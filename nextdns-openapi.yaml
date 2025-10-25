@@ -1,0 +1,1070 @@
+openapi: 3.0.3
+info:
+  title: NextDNS API
+  description: |
+    Complete NextDNS API specification for DNS profile management, analytics, security, and privacy configuration.
+
+    **Base URL**: https://api.nextdns.io
+
+    **Authentication**: All requests require an API key provided via the `X-Api-Key` header.
+
+    **Rate Limiting**: API responses include rate limit headers:
+    - `X-RateLimit-Limit`: Maximum requests allowed per window
+    - `X-RateLimit-Remaining`: Requests remaining in current window
+    - `X-RateLimit-Reset`: Unix timestamp when the rate limit resets
+  version: 1.0.0
+  contact:
+    name: NextDNS API Support
+    url: https://nextdns.io/
+servers:
+  - url: https://api.nextdns.io
+    description: Production NextDNS API server
+
+security:
+  - ApiKeyAuth: []
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: NextDNS API key obtained from account settings
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+        code:
+          type: string
+          description: Error code
+      required:
+        - error
+
+    Profile:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique profile identifier (6 characters, alphanumeric)
+          example: abc123
+        name:
+          type: string
+          description: Profile name
+          example: Home Network
+        fingerprint:
+          type: string
+          description: Profile fingerprint for identification
+      required:
+        - id
+
+    ProfileList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Profile'
+
+    Settings:
+      type: object
+      properties:
+        blockPage:
+          type: boolean
+          description: Enable block page for blocked domains
+        logs:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+              description: Enable query logging
+            retention:
+              type: integer
+              description: Log retention period in days
+              enum: [1, 7, 30, 90, 180, 365]
+        performance:
+          type: object
+          properties:
+            ecs:
+              type: boolean
+              description: Enable EDNS Client Subnet
+            cache:
+              type: boolean
+              description: Enable caching
+        rewrites:
+          type: array
+          description: DNS rewrites configuration
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              content:
+                type: string
+
+    AnalyticsQuery:
+      type: object
+      properties:
+        device:
+          type: string
+          description: Device identifier
+        domain:
+          type: string
+          description: Queried domain name
+        root:
+          type: string
+          description: Root domain
+        type:
+          type: string
+          description: DNS query type (A, AAAA, etc.)
+        status:
+          type: integer
+          description: Response status code
+        timestamp:
+          type: string
+          format: date-time
+          description: Query timestamp
+
+    AnalyticsStatusData:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              status:
+                type: integer
+                description: HTTP/DNS status code
+              queries:
+                type: integer
+                description: Number of queries with this status
+
+    AnalyticsDNSSECData:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            validated:
+              type: integer
+            notValidated:
+              type: integer
+
+    AnalyticsEncryptionData:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            encrypted:
+              type: integer
+            unencrypted:
+              type: integer
+
+    AnalyticsIPVersionData:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            ipv4:
+              type: integer
+            ipv6:
+              type: integer
+
+    AnalyticsProtocolData:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              protocol:
+                type: string
+                enum: [DOH, DOT, DOQ, UDP, TCP]
+              queries:
+                type: integer
+
+    AnalyticsTopItem:
+      type: object
+      properties:
+        name:
+          type: string
+        queries:
+          type: integer
+
+    AnalyticsTopList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnalyticsTopItem'
+
+    AnalyticsDeviceData:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              queries:
+                type: integer
+
+    AnalyticsGAFAMData:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            google:
+              type: integer
+            facebook:
+              type: integer
+            apple:
+              type: integer
+            amazon:
+              type: integer
+            microsoft:
+              type: integer
+
+    AnalyticsCountryData:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              country:
+                type: string
+                description: ISO country code
+              queries:
+                type: integer
+
+    ContentListEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Entry identifier (domain or ID)
+        active:
+          type: boolean
+          description: Whether the entry is active
+
+    ContentList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContentListEntry'
+
+    AddContentEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Domain name or identifier to add
+      required:
+        - id
+
+    OperationSuccess:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+  parameters:
+    ProfileId:
+      name: profile_id
+      in: path
+      required: true
+      description: Profile ID (6-character alphanumeric identifier)
+      schema:
+        type: string
+        pattern: '^[a-z0-9]{6}$'
+      example: abc123
+
+    EntryId:
+      name: entry_id
+      in: path
+      required: true
+      description: Entry identifier (domain or ID)
+      schema:
+        type: string
+      example: example.com
+
+    From:
+      name: from
+      in: query
+      description: Start timestamp for analytics (Unix timestamp or ISO 8601)
+      schema:
+        type: string
+      example: '2024-01-01T00:00:00Z'
+
+    To:
+      name: to
+      in: query
+      description: End timestamp for analytics (Unix timestamp or ISO 8601)
+      schema:
+        type: string
+      example: '2024-01-31T23:59:59Z'
+
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of results to return
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 100
+      example: 100
+
+paths:
+  # Profile Management
+  /profiles:
+    get:
+      summary: List all profiles
+      description: Retrieves a list of all NextDNS profiles accessible with the provided API key.
+      operationId: listProfiles
+      tags:
+        - Profiles
+      responses:
+        '200':
+          description: List of profiles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileList'
+        '401':
+          description: Unauthorized - Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profiles/{profile_id}:
+    get:
+      summary: Get profile details
+      description: Retrieves detailed information about a specific profile.
+      operationId: getProfile
+      tags:
+        - Profiles
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Profile details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '404':
+          description: Profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # Settings
+  /profiles/{profile_id}/settings:
+    get:
+      summary: Get profile settings
+      description: Retrieves the configuration settings for a profile.
+      operationId: getSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Profile settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+
+    patch:
+      summary: Update profile settings
+      description: |
+        Updates configuration settings for a profile. Only provided fields will be updated.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: updateSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Settings'
+      responses:
+        '200':
+          description: Settings updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+
+  # Analytics - Status
+  /profiles/{profile_id}/analytics/status:
+    get:
+      summary: Get query status analytics
+      description: Retrieves analytics data about DNS query response status codes.
+      operationId: getAnalyticsStatus
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Status analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsStatusData'
+
+  # Analytics - Queries
+  /profiles/{profile_id}/analytics/queries:
+    get:
+      summary: Get query logs
+      description: Retrieves DNS query logs with filtering options.
+      operationId: getAnalyticsQueries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Limit'
+        - name: device
+          in: query
+          description: Filter by device ID
+          schema:
+            type: string
+        - name: domain
+          in: query
+          description: Filter by domain name
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Filter by status code
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Query logs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AnalyticsQuery'
+
+  # Analytics - DNSSEC
+  /profiles/{profile_id}/analytics/dnssec:
+    get:
+      summary: Get DNSSEC analytics
+      description: Retrieves statistics about DNSSEC validation.
+      operationId: getAnalyticsDNSSEC
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: DNSSEC analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsDNSSECData'
+
+  # Analytics - Encryption
+  /profiles/{profile_id}/analytics/encryption:
+    get:
+      summary: Get encryption analytics
+      description: Retrieves statistics about encrypted vs unencrypted queries.
+      operationId: getAnalyticsEncryption
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Encryption analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsEncryptionData'
+
+  # Analytics - IP Versions
+  /profiles/{profile_id}/analytics/ip_versions:
+    get:
+      summary: Get IP version analytics
+      description: Retrieves statistics about IPv4 vs IPv6 usage.
+      operationId: getAnalyticsIPVersions
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: IP version analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsIPVersionData'
+
+  # Analytics - Protocols
+  /profiles/{profile_id}/analytics/protocols:
+    get:
+      summary: Get protocol analytics
+      description: Retrieves statistics about DNS protocol usage (DoH, DoT, DoQ, UDP, TCP).
+      operationId: getAnalyticsProtocols
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Protocol analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsProtocolData'
+
+  # Analytics - Destinations
+  /profiles/{profile_id}/analytics/destinations:
+    get:
+      summary: Get top destinations
+      description: Retrieves the most queried destination domains.
+      operationId: getAnalyticsDestinations
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Top destinations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTopList'
+
+  # Analytics - Devices
+  /profiles/{profile_id}/analytics/devices:
+    get:
+      summary: Get device analytics
+      description: Retrieves query statistics by device.
+      operationId: getAnalyticsDevices
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Device analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsDeviceData'
+
+  # Analytics - Root Domains
+  /profiles/{profile_id}/analytics/root_domains:
+    get:
+      summary: Get top root domains
+      description: Retrieves the most queried root domains.
+      operationId: getAnalyticsRootDomains
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Top root domains
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTopList'
+
+  # Analytics - GAFAM
+  /profiles/{profile_id}/analytics/gafam:
+    get:
+      summary: Get GAFAM analytics
+      description: Retrieves statistics about queries to Google, Amazon, Facebook, Apple, and Microsoft domains.
+      operationId: getAnalyticsGAFAM
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: GAFAM analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsGAFAMData'
+
+  # Analytics - Countries
+  /profiles/{profile_id}/analytics/countries:
+    get:
+      summary: Get geographic analytics
+      description: Retrieves statistics about queries by country.
+      operationId: getAnalyticsCountries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Geographic analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsCountryData'
+
+  # Denylist Management
+  /profiles/{profile_id}/denylist:
+    get:
+      summary: Get denylist entries
+      description: Retrieves all domains in the profile's denylist.
+      operationId: getDenylist
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Denylist entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentList'
+
+    post:
+      summary: Add domain to denylist
+      description: |
+        Adds a domain to the profile's denylist (blocks the domain).
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: addToDenylist
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddContentEntry'
+      responses:
+        '200':
+          description: Domain added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  /profiles/{profile_id}/denylist/{entry_id}:
+    delete:
+      summary: Remove domain from denylist
+      description: |
+        Removes a domain from the profile's denylist.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: removeFromDenylist
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200':
+          description: Domain removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  # Allowlist Management
+  /profiles/{profile_id}/allowlist:
+    get:
+      summary: Get allowlist entries
+      description: Retrieves all domains in the profile's allowlist.
+      operationId: getAllowlist
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Allowlist entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentList'
+
+    post:
+      summary: Add domain to allowlist
+      description: |
+        Adds a domain to the profile's allowlist (bypasses all blocking for the domain).
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: addToAllowlist
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddContentEntry'
+      responses:
+        '200':
+          description: Domain added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  /profiles/{profile_id}/allowlist/{entry_id}:
+    delete:
+      summary: Remove domain from allowlist
+      description: |
+        Removes a domain from the profile's allowlist.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: removeFromAllowlist
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200':
+          description: Domain removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  # Parental Control
+  /profiles/{profile_id}/parental_control:
+    get:
+      summary: Get parental control entries
+      description: Retrieves all domains in the profile's parental control list.
+      operationId: getParentalControl
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Parental control entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentList'
+
+    post:
+      summary: Add domain to parental control
+      description: |
+        Adds a domain to the profile's parental control blocklist.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: addToParentalControl
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddContentEntry'
+      responses:
+        '200':
+          description: Domain added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  /profiles/{profile_id}/parental_control/{entry_id}:
+    delete:
+      summary: Remove domain from parental control
+      description: |
+        Removes a domain from the profile's parental control blocklist.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: removeFromParentalControl
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200':
+          description: Domain removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  # Security - TLD Management
+  /profiles/{profile_id}/security/tlds:
+    get:
+      summary: Get blocked TLDs for security
+      description: Retrieves the list of top-level domains blocked for security reasons.
+      operationId: getSecurityTLDs
+      tags:
+        - Security
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: List of blocked TLDs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentList'
+
+    post:
+      summary: Add TLD to security blocklist
+      description: |
+        Adds a top-level domain to the security blocklist.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: addSecurityTLD
+      tags:
+        - Security
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddContentEntry'
+            example:
+              id: xyz
+      responses:
+        '200':
+          description: TLD added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  /profiles/{profile_id}/security/tlds/{entry_id}:
+    delete:
+      summary: Remove TLD from security blocklist
+      description: |
+        Removes a top-level domain from the security blocklist.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: removeSecurityTLD
+      tags:
+        - Security
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200':
+          description: TLD removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  # Privacy - Blocklists
+  /profiles/{profile_id}/privacy/blocklists:
+    get:
+      summary: Get privacy blocklists
+      description: Retrieves the list of privacy protection blocklists enabled for the profile.
+      operationId: getPrivacyBlocklists
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: List of privacy blocklists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentList'
+
+    post:
+      summary: Add privacy blocklist
+      description: |
+        Adds a privacy protection blocklist to the profile.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: addPrivacyBlocklist
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddContentEntry'
+            example:
+              id: nextdns-recommended
+      responses:
+        '200':
+          description: Blocklist added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  /profiles/{profile_id}/privacy/blocklists/{entry_id}:
+    delete:
+      summary: Remove privacy blocklist
+      description: |
+        Removes a privacy protection blocklist from the profile.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: removePrivacyBlocklist
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200':
+          description: Blocklist removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  # Privacy - Native Tracking Protection
+  /profiles/{profile_id}/privacy/natives:
+    get:
+      summary: Get native tracking protection settings
+      description: Retrieves the list of native tracking protection blockers enabled for the profile.
+      operationId: getPrivacyNatives
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: List of native tracking blockers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentList'
+
+    post:
+      summary: Add native tracking protection
+      description: |
+        Adds a native tracking protection blocker to the profile (e.g., Alexa, Roku, Samsung, etc.).
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: addPrivacyNative
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddContentEntry'
+            example:
+              id: alexa
+      responses:
+        '200':
+          description: Native tracking protection added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  /profiles/{profile_id}/privacy/natives/{entry_id}:
+    delete:
+      summary: Remove native tracking protection
+      description: |
+        Removes a native tracking protection blocker from the profile.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: removePrivacyNative
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200':
+          description: Native tracking protection removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+tags:
+  - name: Profiles
+    description: Profile management operations
+  - name: Settings
+    description: Profile configuration settings
+  - name: Analytics
+    description: DNS query analytics and statistics
+  - name: Content Lists
+    description: Denylist, allowlist, and parental control management
+  - name: Security
+    description: Security configuration (TLD blocking)
+  - name: Privacy
+    description: Privacy protection configuration (blocklists, native tracking)
