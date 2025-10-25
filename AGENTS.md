@@ -11,7 +11,7 @@ This file contains repository-specific agent rules. Agents should follow these w
 - Docker: provide a `Dockerfile` that produces a small, runnable image; prefer using official `python:3.11-slim` as base.
 - Keep `TODO.md` progress indicators in sync with the current phase while executing tasks.
 - **Write Operation Safety Rules:**
-  - **NEVER delete a NextDNS profile** - Profile deletion is strictly forbidden, even though the API supports it
+  - **NEVER delete a NextDNS profile without asking first** - Profile deletion is strictly forbidden without permission, even though the API supports it
   - Write operations (create, update) are only allowed against designated test profiles
   - When testing write operations, use only the profile specifically designated for testing
   - Always verify the target profile ID before any write operation

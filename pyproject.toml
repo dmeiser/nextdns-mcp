@@ -5,6 +5,7 @@ description = "NextDNS MCP Server - Model Context Protocol server for NextDNS AP
 authors = ["NextDNS MCP Contributors"]
 readme = "README.md"
 packages = [{include = "nextdns_mcp", from = "src"}]
+include = ["src/nextdns_mcp/*.yaml"]
 
 [tool.poetry.dependencies]
 python = "^3.13"

@@ -356,6 +356,45 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+    post:
+      summary: Create a new profile
+      description: Creates a new NextDNS profile with the specified configuration.
+      operationId: createProfile
+      tags:
+        - Profiles
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Name for the new profile
+                  example: "Home Network"
+              required:
+                - name
+      responses:
+        '201':
+          description: Profile created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /profiles/{profile_id}:
     get:
       summary: Get profile details
@@ -374,6 +413,68 @@ paths:
                 $ref: '#/components/schemas/Profile'
         '404':
           description: Profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    patch:
+      summary: Update profile
+      description: Updates profile properties such as name and configuration.
+      operationId: updateProfile
+      tags:
+        - Profiles
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: New name for the profile
+                  example: "Updated Home Network"
+      responses:
+        '200':
+          description: Profile updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '404':
+          description: Profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      summary: Delete profile
+      description: |
+        **DANGER**: Permanently deletes a NextDNS profile and all its configuration.
+
+        This action is irreversible. The profile and all its settings, lists, and analytics data will be permanently removed.
+
+        **Safety Warning**: Only delete profiles that you own and are certain you want to remove.
+      operationId: deleteProfile
+      tags:
+        - Profiles
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '204':
+          description: Profile deleted successfully
+        '404':
+          description: Profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden - Cannot delete this profile
           content:
             application/json:
               schema:
@@ -421,6 +522,182 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Settings'
+
+  /profiles/{profile_id}/settings/logs:
+    get:
+      summary: Get logs settings
+      description: Retrieves log retention and configuration settings.
+      operationId: getLogsSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Logs settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  retention:
+                    type: integer
+                    enum: [1, 7, 30, 90, 180, 365]
+                  location:
+                    type: string
+
+    patch:
+      summary: Update logs settings
+      description: Updates log retention period and configuration.
+      operationId: updateLogsSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                retention:
+                  type: integer
+                  enum: [1, 7, 30, 90, 180, 365]
+                location:
+                  type: string
+      responses:
+        '200':
+          description: Logs settings updated
+
+  /profiles/{profile_id}/settings/blockPage:
+    get:
+      summary: Get block page settings
+      description: Retrieves block page configuration.
+      operationId: getBlockPageSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Block page settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+
+    patch:
+      summary: Update block page settings
+      description: Enables or disables the block page for blocked domains.
+      operationId: updateBlockPageSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        '200':
+          description: Block page settings updated
+
+  /profiles/{profile_id}/settings/performance:
+    get:
+      summary: Get performance settings
+      description: Retrieves performance optimization settings.
+      operationId: getPerformanceSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Performance settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ecs:
+                    type: boolean
+                    description: EDNS Client Subnet
+                  cache:
+                    type: boolean
+                    description: Caching boost
+
+    patch:
+      summary: Update performance settings
+      description: Updates performance optimization configuration.
+      operationId: updatePerformanceSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ecs:
+                  type: boolean
+                cache:
+                  type: boolean
+      responses:
+        '200':
+          description: Performance settings updated
+
+  /profiles/{profile_id}/settings/web3:
+    get:
+      summary: Get Web3 settings
+      description: Retrieves Web3/blockchain DNS settings.
+      operationId: getWeb3Settings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Web3 settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+
+    patch:
+      summary: Update Web3 settings
+      description: Enables or disables Web3 blockchain DNS resolution.
+      operationId: updateWeb3Settings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        '200':
+          description: Web3 settings updated
 
   # Analytics - Status
   /profiles/{profile_id}/analytics/status:
@@ -857,6 +1134,181 @@ paths:
               schema:
                 $ref: '#/components/schemas/OperationSuccess'
 
+  # Security Settings
+  /profiles/{profile_id}/security:
+    get:
+      summary: Get security settings
+      description: Retrieves security configuration including threat blocking and DNSSEC.
+      operationId: getSecuritySettings
+      tags:
+        - Security
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Security settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  threatIntelligenceFeeds:
+                    type: boolean
+                  aiThreatDetection:
+                    type: boolean
+                  googleSafeBrowsing:
+                    type: boolean
+                  cryptojacking:
+                    type: boolean
+                  dnsRebinding:
+                    type: boolean
+                  homographs:
+                    type: boolean
+                  typosquatting:
+                    type: boolean
+                  dga:
+                    type: boolean
+                  nrd:
+                    type: boolean
+                  parked:
+                    type: boolean
+                  csam:
+                    type: boolean
+
+    patch:
+      summary: Update security settings
+      description: Updates security configuration options.
+      operationId: updateSecuritySettings
+      tags:
+        - Security
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                threatIntelligenceFeeds:
+                  type: boolean
+                aiThreatDetection:
+                  type: boolean
+                googleSafeBrowsing:
+                  type: boolean
+                cryptojacking:
+                  type: boolean
+                dnsRebinding:
+                  type: boolean
+                homographs:
+                  type: boolean
+                typosquatting:
+                  type: boolean
+                dga:
+                  type: boolean
+                nrd:
+                  type: boolean
+                parked:
+                  type: boolean
+                csam:
+                  type: boolean
+      responses:
+        '200':
+          description: Security settings updated
+
+  # Privacy Settings
+  /profiles/{profile_id}/privacy:
+    get:
+      summary: Get privacy settings
+      description: Retrieves privacy protection configuration.
+      operationId: getPrivacySettings
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Privacy settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  disguisedTrackers:
+                    type: boolean
+                  allowAffiliate:
+                    type: boolean
+
+    patch:
+      summary: Update privacy settings
+      description: Updates privacy protection options.
+      operationId: updatePrivacySettings
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                disguisedTrackers:
+                  type: boolean
+                allowAffiliate:
+                  type: boolean
+      responses:
+        '200':
+          description: Privacy settings updated
+
+  # Parental Control Settings
+  /profiles/{profile_id}/parentalControl:
+    get:
+      summary: Get parental control settings
+      description: Retrieves parental control configuration.
+      operationId: getParentalControlSettings
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: Parental control settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  safeSearch:
+                    type: boolean
+                  youtubeRestrictedMode:
+                    type: boolean
+                  blockBypass:
+                    type: boolean
+
+    patch:
+      summary: Update parental control settings
+      description: Updates parental control configuration options.
+      operationId: updateParentalControlSettings
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                safeSearch:
+                  type: boolean
+                youtubeRestrictedMode:
+                  type: boolean
+                blockBypass:
+                  type: boolean
+      responses:
+        '200':
+          description: Parental control settings updated
+
   # Security - TLD Management
   /profiles/{profile_id}/security/tlds:
     get:
@@ -1055,6 +1507,147 @@ paths:
               schema:
                 $ref: '#/components/schemas/OperationSuccess'
 
+  # Logs
+  /profiles/{profile_id}/logs:
+    get:
+      summary: Get query logs
+      description: |
+        Retrieves DNS query logs for a profile with filtering and pagination support.
+
+        Supports filtering by date range, device, status, and text search.
+      operationId: getLogs
+      tags:
+        - Logs
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Limit'
+        - name: device
+          in: query
+          description: Filter by device ID
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Filter by query status
+          schema:
+            type: integer
+        - name: search
+          in: query
+          description: Search query for domain names
+          schema:
+            type: string
+        - name: sort
+          in: query
+          description: Sort order (asc or desc)
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: cursor
+          in: query
+          description: Pagination cursor
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Query logs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AnalyticsQuery'
+                  cursor:
+                    type: string
+                    description: Cursor for next page
+
+    delete:
+      summary: Clear all logs
+      description: |
+        **WARNING**: Permanently deletes all query logs for this profile.
+
+        This action cannot be undone. Use with caution.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: clearLogs
+      tags:
+        - Logs
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '204':
+          description: Logs cleared successfully
+        '404':
+          description: Profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /profiles/{profile_id}/logs/stream:
+    get:
+      summary: Stream query logs in real-time
+      description: |
+        Streams DNS query logs in real-time using Server-Sent Events (SSE).
+
+        This endpoint provides a continuous stream of query events as they occur.
+      operationId: streamLogs
+      tags:
+        - Logs
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - name: device
+          in: query
+          description: Filter by device ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-sent events stream
+
+  /profiles/{profile_id}/logs/download:
+    get:
+      summary: Download logs as file
+      description: |
+        Downloads query logs as a file for offline analysis.
+
+        Supports filtering by date range and returns logs in a downloadable format.
+      operationId: downloadLogs
+      tags:
+        - Logs
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - name: format
+          in: query
+          description: Download format
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
+      responses:
+        '200':
+          description: Log file
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                type: object
+
 tags:
   - name: Profiles
     description: Profile management operations
@@ -1062,6 +1655,8 @@ tags:
     description: Profile configuration settings
   - name: Analytics
     description: DNS query analytics and statistics
+  - name: Logs
+    description: Query log management and real-time streaming
   - name: Content Lists
     description: Denylist, allowlist, and parental control management
   - name: Security
