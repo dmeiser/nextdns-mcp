@@ -659,46 +659,6 @@ paths:
         '200':
           description: Performance settings updated
 
-  /profiles/{profile_id}/settings/web3:
-    get:
-      summary: Get Web3 settings
-      description: Retrieves Web3/blockchain DNS settings.
-      operationId: getWeb3Settings
-      tags:
-        - Settings
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-      responses:
-        '200':
-          description: Web3 settings
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  enabled:
-                    type: boolean
-
-    patch:
-      summary: Update Web3 settings
-      description: Enables or disables Web3 blockchain DNS resolution.
-      operationId: updateWeb3Settings
-      tags:
-        - Settings
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                enabled:
-                  type: boolean
-      responses:
-        '200':
-          description: Web3 settings updated
-
   # Analytics - Status
   /profiles/{profile_id}/analytics/status:
     get:
@@ -719,12 +679,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/AnalyticsStatusData'
 
-  # Analytics - Queries
-  /profiles/{profile_id}/analytics/queries:
+  # Analytics - Domains
+  /profiles/{profile_id}/analytics/domains:
     get:
-      summary: Get query logs
-      description: Retrieves DNS query logs with filtering options.
-      operationId: getAnalyticsQueries
+      summary: Get top domains analytics
+      description: Retrieves statistics about the most queried domains.
+      operationId: getAnalyticsDomains
       tags:
         - Analytics
       parameters:
@@ -732,33 +692,74 @@ paths:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Limit'
-        - name: device
-          in: query
-          description: Filter by device ID
-          schema:
-            type: string
-        - name: domain
-          in: query
-          description: Filter by domain name
-          schema:
-            type: string
-        - name: status
-          in: query
-          description: Filter by status code
-          schema:
-            type: integer
       responses:
         '200':
-          description: Query logs
+          description: Top domains analytics data
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/AnalyticsQuery'
+                $ref: '#/components/schemas/AnalyticsTopList'
+
+  # Analytics - Query Types
+  /profiles/{profile_id}/analytics/queryTypes:
+    get:
+      summary: Get query type analytics
+      description: Retrieves statistics about DNS query types (A, AAAA, CNAME, etc).
+      operationId: getAnalyticsQueryTypes
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Query type analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTopList'
+
+  # Analytics - Reasons
+  /profiles/{profile_id}/analytics/reasons:
+    get:
+      summary: Get blocking reasons analytics
+      description: Retrieves statistics about why queries were blocked.
+      operationId: getAnalyticsReasons
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Blocking reasons analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTopList'
+
+  # Analytics - IPs
+  /profiles/{profile_id}/analytics/ips:
+    get:
+      summary: Get client IP analytics
+      description: Retrieves statistics about client IP addresses.
+      operationId: getAnalyticsIPs
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Client IP analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTopList'
 
   # Analytics - DNSSEC
   /profiles/{profile_id}/analytics/dnssec:
@@ -801,7 +802,7 @@ paths:
                 $ref: '#/components/schemas/AnalyticsEncryptionData'
 
   # Analytics - IP Versions
-  /profiles/{profile_id}/analytics/ip_versions:
+  /profiles/{profile_id}/analytics/ipVersions:
     get:
       summary: Get IP version analytics
       description: Retrieves statistics about IPv4 vs IPv6 usage.
@@ -853,6 +854,13 @@ paths:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Limit'
+        - name: type
+          in: query
+          required: true
+          description: Filter destinations by type (countries or GAFAM companies)
+          schema:
+            type: string
+            enum: [countries, gafam]
       responses:
         '200':
           description: Top destinations
@@ -880,67 +888,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnalyticsDeviceData'
-
-  # Analytics - Root Domains
-  /profiles/{profile_id}/analytics/root_domains:
-    get:
-      summary: Get top root domains
-      description: Retrieves the most queried root domains.
-      operationId: getAnalyticsRootDomains
-      tags:
-        - Analytics
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
-        - $ref: '#/components/parameters/To'
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '200':
-          description: Top root domains
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AnalyticsTopList'
-
-  # Analytics - GAFAM
-  /profiles/{profile_id}/analytics/gafam:
-    get:
-      summary: Get GAFAM analytics
-      description: Retrieves statistics about queries to Google, Amazon, Facebook, Apple, and Microsoft domains.
-      operationId: getAnalyticsGAFAM
-      tags:
-        - Analytics
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
-        - $ref: '#/components/parameters/To'
-      responses:
-        '200':
-          description: GAFAM analytics data
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AnalyticsGAFAMData'
-
-  # Analytics - Countries
-  /profiles/{profile_id}/analytics/countries:
-    get:
-      summary: Get geographic analytics
-      description: Retrieves statistics about queries by country.
-      operationId: getAnalyticsCountries
-      tags:
-        - Analytics
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
-        - $ref: '#/components/parameters/To'
-      responses:
-        '200':
-          description: Geographic analytics data
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AnalyticsCountryData'
 
   # Denylist Management
   /profiles/{profile_id}/denylist:
@@ -1070,31 +1017,51 @@ paths:
               schema:
                 $ref: '#/components/schemas/OperationSuccess'
 
-  # Parental Control
-  /profiles/{profile_id}/parental_control:
+  # Parental Control - Services
+  /profiles/{profile_id}/parentalControl/services:
     get:
-      summary: Get parental control entries
-      description: Retrieves all domains in the profile's parental control list.
-      operationId: getParentalControl
+      summary: Get parental control services
+      description: Retrieves blocked services (e.g., TikTok, Facebook, etc.).
+      operationId: getParentalControlServices
       tags:
         - Content Lists
       parameters:
         - $ref: '#/components/parameters/ProfileId'
       responses:
         '200':
-          description: Parental control entries
+          description: Parental control services
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ContentList'
 
+    put:
+      summary: Replace parental control services
+      description: Replaces the entire list of blocked services.
+      operationId: replaceParentalControlServices
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        '200':
+          description: Services list replaced successfully
+
     post:
-      summary: Add domain to parental control
+      summary: Add service to parental control
       description: |
-        Adds a domain to the profile's parental control blocklist.
+        Adds a service to the parental control blocklist.
 
         **Safety Note**: Only use with designated test profiles.
-      operationId: addToParentalControl
+      operationId: addToParentalControlServices
       tags:
         - Content Lists
       parameters:
@@ -1107,28 +1074,70 @@ paths:
               $ref: '#/components/schemas/AddContentEntry'
       responses:
         '200':
-          description: Domain added successfully
+          description: Service added successfully
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/OperationSuccess'
 
-  /profiles/{profile_id}/parental_control/{entry_id}:
-    delete:
-      summary: Remove domain from parental control
-      description: |
-        Removes a domain from the profile's parental control blocklist.
-
-        **Safety Note**: Only use with designated test profiles.
-      operationId: removeFromParentalControl
+  # Parental Control - Categories
+  /profiles/{profile_id}/parentalControl/categories:
+    get:
+      summary: Get parental control categories
+      description: Retrieves blocked content categories (e.g., gambling, adult content, etc.).
+      operationId: getParentalControlCategories
       tags:
         - Content Lists
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/EntryId'
       responses:
         '200':
-          description: Domain removed successfully
+          description: Parental control categories
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentList'
+
+    put:
+      summary: Replace parental control categories
+      description: Replaces the entire list of blocked categories.
+      operationId: replaceParentalControlCategories
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        '200':
+          description: Categories list replaced successfully
+
+    post:
+      summary: Add category to parental control
+      description: |
+        Adds a category to the parental control blocklist.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: addToParentalControlCategories
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddContentEntry'
+      responses:
+        '200':
+          description: Category added successfully
           content:
             application/json:
               schema:
@@ -1597,6 +1606,7 @@ paths:
 
         This endpoint provides a continuous stream of query events as they occur.
       operationId: streamLogs
+      x-fastmcp-generate: false  # SSE streaming endpoint - FastMCP doesn't support Server-Sent Events
       tags:
         - Logs
       parameters:

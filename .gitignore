@@ -52,6 +52,9 @@ htmlcov/
 *~
 .DS_Store
 
+# Local settings
+.claude/
+
 # Logs
 *.log
 
