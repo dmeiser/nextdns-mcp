@@ -88,7 +88,7 @@ class TestGetApiKey:
 
     def test_get_api_key_strips_whitespace(self, monkeypatch):
         """Test that API key from file has whitespace stripped."""
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
             f.write("  test_key_with_spaces  \n")
             temp_path = f.name
 
@@ -126,8 +126,9 @@ class TestEnvironmentConfiguration:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         import sys
-        if 'nextdns_mcp.server' in sys.modules:
-            del sys.modules['nextdns_mcp.server']
+
+        if "nextdns_mcp.server" in sys.modules:
+            del sys.modules["nextdns_mcp.server"]
 
         from nextdns_mcp import server
 

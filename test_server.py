@@ -5,9 +5,9 @@ import asyncio
 import os
 from pathlib import Path
 
+import httpx
 import yaml
 from dotenv import load_dotenv
-import httpx
 
 # Load environment
 load_dotenv()
@@ -27,9 +27,7 @@ async def test_nextdns_api():
         return False
 
     async with httpx.AsyncClient(
-        base_url=NEXTDNS_BASE_URL,
-        headers={"X-Api-Key": NEXTDNS_API_KEY},
-        timeout=30.0
+        base_url=NEXTDNS_BASE_URL, headers={"X-Api-Key": NEXTDNS_API_KEY}, timeout=30.0
     ) as client:
         try:
             # Test listing profiles
@@ -65,15 +63,15 @@ def verify_openapi_spec():
         return False
 
     try:
-        with open(spec_path, 'r') as f:
+        with open(spec_path, "r") as f:
             spec = yaml.safe_load(f)
 
         # Verify key fields
-        assert spec.get('openapi') == '3.0.3', "Not OpenAPI 3.0.3"
-        assert 'info' in spec, "Missing info section"
-        assert 'paths' in spec, "Missing paths section"
+        assert spec.get("openapi") == "3.0.3", "Not OpenAPI 3.0.3"
+        assert "info" in spec, "Missing info section"
+        assert "paths" in spec, "Missing paths section"
 
-        num_paths = len(spec['paths'])
+        num_paths = len(spec["paths"])
         print(f"✓ OpenAPI spec is valid")
         print(f"  Version: {spec['openapi']}")
         print(f"  Title: {spec['info']['title']}")
@@ -81,8 +79,10 @@ def verify_openapi_spec():
 
         # Count operations
         num_operations = 0
-        for path, methods in spec['paths'].items():
-            num_operations += len([m for m in methods if m in ['get', 'post', 'patch', 'delete', 'put']])
+        for path, methods in spec["paths"].items():
+            num_operations += len(
+                [m for m in methods if m in ["get", "post", "patch", "delete", "put"]]
+            )
 
         print(f"  Operations: {num_operations}")
 
@@ -104,7 +104,7 @@ def verify_docker_image():
             ["docker", "images", "nextdns-mcp:latest", "--format", "{{.Repository}}:{{.Tag}}"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
 
         if "nextdns-mcp:latest" in result.stdout:
@@ -115,7 +115,7 @@ def verify_docker_image():
                 ["docker", "images", "nextdns-mcp:latest", "--format", "{{.Size}}"],
                 capture_output=True,
                 text=True,
-                check=True
+                check=True,
             )
             print(f"  Size: {details.stdout.strip()}")
 

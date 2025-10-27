@@ -46,6 +46,7 @@ from fastmcp.tools.tool import ToolResult
 # Try to load .env file if it exists
 try:
     from dotenv import load_dotenv
+
     # Look for .env in project root
     env_path = Path(__file__).parent.parent.parent / ".env"
     if env_path.exists():
@@ -169,13 +170,17 @@ class MCPServerTester:
             return
 
         if "getLogsSettings" not in self.tools:
-            self.record_skip("getLogsSettings", "Tool unavailable; cannot verify logging provisioning")
+            self.record_skip(
+                "getLogsSettings", "Tool unavailable; cannot verify logging provisioning"
+            )
             return
 
         pid = self.validation_profile_id
         start = time.monotonic()
         delay = 1.0
-        print(f"Waiting for logging to provision for profile {pid} (timeout {self.log_provision_timeout}s)...")
+        print(
+            f"Waiting for logging to provision for profile {pid} (timeout {self.log_provision_timeout}s)..."
+        )
 
         while time.monotonic() - start < self.log_provision_timeout:
             try:
@@ -323,19 +328,23 @@ class MCPServerTester:
 
         # Extract profile ID from ToolResult
         from fastmcp.tools.tool import ToolResult
+
         if isinstance(result, ToolResult):
             # Try structured_content first (likely a dict), then content
             data = result.structured_content or result.content
 
             if isinstance(data, dict):
                 # Check for nested 'data' key or direct 'id' key
-                self.validation_profile_id = data.get('data', {}).get('id') or data.get('id')
+                self.validation_profile_id = data.get("data", {}).get("id") or data.get("id")
             elif isinstance(data, str):
                 # Try parsing as JSON
                 import json
+
                 try:
                     parsed = json.loads(data)
-                    self.validation_profile_id = parsed.get('data', {}).get('id') or parsed.get('id')
+                    self.validation_profile_id = parsed.get("data", {}).get("id") or parsed.get(
+                        "id"
+                    )
                 except:
                     pass
 
@@ -357,7 +366,11 @@ class MCPServerTester:
 
         await self.test_tool("listProfiles")
         await self.test_tool("getProfile", profile_id=self.validation_profile_id)
-        await self.test_tool("updateProfile", profile_id=self.validation_profile_id, name="Validation Profile (Updated)")
+        await self.test_tool(
+            "updateProfile",
+            profile_id=self.validation_profile_id,
+            name="Validation Profile (Updated)",
+        )
 
     # ========================================================================
     # Settings Tests
@@ -535,7 +548,12 @@ class MCPServerTester:
 
         # Settings operations
         await self.test_tool("getParentalControlSettings", profile_id=pid)
-        await self.test_tool("updateParentalControlSettings", profile_id=pid, safeSearch=False, youtubeRestrictedMode=False)
+        await self.test_tool(
+            "updateParentalControlSettings",
+            profile_id=pid,
+            safeSearch=False,
+            youtubeRestrictedMode=False,
+        )
 
         # Services and Categories
         await self.test_tool("getParentalControlServices", profile_id=pid)
@@ -565,12 +583,16 @@ class MCPServerTester:
             if entry_id:
                 self.entry_ids["pc_service"] = entry_id
             else:
-                print("⚠️  Could not determine parental control service entry ID; skipping entry-specific tests")
+                print(
+                    "⚠️  Could not determine parental control service entry ID; skipping entry-specific tests"
+                )
 
         # Test item-level operations for services
-        if 'pc_service' in self.entry_ids:
-            entry_id = self.entry_ids['pc_service']
-            await self.test_tool("updateParentalControlServiceEntry", profile_id=pid, id=entry_id, active=False)
+        if "pc_service" in self.entry_ids:
+            entry_id = self.entry_ids["pc_service"]
+            await self.test_tool(
+                "updateParentalControlServiceEntry", profile_id=pid, id=entry_id, active=False
+            )
             await self.test_tool("removeFromParentalControlServices", profile_id=pid, id=entry_id)
 
         # Add a category
@@ -597,12 +619,16 @@ class MCPServerTester:
             if entry_id:
                 self.entry_ids["pc_category"] = entry_id
             else:
-                print("⚠️  Could not determine parental control category entry ID; skipping entry-specific tests")
+                print(
+                    "⚠️  Could not determine parental control category entry ID; skipping entry-specific tests"
+                )
 
         # Test item-level operations for categories
-        if 'pc_category' in self.entry_ids:
-            entry_id = self.entry_ids['pc_category']
-            await self.test_tool("updateParentalControlCategoryEntry", profile_id=pid, id=entry_id, active=False)
+        if "pc_category" in self.entry_ids:
+            entry_id = self.entry_ids["pc_category"]
+            await self.test_tool(
+                "updateParentalControlCategoryEntry", profile_id=pid, id=entry_id, active=False
+            )
             await self.test_tool("removeFromParentalControlCategories", profile_id=pid, id=entry_id)
 
     # ========================================================================
@@ -642,7 +668,9 @@ class MCPServerTester:
 
         if denylist_id:
             self.entry_ids["denylist"] = denylist_id
-            await self.test_tool("updateDenylistEntry", profile_id=pid, entry_id=denylist_id, active=False)
+            await self.test_tool(
+                "updateDenylistEntry", profile_id=pid, entry_id=denylist_id, active=False
+            )
             await self.test_tool("removeFromDenylist", profile_id=pid, entry_id=denylist_id)
         else:
             print("⚠️  Could not determine denylist entry ID; skipping update/delete")
@@ -669,7 +697,9 @@ class MCPServerTester:
 
         if allowlist_id:
             self.entry_ids["allowlist"] = allowlist_id
-            await self.test_tool("updateAllowlistEntry", profile_id=pid, entry_id=allowlist_id, active=False)
+            await self.test_tool(
+                "updateAllowlistEntry", profile_id=pid, entry_id=allowlist_id, active=False
+            )
             await self.test_tool("removeFromAllowlist", profile_id=pid, entry_id=allowlist_id)
         else:
             print("⚠️  Could not determine allowlist entry ID; skipping update/delete")
@@ -717,24 +747,48 @@ class MCPServerTester:
 
         # Calculate a date range for analytics (last 24 hours)
         from datetime import datetime, timedelta, timezone
+
         now = datetime.now(timezone.utc)
         yesterday = now - timedelta(days=1)
-        from_time = yesterday.isoformat().replace('+00:00', 'Z')
-        to_time = now.isoformat().replace('+00:00', 'Z')
+        from_time = yesterday.isoformat().replace("+00:00", "Z")
+        to_time = now.isoformat().replace("+00:00", "Z")
 
         # Test ALL time-series endpoints (except getAnalyticsDomainsSeries - API issue)
         # Note: These might not have data for newly created profiles
         # Note: getAnalyticsDomainsSeries excluded - returns 404 from NextDNS API (known issue)
-        await self.test_tool("getAnalyticsStatusSeries", profile_id=pid, **{"from": from_time, "to": to_time})
-        await self.test_tool("getAnalyticsQueryTypesSeries", profile_id=pid, **{"from": from_time, "to": to_time})
-        await self.test_tool("getAnalyticsReasonsSeries", profile_id=pid, **{"from": from_time, "to": to_time})
-        await self.test_tool("getAnalyticsIPsSeries", profile_id=pid, **{"from": from_time, "to": to_time})
-        await self.test_tool("getAnalyticsDevicesSeries", profile_id=pid, **{"from": from_time, "to": to_time})
-        await self.test_tool("getAnalyticsProtocolsSeries", profile_id=pid, **{"from": from_time, "to": to_time})
-        await self.test_tool("getAnalyticsIPVersionsSeries", profile_id=pid, **{"from": from_time, "to": to_time})
-        await self.test_tool("getAnalyticsDNSSECSeries", profile_id=pid, **{"from": from_time, "to": to_time})
-        await self.test_tool("getAnalyticsEncryptionSeries", profile_id=pid, **{"from": from_time, "to": to_time})
-        await self.test_tool("getAnalyticsDestinationsSeries", profile_id=pid, type="countries", **{"from": from_time, "to": to_time})
+        await self.test_tool(
+            "getAnalyticsStatusSeries", profile_id=pid, **{"from": from_time, "to": to_time}
+        )
+        await self.test_tool(
+            "getAnalyticsQueryTypesSeries", profile_id=pid, **{"from": from_time, "to": to_time}
+        )
+        await self.test_tool(
+            "getAnalyticsReasonsSeries", profile_id=pid, **{"from": from_time, "to": to_time}
+        )
+        await self.test_tool(
+            "getAnalyticsIPsSeries", profile_id=pid, **{"from": from_time, "to": to_time}
+        )
+        await self.test_tool(
+            "getAnalyticsDevicesSeries", profile_id=pid, **{"from": from_time, "to": to_time}
+        )
+        await self.test_tool(
+            "getAnalyticsProtocolsSeries", profile_id=pid, **{"from": from_time, "to": to_time}
+        )
+        await self.test_tool(
+            "getAnalyticsIPVersionsSeries", profile_id=pid, **{"from": from_time, "to": to_time}
+        )
+        await self.test_tool(
+            "getAnalyticsDNSSECSeries", profile_id=pid, **{"from": from_time, "to": to_time}
+        )
+        await self.test_tool(
+            "getAnalyticsEncryptionSeries", profile_id=pid, **{"from": from_time, "to": to_time}
+        )
+        await self.test_tool(
+            "getAnalyticsDestinationsSeries",
+            profile_id=pid,
+            type="countries",
+            **{"from": from_time, "to": to_time},
+        )
 
     # ========================================================================
     # Logs Tests
@@ -758,7 +812,9 @@ class MCPServerTester:
         if not self.doh_lookup_info:
             self.record_skip("getLogs", "DoH lookup not executed prior to log verification")
             if "downloadLogs" in self.tools:
-                self.record_skip("downloadLogs", "DoH lookup not executed prior to log verification")
+                self.record_skip(
+                    "downloadLogs", "DoH lookup not executed prior to log verification"
+                )
             return
 
         domain = "validation.example.com"
@@ -842,7 +898,9 @@ class MCPServerTester:
             self.print_test("dohLookup", "FAIL", str(exc)[:60])
             return
 
-        self.passed.append("dohLookup")  # mark success manually since issue_doh_lookup bypassed test_tool
+        self.passed.append(
+            "dohLookup"
+        )  # mark success manually since issue_doh_lookup bypassed test_tool
         self.print_test("dohLookup", "PASS", "Executed DoH lookup for validation.example.com")
         await self.wait_for_log_ingestion()
 
@@ -865,7 +923,9 @@ class MCPServerTester:
             print("\n🔒 Profile deletion skipped (--skip-cleanup flag)")
             print(f"   Profile will remain in your account for manual inspection.")
             print(f"   To delete it manually, use profile ID: {self.validation_profile_id}")
-            print(f"   Or run: poetry run python tests/integration/test_live_api.py --delete-profile {self.validation_profile_id}")
+            print(
+                f"   Or run: poetry run python tests/integration/test_live_api.py --delete-profile {self.validation_profile_id}"
+            )
             self.record_skip("clearLogs", "Cleanup skipped (--skip-cleanup flag)")
             return
 
@@ -879,13 +939,17 @@ class MCPServerTester:
             print("  no    - Keep the profile for manual inspection")
             print("  skip  - Same as 'no' (alias)")
 
-            response = input("\nDo you want to DELETE this profile? (yes/no/skip): ").strip().lower()
+            response = (
+                input("\nDo you want to DELETE this profile? (yes/no/skip): ").strip().lower()
+            )
 
         if response not in ("yes", "y"):
             print("\n✓ Profile deletion skipped. Profile will remain in your account.")
             print(f"   Profile ID: {self.validation_profile_id}")
             print(f"   To delete it later, use the NextDNS web interface or run:")
-            print(f"   poetry run python tests/integration/test_live_api.py --delete-profile {self.validation_profile_id}")
+            print(
+                f"   poetry run python tests/integration/test_live_api.py --delete-profile {self.validation_profile_id}"
+            )
             self.record_skip("clearLogs", "Profile retained per user instruction")
             return
 
@@ -1015,12 +1079,13 @@ async def delete_profile(profile_id: str):
         delete_tool = tools["deleteProfile"]
 
         # Delete the profile
-        result = await delete_tool.run(profile_id=profile_id)
+        result = await delete_tool.run(arguments={"profile_id": profile_id})
         print(f"✓ Profile {profile_id} deleted successfully")
         print(f"Result: {result}")
     except Exception as e:
         print(f"✗ Failed to delete profile: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
@@ -1043,23 +1108,23 @@ Examples:
 
   # Delete a specific profile
   poetry run python tests/integration/test_live_api.py --delete-profile abc123
-        """
+        """,
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--skip-cleanup",
         action="store_true",
-        help="Skip the profile deletion prompt and keep the validation profile"
+        help="Skip the profile deletion prompt and keep the validation profile",
     )
     group.add_argument(
         "--auto-delete-profile",
         action="store_true",
-        help="Automatically delete the validation profile without prompting"
+        help="Automatically delete the validation profile without prompting",
     )
     parser.add_argument(
         "--delete-profile",
         metavar="PROFILE_ID",
-        help="Delete a specific profile by ID (skips test suite)"
+        help="Delete a specific profile by ID (skips test suite)",
     )
 
     args = parser.parse_args()
@@ -1086,5 +1151,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n\nFatal error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)

@@ -87,7 +87,10 @@ def load_openapi_spec() -> dict:
             for method, operation in list(path_item.items()):
                 if isinstance(operation, dict) and operation.get("x-fastmcp-generate") is False:
                     operation_id = operation.get("operationId", f"{method.upper()} {path}")
-                    print(f"  Excluding operation: {operation_id} (x-fastmcp-generate: false)", file=sys.stderr)
+                    print(
+                        f"  Excluding operation: {operation_id} (x-fastmcp-generate: false)",
+                        file=sys.stderr,
+                    )
                     del path_item[method]
 
             # Remove path entirely if no methods remain
@@ -108,10 +111,12 @@ def create_nextdns_client() -> httpx.AsyncClient:
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
+    # Remove any headers that weren't set to actual values to satisfy type checkers
+    clean_headers = {key: value for key, value in headers.items() if value is not None}
 
     return httpx.AsyncClient(
         base_url=NEXTDNS_BASE_URL,
-        headers=headers,
+        headers=clean_headers,
         timeout=NEXTDNS_HTTP_TIMEOUT,
         follow_redirects=True,
     )

@@ -1,9 +1,10 @@
 """Unit tests for the custom dohLookup tool."""
 
 import os
-import pytest
 from unittest.mock import AsyncMock, Mock, patch
+
 import httpx
+import pytest
 
 # Set up environment before importing server to avoid module-level initialization issues
 os.environ["NEXTDNS_API_KEY"] = "test_key_for_doh_tests"
@@ -21,12 +22,7 @@ def mock_httpx_client():
     mock_response.json.return_value = {
         "Status": 0,
         "Question": [{"name": "google.com.", "type": 1}],
-        "Answer": [{
-            "name": "google.com.",
-            "type": 1,
-            "TTL": 300,
-            "data": "142.250.190.46"
-        }]
+        "Answer": [{"name": "google.com.", "type": 1, "TTL": 300, "data": "142.250.190.46"}],
     }
     mock_client.get.return_value = mock_response
     return mock_client
@@ -39,12 +35,12 @@ class TestDohLookup:
     async def test_doh_lookup_basic_query(self, mock_profile_id):
         """Test basic DoH lookup."""
         # Mock httpx.AsyncClient
-        with patch('httpx.AsyncClient') as mock_client_class:
+        with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = Mock()
             mock_response.json.return_value = {
                 "Status": 0,
-                "Answer": [{"name": "google.com.", "data": "142.250.190.46"}]
+                "Answer": [{"name": "google.com.", "data": "142.250.190.46"}],
             }
             mock_client.get.return_value = mock_response
             mock_client.__aenter__.return_value = mock_client
@@ -64,7 +60,7 @@ class TestDohLookup:
     async def test_doh_lookup_uses_default_profile(self):
         """Test that dohLookup uses NEXTDNS_DEFAULT_PROFILE when profile_id not provided."""
         # The module was imported with NEXTDNS_DEFAULT_PROFILE="test123"
-        with patch('httpx.AsyncClient') as mock_client_class:
+        with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = Mock()
             mock_response.json.return_value = {"Status": 0, "Answer": []}
@@ -101,7 +97,7 @@ class TestDohLookup:
         """Test all valid DNS record types are accepted."""
         valid_types = ["A", "AAAA", "CNAME", "MX", "NS", "PTR", "SOA", "TXT", "SRV", "CAA"]
 
-        with patch('httpx.AsyncClient') as mock_client_class:
+        with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = Mock()
             mock_response.json.return_value = {"Status": 0, "Answer": []}
@@ -118,7 +114,7 @@ class TestDohLookup:
     @pytest.mark.asyncio
     async def test_doh_lookup_adds_metadata(self, mock_profile_id):
         """Test that dohLookup adds helpful metadata to response."""
-        with patch('httpx.AsyncClient') as mock_client_class:
+        with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = Mock()
             mock_response.json.return_value = {"Status": 0, "Answer": []}
@@ -144,7 +140,7 @@ class TestDohLookup:
             (3, "NXDOMAIN - Non-existent domain"),
         ]
 
-        with patch('httpx.AsyncClient') as mock_client_class:
+        with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.__aenter__.return_value = mock_client
             mock_client.__aexit__.return_value = AsyncMock()
@@ -163,13 +159,15 @@ class TestDohLookup:
     async def test_doh_lookup_http_error(self, mock_profile_id):
         """Test error handling for HTTP errors."""
         # Patch at the server module level where httpx is imported
-        with patch('nextdns_mcp.server.httpx.AsyncClient') as mock_client_class:
+        with patch("nextdns_mcp.server.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.get.side_effect = httpx.HTTPError("Connection failed")
             mock_client.__aenter__.return_value = mock_client
+
             # __aexit__ should return False to not suppress exceptions
             async def aexit_mock(*args):
                 return False
+
             mock_client.__aexit__ = aexit_mock
             mock_client_class.return_value = mock_client
 
@@ -183,13 +181,15 @@ class TestDohLookup:
     async def test_doh_lookup_generic_exception(self, mock_profile_id):
         """Test error handling for unexpected exceptions."""
         # Patch at the server module level where httpx is imported
-        with patch('nextdns_mcp.server.httpx.AsyncClient') as mock_client_class:
+        with patch("nextdns_mcp.server.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.get.side_effect = Exception("Unexpected error")
             mock_client.__aenter__.return_value = mock_client
+
             # __aexit__ should return False to not suppress exceptions
             async def aexit_mock(*args):
                 return False
+
             mock_client.__aexit__ = aexit_mock
             mock_client_class.return_value = mock_client
 
@@ -201,7 +201,7 @@ class TestDohLookup:
     @pytest.mark.asyncio
     async def test_doh_lookup_correct_url_format(self, mock_profile_id):
         """Test that DoH endpoint URL is correctly formatted."""
-        with patch('httpx.AsyncClient') as mock_client_class:
+        with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = Mock()
             mock_response.json.return_value = {"Status": 0, "Answer": []}
@@ -212,13 +212,15 @@ class TestDohLookup:
 
             result = await dohLookup("example.com", mock_profile_id, "A")
 
-            expected_url = f"https://dns.nextdns.io/{mock_profile_id}/dns-query?name=example.com&type=A"
+            expected_url = (
+                f"https://dns.nextdns.io/{mock_profile_id}/dns-query?name=example.com&type=A"
+            )
             assert result["_metadata"]["doh_endpoint"] == expected_url
 
     @pytest.mark.asyncio
     async def test_doh_lookup_case_insensitive_record_type(self, mock_profile_id):
         """Test that record type is case-insensitive."""
-        with patch('httpx.AsyncClient') as mock_client_class:
+        with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = Mock()
             mock_response.json.return_value = {"Status": 0, "Answer": []}

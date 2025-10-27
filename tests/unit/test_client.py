@@ -1,7 +1,7 @@
 """Unit tests for HTTP client creation."""
 
-import pytest
 import httpx
+import pytest
 
 
 class TestCreateNextdnsClient:
@@ -12,8 +12,9 @@ class TestCreateNextdnsClient:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         import sys
-        if 'nextdns_mcp.server' in sys.modules:
-            del sys.modules['nextdns_mcp.server']
+
+        if "nextdns_mcp.server" in sys.modules:
+            del sys.modules["nextdns_mcp.server"]
 
         from nextdns_mcp.server import create_nextdns_client
 
@@ -33,8 +34,9 @@ class TestCreateNextdnsClient:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         import sys
-        if 'nextdns_mcp.server' in sys.modules:
-            del sys.modules['nextdns_mcp.server']
+
+        if "nextdns_mcp.server" in sys.modules:
+            del sys.modules["nextdns_mcp.server"]
 
         from nextdns_mcp.server import create_nextdns_client
 
@@ -48,8 +50,9 @@ class TestCreateNextdnsClient:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         import sys
-        if 'nextdns_mcp.server' in sys.modules:
-            del sys.modules['nextdns_mcp.server']
+
+        if "nextdns_mcp.server" in sys.modules:
+            del sys.modules["nextdns_mcp.server"]
 
         from nextdns_mcp.server import create_nextdns_client
 
@@ -65,8 +68,9 @@ class TestCreateNextdnsClient:
         monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "45")
 
         import sys
-        if 'nextdns_mcp.server' in sys.modules:
-            del sys.modules['nextdns_mcp.server']
+
+        if "nextdns_mcp.server" in sys.modules:
+            del sys.modules["nextdns_mcp.server"]
 
         from nextdns_mcp.server import create_nextdns_client
 
@@ -80,8 +84,9 @@ class TestCreateNextdnsClient:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         import sys
-        if 'nextdns_mcp.server' in sys.modules:
-            del sys.modules['nextdns_mcp.server']
+
+        if "nextdns_mcp.server" in sys.modules:
+            del sys.modules["nextdns_mcp.server"]
 
         from nextdns_mcp.server import create_nextdns_client
 
@@ -95,8 +100,9 @@ class TestCreateNextdnsClient:
         monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "120")
 
         import sys
-        if 'nextdns_mcp.server' in sys.modules:
-            del sys.modules['nextdns_mcp.server']
+
+        if "nextdns_mcp.server" in sys.modules:
+            del sys.modules["nextdns_mcp.server"]
 
         from nextdns_mcp.server import create_nextdns_client
 
