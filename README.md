@@ -434,7 +434,7 @@ docker mcp catalog ls                         # List all catalogs
 
 ## License
 
-See repository license for details.
+This project is released under the [MIT License](LICENSE).
 
 ## Contributing
 

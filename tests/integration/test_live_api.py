@@ -69,7 +69,7 @@ from nextdns_mcp import server
 class MCPServerTester:
     """Test all NextDNS MCP tools by invoking them through the server."""
 
-    def __init__(self, skip_cleanup: bool = False):
+    def __init__(self, skip_cleanup: bool = False, auto_delete_profile: bool = False):
         """Initialize the tester.
 
         Args:
@@ -95,6 +95,7 @@ class MCPServerTester:
         self.log_verification_timeout = int(os.getenv("LOG_VERIFICATION_TIMEOUT_SECONDS", "180"))
         self.doh_record_types = ["A", "AAAA", "TXT"]
         self.doh_lookup_runs = 0
+        self.auto_delete_profile = auto_delete_profile
 
     async def initialize(self):
         """Load all tools from the MCP server."""
@@ -868,13 +869,17 @@ class MCPServerTester:
             self.record_skip("clearLogs", "Cleanup skipped (--skip-cleanup flag)")
             return
 
-        print("\n⚠️  WARNING: This action cannot be undone!")
-        print("\nOptions:")
-        print("  yes   - Delete the profile now")
-        print("  no    - Keep the profile for manual inspection")
-        print("  skip  - Same as 'no' (alias)")
+        if self.auto_delete_profile:
+            print("\n⚙️  Auto-deletion enabled (--auto-delete-profile). Proceeding without prompt.")
+            response = "yes"
+        else:
+            print("\n⚠️  WARNING: This action cannot be undone!")
+            print("\nOptions:")
+            print("  yes   - Delete the profile now")
+            print("  no    - Keep the profile for manual inspection")
+            print("  skip  - Same as 'no' (alias)")
 
-        response = input("\nDo you want to DELETE this profile? (yes/no/skip): ").strip().lower()
+            response = input("\nDo you want to DELETE this profile? (yes/no/skip): ").strip().lower()
 
         if response not in ("yes", "y"):
             print("\n✓ Profile deletion skipped. Profile will remain in your account.")
@@ -1033,14 +1038,23 @@ Examples:
   # Run tests but keep the validation profile
   poetry run python tests/integration/test_live_api.py --skip-cleanup
 
+  # Run tests and automatically delete the validation profile
+  poetry run python tests/integration/test_live_api.py --auto-delete-profile
+
   # Delete a specific profile
   poetry run python tests/integration/test_live_api.py --delete-profile abc123
         """
     )
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
         "--skip-cleanup",
         action="store_true",
         help="Skip the profile deletion prompt and keep the validation profile"
+    )
+    group.add_argument(
+        "--auto-delete-profile",
+        action="store_true",
+        help="Automatically delete the validation profile without prompting"
     )
     parser.add_argument(
         "--delete-profile",
@@ -1056,7 +1070,10 @@ Examples:
         return
 
     # Run test suite
-    tester = MCPServerTester(skip_cleanup=args.skip_cleanup)
+    tester = MCPServerTester(
+        skip_cleanup=args.skip_cleanup,
+        auto_delete_profile=args.auto_delete_profile,
+    )
     await tester.run_all_tests()
 
 

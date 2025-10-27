@@ -19,6 +19,7 @@ This file contains repository-specific agent rules. Agents should follow these w
 - Keep `TODO.md` progress indicators in sync with the current phase while executing tasks.
 - **Write Operation Safety Rules:**
   - **NEVER delete a NextDNS profile without asking first** - Profile deletion is strictly forbidden without permission, even though the API supports it
+  - When running validation tests, you are permitted to run `tests/integration/test_live_api.py --auto-delete-profile`, which will delete the profile created for the  validation run.
   - Write operations (create, update) are only allowed against designated test profiles
   - When testing write operations, use only the profile specifically designated for testing
   - Always verify the target profile ID before any write operation
