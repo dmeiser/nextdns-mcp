@@ -221,6 +221,24 @@ components:
               queries:
                 type: integer
 
+    AnalyticsTimeSeriesData:
+      type: object
+      description: Time-series analytics data for charting
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: string
+                format: date-time
+                description: Timestamp for this data point
+              queries:
+                type: integer
+                description: Number of queries for this time period
+          description: Array of time-bucketed data points
+
     AnalyticsGAFAMData:
       type: object
       properties:
@@ -309,6 +327,7 @@ components:
     From:
       name: from
       in: query
+      required: true
       description: Start timestamp for analytics (Unix timestamp or ISO 8601)
       schema:
         type: string
@@ -679,6 +698,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/AnalyticsStatusData'
 
+  /profiles/{profile_id}/analytics/status;series:
+    get:
+      summary: Get query status analytics time-series
+      description: Retrieves time-series analytics data about DNS query response status codes for charting.
+      operationId: getAnalyticsStatusSeries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Status analytics time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
+
   # Analytics - Domains
   /profiles/{profile_id}/analytics/domains:
     get:
@@ -692,6 +730,18 @@ paths:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          description: Filter by domain status
+          schema:
+            type: string
+            enum: [default, blocked, allowed]
+        - name: root
+          in: query
+          description: Group by root domain
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
           description: Top domains analytics data
@@ -699,6 +749,43 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnalyticsTopList'
+
+  /profiles/{profile_id}/analytics/domains;series:
+    get:
+      summary: Get top domains analytics time-series
+      description: |
+        Retrieves time-series statistics about the most queried domains for charting.
+
+        **Known Issue**: This endpoint returns 404 from NextDNS API. While the documentation
+        suggests all analytics endpoints support ;series suffix, this specific endpoint appears
+        to not be implemented. Tool generation is disabled until the API is fixed.
+      operationId: getAnalyticsDomainsSeries
+      x-fastmcp-generate: false
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - name: status
+          in: query
+          description: Filter by domain status
+          schema:
+            type: string
+            enum: [default, blocked, allowed]
+        - name: root
+          in: query
+          description: Group by root domain
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Top domains time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
 
   # Analytics - Query Types
   /profiles/{profile_id}/analytics/queryTypes:
@@ -720,6 +807,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/AnalyticsTopList'
 
+  /profiles/{profile_id}/analytics/queryTypes;series:
+    get:
+      summary: Get query type analytics time-series
+      description: Retrieves time-series statistics about DNS query types for charting.
+      operationId: getAnalyticsQueryTypesSeries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Query type time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
+
   # Analytics - Reasons
   /profiles/{profile_id}/analytics/reasons:
     get:
@@ -739,6 +845,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnalyticsTopList'
+
+  /profiles/{profile_id}/analytics/reasons;series:
+    get:
+      summary: Get blocking reasons analytics time-series
+      description: Retrieves time-series statistics about why queries were blocked for charting.
+      operationId: getAnalyticsReasonsSeries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Blocking reasons time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
 
   # Analytics - IPs
   /profiles/{profile_id}/analytics/ips:
@@ -761,6 +886,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/AnalyticsTopList'
 
+  /profiles/{profile_id}/analytics/ips;series:
+    get:
+      summary: Get client IP analytics time-series
+      description: Retrieves time-series statistics about client IP addresses for charting.
+      operationId: getAnalyticsIPsSeries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Client IP time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
+
   # Analytics - DNSSEC
   /profiles/{profile_id}/analytics/dnssec:
     get:
@@ -780,6 +924,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnalyticsDNSSECData'
+
+  /profiles/{profile_id}/analytics/dnssec;series:
+    get:
+      summary: Get DNSSEC analytics time-series
+      description: Retrieves time-series statistics about DNSSEC validation for charting.
+      operationId: getAnalyticsDNSSECSeries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: DNSSEC time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
 
   # Analytics - Encryption
   /profiles/{profile_id}/analytics/encryption:
@@ -801,6 +964,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/AnalyticsEncryptionData'
 
+  /profiles/{profile_id}/analytics/encryption;series:
+    get:
+      summary: Get encryption analytics time-series
+      description: Retrieves time-series statistics about encrypted vs unencrypted queries for charting.
+      operationId: getAnalyticsEncryptionSeries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Encryption time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
+
   # Analytics - IP Versions
   /profiles/{profile_id}/analytics/ipVersions:
     get:
@@ -821,6 +1003,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/AnalyticsIPVersionData'
 
+  /profiles/{profile_id}/analytics/ipVersions;series:
+    get:
+      summary: Get IP version analytics time-series
+      description: Retrieves time-series statistics about IPv4 vs IPv6 usage for charting.
+      operationId: getAnalyticsIPVersionsSeries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: IP version time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
+
   # Analytics - Protocols
   /profiles/{profile_id}/analytics/protocols:
     get:
@@ -840,6 +1041,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnalyticsProtocolData'
+
+  /profiles/{profile_id}/analytics/protocols;series:
+    get:
+      summary: Get protocol analytics time-series
+      description: Retrieves time-series statistics about DNS protocol usage for charting.
+      operationId: getAnalyticsProtocolsSeries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Protocol time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
 
   # Analytics - Destinations
   /profiles/{profile_id}/analytics/destinations:
@@ -869,6 +1089,32 @@ paths:
               schema:
                 $ref: '#/components/schemas/AnalyticsTopList'
 
+  /profiles/{profile_id}/analytics/destinations;series:
+    get:
+      summary: Get top destinations analytics time-series
+      description: Retrieves time-series statistics for the most queried destination domains for charting.
+      operationId: getAnalyticsDestinationsSeries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - name: type
+          in: query
+          required: true
+          description: Filter destinations by type (countries or GAFAM companies)
+          schema:
+            type: string
+            enum: [countries, gafam]
+      responses:
+        '200':
+          description: Top destinations time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
+
   # Analytics - Devices
   /profiles/{profile_id}/analytics/devices:
     get:
@@ -888,6 +1134,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnalyticsDeviceData'
+
+  /profiles/{profile_id}/analytics/devices;series:
+    get:
+      summary: Get device analytics time-series
+      description: Retrieves time-series query statistics by device for charting.
+      operationId: getAnalyticsDevicesSeries
+      tags:
+        - Analytics
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Device time-series data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
 
   # Denylist Management
   /profiles/{profile_id}/denylist:
@@ -932,7 +1197,74 @@ paths:
               schema:
                 $ref: '#/components/schemas/OperationSuccess'
 
+    put:
+      summary: Replace denylist
+      description: |
+        Replaces the entire denylist with the provided list of domains.
+
+        **Warning**: This operation removes all existing entries and replaces them.
+        **Safety Note**: Only use with designated test profiles.
+
+        **Known Limitation**: This endpoint requires a raw JSON array at the root level,
+        which is not fully supported by FastMCP. Tool generation is disabled.
+        Use the NextDNS API directly for bulk replacement operations.
+      operationId: replaceDenylist
+      x-fastmcp-generate: false
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+              description: Array of domain names to set as the complete denylist
+              example: ["blocked.com", "malicious.org"]
+      responses:
+        '200':
+          description: Denylist replaced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
   /profiles/{profile_id}/denylist/{entry_id}:
+    patch:
+      summary: Update denylist entry
+      description: |
+        Updates properties of a denylist entry (e.g., enable/disable).
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: updateDenylistEntry
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active:
+                  type: boolean
+                  description: Enable or disable this denylist entry
+              example:
+                active: false
+      responses:
+        '200':
+          description: Entry updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
     delete:
       summary: Remove domain from denylist
       description: |
@@ -996,7 +1328,74 @@ paths:
               schema:
                 $ref: '#/components/schemas/OperationSuccess'
 
+    put:
+      summary: Replace allowlist
+      description: |
+        Replaces the entire allowlist with the provided list of domains.
+
+        **Warning**: This operation removes all existing entries and replaces them.
+        **Safety Note**: Only use with designated test profiles.
+
+        **Known Limitation**: This endpoint requires a raw JSON array at the root level,
+        which is not fully supported by FastMCP. Tool generation is disabled.
+        Use the NextDNS API directly for bulk replacement operations.
+      operationId: replaceAllowlist
+      x-fastmcp-generate: false
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+              description: Array of domain names to set as the complete allowlist
+              example: ["example.com", "trusted.org"]
+      responses:
+        '200':
+          description: Allowlist replaced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
   /profiles/{profile_id}/allowlist/{entry_id}:
+    patch:
+      summary: Update allowlist entry
+      description: |
+        Updates properties of an allowlist entry (e.g., enable/disable).
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: updateAllowlistEntry
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active:
+                  type: boolean
+                  description: Enable or disable this allowlist entry
+              example:
+                active: false
+      responses:
+        '200':
+          description: Entry updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
     delete:
       summary: Remove domain from allowlist
       description: |
@@ -1037,8 +1436,14 @@ paths:
 
     put:
       summary: Replace parental control services
-      description: Replaces the entire list of blocked services.
+      description: |
+        Replaces the entire list of blocked services.
+
+        **Known Limitation**: This endpoint requires a raw JSON array at the root level,
+        which is not fully supported by FastMCP. Tool generation is disabled.
+        Use the NextDNS API directly for bulk replacement operations.
       operationId: replaceParentalControlServices
+      x-fastmcp-generate: false
       tags:
         - Content Lists
       parameters:
@@ -1080,6 +1485,91 @@ paths:
               schema:
                 $ref: '#/components/schemas/OperationSuccess'
 
+  /profiles/{profile_id}/parentalControl/services/{id}:
+    get:
+      summary: Get parental control service details
+      description: Retrieves details of a specific blocked service entry.
+      operationId: getParentalControlServiceEntry
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - name: id
+          in: path
+          required: true
+          description: Service ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Service entry details
+          content:
+            application/json:
+              schema:
+                type: object
+
+    patch:
+      summary: Update parental control service entry
+      description: |
+        Updates properties of a parental control service entry (e.g., enable/disable).
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: updateParentalControlServiceEntry
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - name: id
+          in: path
+          required: true
+          description: Service ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active:
+                  type: boolean
+                  description: Enable or disable this service block
+              example:
+                active: false
+      responses:
+        '200':
+          description: Entry updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+    delete:
+      summary: Remove service from parental control
+      description: |
+        Removes a service from the parental control blocklist.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: removeFromParentalControlServices
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - name: id
+          in: path
+          required: true
+          description: Service ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Service removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
   # Parental Control - Categories
   /profiles/{profile_id}/parentalControl/categories:
     get:
@@ -1100,8 +1590,14 @@ paths:
 
     put:
       summary: Replace parental control categories
-      description: Replaces the entire list of blocked categories.
+      description: |
+        Replaces the entire list of blocked categories.
+
+        **Known Limitation**: This endpoint requires a raw JSON array at the root level,
+        which is not fully supported by FastMCP. Tool generation is disabled.
+        Use the NextDNS API directly for bulk replacement operations.
       operationId: replaceParentalControlCategories
+      x-fastmcp-generate: false
       tags:
         - Content Lists
       parameters:
@@ -1138,6 +1634,91 @@ paths:
       responses:
         '200':
           description: Category added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+  /profiles/{profile_id}/parentalControl/categories/{id}:
+    get:
+      summary: Get parental control category details
+      description: Retrieves details of a specific blocked category entry.
+      operationId: getParentalControlCategoryEntry
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - name: id
+          in: path
+          required: true
+          description: Category ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Category entry details
+          content:
+            application/json:
+              schema:
+                type: object
+
+    patch:
+      summary: Update parental control category entry
+      description: |
+        Updates properties of a parental control category entry (e.g., enable/disable).
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: updateParentalControlCategoryEntry
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - name: id
+          in: path
+          required: true
+          description: Category ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active:
+                  type: boolean
+                  description: Enable or disable this category block
+              example:
+                active: false
+      responses:
+        '200':
+          description: Entry updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
+    delete:
+      summary: Remove category from parental control
+      description: |
+        Removes a category from the parental control blocklist.
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: removeFromParentalControlCategories
+      tags:
+        - Content Lists
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - name: id
+          in: path
+          required: true
+          description: Category ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Category removed successfully
           content:
             application/json:
               schema:
@@ -1363,7 +1944,74 @@ paths:
               schema:
                 $ref: '#/components/schemas/OperationSuccess'
 
+    put:
+      summary: Replace security TLD blocklist
+      description: |
+        Replaces the entire security TLD blocklist with the provided list.
+
+        **Warning**: This operation removes all existing entries and replaces them.
+        **Safety Note**: Only use with designated test profiles.
+
+        **Known Limitation**: This endpoint requires a raw JSON array at the root level,
+        which is not fully supported by FastMCP. Tool generation is disabled.
+        Use the NextDNS API directly for bulk replacement operations.
+      operationId: replaceSecurityTLDs
+      x-fastmcp-generate: false
+      tags:
+        - Security
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+              description: Array of TLD names to set as the complete blocklist
+              example: ["xyz", "top", "zip"]
+      responses:
+        '200':
+          description: TLD blocklist replaced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
   /profiles/{profile_id}/security/tlds/{entry_id}:
+    patch:
+      summary: Update security TLD entry
+      description: |
+        Updates properties of a security TLD entry (e.g., enable/disable).
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: updateSecurityTLDEntry
+      tags:
+        - Security
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active:
+                  type: boolean
+                  description: Enable or disable this TLD block entry
+              example:
+                active: false
+      responses:
+        '200':
+          description: Entry updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
     delete:
       summary: Remove TLD from security blocklist
       description: |
@@ -1429,7 +2077,74 @@ paths:
               schema:
                 $ref: '#/components/schemas/OperationSuccess'
 
+    put:
+      summary: Replace privacy blocklists
+      description: |
+        Replaces the entire privacy blocklists collection with the provided list.
+
+        **Warning**: This operation removes all existing entries and replaces them.
+        **Safety Note**: Only use with designated test profiles.
+
+        **Known Limitation**: This endpoint requires a raw JSON array at the root level,
+        which is not fully supported by FastMCP. Tool generation is disabled.
+        Use the NextDNS API directly for bulk replacement operations.
+      operationId: replacePrivacyBlocklists
+      x-fastmcp-generate: false
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+              description: Array of blocklist IDs to set as the complete collection
+              example: ["nextdns-recommended", "easylist"]
+      responses:
+        '200':
+          description: Blocklists replaced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
   /profiles/{profile_id}/privacy/blocklists/{entry_id}:
+    patch:
+      summary: Update privacy blocklist entry
+      description: |
+        Updates properties of a privacy blocklist entry (e.g., enable/disable).
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: updatePrivacyBlocklistEntry
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active:
+                  type: boolean
+                  description: Enable or disable this blocklist entry
+              example:
+                active: false
+      responses:
+        '200':
+          description: Entry updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
     delete:
       summary: Remove privacy blocklist
       description: |
@@ -1495,7 +2210,74 @@ paths:
               schema:
                 $ref: '#/components/schemas/OperationSuccess'
 
+    put:
+      summary: Replace native tracking protection
+      description: |
+        Replaces the entire native tracking protection collection with the provided list.
+
+        **Warning**: This operation removes all existing entries and replaces them.
+        **Safety Note**: Only use with designated test profiles.
+
+        **Known Limitation**: This endpoint requires a raw JSON array at the root level,
+        which is not fully supported by FastMCP. Tool generation is disabled.
+        Use the NextDNS API directly for bulk replacement operations.
+      operationId: replacePrivacyNatives
+      x-fastmcp-generate: false
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+              description: Array of native tracker IDs to set as the complete collection
+              example: ["alexa", "roku", "samsung"]
+      responses:
+        '200':
+          description: Native tracking protection replaced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
   /profiles/{profile_id}/privacy/natives/{entry_id}:
+    patch:
+      summary: Update native tracking protection entry
+      description: |
+        Updates properties of a native tracking protection entry (e.g., enable/disable).
+
+        **Safety Note**: Only use with designated test profiles.
+      operationId: updatePrivacyNativeEntry
+      tags:
+        - Privacy
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - $ref: '#/components/parameters/EntryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active:
+                  type: boolean
+                  description: Enable or disable this native tracking protection entry
+              example:
+                active: false
+      responses:
+        '200':
+          description: Entry updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationSuccess'
+
     delete:
       summary: Remove native tracking protection
       description: |

@@ -3,7 +3,7 @@ displayName: NextDNS MCP Server Catalog
 registry:
   nextdns:
     title: "NextDNS MCP Server"
-    description: "Model Context Protocol server for NextDNS API. Complete profile management, DoH testing, logs, analytics, security settings, blocklists, and parental controls through 55 comprehensive tools."
+    description: "Model Context Protocol server for NextDNS API. Complete profile management, DoH testing, logs, analytics (including time-series), security settings, blocklists, and parental controls through 74 comprehensive tools. Supports individual entry updates (PATCH) and time-series analytics for charting. OpenAPI spec provides 100% NextDNS API coverage with 82 documented operations."
     type: "server"
     image: "nextdns-mcp:latest"
     dateAdded: "2025-10-25T00:00:00Z"
@@ -24,91 +24,138 @@ registry:
         description: "HTTP request timeout in seconds"
         example: "30"
 
-    # Available tools (55 total)
+    # Available tools (74 total: 73 enabled API operations + 1 custom DoH lookup)
+    # Note: 9 operations excluded from tools:
+    #       - 7 PUT bulk operations (FastMCP limitation with raw array body)
+    #       - 1 streamLogs SSE endpoint (FastMCP limitation)
+    #       - 1 getAnalyticsDomainsSeries (NextDNS API returns 404)
     tools:
       # DNS Testing (1 custom)
-      - dohLookup
+      - name: dohLookup
 
       # Profile Management (5)
-      - listProfiles
-      - getProfile
-      - createProfile
-      - updateProfile
-      - deleteProfile
+      - name: listProfiles
+      - name: getProfile
+      - name: createProfile
+      - name: updateProfile
+      - name: deleteProfile
 
-      # Settings (13)
-      - getSettings
-      - updateSettings
-      - getLogsSettings
-      - updateLogsSettings
-      - getBlockPageSettings
-      - updateBlockPageSettings
-      - getPerformanceSettings
-      - updatePerformanceSettings
-      - getWeb3Settings
-      - updateWeb3Settings
+      # Settings (11)
+      - name: getSettings
+      - name: updateSettings
+      - name: getLogsSettings
+      - name: updateLogsSettings
+      - name: getBlockPageSettings
+      - name: updateBlockPageSettings
+      - name: getPerformanceSettings
+      - name: updatePerformanceSettings
+      # Web3 settings not currently in NextDNS API
 
-      # Logs (4)
-      - getLogs
-      - streamLogs
-      - downloadLogs
-      - clearLogs
+      # Logs (3)
+      - name: getLogs
+      # streamLogs excluded - SSE streaming not supported by FastMCP
+      - name: downloadLogs
+      - name: clearLogs
 
-      # Analytics (11)
-      - getAnalyticsStatus
-      - getAnalyticsQueries
-      - getAnalyticsDNSSEC
-      - getAnalyticsEncryption
-      - getAnalyticsIPVersions
-      - getAnalyticsProtocols
-      - getAnalyticsDestinations
-      - getAnalyticsDevices
-      - getAnalyticsRootDomains
-      - getAnalyticsGAFAM
-      - getAnalyticsCountries
+      # Analytics - Base Endpoints (11)
+      - name: getAnalyticsStatus
+      - name: getAnalyticsDomains
+      - name: getAnalyticsReasons
+      - name: getAnalyticsIPs
+      - name: getAnalyticsDevices
+      - name: getAnalyticsProtocols
+      - name: getAnalyticsQueryTypes
+      - name: getAnalyticsIPVersions
+      - name: getAnalyticsDNSSEC
+      - name: getAnalyticsEncryption
+      - name: getAnalyticsDestinations
 
-      # Content Lists (9)
-      - getDenylist
-      - addToDenylist
-      - removeFromDenylist
-      - getAllowlist
-      - addToAllowlist
-      - removeFromAllowlist
-      - getParentalControl
-      - addToParentalControl
-      - removeFromParentalControl
+      # Analytics - Time-Series (10)
+      - name: getAnalyticsStatusSeries
+      # getAnalyticsDomainsSeries excluded - returns 404 from NextDNS API
+      - name: getAnalyticsReasonsSeries
+      - name: getAnalyticsIPsSeries
+      - name: getAnalyticsDevicesSeries
+      - name: getAnalyticsProtocolsSeries
+      - name: getAnalyticsQueryTypesSeries
+      - name: getAnalyticsIPVersionsSeries
+      - name: getAnalyticsDNSSECSeries
+      - name: getAnalyticsEncryptionSeries
+      - name: getAnalyticsDestinationsSeries
 
-      # Security (5)
-      - getSecuritySettings
-      - updateSecuritySettings
-      - getSecurityTLDs
-      - addSecurityTLD
-      - removeSecurityTLD
+      # Content Lists - Denylist (4)
+      - name: getDenylist
+      - name: addToDenylist
+      - name: removeFromDenylist
+      # replaceDenylist excluded - FastMCP limitation with raw array body
+      - name: updateDenylistEntry      # Update individual entry
 
-      # Privacy (8)
-      - getPrivacySettings
-      - updatePrivacySettings
-      - getPrivacyBlocklists
-      - addPrivacyBlocklist
-      - removePrivacyBlocklist
-      - getPrivacyNatives
-      - addPrivacyNative
-      - removePrivacyNative
+      # Content Lists - Allowlist (4)
+      - name: getAllowlist
+      - name: addToAllowlist
+      - name: removeFromAllowlist
+      # replaceAllowlist excluded - FastMCP limitation with raw array body
+      - name: updateAllowlistEntry     # Update individual entry
 
-      # Parental Control Settings (2)
-      - getParentalControlSettings
-      - updateParentalControlSettings
+      # Security - Settings (2)
+      - name: getSecuritySettings
+      - name: updateSecuritySettings
+
+      # Security - TLDs (4)
+      - name: getSecurityTLDs
+      - name: addSecurityTLD
+      - name: removeSecurityTLD
+      # replaceSecurityTLDs excluded - FastMCP limitation with raw array body
+      - name: updateSecurityTLDEntry   # Update individual entry
+
+      # Privacy - Settings (2)
+      - name: getPrivacySettings
+      - name: updatePrivacySettings
+
+      # Privacy - Blocklists (4)
+      - name: getPrivacyBlocklists
+      - name: addPrivacyBlocklist
+      - name: removePrivacyBlocklist
+      # replacePrivacyBlocklists excluded - FastMCP limitation with raw array body
+      - name: updatePrivacyBlocklistEntry # Update individual entry
+
+      # Privacy - Native Tracking (4)
+      - name: getPrivacyNatives
+      - name: addPrivacyNative
+      - name: removePrivacyNative
+      # replacePrivacyNatives excluded - FastMCP limitation with raw array body
+      - name: updatePrivacyNativeEntry    # Update individual entry
+
+      # Parental Control - Settings (2)
+      - name: getParentalControlSettings
+      - name: updateParentalControlSettings
+
+      # Parental Control - Services (5)
+      - name: getParentalControlServices
+      - name: addToParentalControlServices
+      - name: getParentalControlServiceEntry    # Get individual service
+      - name: updateParentalControlServiceEntry # Update individual service
+      - name: removeFromParentalControlServices # Delete individual service
+
+      # Parental Control - Categories (5)
+      - name: getParentalControlCategories
+      - name: addToParentalControlCategories
+      - name: getParentalControlCategoryEntry    # Get individual category
+      - name: updateParentalControlCategoryEntry # Update individual category
+      - name: removeFromParentalControlCategories # Delete individual category
 
     # Metadata
     metadata:
-      category: "dns,networking,api,security,privacy"
+      category: "dns,networking,api,security,privacy,parental-control"
       tags:
         - dns
         - nextdns
         - analytics
+        - time-series
         - security
         - privacy
         - parental-controls
+        - bulk-operations
         - api
       license: "MIT"
 

@@ -2,8 +2,24 @@
 """
 Live integration test for NextDNS MCP Server.
 
-This script tests ALL 55 tools (54 API operations + 1 custom DoH lookup) by
+This script tests ALL 74 tools (73 enabled API operations + 1 custom DoH lookup) by
 invoking them through the MCP server (server.py), not via direct API calls.
+
+Includes tests for:
+- Profile management
+- Settings operations (logs, block page, performance, parental control)
+- Security operations (settings, TLDs, item-level PATCH)
+- Privacy operations (settings, blocklists, natives, item-level PATCH)
+- Parental control (settings, services, categories, item operations)
+- Content lists (allowlist, denylist) with item-level PATCH operations
+- Analytics (base endpoints + time-series)
+- Logs operations
+- Custom DoH lookup tool
+
+Note: 9 operations excluded from MCP tools:
+- 7 PUT operations (bulk replacement) - require raw JSON array body (FastMCP limitation)
+- 1 streamLogs - SSE streaming not supported (FastMCP limitation)
+- 1 getAnalyticsDomainsSeries - returns 404 from NextDNS API (API issue)
 
 Requirements:
 - NEXTDNS_API_KEY environment variable must be set
@@ -12,6 +28,7 @@ Requirements:
 
 Usage:
     poetry run python tests/integration/test_live_api.py
+    poetry run python tests/integration/test_live_api.py --skip-cleanup
 """
 
 import argparse
@@ -21,6 +38,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from fastmcp.tools.tool import ToolResult
 
 # Try to load .env file if it exists
 try:
@@ -228,22 +247,31 @@ class MCPServerTester:
         await self.test_tool("getSecurityTLDs", profile_id=pid)
 
         # Add a TLD (using a real TLD)
-        result = await self.test_tool("addSecurityTLD", profile_id=pid, id="xyz")
-        if result:
-            # Try to extract the entry ID for deletion
-            try:
-                import json
-                content = result[0].content
-                if isinstance(content, list):
-                    text = content[0].text
-                    data = json.loads(text)
-                    self.entry_ids['security_tld'] = data.get('data', {}).get('id')
-            except:
-                pass
+        security_tld_value = "xyz"
+        await self.test_tool("addSecurityTLD", profile_id=pid, id=security_tld_value)
 
-        # Remove the TLD
-        if 'security_tld' in self.entry_ids:
-            await self.test_tool("removeSecurityTLD", profile_id=pid, entry_id=self.entry_ids['security_tld'])
+        # Look up the ID for the entry we just added
+        security_tld_id = None
+        result = await self.test_tool("getSecurityTLDs", profile_id=pid)
+        if result and isinstance(result, ToolResult):
+            payload = result.structured_content or {}
+            if isinstance(payload, dict):
+                entries = payload.get("data") or []
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("id") == security_tld_value:
+                        security_tld_id = entry.get("id")
+                        break
+                if security_tld_id is None and entries:
+                    entry = entries[0]
+                    if isinstance(entry, dict):
+                        security_tld_id = entry.get("id")
+
+        if security_tld_id:
+            self.entry_ids["security_tld"] = security_tld_id
+            await self.test_tool("updateSecurityTLDEntry", profile_id=pid, entry_id=security_tld_id, active=False)
+            await self.test_tool("removeSecurityTLD", profile_id=pid, entry_id=security_tld_id)
+        else:
+            print("⚠️  Could not determine security TLD entry ID; skipping update/delete")
 
     # ========================================================================
     # Privacy Tests
@@ -265,38 +293,57 @@ class MCPServerTester:
         # Blocklists
         await self.test_tool("getPrivacyBlocklists", profile_id=pid)
 
-        result = await self.test_tool("addPrivacyBlocklist", profile_id=pid, id="nextdns-recommended")
-        if result:
-            try:
-                import json
-                content = result[0].content
-                if isinstance(content, list):
-                    text = content[0].text
-                    data = json.loads(text)
-                    self.entry_ids['blocklist'] = data.get('data', {}).get('id')
-            except:
-                pass
+        blocklist_value = "nextdns-recommended"
+        await self.test_tool("addPrivacyBlocklist", profile_id=pid, id=blocklist_value)
 
-        if 'blocklist' in self.entry_ids:
-            await self.test_tool("removePrivacyBlocklist", profile_id=pid, entry_id=self.entry_ids['blocklist'])
+        blocklist_id = None
+        result = await self.test_tool("getPrivacyBlocklists", profile_id=pid)
+        if result and isinstance(result, ToolResult):
+            payload = result.structured_content or {}
+            if isinstance(payload, dict):
+                entries = payload.get("data") or []
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("id") == blocklist_value:
+                        blocklist_id = entry.get("id")
+                        break
+                if blocklist_id is None and entries:
+                    entry = entries[0]
+                    if isinstance(entry, dict):
+                        blocklist_id = entry.get("id")
+
+        if blocklist_id:
+            self.entry_ids["blocklist"] = blocklist_id
+            await self.test_tool("updatePrivacyBlocklistEntry", profile_id=pid, entry_id=blocklist_id, active=False)
+            await self.test_tool("removePrivacyBlocklist", profile_id=pid, entry_id=blocklist_id)
+        else:
+            print("⚠️  Could not determine privacy blocklist entry ID; skipping update/delete")
 
         # Native tracking protection
         await self.test_tool("getPrivacyNatives", profile_id=pid)
+        native_value = "apple"
+        await self.test_tool("addPrivacyNative", profile_id=pid, id=native_value)
 
-        result = await self.test_tool("addPrivacyNative", profile_id=pid, id="apple")
-        if result:
-            try:
-                import json
-                content = result[0].content
-                if isinstance(content, list):
-                    text = content[0].text
-                    data = json.loads(text)
-                    self.entry_ids['native'] = data.get('data', {}).get('id')
-            except:
-                pass
+        native_id = None
+        result = await self.test_tool("getPrivacyNatives", profile_id=pid)
+        if result and isinstance(result, ToolResult):
+            payload = result.structured_content or {}
+            if isinstance(payload, dict):
+                entries = payload.get("data") or []
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("id") == native_value:
+                        native_id = entry.get("id")
+                        break
+                if native_id is None and entries:
+                    entry = entries[0]
+                    if isinstance(entry, dict):
+                        native_id = entry.get("id")
 
-        if 'native' in self.entry_ids:
-            await self.test_tool("removePrivacyNative", profile_id=pid, entry_id=self.entry_ids['native'])
+        if native_id:
+            self.entry_ids["native"] = native_id
+            await self.test_tool("updatePrivacyNativeEntry", profile_id=pid, entry_id=native_id, active=False)
+            await self.test_tool("removePrivacyNative", profile_id=pid, entry_id=native_id)
+        else:
+            print("⚠️  Could not determine privacy native entry ID; skipping update/delete")
 
     # ========================================================================
     # Parental Control Tests
@@ -321,8 +368,70 @@ class MCPServerTester:
         await self.test_tool("getParentalControlCategories", profile_id=pid)
 
         # Add a service
-        result = await self.test_tool("addToParentalControlServices", profile_id=pid, id="tiktok")
-        # Note: The actual API response structure may vary
+        service_id = "tiktok"
+        await self.test_tool("addToParentalControlServices", profile_id=pid, id=service_id)
+
+        # Get the list to find the entry ID
+        result = await self.test_tool("getParentalControlServices", profile_id=pid)
+        if result and isinstance(result, ToolResult):
+            payload = result.structured_content or {}
+            entry_id = None
+            if isinstance(payload, dict):
+                entries = payload.get("data") or []
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("id") == service_id:
+                        entry_id = entry.get("id")
+                        break
+                # Fallback to first entry if we didn't find an exact match
+                if entry_id is None and entries:
+                    entry = entries[0]
+                    if isinstance(entry, dict):
+                        entry_id = entry.get("id")
+
+            if entry_id:
+                self.entry_ids["pc_service"] = entry_id
+            else:
+                print("⚠️  Could not determine parental control service entry ID; skipping entry-specific tests")
+
+        # Test item-level operations for services
+        if 'pc_service' in self.entry_ids:
+            entry_id = self.entry_ids['pc_service']
+            await self.test_tool("getParentalControlServiceEntry", profile_id=pid, id=entry_id)
+            await self.test_tool("updateParentalControlServiceEntry", profile_id=pid, id=entry_id, active=False)
+            await self.test_tool("removeFromParentalControlServices", profile_id=pid, id=entry_id)
+
+        # Add a category
+        category_id = "gambling"
+        await self.test_tool("addToParentalControlCategories", profile_id=pid, id=category_id)
+
+        # Get the list to find the entry ID
+        result = await self.test_tool("getParentalControlCategories", profile_id=pid)
+        if result and isinstance(result, ToolResult):
+            payload = result.structured_content or {}
+            entry_id = None
+            if isinstance(payload, dict):
+                entries = payload.get("data") or []
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("id") == category_id:
+                        entry_id = entry.get("id")
+                        break
+                # Fallback to first entry if we didn't find an exact match
+                if entry_id is None and entries:
+                    entry = entries[0]
+                    if isinstance(entry, dict):
+                        entry_id = entry.get("id")
+
+            if entry_id:
+                self.entry_ids["pc_category"] = entry_id
+            else:
+                print("⚠️  Could not determine parental control category entry ID; skipping entry-specific tests")
+
+        # Test item-level operations for categories
+        if 'pc_category' in self.entry_ids:
+            entry_id = self.entry_ids['pc_category']
+            await self.test_tool("getParentalControlCategoryEntry", profile_id=pid, id=entry_id)
+            await self.test_tool("updateParentalControlCategoryEntry", profile_id=pid, id=entry_id, active=False)
+            await self.test_tool("removeFromParentalControlCategories", profile_id=pid, id=entry_id)
 
     # ========================================================================
     # Allowlist/Denylist Tests
@@ -341,38 +450,57 @@ class MCPServerTester:
         # Denylist
         await self.test_tool("getDenylist", profile_id=pid)
 
-        result = await self.test_tool("addToDenylist", profile_id=pid, id="example-blocked.com")
-        if result:
-            try:
-                import json
-                content = result[0].content
-                if isinstance(content, list):
-                    text = content[0].text
-                    data = json.loads(text)
-                    self.entry_ids['denylist'] = data.get('data', {}).get('id')
-            except:
-                pass
+        denylist_value = "example-blocked.com"
+        await self.test_tool("addToDenylist", profile_id=pid, id=denylist_value)
 
-        if 'denylist' in self.entry_ids:
-            await self.test_tool("removeFromDenylist", profile_id=pid, entry_id=self.entry_ids['denylist'])
+        denylist_id = None
+        result = await self.test_tool("getDenylist", profile_id=pid)
+        if result and isinstance(result, ToolResult):
+            payload = result.structured_content or {}
+            if isinstance(payload, dict):
+                entries = payload.get("data") or []
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("id") == denylist_value:
+                        denylist_id = entry.get("id")
+                        break
+                if denylist_id is None and entries:
+                    entry = entries[0]
+                    if isinstance(entry, dict):
+                        denylist_id = entry.get("id")
+
+        if denylist_id:
+            self.entry_ids["denylist"] = denylist_id
+            await self.test_tool("updateDenylistEntry", profile_id=pid, entry_id=denylist_id, active=False)
+            await self.test_tool("removeFromDenylist", profile_id=pid, entry_id=denylist_id)
+        else:
+            print("⚠️  Could not determine denylist entry ID; skipping update/delete")
 
         # Allowlist
         await self.test_tool("getAllowlist", profile_id=pid)
+        allowlist_value = "example-allowed.com"
+        await self.test_tool("addToAllowlist", profile_id=pid, id=allowlist_value)
 
-        result = await self.test_tool("addToAllowlist", profile_id=pid, id="example-allowed.com")
-        if result:
-            try:
-                import json
-                content = result[0].content
-                if isinstance(content, list):
-                    text = content[0].text
-                    data = json.loads(text)
-                    self.entry_ids['allowlist'] = data.get('data', {}).get('id')
-            except:
-                pass
+        allowlist_id = None
+        result = await self.test_tool("getAllowlist", profile_id=pid)
+        if result and isinstance(result, ToolResult):
+            payload = result.structured_content or {}
+            if isinstance(payload, dict):
+                entries = payload.get("data") or []
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("id") == allowlist_value:
+                        allowlist_id = entry.get("id")
+                        break
+                if allowlist_id is None and entries:
+                    entry = entries[0]
+                    if isinstance(entry, dict):
+                        allowlist_id = entry.get("id")
 
-        if 'allowlist' in self.entry_ids:
-            await self.test_tool("removeFromAllowlist", profile_id=pid, entry_id=self.entry_ids['allowlist'])
+        if allowlist_id:
+            self.entry_ids["allowlist"] = allowlist_id
+            await self.test_tool("updateAllowlistEntry", profile_id=pid, entry_id=allowlist_id, active=False)
+            await self.test_tool("removeFromAllowlist", profile_id=pid, entry_id=allowlist_id)
+        else:
+            print("⚠️  Could not determine allowlist entry ID; skipping update/delete")
 
     # ========================================================================
     # Analytics Tests
@@ -400,6 +528,41 @@ class MCPServerTester:
         await self.test_tool("getAnalyticsProtocols", profile_id=pid)
         await self.test_tool("getAnalyticsDestinations", profile_id=pid, type="countries")
         await self.test_tool("getAnalyticsDevices", profile_id=pid)
+
+    # ========================================================================
+    # Analytics Time-Series Tests
+    # ========================================================================
+
+    async def test_analytics_series(self):
+        """Test time-series analytics operations (sample of endpoints)."""
+        self.print_header("ANALYTICS TIME-SERIES OPERATIONS")
+
+        if not self.validation_profile_id:
+            print("⚠️  No validation profile ID - skipping")
+            return
+
+        pid = self.validation_profile_id
+
+        # Calculate a date range for analytics (last 24 hours)
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        yesterday = now - timedelta(days=1)
+        from_time = yesterday.isoformat().replace('+00:00', 'Z')
+        to_time = now.isoformat().replace('+00:00', 'Z')
+
+        # Test ALL time-series endpoints (except getAnalyticsDomainsSeries - API issue)
+        # Note: These might not have data for newly created profiles
+        # Note: getAnalyticsDomainsSeries excluded - returns 404 from NextDNS API (known issue)
+        await self.test_tool("getAnalyticsStatusSeries", profile_id=pid, **{"from": from_time, "to": to_time})
+        await self.test_tool("getAnalyticsQueryTypesSeries", profile_id=pid, **{"from": from_time, "to": to_time})
+        await self.test_tool("getAnalyticsReasonsSeries", profile_id=pid, **{"from": from_time, "to": to_time})
+        await self.test_tool("getAnalyticsIPsSeries", profile_id=pid, **{"from": from_time, "to": to_time})
+        await self.test_tool("getAnalyticsDevicesSeries", profile_id=pid, **{"from": from_time, "to": to_time})
+        await self.test_tool("getAnalyticsProtocolsSeries", profile_id=pid, **{"from": from_time, "to": to_time})
+        await self.test_tool("getAnalyticsIPVersionsSeries", profile_id=pid, **{"from": from_time, "to": to_time})
+        await self.test_tool("getAnalyticsDNSSECSeries", profile_id=pid, **{"from": from_time, "to": to_time})
+        await self.test_tool("getAnalyticsEncryptionSeries", profile_id=pid, **{"from": from_time, "to": to_time})
+        await self.test_tool("getAnalyticsDestinationsSeries", profile_id=pid, type="countries", **{"from": from_time, "to": to_time})
 
     # ========================================================================
     # Logs Tests
@@ -491,7 +654,7 @@ class MCPServerTester:
         """Run all integration tests."""
         print("\n" + "=" * 80)
         print("  NextDNS MCP Server - Live Integration Test")
-        print("  Testing all 55 tools via MCP server (server.py)")
+        print("  Testing 75 tools via MCP server (74 API + 1 custom)")
         print("=" * 80)
 
         try:
@@ -522,13 +685,16 @@ class MCPServerTester:
             # 8. Analytics
             await self.test_analytics()
 
-            # 9. Logs
+            # 9. Analytics Time-Series
+            await self.test_analytics_series()
+
+            # 10. Logs
             await self.test_logs()
 
-            # 10. DoH Lookup (custom tool)
+            # 11. DoH Lookup (custom tool)
             await self.test_doh_lookup()
 
-            # 11. Cleanup with confirmation
+            # 12. Cleanup with confirmation
             await self.cleanup_profile()
 
         except KeyboardInterrupt:
