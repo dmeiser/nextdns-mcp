@@ -33,9 +33,11 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import os
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -80,9 +82,19 @@ class MCPServerTester:
         # Track test results
         self.passed: List[str] = []
         self.failed: List[Dict[str, str]] = []
+        self.skipped: List[Dict[str, str]] = []
 
         # Store entry IDs for cleanup
         self.entry_ids: Dict[str, str] = {}
+
+        # Track DoH lookup details for log verification
+        self.doh_lookup_info: Optional[Dict[str, object]] = None
+        self.logs_ready = False
+        self.log_provision_timeout = int(os.getenv("LOG_PROVISION_TIMEOUT_SECONDS", "120"))
+        self.log_ingest_wait_seconds = int(os.getenv("LOG_INGEST_WAIT_SECONDS", "10"))
+        self.log_verification_timeout = int(os.getenv("LOG_VERIFICATION_TIMEOUT_SECONDS", "180"))
+        self.doh_record_types = ["A", "AAAA", "TXT"]
+        self.doh_lookup_runs = 0
 
     async def initialize(self):
         """Load all tools from the MCP server."""
@@ -97,8 +109,8 @@ class MCPServerTester:
 
     def print_test(self, name: str, status: str, details: str = ""):
         """Print test result."""
-        symbols = {"PASS": "✓", "FAIL": "✗"}
-        colors = {"PASS": "\033[92m", "FAIL": "\033[91m"}
+        symbols = {"PASS": "✓", "FAIL": "✗", "SKIP": "-"}
+        colors = {"PASS": "\033[92m", "FAIL": "\033[91m", "SKIP": "\033[93m"}
         reset = "\033[0m"
 
         symbol = symbols.get(status, "?")
@@ -106,6 +118,11 @@ class MCPServerTester:
         print(f"{color}{symbol}{reset} {name:<50} [{status}]")
         if details:
             print(f"  → {details}")
+
+    def record_skip(self, name: str, reason: str = ""):
+        """Record and display a skipped test."""
+        self.skipped.append({"name": name, "reason": reason})
+        self.print_test(name, "SKIP", reason)
 
     async def call_tool(self, tool_name: str, **params):
         """Call an MCP tool and return the result."""
@@ -144,6 +161,151 @@ class MCPServerTester:
             self.failed.append({"name": tool_name, "error": str(e)})
             self.print_test(tool_name, "FAIL", str(e)[:60])
             return None
+
+    async def wait_for_logging_provisioning(self):
+        """Poll until logging endpoints are available for the validation profile."""
+        if not self.validation_profile_id:
+            return
+
+        if "getLogsSettings" not in self.tools:
+            self.record_skip("getLogsSettings", "Tool unavailable; cannot verify logging provisioning")
+            return
+
+        pid = self.validation_profile_id
+        start = time.monotonic()
+        delay = 1.0
+        print(f"Waiting for logging to provision for profile {pid} (timeout {self.log_provision_timeout}s)...")
+
+        while time.monotonic() - start < self.log_provision_timeout:
+            try:
+                await self.tools["getLogsSettings"].run(arguments={"profile_id": pid})
+                self.logs_ready = True
+                print(f"✓ Logging provisioning detected for profile {pid}")
+                return
+            except Exception:
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 5.0)
+
+        raise RuntimeError(
+            f"Logging did not provision within {self.log_provision_timeout} seconds for profile {pid}. "
+            "Enable logs manually or increase LOG_PROVISION_TIMEOUT_SECONDS."
+        )
+
+    async def wait_for_log_ingestion(self):
+        """Sleep briefly to allow the DoH lookup to appear in logs."""
+        if not self.logs_ready:
+            print("ℹ️ Logging not provisioned; skipping log ingestion wait.")
+            return
+
+        wait_seconds = max(self.log_ingest_wait_seconds, 0)
+        if wait_seconds == 0:
+            return
+
+        domain = (self.doh_lookup_info or {}).get("domain", "validation.example.com")
+        pid = self.validation_profile_id or "(unknown)"
+        print(
+            f"Waiting {wait_seconds} seconds for log ingestion "
+            f"(profile {pid}, domain {domain})..."
+        )
+        await asyncio.sleep(wait_seconds)
+
+    @staticmethod
+    def _extract_payload(result):
+        """Normalize ToolResult payloads into plain Python structures."""
+        if isinstance(result, ToolResult):
+            if result.structured_content:
+                return result.structured_content
+            if result.content and isinstance(result.content, list):
+                # Join text content blocks if present
+                texts = [getattr(block, "text", "") for block in result.content]
+                merged = "".join(texts)
+                try:
+                    return json.loads(merged)
+                except json.JSONDecodeError:
+                    return merged
+        if isinstance(result, str):
+            try:
+                return json.loads(result)
+            except json.JSONDecodeError:
+                return result
+        return result
+
+    async def poll_for_log_entry(
+        self,
+        profile_id: str,
+        domain: str,
+        lookup_timestamp: Optional[datetime],
+        refresh_lookup: bool = False,
+    ) -> tuple[Optional[dict], List[dict]]:
+        """Poll the logs endpoint until a matching entry is found or timeout expires."""
+        if "getLogs" not in self.tools:
+            raise KeyError("getLogs tool unavailable")
+
+        deadline = time.monotonic() + self.log_verification_timeout
+        delay = 1.0
+        last_entries: List[dict] = []
+        last_error: Optional[Exception] = None
+
+        first_attempt = True
+        while time.monotonic() < deadline:
+            if refresh_lookup and not first_attempt:
+                try:
+                    lookup_timestamp = await self.issue_doh_lookup(profile_id, domain)
+                except Exception:
+                    pass
+            first_attempt = False
+            try:
+                result = await self.tools["getLogs"].run(arguments={"profile_id": profile_id})
+                payload = self._extract_payload(result)
+                if isinstance(payload, dict):
+                    entries = payload.get("data") or []
+                else:
+                    entries = []
+                last_entries = entries if isinstance(entries, list) else []
+
+                normalized_target = domain.rstrip(".").lower()
+                for entry in last_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_domain = str(entry.get("domain", "")).rstrip(".").lower()
+                    if entry_domain != normalized_target:
+                        continue
+                    return entry, last_entries
+
+                await asyncio.sleep(delay)
+                delay = min(delay * 1.5, 5.0)
+                continue
+            except Exception as exc:  # pragma: no cover - best-effort polling
+                last_error = exc
+                await asyncio.sleep(delay)
+                delay = min(delay * 1.5, 5.0)
+
+        if last_error:
+            raise last_error
+
+        return None, last_entries
+
+    def next_record_type(self) -> str:
+        record_type = self.doh_record_types[self.doh_lookup_runs % len(self.doh_record_types)]
+        self.doh_lookup_runs += 1
+        return record_type
+
+    async def issue_doh_lookup(self, profile_id: str, domain: str) -> datetime:
+        """Execute a DoH lookup and return the timestamp used for verification."""
+        if "dohLookup" not in self.tools:
+            raise KeyError("dohLookup tool unavailable")
+
+        record_type = self.next_record_type()
+        timestamp = datetime.now(timezone.utc)
+        await self.tools["dohLookup"].run(
+            arguments={"domain": domain, "profile_id": profile_id, "record_type": record_type}
+        )
+        self.doh_lookup_info = {
+            "domain": domain,
+            "timestamp": timestamp,
+            "record_type": record_type,
+        }
+        return timestamp
 
     # ========================================================================
     # Profile Management Tests
@@ -215,8 +377,22 @@ class MCPServerTester:
         await self.test_tool("updateSettings", profile_id=pid, blockPage={"enabled": True})
 
         # Logs settings
-        await self.test_tool("getLogsSettings", profile_id=pid)
-        await self.test_tool("updateLogsSettings", profile_id=pid, enabled=True)
+        logs_result = await self.test_tool("getLogsSettings", profile_id=pid)
+        logs_payload = self._extract_payload(logs_result)
+        retention = 7776000
+        location = "us"
+        if isinstance(logs_payload, dict):
+            data = logs_payload.get("data") or {}
+            retention = data.get("retention", retention)
+            location = data.get("location", location)
+
+        await self.test_tool(
+            "updateLogsSettings",
+            profile_id=pid,
+            enabled=True,
+            retention=retention,
+            location=location,
+        )
 
         # Block page settings
         await self.test_tool("getBlockPageSettings", profile_id=pid)
@@ -268,10 +444,9 @@ class MCPServerTester:
 
         if security_tld_id:
             self.entry_ids["security_tld"] = security_tld_id
-            await self.test_tool("updateSecurityTLDEntry", profile_id=pid, entry_id=security_tld_id, active=False)
             await self.test_tool("removeSecurityTLD", profile_id=pid, entry_id=security_tld_id)
         else:
-            print("⚠️  Could not determine security TLD entry ID; skipping update/delete")
+            print("⚠️  Could not determine security TLD entry ID; skipping deletion")
 
     # ========================================================================
     # Privacy Tests
@@ -313,10 +488,9 @@ class MCPServerTester:
 
         if blocklist_id:
             self.entry_ids["blocklist"] = blocklist_id
-            await self.test_tool("updatePrivacyBlocklistEntry", profile_id=pid, entry_id=blocklist_id, active=False)
             await self.test_tool("removePrivacyBlocklist", profile_id=pid, entry_id=blocklist_id)
         else:
-            print("⚠️  Could not determine privacy blocklist entry ID; skipping update/delete")
+            print("⚠️  Could not determine privacy blocklist entry ID; skipping deletion")
 
         # Native tracking protection
         await self.test_tool("getPrivacyNatives", profile_id=pid)
@@ -340,10 +514,9 @@ class MCPServerTester:
 
         if native_id:
             self.entry_ids["native"] = native_id
-            await self.test_tool("updatePrivacyNativeEntry", profile_id=pid, entry_id=native_id, active=False)
             await self.test_tool("removePrivacyNative", profile_id=pid, entry_id=native_id)
         else:
-            print("⚠️  Could not determine privacy native entry ID; skipping update/delete")
+            print("⚠️  Could not determine privacy native entry ID; skipping deletion")
 
     # ========================================================================
     # Parental Control Tests
@@ -396,7 +569,6 @@ class MCPServerTester:
         # Test item-level operations for services
         if 'pc_service' in self.entry_ids:
             entry_id = self.entry_ids['pc_service']
-            await self.test_tool("getParentalControlServiceEntry", profile_id=pid, id=entry_id)
             await self.test_tool("updateParentalControlServiceEntry", profile_id=pid, id=entry_id, active=False)
             await self.test_tool("removeFromParentalControlServices", profile_id=pid, id=entry_id)
 
@@ -429,7 +601,6 @@ class MCPServerTester:
         # Test item-level operations for categories
         if 'pc_category' in self.entry_ids:
             entry_id = self.entry_ids['pc_category']
-            await self.test_tool("getParentalControlCategoryEntry", profile_id=pid, id=entry_id)
             await self.test_tool("updateParentalControlCategoryEntry", profile_id=pid, id=entry_id, active=False)
             await self.test_tool("removeFromParentalControlCategories", profile_id=pid, id=entry_id)
 
@@ -577,11 +748,67 @@ class MCPServerTester:
             return
 
         pid = self.validation_profile_id
+        if not self.logs_ready:
+            self.record_skip("getLogs", "Logging not provisioned for validation profile")
+            if "downloadLogs" in self.tools:
+                self.record_skip("downloadLogs", "Logging not provisioned for validation profile")
+            return
 
-        await self.test_tool("getLogs", profile_id=pid)
-        # streamLogs excluded - SSE streaming endpoint not supported by FastMCP
-        await self.test_tool("downloadLogs", profile_id=pid)
-        await self.test_tool("clearLogs", profile_id=pid)
+        if not self.doh_lookup_info:
+            self.record_skip("getLogs", "DoH lookup not executed prior to log verification")
+            if "downloadLogs" in self.tools:
+                self.record_skip("downloadLogs", "DoH lookup not executed prior to log verification")
+            return
+
+        domain = "validation.example.com"
+        try:
+            lookup_timestamp = await self.issue_doh_lookup(pid, domain)
+        except KeyError:
+            self.record_skip("getLogs", "dohLookup tool unavailable for verification")
+            if "downloadLogs" in self.tools:
+                self.record_skip("downloadLogs", "dohLookup tool unavailable for verification")
+            return
+        except Exception as exc:
+            self.failed.append({"name": "getLogs", "error": f"DoH lookup failed: {exc}"})
+            self.print_test("getLogs", "FAIL", f"DoH lookup failed: {exc}")
+            return
+
+        try:
+            matched_entry, entries = await self.poll_for_log_entry(
+                pid, domain, lookup_timestamp, refresh_lookup=True
+            )
+        except KeyError:
+            self.record_skip("getLogs", "Tool unavailable")
+            if "downloadLogs" in self.tools:
+                self.record_skip("downloadLogs", "Tool unavailable")
+            return
+        except Exception as exc:
+            self.failed.append({"name": "getLogs", "error": str(exc)})
+            self.print_test("getLogs", "FAIL", str(exc)[:60])
+            return
+
+        if matched_entry:
+            details = f"Found log entry for {domain}"
+            self.passed.append("getLogs")
+            self.print_test("getLogs", "PASS", details)
+        else:
+            sample = [
+                str(entry.get("domain"))
+                for entry in entries
+                if isinstance(entry, dict) and "domain" in entry
+            ][:5]
+            error = (
+                f"No log entry for {domain} found after DoH lookup; received {len(entries)} entries"
+                + (f" (sample domains: {sample})" if sample else "")
+            )
+            self.failed.append({"name": "getLogs", "error": error})
+            self.print_test("getLogs", "FAIL", error)
+            return
+
+        if "downloadLogs" in self.tools:
+            await self.test_tool("downloadLogs", profile_id=pid)
+        else:
+            self.record_skip("downloadLogs", "Tool unavailable")
 
     # ========================================================================
     # DoH Lookup Test (Custom Tool)
@@ -600,7 +827,23 @@ class MCPServerTester:
         else:
             profile_id = self.validation_profile_id
 
-        await self.test_tool("dohLookup", domain="google.com", profile_id=profile_id, record_type="A")
+        if not self.logs_ready:
+            print("ℹ️ Logging not provisioned; DoH lookup will run without log verification.")
+
+        domain = "validation.example.com"
+        try:
+            await self.issue_doh_lookup(profile_id, domain)
+        except KeyError:
+            self.record_skip("dohLookup", "Tool unavailable")
+            return
+        except Exception as exc:
+            self.failed.append({"name": "dohLookup", "error": str(exc)})
+            self.print_test("dohLookup", "FAIL", str(exc)[:60])
+            return
+
+        self.passed.append("dohLookup")  # mark success manually since issue_doh_lookup bypassed test_tool
+        self.print_test("dohLookup", "PASS", "Executed DoH lookup for validation.example.com")
+        await self.wait_for_log_ingestion()
 
     # ========================================================================
     # Cleanup
@@ -622,6 +865,7 @@ class MCPServerTester:
             print(f"   Profile will remain in your account for manual inspection.")
             print(f"   To delete it manually, use profile ID: {self.validation_profile_id}")
             print(f"   Or run: poetry run python tests/integration/test_live_api.py --delete-profile {self.validation_profile_id}")
+            self.record_skip("clearLogs", "Cleanup skipped (--skip-cleanup flag)")
             return
 
         print("\n⚠️  WARNING: This action cannot be undone!")
@@ -637,9 +881,15 @@ class MCPServerTester:
             print(f"   Profile ID: {self.validation_profile_id}")
             print(f"   To delete it later, use the NextDNS web interface or run:")
             print(f"   poetry run python tests/integration/test_live_api.py --delete-profile {self.validation_profile_id}")
+            self.record_skip("clearLogs", "Profile retained per user instruction")
             return
 
         try:
+            if "clearLogs" in self.tools:
+                await self.test_tool("clearLogs", profile_id=self.validation_profile_id)
+            else:
+                self.record_skip("clearLogs", "Tool unavailable during cleanup")
+
             await self.test_tool("deleteProfile", profile_id=self.validation_profile_id)
             print("✓ Validation profile deleted successfully")
         except Exception as e:
@@ -663,6 +913,9 @@ class MCPServerTester:
 
             # 1. Create validation profile
             await self.test_create_validation_profile()
+
+            # Ensure logging endpoints are ready before continuing
+            await self.wait_for_logging_provisioning()
 
             # 2. Profile operations
             await self.test_profile_operations()
@@ -688,11 +941,11 @@ class MCPServerTester:
             # 9. Analytics Time-Series
             await self.test_analytics_series()
 
-            # 10. Logs
-            await self.test_logs()
-
-            # 11. DoH Lookup (custom tool)
+            # 10. DoH Lookup (custom tool)
             await self.test_doh_lookup()
+
+            # 11. Logs
+            await self.test_logs()
 
             # 12. Cleanup with confirmation
             await self.cleanup_profile()
@@ -709,11 +962,13 @@ class MCPServerTester:
         """Print test summary."""
         self.print_header("TEST SUMMARY")
 
-        total = len(self.passed) + len(self.failed)
+        total = len(self.passed) + len(self.failed) + len(self.skipped)
+        denom = total if total else 1
 
         print(f"Total Tests: {total}")
-        print(f"✓ Passed:    {len(self.passed)} ({len(self.passed)/total*100:.1f}%)")
-        print(f"✗ Failed:    {len(self.failed)} ({len(self.failed)/total*100:.1f}%)")
+        print(f"✓ Passed:    {len(self.passed)} ({len(self.passed)/denom*100:.1f}%)")
+        print(f"✗ Failed:    {len(self.failed)} ({len(self.failed)/denom*100:.1f}%)")
+        print(f"- Skipped:   {len(self.skipped)} ({len(self.skipped)/denom*100:.1f}%)")
 
         if self.failed:
             print("\n" + "=" * 80)
@@ -722,6 +977,14 @@ class MCPServerTester:
             for failure in self.failed:
                 print(f"\n✗ {failure['name']}")
                 print(f"  Error: {failure['error']}")
+
+        if self.skipped:
+            print("\n" + "=" * 80)
+            print("  SKIPPED TESTS")
+            print("=" * 80)
+            for item in self.skipped:
+                print(f"\n- {item['name']}")
+                print(f"  Reason: {item['reason']}")
 
         print("\n" + "=" * 80)
 

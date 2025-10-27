@@ -101,46 +101,41 @@ registry:
       - name: getSecuritySettings
       - name: updateSecuritySettings
 
-      # Security - TLDs (4)
+      # Security - TLDs (3)
       - name: getSecurityTLDs
       - name: addSecurityTLD
       - name: removeSecurityTLD
       # replaceSecurityTLDs excluded - FastMCP limitation with raw array body
-      - name: updateSecurityTLDEntry   # Update individual entry
 
       # Privacy - Settings (2)
       - name: getPrivacySettings
       - name: updatePrivacySettings
 
-      # Privacy - Blocklists (4)
+      # Privacy - Blocklists (3)
       - name: getPrivacyBlocklists
       - name: addPrivacyBlocklist
       - name: removePrivacyBlocklist
       # replacePrivacyBlocklists excluded - FastMCP limitation with raw array body
-      - name: updatePrivacyBlocklistEntry # Update individual entry
 
-      # Privacy - Native Tracking (4)
+      # Privacy - Native Tracking (3)
       - name: getPrivacyNatives
       - name: addPrivacyNative
       - name: removePrivacyNative
       # replacePrivacyNatives excluded - FastMCP limitation with raw array body
-      - name: updatePrivacyNativeEntry    # Update individual entry
 
       # Parental Control - Settings (2)
       - name: getParentalControlSettings
       - name: updateParentalControlSettings
 
-      # Parental Control - Services (5)
+      # Parental Control - Services (3)
       - name: getParentalControlServices
       - name: addToParentalControlServices
-      - name: getParentalControlServiceEntry    # Get individual service
       - name: updateParentalControlServiceEntry # Update individual service
       - name: removeFromParentalControlServices # Delete individual service
 
-      # Parental Control - Categories (5)
+      # Parental Control - Categories (3)
       - name: getParentalControlCategories
       - name: addToParentalControlCategories
-      - name: getParentalControlCategoryEntry    # Get individual category
       - name: updateParentalControlCategoryEntry # Update individual category
       - name: removeFromParentalControlCategories # Delete individual category
 

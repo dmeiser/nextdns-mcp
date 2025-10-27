@@ -1486,28 +1486,6 @@ paths:
                 $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/parentalControl/services/{id}:
-    get:
-      summary: Get parental control service details
-      description: Retrieves details of a specific blocked service entry.
-      operationId: getParentalControlServiceEntry
-      tags:
-        - Content Lists
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-        - name: id
-          in: path
-          required: true
-          description: Service ID
-          schema:
-            type: string
-      responses:
-        '200':
-          description: Service entry details
-          content:
-            application/json:
-              schema:
-                type: object
-
     patch:
       summary: Update parental control service entry
       description: |
@@ -1640,28 +1618,6 @@ paths:
                 $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/parentalControl/categories/{id}:
-    get:
-      summary: Get parental control category details
-      description: Retrieves details of a specific blocked category entry.
-      operationId: getParentalControlCategoryEntry
-      tags:
-        - Content Lists
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-        - name: id
-          in: path
-          required: true
-          description: Category ID
-          schema:
-            type: string
-      responses:
-        '200':
-          description: Category entry details
-          content:
-            application/json:
-              schema:
-                type: object
-
     patch:
       summary: Update parental control category entry
       description: |
@@ -1980,38 +1936,6 @@ paths:
                 $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/security/tlds/{entry_id}:
-    patch:
-      summary: Update security TLD entry
-      description: |
-        Updates properties of a security TLD entry (e.g., enable/disable).
-
-        **Safety Note**: Only use with designated test profiles.
-      operationId: updateSecurityTLDEntry
-      tags:
-        - Security
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/EntryId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                active:
-                  type: boolean
-                  description: Enable or disable this TLD block entry
-              example:
-                active: false
-      responses:
-        '200':
-          description: Entry updated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
-
     delete:
       summary: Remove TLD from security blocklist
       description: |
@@ -2113,38 +2037,6 @@ paths:
                 $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/privacy/blocklists/{entry_id}:
-    patch:
-      summary: Update privacy blocklist entry
-      description: |
-        Updates properties of a privacy blocklist entry (e.g., enable/disable).
-
-        **Safety Note**: Only use with designated test profiles.
-      operationId: updatePrivacyBlocklistEntry
-      tags:
-        - Privacy
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/EntryId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                active:
-                  type: boolean
-                  description: Enable or disable this blocklist entry
-              example:
-                active: false
-      responses:
-        '200':
-          description: Entry updated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
-
     delete:
       summary: Remove privacy blocklist
       description: |
@@ -2246,38 +2138,6 @@ paths:
                 $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/privacy/natives/{entry_id}:
-    patch:
-      summary: Update native tracking protection entry
-      description: |
-        Updates properties of a native tracking protection entry (e.g., enable/disable).
-
-        **Safety Note**: Only use with designated test profiles.
-      operationId: updatePrivacyNativeEntry
-      tags:
-        - Privacy
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/EntryId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                active:
-                  type: boolean
-                  description: Enable or disable this native tracking protection entry
-              example:
-                active: false
-      responses:
-        '200':
-          description: Entry updated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
-
     delete:
       summary: Remove native tracking protection
       description: |
