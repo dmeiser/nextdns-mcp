@@ -199,7 +199,14 @@ async def _dohLookup_impl(
         result = await dohLookup("google.com", "b282de", "AAAA")
     """
     # Use default profile if not specified
-    target_profile = profile_id or NEXTDNS_DEFAULT_PROFILE
+    target_profile = profile_id
+    if not target_profile:
+        # Re-read environment in case tests or callers override it after import
+        env_default = os.getenv("NEXTDNS_DEFAULT_PROFILE")
+        if env_default:
+            target_profile = env_default
+        else:
+            target_profile = NEXTDNS_DEFAULT_PROFILE
 
     if not target_profile:
         return {
