@@ -1,6 +1,5 @@
 """Pytest configuration and fixtures for NextDNS MCP Server tests."""
 
-import os
 import tempfile
 from pathlib import Path
 from typing import Generator

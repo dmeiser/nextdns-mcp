@@ -36,7 +36,7 @@ async def test_nextdns_api():
             data = response.json()
 
             profiles = data.get("data", [])
-            print(f"✓ Successfully connected to NextDNS API")
+            print("✓ Successfully connected to NextDNS API")
             print(f"  Found {len(profiles)} profile(s)")
 
             if profiles:
@@ -72,7 +72,7 @@ def verify_openapi_spec():
         assert "paths" in spec, "Missing paths section"
 
         num_paths = len(spec["paths"])
-        print(f"✓ OpenAPI spec is valid")
+        print("✓ OpenAPI spec is valid")
         print(f"  Version: {spec['openapi']}")
         print(f"  Title: {spec['info']['title']}")
         print(f"  Paths: {num_paths}")

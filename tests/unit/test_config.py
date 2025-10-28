@@ -1,6 +1,5 @@
 """Unit tests for configuration and API key loading."""
 
-import os
 import tempfile
 from pathlib import Path
 

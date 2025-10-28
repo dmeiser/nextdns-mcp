@@ -10,19 +10,18 @@ registry:
 
     # Required secrets
     secrets:
-      - name: "NextDNS API Key"
-        env: "NEXTDNS_API_KEY"
-        example: "your_api_key_from_nextdns"
+      - name: NEXTDNS_API_KEY
         description: "API key from https://my.nextdns.io/account"
+        required: true
 
     # Optional environment variables
     env:
-      - name: "NEXTDNS_DEFAULT_PROFILE"
+      - name: NEXTDNS_DEFAULT_PROFILE
         description: "Default NextDNS profile ID to use"
-        example: "abc123"
-      - name: "NEXTDNS_HTTP_TIMEOUT"
+        default: ""
+      - name: NEXTDNS_HTTP_TIMEOUT
         description: "HTTP request timeout in seconds"
-        example: "30"
+        default: "30"
 
     # Available tools (76 total: 68 enabled API operations + 7 custom bulk operations + 1 custom DoH lookup)
     # Note: 2 operations excluded from tools (truly unsupported):

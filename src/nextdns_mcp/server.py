@@ -3,18 +3,17 @@
 SPDX-License-Identifier: MIT
 """
 
+import httpx
 import json
 import logging
 import os
 import sys
-from pathlib import Path
-from typing import Optional
-
-import httpx
 import yaml
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.openapi import DEFAULT_ROUTE_MAPPINGS, RouteMap
+from pathlib import Path
+from typing import Optional
 
 from .config import (
     DNS_STATUS_CODES,
@@ -314,7 +313,6 @@ async def _bulk_update_helper(profile_id: str, data: str, endpoint: str, param_n
     Returns:
         dict: API response or error dict
     """
-    import json
 
     logger.info(f"Bulk update: {param_name} for profile {profile_id}")
 

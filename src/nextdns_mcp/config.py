@@ -9,7 +9,6 @@ SPDX-License-Identifier: MIT
 import logging
 import os
 import sys
-from pathlib import Path
 from typing import Optional
 
 from fastmcp.server.openapi import MCPType, RouteMap

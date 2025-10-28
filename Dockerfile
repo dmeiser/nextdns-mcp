@@ -1,44 +1,33 @@
-# Multi-stage build for NextDNS MCP Server
+# Multi-stage build for a lean final image
+
+# 1. Builder stage: Install dependencies
 FROM python:3.13-slim AS builder
+
+# Set working directory
+WORKDIR /app
+
+# Install poetry
+RUN pip install --no-cache-dir poetry
+
+# Configure poetry to create the virtualenv in the project directory,
+# so we know where to copy from.
+RUN poetry config virtualenvs.in-project true
+
+# Copy dependency files
+COPY pyproject.toml poetry.lock ./
+
+# Install dependencies into the project's .venv
+RUN poetry install --without dev --no-interaction --no-ansi --no-root
+
+# 2. Final stage: Create the runtime image
+FROM python:3.13-slim
 
 # OCI labels for Docker MCP Gateway compatibility
 LABEL org.opencontainers.image.title="NextDNS MCP Server"
-LABEL org.opencontainers.image.description="Model Context Protocol server for NextDNS API - manage DNS profiles, analytics, security, and privacy settings"
+LABEL org.opencontainers.image.description="Model Context Protocol server for NextDNS API"
 LABEL org.opencontainers.image.authors="NextDNS MCP Contributors"
-LABEL org.opencontainers.image.source="https://github.com/yourusername/nextdns-mcp"
-LABEL org.opencontainers.image.documentation="https://github.com/yourusername/nextdns-mcp/blob/main/README.md"
-LABEL org.opencontainers.image.version="2.0.0"
-LABEL org.opencontainers.image.licenses="MIT"
-
-# MCP-specific labels
-LABEL com.docker.mcp.server.type="stdio"
-LABEL com.docker.mcp.server.protocol="mcp"
-LABEL com.docker.mcp.server.category="dns,api,networking"
-
-# Install poetry
-RUN pip install --no-cache-dir poetry==1.7.1
-
-# Set working directory
-WORKDIR /app
-
-# Copy dependency files
-COPY pyproject.toml poetry.lock* ./
-
-# Configure poetry to not create virtual environment (we're in a container)
-RUN poetry config virtualenvs.create false
-
-# Install dependencies
-RUN poetry install --no-dev --no-interaction --no-ansi
-
-# Final stage
-FROM python:3.13-slim
-
-# Copy OCI labels to final image
-LABEL org.opencontainers.image.title="NextDNS MCP Server"
-LABEL org.opencontainers.image.description="Model Context Protocol server for NextDNS API - manage DNS profiles, analytics, security, and privacy settings"
-LABEL org.opencontainers.image.authors="NextDNS MCP Contributors"
-LABEL org.opencontainers.image.source="https://github.com/yourusername/nextdns-mcp"
-LABEL org.opencontainers.image.documentation="https://github.com/yourusername/nextdns-mcp/blob/main/README.md"
+LABEL org.opencontainers.image.source="https://github.com/dmeiser/nextdns-mcp"
+LABEL org.opencontainers.image.documentation="https://github.com/dmeiser/nextdns-mcp/blob/main/README.md"
 LABEL org.opencontainers.image.version="2.0.0"
 LABEL org.opencontainers.image.licenses="MIT"
 
@@ -50,24 +39,16 @@ LABEL com.docker.mcp.server.category="dns,api,networking"
 # Set working directory
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy installed packages from the builder stage's virtual environment
+# This path is predictable because of `poetry config virtualenvs.in-project true`
+COPY --from=builder /app/.venv/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 
-# Copy application code and OpenAPI spec
+# Copy application code
 COPY src/ /app/src/
 
-# Create non-root user for security
-RUN useradd -m -u 1000 mcpuser && \
-    chown -R mcpuser:mcpuser /app
+# Create and switch to a non-root user for security
+RUN useradd --create-home appuser
+USER appuser
 
-# Switch to non-root user
-USER mcpuser
-
-# Set Python path
-ENV PYTHONPATH=/app/src
-
-# MCP servers use stdio transport, no port needed
-
-# Run the MCP server
-CMD ["python", "-m", "nextdns_mcp.server"]
+# Command to run the application
+CMD ["python", "-m", "src.nextdns_mcp.server"]

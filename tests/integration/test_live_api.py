@@ -41,7 +41,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -260,7 +260,7 @@ class MCPServerTester:
         while time.monotonic() < deadline:
             if refresh_lookup and not first_attempt:
                 try:
-                    lookup_timestamp = await self.issue_doh_lookup(profile_id, domain)
+                    await self.issue_doh_lookup(profile_id, domain)
                 except Exception:
                     pass
             first_attempt = False
@@ -349,13 +349,13 @@ class MCPServerTester:
                     self.validation_profile_id = parsed.get("data", {}).get("id") or parsed.get(
                         "id"
                     )
-                except:
+                except json.JSONDecodeError:
                     pass
 
             if self.validation_profile_id:
                 print(f"\n  Created profile ID: {self.validation_profile_id}\n")
             else:
-                print(f"\n  Warning: Could not extract profile ID from result\n")
+                print("\n  Warning: Could not extract profile ID from result\n")
                 print(f"  Result data: {data}\n")
 
         return self.validation_profile_id
@@ -967,7 +967,7 @@ class MCPServerTester:
 
         if self.skip_cleanup:
             print("\n🔒 Profile deletion skipped (--skip-cleanup flag)")
-            print(f"   Profile will remain in your account for manual inspection.")
+            print("   Profile will remain in your account for manual inspection.")
             print(f"   To delete it manually, use profile ID: {self.validation_profile_id}")
             print(
                 f"   Or run: poetry run python tests/integration/test_live_api.py --delete-profile {self.validation_profile_id}"
@@ -992,7 +992,7 @@ class MCPServerTester:
         if response not in ("yes", "y"):
             print("\n✓ Profile deletion skipped. Profile will remain in your account.")
             print(f"   Profile ID: {self.validation_profile_id}")
-            print(f"   To delete it later, use the NextDNS web interface or run:")
+            print("   To delete it later, use the NextDNS web interface or run:")
             print(
                 f"   poetry run python tests/integration/test_live_api.py --delete-profile {self.validation_profile_id}"
             )

@@ -1,17 +1,11 @@
 """Unit tests for the custom dohLookup tool."""
 
-import os
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
 
-# Set up environment before importing server to avoid module-level initialization issues
-os.environ["NEXTDNS_API_KEY"] = "test_key_for_doh_tests"
-os.environ["NEXTDNS_DEFAULT_PROFILE"] = "test123"
-
-# Import the implementation function (not the MCP tool wrapper)
-from nextdns_mcp.server import _dohLookup_impl as dohLookup
+from nextdns_mcp.server import _doh_lookup_impl as dohLookup
 
 
 @pytest.fixture

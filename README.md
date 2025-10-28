@@ -305,19 +305,19 @@ Docker MCP Gateway provides secure, isolated MCP server management with built-in
    docker mcp catalog add my-catalog nextdns ./catalog.yaml
    ```
 
-3. **Enable the server:**
+3. **Enable and configure the server:**
    ```bash
+   # Enable the server
    docker mcp server enable nextdns
-   ```
-
-4. **Configure your API key:**
-   ```bash
-   # Set the required API key secret
-   docker mcp config set nextdns NEXTDNS_API_KEY your_api_key_here
-
-   # Optional: Set default profile
+   
+   # Configure the required API key secret
+   # (This will be prompted during enable, or set it separately)
+   
+   # Optional: Set environment variables
    docker mcp config set nextdns NEXTDNS_DEFAULT_PROFILE your_profile_id
    ```
+   
+   Note: When you enable the server, Docker MCP Gateway will prompt you to configure required secrets interactively. You can also view and edit configuration in the Docker Desktop UI under MCP Toolkit → My Servers → nextdns → Configuration.
 
 5. **Verify it's working:**
    ```bash
