@@ -283,6 +283,47 @@ async def dohLookup(domain: str, profile_id: Optional[str] = None, record_type: 
 # We provide custom implementations that accept JSON strings and convert them.
 
 
+async def _bulk_update_helper(
+    profile_id: str, data: str, endpoint: str, param_name: str
+) -> dict:
+    """Helper function for bulk update operations that require raw JSON arrays.
+
+    This function handles the common pattern of:
+    1. Parsing a JSON array string
+    2. Validating it's actually an array
+    3. Making a PUT request with the array as the body
+
+    Args:
+        profile_id: The profile ID (6-character alphanumeric)
+        data: JSON array string to send
+        endpoint: API endpoint path (e.g., "/profiles/{profile_id}/denylist")
+        param_name: Parameter name for error messages (e.g., "entries", "services")
+
+    Returns:
+        dict: API response or error dict
+    """
+    import json
+
+    # Parse and validate JSON array
+    try:
+        array_data = json.loads(data)
+        if not isinstance(array_data, list):
+            return {"error": f"{param_name} must be a JSON array string"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {str(e)}"}
+
+    # Make PUT request with array body
+    client = mcp._client  # type: ignore[attr-defined]
+    url = endpoint.format(profile_id=profile_id)
+
+    try:
+        response = await client.put(url, json=array_data)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as e:
+        return {"error": f"HTTP error: {str(e)}"}
+
+
 @mcp.tool()
 async def updateDenylist(profile_id: str, entries: str) -> dict:
     """Update the denylist for a profile.
@@ -303,25 +344,9 @@ async def updateDenylist(profile_id: str, entries: str) -> dict:
     Example:
         result = await updateDenylist("abc123", '["ads.example.com", "tracker.net"]')
     """
-    import json
-
-    try:
-        array_data = json.loads(entries)
-        if not isinstance(array_data, list):
-            return {"error": "entries must be a JSON array string"}
-    except json.JSONDecodeError as e:
-        return {"error": f"Invalid JSON: {str(e)}"}
-
-    # Get the HTTP client from the MCP server
-    client = mcp._client  # type: ignore[attr-defined]
-    url = f"/profiles/{profile_id}/denylist"
-
-    try:
-        response = await client.put(url, json=array_data)
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as e:
-        return {"error": f"HTTP error: {str(e)}"}
+    return await _bulk_update_helper(
+        profile_id, entries, "/profiles/{profile_id}/denylist", "entries"
+    )
 
 
 @mcp.tool()
@@ -344,25 +369,9 @@ async def updateAllowlist(profile_id: str, entries: str) -> dict:
     Example:
         result = await updateAllowlist("abc123", '["safe.com", "trusted.org"]')
     """
-    import json
-
-    try:
-        array_data = json.loads(entries)
-        if not isinstance(array_data, list):
-            return {"error": "entries must be a JSON array string"}
-    except json.JSONDecodeError as e:
-        return {"error": f"Invalid JSON: {str(e)}"}
-
-    # Get the HTTP client from the MCP server
-    client = mcp._client  # type: ignore[attr-defined]
-    url = f"/profiles/{profile_id}/allowlist"
-
-    try:
-        response = await client.put(url, json=array_data)
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as e:
-        return {"error": f"HTTP error: {str(e)}"}
+    return await _bulk_update_helper(
+        profile_id, entries, "/profiles/{profile_id}/allowlist", "entries"
+    )
 
 
 @mcp.tool()
@@ -383,25 +392,12 @@ async def updateParentalControlServices(profile_id: str, services: str) -> dict:
     Example:
         result = await updateParentalControlServices("abc123", '["tiktok", "fortnite"]')
     """
-    import json
-
-    try:
-        array_data = json.loads(services)
-        if not isinstance(array_data, list):
-            return {"error": "services must be a JSON array string"}
-    except json.JSONDecodeError as e:
-        return {"error": f"Invalid JSON: {str(e)}"}
-
-    # Get the HTTP client from the MCP server
-    client = mcp._client  # type: ignore[attr-defined]
-    url = f"/profiles/{profile_id}/parentalControl/services"
-
-    try:
-        response = await client.put(url, json=array_data)
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as e:
-        return {"error": f"HTTP error: {str(e)}"}
+    return await _bulk_update_helper(
+        profile_id,
+        services,
+        "/profiles/{profile_id}/parentalControl/services",
+        "services",
+    )
 
 
 @mcp.tool()
@@ -422,25 +418,12 @@ async def updateParentalControlCategories(profile_id: str, categories: str) -> d
     Example:
         result = await updateParentalControlCategories("abc123", '["gambling", "dating"]')
     """
-    import json
-
-    try:
-        array_data = json.loads(categories)
-        if not isinstance(array_data, list):
-            return {"error": "categories must be a JSON array string"}
-    except json.JSONDecodeError as e:
-        return {"error": f"Invalid JSON: {str(e)}"}
-
-    # Get the HTTP client from the MCP server
-    client = mcp._client  # type: ignore[attr-defined]
-    url = f"/profiles/{profile_id}/parentalControl/categories"
-
-    try:
-        response = await client.put(url, json=array_data)
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as e:
-        return {"error": f"HTTP error: {str(e)}"}
+    return await _bulk_update_helper(
+        profile_id,
+        categories,
+        "/profiles/{profile_id}/parentalControl/categories",
+        "categories",
+    )
 
 
 @mcp.tool()
@@ -460,25 +443,9 @@ async def updateSecurityTlds(profile_id: str, tlds: str) -> dict:
     Example:
         result = await updateSecurityTlds("abc123", '["zip", "mov"]')
     """
-    import json
-
-    try:
-        array_data = json.loads(tlds)
-        if not isinstance(array_data, list):
-            return {"error": "tlds must be a JSON array string"}
-    except json.JSONDecodeError as e:
-        return {"error": f"Invalid JSON: {str(e)}"}
-
-    # Get the HTTP client from the MCP server
-    client = mcp._client  # type: ignore[attr-defined]
-    url = f"/profiles/{profile_id}/security/tlds"
-
-    try:
-        response = await client.put(url, json=array_data)
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as e:
-        return {"error": f"HTTP error: {str(e)}"}
+    return await _bulk_update_helper(
+        profile_id, tlds, "/profiles/{profile_id}/security/tlds", "tlds"
+    )
 
 
 @mcp.tool()
@@ -499,25 +466,12 @@ async def updatePrivacyBlocklists(profile_id: str, blocklists: str) -> dict:
     Example:
         result = await updatePrivacyBlocklists("abc123", '["nextdns-recommended", "oisd"]')
     """
-    import json
-
-    try:
-        array_data = json.loads(blocklists)
-        if not isinstance(array_data, list):
-            return {"error": "blocklists must be a JSON array string"}
-    except json.JSONDecodeError as e:
-        return {"error": f"Invalid JSON: {str(e)}"}
-
-    # Get the HTTP client from the MCP server
-    client = mcp._client  # type: ignore[attr-defined]
-    url = f"/profiles/{profile_id}/privacy/blocklists"
-
-    try:
-        response = await client.put(url, json=array_data)
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as e:
-        return {"error": f"HTTP error: {str(e)}"}
+    return await _bulk_update_helper(
+        profile_id,
+        blocklists,
+        "/profiles/{profile_id}/privacy/blocklists",
+        "blocklists",
+    )
 
 
 @mcp.tool()
@@ -538,25 +492,9 @@ async def updatePrivacyNatives(profile_id: str, natives: str) -> dict:
     Example:
         result = await updatePrivacyNatives("abc123", '["apple", "windows"]')
     """
-    import json
-
-    try:
-        array_data = json.loads(natives)
-        if not isinstance(array_data, list):
-            return {"error": "natives must be a JSON array string"}
-    except json.JSONDecodeError as e:
-        return {"error": f"Invalid JSON: {str(e)}"}
-
-    # Get the HTTP client from the MCP server
-    client = mcp._client  # type: ignore[attr-defined]
-    url = f"/profiles/{profile_id}/privacy/natives"
-
-    try:
-        response = await client.put(url, json=array_data)
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as e:
-        return {"error": f"HTTP error: {str(e)}"}
+    return await _bulk_update_helper(
+        profile_id, natives, "/profiles/{profile_id}/privacy/natives", "natives"
+    )
 
 
 if __name__ == "__main__":
