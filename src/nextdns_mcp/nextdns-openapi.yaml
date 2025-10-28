@@ -760,7 +760,6 @@ paths:
         suggests all analytics endpoints support ;series suffix, this specific endpoint appears
         to not be implemented. Tool generation is disabled until the API is fixed.
       operationId: getAnalyticsDomainsSeries
-      x-fastmcp-generate: false
       tags:
         - Analytics
       parameters:
@@ -1206,10 +1205,9 @@ paths:
         **Safety Note**: Only use with designated test profiles.
 
         **Known Limitation**: This endpoint requires a raw JSON array at the root level,
-        which is not fully supported by FastMCP. Tool generation is disabled.
+        which is not fully supported by FastMCP and is excluded via custom route mappings.
         Use the NextDNS API directly for bulk replacement operations.
       operationId: replaceDenylist
-      x-fastmcp-generate: false
       tags:
         - Content Lists
       parameters:
@@ -1337,10 +1335,9 @@ paths:
         **Safety Note**: Only use with designated test profiles.
 
         **Known Limitation**: This endpoint requires a raw JSON array at the root level,
-        which is not fully supported by FastMCP. Tool generation is disabled.
+        which is not fully supported by FastMCP and is excluded via custom route mappings.
         Use the NextDNS API directly for bulk replacement operations.
       operationId: replaceAllowlist
-      x-fastmcp-generate: false
       tags:
         - Content Lists
       parameters:
@@ -1440,10 +1437,9 @@ paths:
         Replaces the entire list of blocked services.
 
         **Known Limitation**: This endpoint requires a raw JSON array at the root level,
-        which is not fully supported by FastMCP. Tool generation is disabled.
+        which is not fully supported by FastMCP and is excluded via custom route mappings.
         Use the NextDNS API directly for bulk replacement operations.
       operationId: replaceParentalControlServices
-      x-fastmcp-generate: false
       tags:
         - Content Lists
       parameters:
@@ -1572,10 +1568,9 @@ paths:
         Replaces the entire list of blocked categories.
 
         **Known Limitation**: This endpoint requires a raw JSON array at the root level,
-        which is not fully supported by FastMCP. Tool generation is disabled.
+        which is not fully supported by FastMCP and is excluded via custom route mappings.
         Use the NextDNS API directly for bulk replacement operations.
       operationId: replaceParentalControlCategories
-      x-fastmcp-generate: false
       tags:
         - Content Lists
       parameters:
@@ -1909,10 +1904,9 @@ paths:
         **Safety Note**: Only use with designated test profiles.
 
         **Known Limitation**: This endpoint requires a raw JSON array at the root level,
-        which is not fully supported by FastMCP. Tool generation is disabled.
+        which is not fully supported by FastMCP and is excluded via custom route mappings.
         Use the NextDNS API directly for bulk replacement operations.
       operationId: replaceSecurityTLDs
-      x-fastmcp-generate: false
       tags:
         - Security
       parameters:
@@ -2010,10 +2004,9 @@ paths:
         **Safety Note**: Only use with designated test profiles.
 
         **Known Limitation**: This endpoint requires a raw JSON array at the root level,
-        which is not fully supported by FastMCP. Tool generation is disabled.
+        which is not fully supported by FastMCP and is excluded via custom route mappings.
         Use the NextDNS API directly for bulk replacement operations.
       operationId: replacePrivacyBlocklists
-      x-fastmcp-generate: false
       tags:
         - Privacy
       parameters:
@@ -2111,10 +2104,9 @@ paths:
         **Safety Note**: Only use with designated test profiles.
 
         **Known Limitation**: This endpoint requires a raw JSON array at the root level,
-        which is not fully supported by FastMCP. Tool generation is disabled.
+        which is not fully supported by FastMCP and is excluded via custom route mappings.
         Use the NextDNS API directly for bulk replacement operations.
       operationId: replacePrivacyNatives
-      x-fastmcp-generate: false
       tags:
         - Privacy
       parameters:
@@ -2248,7 +2240,8 @@ paths:
 
         This endpoint provides a continuous stream of query events as they occur.
       operationId: streamLogs
-      x-fastmcp-generate: false  # SSE streaming endpoint - FastMCP doesn't support Server-Sent Events
+      # This endpoint is excluded from the MCP server via custom route mappings because
+      # FastMCP does not support Server-Sent Events.
       tags:
         - Logs
       parameters:

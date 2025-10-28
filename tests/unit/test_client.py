@@ -35,8 +35,11 @@ class TestCreateNextdnsClient:
 
         import sys
 
+        # Delete both server and config modules to ensure clean reload
         if "nextdns_mcp.server" in sys.modules:
             del sys.modules["nextdns_mcp.server"]
+        if "nextdns_mcp.config" in sys.modules:
+            del sys.modules["nextdns_mcp.config"]
 
         from nextdns_mcp.server import create_nextdns_client
 
@@ -51,8 +54,11 @@ class TestCreateNextdnsClient:
 
         import sys
 
+        # Delete both server and config modules to ensure clean reload
         if "nextdns_mcp.server" in sys.modules:
             del sys.modules["nextdns_mcp.server"]
+        if "nextdns_mcp.config" in sys.modules:
+            del sys.modules["nextdns_mcp.config"]
 
         from nextdns_mcp.server import create_nextdns_client
 

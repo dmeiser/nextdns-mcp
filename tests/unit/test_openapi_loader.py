@@ -4,8 +4,10 @@ import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import httpx
 import pytest
 import yaml
+from fastmcp import FastMCP
 
 
 class TestLoadOpenApiSpec:
@@ -40,6 +42,47 @@ class TestLoadOpenApiSpec:
                 assert result["info"]["title"] == "Test NextDNS API"
         finally:
             temp_spec.unlink(missing_ok=True)
+
+    @pytest.mark.asyncio
+    async def test_build_route_mappings_excludes_disabled_operations(self, set_env_api_key):
+        """Ensure custom route mappings exclude unsupported OpenAPI operations."""
+
+        spec = {
+            "openapi": "3.0.3",
+            "info": {"title": "NextDNS Logs API", "version": "1.0.0"},
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {
+                "/profiles/{profile_id}/logs": {
+                    "get": {
+                        "operationId": "getLogs",
+                        "responses": {"200": {"description": "OK"}},
+                    }
+                },
+                "/profiles/{profile_id}/logs/stream": {
+                    "get": {
+                        "operationId": "streamLogs",
+                        "responses": {"200": {"description": "Stream"}},
+                    }
+                },
+            },
+            "components": {},
+        }
+
+        from nextdns_mcp.server import build_route_mappings
+
+        async with httpx.AsyncClient(base_url="https://api.example.com") as client:
+            mcp = FastMCP.from_openapi(
+                openapi_spec=spec,
+                client=client,
+                route_maps=build_route_mappings(),
+                name="Test Server",
+                timeout=5,
+            )
+
+            tools = await mcp.get_tools()
+
+            assert "getLogs" in tools
+            assert "streamLogs" not in tools
 
     def test_load_openapi_spec_file_not_found(self, monkeypatch, mock_api_key, capsys):
         """Test error handling when OpenAPI spec file is missing."""

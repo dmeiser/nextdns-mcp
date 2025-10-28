@@ -18,7 +18,7 @@ class TestGetApiKey:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         # Import after setting env var
-        from nextdns_mcp.server import get_api_key
+        from nextdns_mcp.config import get_api_key
 
         result = get_api_key()
         assert result == mock_api_key
@@ -30,7 +30,7 @@ class TestGetApiKey:
         # Set file path
         monkeypatch.setenv("NEXTDNS_API_KEY_FILE", str(temp_api_key_file))
 
-        from nextdns_mcp.server import get_api_key
+        from nextdns_mcp.config import get_api_key
 
         result = get_api_key()
         assert result == mock_api_key
@@ -41,7 +41,7 @@ class TestGetApiKey:
         monkeypatch.setenv("NEXTDNS_API_KEY", env_key)
         monkeypatch.setenv("NEXTDNS_API_KEY_FILE", str(temp_api_key_file))
 
-        from nextdns_mcp.server import get_api_key
+        from nextdns_mcp.config import get_api_key
 
         result = get_api_key()
         assert result == env_key
@@ -51,7 +51,7 @@ class TestGetApiKey:
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
         monkeypatch.setenv("NEXTDNS_API_KEY_FILE", "/nonexistent/file.txt")
 
-        from nextdns_mcp.server import get_api_key
+        from nextdns_mcp.config import get_api_key
 
         result = get_api_key()
         assert result is None
@@ -67,7 +67,7 @@ class TestGetApiKey:
             monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
             monkeypatch.setenv("NEXTDNS_API_KEY_FILE", tmpdir)
 
-            from nextdns_mcp.server import get_api_key
+            from nextdns_mcp.config import get_api_key
 
             result = get_api_key()
             assert result is None
@@ -81,7 +81,7 @@ class TestGetApiKey:
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
         monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
 
-        from nextdns_mcp.server import get_api_key
+        from nextdns_mcp.config import get_api_key
 
         result = get_api_key()
         assert result is None
@@ -96,7 +96,7 @@ class TestGetApiKey:
             monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
             monkeypatch.setenv("NEXTDNS_API_KEY_FILE", temp_path)
 
-            from nextdns_mcp.server import get_api_key
+            from nextdns_mcp.config import get_api_key
 
             result = get_api_key()
             assert result == "test_key_with_spaces"
@@ -127,9 +127,9 @@ class TestEnvironmentConfiguration:
 
         import sys
 
-        if "nextdns_mcp.server" in sys.modules:
-            del sys.modules["nextdns_mcp.server"]
+        if "nextdns_mcp.config" in sys.modules:
+            del sys.modules["nextdns_mcp.config"]
 
-        from nextdns_mcp import server
+        from nextdns_mcp import config
 
-        assert server.NEXTDNS_BASE_URL == "https://api.nextdns.io"
+        assert config.NEXTDNS_BASE_URL == "https://api.nextdns.io"

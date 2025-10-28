@@ -2,24 +2,28 @@
 """
 Live integration test for NextDNS MCP Server.
 
-This script tests ALL 74 tools (73 enabled API operations + 1 custom DoH lookup) by
+This script tests ALL 76 tools (68 enabled API operations + 7 custom bulk operations + 1 custom DoH lookup) by
 invoking them through the MCP server (server.py), not via direct API calls.
 
 Includes tests for:
 - Profile management
 - Settings operations (logs, block page, performance, parental control)
-- Security operations (settings, TLDs, item-level PATCH)
-- Privacy operations (settings, blocklists, natives, item-level PATCH)
-- Parental control (settings, services, categories, item operations)
-- Content lists (allowlist, denylist) with item-level PATCH operations
+- Security operations (settings, TLDs, bulk replacement, item-level PATCH)
+- Privacy operations (settings, blocklists, natives, bulk replacement, item-level PATCH)
+- Parental control (settings, services, categories, bulk replacement, item operations)
+- Content lists (allowlist, denylist) with bulk replacement and item-level PATCH operations
 - Analytics (base endpoints + time-series)
 - Logs operations
 - Custom DoH lookup tool
 
-Note: 9 operations excluded from MCP tools:
-- 7 PUT operations (bulk replacement) - require raw JSON array body (FastMCP limitation)
+Note: 2 operations excluded from MCP tools (truly unsupported):
 - 1 streamLogs - SSE streaming not supported (FastMCP limitation)
-- 1 getAnalyticsDomainsSeries - returns 404 from NextDNS API (API issue)
+- 1 getAnalyticsDomainsSeries - returns 404 from NextDNS API (API bug)
+
+Note: 7 bulk replacement operations now supported via custom implementations:
+- updateDenylist, updateAllowlist, updateParentalControlServices, 
+  updateParentalControlCategories, updateSecurityTlds, updatePrivacyBlocklists,
+  updatePrivacyNatives (accept JSON array strings, convert to array body)
 
 Requirements:
 - NEXTDNS_API_KEY environment variable must be set
@@ -462,6 +466,11 @@ class MCPServerTester:
         else:
             print("⚠️  Could not determine security TLD entry ID; skipping deletion")
 
+        # Test bulk TLD replacement (custom tool)
+        print("\n🧪 Testing bulk TLD replacement (custom tool)...")
+        tlds_bulk = '["zip", "mov"]'
+        await self.test_tool("updateSecurityTlds", profile_id=pid, tlds=tlds_bulk)
+
     # ========================================================================
     # Privacy Tests
     # ========================================================================
@@ -531,6 +540,17 @@ class MCPServerTester:
             await self.test_tool("removePrivacyNative", profile_id=pid, entry_id=native_id)
         else:
             print("⚠️  Could not determine privacy native entry ID; skipping deletion")
+
+        # Test bulk privacy operations (custom tools)
+        print("\n🧪 Testing bulk privacy operations (custom tools)...")
+        
+        # Test updatePrivacyBlocklists (bulk replacement)
+        blocklists_bulk = '["nextdns-recommended", "oisd"]'
+        await self.test_tool("updatePrivacyBlocklists", profile_id=pid, blocklists=blocklists_bulk)
+        
+        # Test updatePrivacyNatives (bulk replacement)
+        natives_bulk = '["apple", "windows"]'
+        await self.test_tool("updatePrivacyNatives", profile_id=pid, natives=natives_bulk)
 
     # ========================================================================
     # Parental Control Tests
@@ -631,6 +651,17 @@ class MCPServerTester:
             )
             await self.test_tool("removeFromParentalControlCategories", profile_id=pid, id=entry_id)
 
+        # Test bulk parental control operations (custom tools)
+        print("\n🧪 Testing bulk parental control operations (custom tools)...")
+        
+        # Test updateParentalControlServices (bulk replacement)
+        services_bulk = '["tiktok", "fortnite"]'
+        await self.test_tool("updateParentalControlServices", profile_id=pid, services=services_bulk)
+        
+        # Test updateParentalControlCategories (bulk replacement)
+        categories_bulk = '["gambling", "dating"]'
+        await self.test_tool("updateParentalControlCategories", profile_id=pid, categories=categories_bulk)
+
     # ========================================================================
     # Allowlist/Denylist Tests
     # ========================================================================
@@ -703,6 +734,17 @@ class MCPServerTester:
             await self.test_tool("removeFromAllowlist", profile_id=pid, entry_id=allowlist_id)
         else:
             print("⚠️  Could not determine allowlist entry ID; skipping update/delete")
+
+        # Test bulk replacement operations (custom tools)
+        print("\n🧪 Testing bulk replacement operations (custom tools)...")
+        
+        # Test updateDenylist (bulk replacement)
+        denylist_bulk = '["bulk1.example.com", "bulk2.example.com"]'
+        await self.test_tool("updateDenylist", profile_id=pid, entries=denylist_bulk)
+        
+        # Test updateAllowlist (bulk replacement)
+        allowlist_bulk = '["trusted1.example.com", "trusted2.example.com"]'
+        await self.test_tool("updateAllowlist", profile_id=pid, entries=allowlist_bulk)
 
     # ========================================================================
     # Analytics Tests

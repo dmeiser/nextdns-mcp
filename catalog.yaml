@@ -3,7 +3,7 @@ displayName: NextDNS MCP Server Catalog
 registry:
   nextdns:
     title: "NextDNS MCP Server"
-    description: "Model Context Protocol server for NextDNS API. Complete profile management, DoH testing, logs, analytics (including time-series), security settings, blocklists, and parental controls through 74 comprehensive tools. Supports individual entry updates (PATCH) and time-series analytics for charting. OpenAPI spec provides 100% NextDNS API coverage with 82 documented operations."
+    description: "Model Context Protocol server for NextDNS API. Complete profile management, DoH testing, logs, analytics (including time-series), security settings, blocklists, and parental controls through 76 comprehensive tools. Supports individual entry updates (PATCH), bulk replacements (PUT), and time-series analytics for charting. OpenAPI spec provides 100% NextDNS API coverage with 82 documented operations."
     type: "server"
     image: "nextdns-mcp:latest"
     dateAdded: "2025-10-25T00:00:00Z"
@@ -24,11 +24,12 @@ registry:
         description: "HTTP request timeout in seconds"
         example: "30"
 
-    # Available tools (74 total: 73 enabled API operations + 1 custom DoH lookup)
-    # Note: 9 operations excluded from tools:
-    #       - 7 PUT bulk operations (FastMCP limitation with raw array body)
-    #       - 1 streamLogs SSE endpoint (FastMCP limitation)
-    #       - 1 getAnalyticsDomainsSeries (NextDNS API returns 404)
+    # Available tools (76 total: 68 enabled API operations + 7 custom bulk operations + 1 custom DoH lookup)
+    # Note: 2 operations excluded from tools (truly unsupported):
+    #       - 1 streamLogs SSE endpoint (FastMCP limitation - Server-Sent Events)
+    #       - 1 getAnalyticsDomainsSeries (NextDNS API bug - returns 404)
+    # Note: 7 PUT bulk operations now available via custom implementations:
+    #       - Custom tools accept JSON array strings and handle array-to-body conversion
     tools:
       # DNS Testing (1 custom)
       - name: dohLookup
@@ -83,61 +84,63 @@ registry:
       - name: getAnalyticsEncryptionSeries
       - name: getAnalyticsDestinationsSeries
 
-      # Content Lists - Denylist (4)
+      # Content Lists - Denylist (5 - includes custom bulk update)
       - name: getDenylist
       - name: addToDenylist
       - name: removeFromDenylist
-      # replaceDenylist excluded - FastMCP limitation with raw array body
-      - name: updateDenylistEntry      # Update individual entry
+      - name: updateDenylist           # Custom bulk replacement (JSON array string)
+      - name: updateDenylistEntry      # Update individual entry (PATCH)
 
-      # Content Lists - Allowlist (4)
+      # Content Lists - Allowlist (5 - includes custom bulk update)
       - name: getAllowlist
       - name: addToAllowlist
       - name: removeFromAllowlist
-      # replaceAllowlist excluded - FastMCP limitation with raw array body
-      - name: updateAllowlistEntry     # Update individual entry
+      - name: updateAllowlist          # Custom bulk replacement (JSON array string)
+      - name: updateAllowlistEntry     # Update individual entry (PATCH)
 
       # Security - Settings (2)
       - name: getSecuritySettings
       - name: updateSecuritySettings
 
-      # Security - TLDs (3)
+      # Security - TLDs (4 - includes custom bulk update)
       - name: getSecurityTLDs
       - name: addSecurityTLD
       - name: removeSecurityTLD
-      # replaceSecurityTLDs excluded - FastMCP limitation with raw array body
+      - name: updateSecurityTlds       # Custom bulk replacement (JSON array string)
 
       # Privacy - Settings (2)
       - name: getPrivacySettings
       - name: updatePrivacySettings
 
-      # Privacy - Blocklists (3)
+      # Privacy - Blocklists (4 - includes custom bulk update)
       - name: getPrivacyBlocklists
       - name: addPrivacyBlocklist
       - name: removePrivacyBlocklist
-      # replacePrivacyBlocklists excluded - FastMCP limitation with raw array body
+      - name: updatePrivacyBlocklists  # Custom bulk replacement (JSON array string)
 
-      # Privacy - Native Tracking (3)
+      # Privacy - Native Tracking (4 - includes custom bulk update)
       - name: getPrivacyNatives
       - name: addPrivacyNative
       - name: removePrivacyNative
-      # replacePrivacyNatives excluded - FastMCP limitation with raw array body
+      - name: updatePrivacyNatives     # Custom bulk replacement (JSON array string)
 
       # Parental Control - Settings (2)
       - name: getParentalControlSettings
       - name: updateParentalControlSettings
 
-      # Parental Control - Services (3)
+      # Parental Control - Services (5 - includes custom bulk update)
       - name: getParentalControlServices
       - name: addToParentalControlServices
-      - name: updateParentalControlServiceEntry # Update individual service
-      - name: removeFromParentalControlServices # Delete individual service
+      - name: removeFromParentalControlServices
+      - name: updateParentalControlServices     # Custom bulk replacement (JSON array string)
+      - name: updateParentalControlServiceEntry # Update individual service (PATCH)
 
-      # Parental Control - Categories (3)
+      # Parental Control - Categories (5 - includes custom bulk update)
       - name: getParentalControlCategories
       - name: addToParentalControlCategories
-      - name: updateParentalControlCategoryEntry # Update individual category
-      - name: removeFromParentalControlCategories # Delete individual category
+      - name: removeFromParentalControlCategories
+      - name: updateParentalControlCategories     # Custom bulk replacement (JSON array string)
+      - name: updateParentalControlCategoryEntry  # Update individual category (PATCH)
 
     # Metadata
     metadata:

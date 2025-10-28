@@ -9,53 +9,20 @@ import httpx
 import yaml
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from fastmcp.server.openapi import DEFAULT_ROUTE_MAPPINGS, RouteMap
+
+from .config import (
+    DNS_STATUS_CODES,
+    EXCLUDED_ROUTES,
+    NEXTDNS_API_KEY,
+    NEXTDNS_BASE_URL,
+    NEXTDNS_DEFAULT_PROFILE,
+    NEXTDNS_HTTP_TIMEOUT,
+    VALID_DNS_RECORD_TYPES,
+)
 
 # Load environment variables from .env file
 load_dotenv()
-
-
-def get_api_key() -> Optional[str]:
-    """Get API key from environment or Docker secret file.
-
-    Checks in order:
-    1. NEXTDNS_API_KEY environment variable
-    2. NEXTDNS_API_KEY_FILE environment variable pointing to a secret file
-
-    Returns:
-        str: The API key if found, None otherwise
-    """
-    # Check direct environment variable first
-    api_key = os.getenv("NEXTDNS_API_KEY")
-    if api_key:
-        return api_key
-
-    # Check for Docker secret file
-    api_key_file = os.getenv("NEXTDNS_API_KEY_FILE")
-    if api_key_file:
-        try:
-            with open(api_key_file, "r") as f:
-                return f.read().strip()
-        except FileNotFoundError:
-            print(f"ERROR: API key file not found: {api_key_file}", file=sys.stderr)
-        except Exception as e:
-            print(f"ERROR: Failed to read API key file: {e}", file=sys.stderr)
-
-    return None
-
-
-# Get configuration from environment
-NEXTDNS_API_KEY = get_api_key()
-NEXTDNS_DEFAULT_PROFILE = os.getenv("NEXTDNS_DEFAULT_PROFILE")
-NEXTDNS_BASE_URL = "https://api.nextdns.io"
-NEXTDNS_HTTP_TIMEOUT = float(os.getenv("NEXTDNS_HTTP_TIMEOUT", "30"))
-
-# Validate required configuration
-if not NEXTDNS_API_KEY:
-    print("ERROR: NEXTDNS_API_KEY is required", file=sys.stderr)
-    print("Set either:", file=sys.stderr)
-    print("  - NEXTDNS_API_KEY environment variable", file=sys.stderr)
-    print("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret", file=sys.stderr)
-    sys.exit(1)
 
 
 def load_openapi_spec() -> dict:
@@ -80,24 +47,18 @@ def load_openapi_spec() -> dict:
     with open(spec_path, "r") as f:
         spec = yaml.safe_load(f)
 
-    # Filter out operations marked with x-fastmcp-generate: false
-    # FastMCP doesn't natively support this, so we filter programmatically
-    if "paths" in spec:
-        for path, path_item in list(spec["paths"].items()):
-            for method, operation in list(path_item.items()):
-                if isinstance(operation, dict) and operation.get("x-fastmcp-generate") is False:
-                    operation_id = operation.get("operationId", f"{method.upper()} {path}")
-                    print(
-                        f"  Excluding operation: {operation_id} (x-fastmcp-generate: false)",
-                        file=sys.stderr,
-                    )
-                    del path_item[method]
-
-            # Remove path entirely if no methods remain
-            if not any(k in path_item for k in ["get", "post", "put", "patch", "delete"]):
-                del spec["paths"][path]
-
     return spec
+
+
+def build_route_mappings() -> list[RouteMap]:
+    """Create the RouteMap list used for OpenAPI conversion.
+    
+    Combines excluded routes with default route mappings.
+    
+    Returns:
+        list[RouteMap]: Complete list of route mappings for MCP tool generation
+    """
+    return [*EXCLUDED_ROUTES, *DEFAULT_ROUTE_MAPPINGS]
 
 
 def create_nextdns_client() -> httpx.AsyncClient:
@@ -142,9 +103,12 @@ def create_mcp_server() -> FastMCP:
 
     # Create MCP server from OpenAPI spec
     print("Generating MCP server from OpenAPI specification...", file=sys.stderr)
+    route_maps = build_route_mappings()
+
     mcp = FastMCP.from_openapi(
         openapi_spec=openapi_spec,
         client=api_client,
+        route_maps=route_maps,
         name="NextDNS MCP Server",
         timeout=NEXTDNS_HTTP_TIMEOUT,
     )
@@ -220,23 +184,12 @@ async def _dohLookup_impl(
         }
 
     # Validate record type
-    valid_types = [
-        "A",
-        "AAAA",
-        "CNAME",
-        "MX",
-        "NS",
-        "PTR",
-        "SOA",
-        "TXT",
-        "SRV",
-        "CAA",
-        "DNSKEY",
-        "DS",
-    ]
     record_type_upper = record_type.upper()
-    if record_type_upper not in valid_types:
-        return {"error": f"Invalid record type: {record_type}", "valid_types": valid_types}
+    if record_type_upper not in VALID_DNS_RECORD_TYPES:
+        return {
+            "error": f"Invalid record type: {record_type}",
+            "valid_types": VALID_DNS_RECORD_TYPES,
+        }
 
     # Construct DoH query URL
     doh_url = f"https://dns.nextdns.io/{target_profile}/dns-query"
@@ -259,17 +212,9 @@ async def _dohLookup_impl(
                 "doh_endpoint": f"{doh_url}?name={domain}&type={record_type_upper}",
             }
 
-            # Add human-readable status
-            status_codes = {
-                0: "NOERROR - Success",
-                1: "FORMERR - Format error",
-                2: "SERVFAIL - Server failure",
-                3: "NXDOMAIN - Non-existent domain",
-                4: "NOTIMP - Not implemented",
-                5: "REFUSED - Query refused",
-            }
+            # Add human-readable status description
             if "Status" in result:
-                result["_metadata"]["status_description"] = status_codes.get(
+                result["_metadata"]["status_description"] = DNS_STATUS_CODES.get(
                     result["Status"], f"Unknown status code: {result['Status']}"
                 )
 
@@ -331,6 +276,286 @@ async def dohLookup(domain: str, profile_id: Optional[str] = None, record_type: 
         result = await dohLookup("google.com", "b282de", "AAAA")
     """
     return await _dohLookup_impl(domain, profile_id, record_type)
+
+
+# Custom tools for array-based PUT endpoints (excluded from FastMCP auto-generation)
+# These endpoints require raw JSON arrays, which FastMCP doesn't support directly.
+# We provide custom implementations that accept JSON strings and convert them.
+
+@mcp.tool()
+async def updateDenylist(profile_id: str, entries: str) -> dict:
+    """Update the denylist for a profile.
+    
+    Replace the entire denylist with the provided domains. All previous denylist 
+    entries will be removed and replaced with the new list.
+    
+    Args:
+        profile_id: The profile ID (6-character alphanumeric)
+        entries: JSON array string of domains to block, e.g. '["example.com", "bad.com"]'
+                Each entry can be:
+                - Domain name: "example.com"
+                - Wildcard subdomain: "*.example.com"
+    
+    Returns:
+        dict: Response containing the updated denylist
+        
+    Example:
+        result = await updateDenylist("abc123", '["ads.example.com", "tracker.net"]')
+    """
+    import json
+    
+    try:
+        array_data = json.loads(entries)
+        if not isinstance(array_data, list):
+            return {"error": "entries must be a JSON array string"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {str(e)}"}
+    
+    # Get the HTTP client from the MCP server
+    client = mcp._client
+    url = f"/profiles/{profile_id}/denylist"
+    
+    try:
+        response = await client.put(url, json=array_data)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as e:
+        return {"error": f"HTTP error: {str(e)}"}
+
+
+@mcp.tool()
+async def updateAllowlist(profile_id: str, entries: str) -> dict:
+    """Update the allowlist for a profile.
+    
+    Replace the entire allowlist with the provided domains. All previous allowlist 
+    entries will be removed and replaced with the new list.
+    
+    Args:
+        profile_id: The profile ID (6-character alphanumeric)
+        entries: JSON array string of domains to allow, e.g. '["safe.com", "trusted.org"]'
+                Each entry can be:
+                - Domain name: "example.com"
+                - Wildcard subdomain: "*.example.com"
+    
+    Returns:
+        dict: Response containing the updated allowlist
+        
+    Example:
+        result = await updateAllowlist("abc123", '["safe.com", "trusted.org"]')
+    """
+    import json
+    
+    try:
+        array_data = json.loads(entries)
+        if not isinstance(array_data, list):
+            return {"error": "entries must be a JSON array string"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {str(e)}"}
+    
+    # Get the HTTP client from the MCP server
+    client = mcp._client
+    url = f"/profiles/{profile_id}/allowlist"
+    
+    try:
+        response = await client.put(url, json=array_data)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as e:
+        return {"error": f"HTTP error: {str(e)}"}
+
+
+@mcp.tool()
+async def updateParentalControlServices(profile_id: str, services: str) -> dict:
+    """Update parental control services for a profile.
+    
+    Replace the entire list of blocked services with the provided service IDs.
+    
+    Args:
+        profile_id: The profile ID (6-character alphanumeric)
+        services: JSON array string of service IDs to block, e.g. '["tiktok", "fortnite", "roblox"]'
+                 Common services: tiktok, fortnite, roblox, instagram, snapchat, facebook, 
+                 twitter, youtube, twitch, discord, whatsapp, telegram, zoom, etc.
+    
+    Returns:
+        dict: Response containing the updated services list
+        
+    Example:
+        result = await updateParentalControlServices("abc123", '["tiktok", "fortnite"]')
+    """
+    import json
+    
+    try:
+        array_data = json.loads(services)
+        if not isinstance(array_data, list):
+            return {"error": "services must be a JSON array string"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {str(e)}"}
+    
+    # Get the HTTP client from the MCP server
+    client = mcp._client
+    url = f"/profiles/{profile_id}/parentalControl/services"
+    
+    try:
+        response = await client.put(url, json=array_data)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as e:
+        return {"error": f"HTTP error: {str(e)}"}
+
+
+@mcp.tool()
+async def updateParentalControlCategories(profile_id: str, categories: str) -> dict:
+    """Update parental control website categories for a profile.
+    
+    Replace the entire list of blocked website categories with the provided category IDs.
+    
+    Args:
+        profile_id: The profile ID (6-character alphanumeric)
+        categories: JSON array string of category IDs to block, e.g. '["gambling", "dating", "piracy"]'
+                   Common categories: gambling, dating, piracy, porn, social-networks, 
+                   video-streaming, gaming, etc.
+    
+    Returns:
+        dict: Response containing the updated categories list
+        
+    Example:
+        result = await updateParentalControlCategories("abc123", '["gambling", "dating"]')
+    """
+    import json
+    
+    try:
+        array_data = json.loads(categories)
+        if not isinstance(array_data, list):
+            return {"error": "categories must be a JSON array string"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {str(e)}"}
+    
+    # Get the HTTP client from the MCP server
+    client = mcp._client
+    url = f"/profiles/{profile_id}/parentalControl/categories"
+    
+    try:
+        response = await client.put(url, json=array_data)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as e:
+        return {"error": f"HTTP error: {str(e)}"}
+
+
+@mcp.tool()
+async def updateSecurityTlds(profile_id: str, tlds: str) -> dict:
+    """Update blocked top-level domains (TLDs) for a profile.
+    
+    Replace the entire list of blocked TLDs with the provided list.
+    
+    Args:
+        profile_id: The profile ID (6-character alphanumeric)
+        tlds: JSON array string of TLDs to block, e.g. '["zip", "mov", "xyz"]'
+              Do not include the dot (use "com" not ".com")
+    
+    Returns:
+        dict: Response containing the updated TLD list
+        
+    Example:
+        result = await updateSecurityTlds("abc123", '["zip", "mov"]')
+    """
+    import json
+    
+    try:
+        array_data = json.loads(tlds)
+        if not isinstance(array_data, list):
+            return {"error": "tlds must be a JSON array string"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {str(e)}"}
+    
+    # Get the HTTP client from the MCP server
+    client = mcp._client
+    url = f"/profiles/{profile_id}/security/tlds"
+    
+    try:
+        response = await client.put(url, json=array_data)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as e:
+        return {"error": f"HTTP error: {str(e)}"}
+
+
+@mcp.tool()
+async def updatePrivacyBlocklists(profile_id: str, blocklists: str) -> dict:
+    """Update privacy blocklists for a profile.
+    
+    Replace the entire list of enabled blocklists with the provided blocklist IDs.
+    
+    Args:
+        profile_id: The profile ID (6-character alphanumeric)
+        blocklists: JSON array string of blocklist IDs to enable, e.g. '["nextdns-recommended", "oisd"]'
+                   Common blocklists: nextdns-recommended, energized, stevenblack, 
+                   oisd, notracking, adguard, etc.
+    
+    Returns:
+        dict: Response containing the updated blocklists
+        
+    Example:
+        result = await updatePrivacyBlocklists("abc123", '["nextdns-recommended", "oisd"]')
+    """
+    import json
+    
+    try:
+        array_data = json.loads(blocklists)
+        if not isinstance(array_data, list):
+            return {"error": "blocklists must be a JSON array string"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {str(e)}"}
+    
+    # Get the HTTP client from the MCP server
+    client = mcp._client
+    url = f"/profiles/{profile_id}/privacy/blocklists"
+    
+    try:
+        response = await client.put(url, json=array_data)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as e:
+        return {"error": f"HTTP error: {str(e)}"}
+
+
+@mcp.tool()
+async def updatePrivacyNatives(profile_id: str, natives: str) -> dict:
+    """Update native tracking protection settings for a profile.
+    
+    Replace the entire list of native tracking protection features with the provided list.
+    
+    Args:
+        profile_id: The profile ID (6-character alphanumeric)
+        natives: JSON array string of native tracking feature IDs, e.g. '["apple", "windows", "alexa"]'
+                Common features: apple (Apple device tracking), windows (Microsoft telemetry),
+                alexa (Amazon Alexa), samsung, huawei, xiaomi, roku, sonos, etc.
+    
+    Returns:
+        dict: Response containing the updated native tracking settings
+        
+    Example:
+        result = await updatePrivacyNatives("abc123", '["apple", "windows"]')
+    """
+    import json
+    
+    try:
+        array_data = json.loads(natives)
+        if not isinstance(array_data, list):
+            return {"error": "natives must be a JSON array string"}
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {str(e)}"}
+    
+    # Get the HTTP client from the MCP server
+    client = mcp._client
+    url = f"/profiles/{profile_id}/privacy/natives"
+    
+    try:
+        response = await client.put(url, json=array_data)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as e:
+        return {"error": f"HTTP error: {str(e)}"}
 
 
 if __name__ == "__main__":
