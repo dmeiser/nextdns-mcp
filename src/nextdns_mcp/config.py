@@ -50,7 +50,7 @@ NEXTDNS_HTTP_TIMEOUT = float(os.getenv("NEXTDNS_HTTP_TIMEOUT", "30"))
 
 def validate_configuration() -> None:
     """Validate required configuration is present.
-    
+
     Raises:
         SystemExit: If required configuration is missing
     """
@@ -64,11 +64,11 @@ def validate_configuration() -> None:
 
 # Routes to exclude from MCP tool generation
 # Routes excluded from FastMCP's auto-generation (custom implementations provided in server.py)
-# 
+#
 # Array-based PUT endpoints (7 routes): These require raw JSON arrays as request body,
 # which FastMCP doesn't support. Custom @mcp.tool() implementations are provided that
 # accept JSON strings and convert them to arrays.
-# 
+#
 # Unsupported endpoints (2 routes):
 # - GET /analytics/domains;series: NextDNS API returns 404 (API bug)
 # - GET /logs/stream: Uses Server-Sent Events (SSE), not supported by FastMCP

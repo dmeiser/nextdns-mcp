@@ -543,11 +543,11 @@ class MCPServerTester:
 
         # Test bulk privacy operations (custom tools)
         print("\n🧪 Testing bulk privacy operations (custom tools)...")
-        
+
         # Test updatePrivacyBlocklists (bulk replacement)
         blocklists_bulk = '["nextdns-recommended", "oisd"]'
         await self.test_tool("updatePrivacyBlocklists", profile_id=pid, blocklists=blocklists_bulk)
-        
+
         # Test updatePrivacyNatives (bulk replacement)
         natives_bulk = '["apple", "windows"]'
         await self.test_tool("updatePrivacyNatives", profile_id=pid, natives=natives_bulk)
@@ -653,14 +653,18 @@ class MCPServerTester:
 
         # Test bulk parental control operations (custom tools)
         print("\n🧪 Testing bulk parental control operations (custom tools)...")
-        
+
         # Test updateParentalControlServices (bulk replacement)
         services_bulk = '["tiktok", "fortnite"]'
-        await self.test_tool("updateParentalControlServices", profile_id=pid, services=services_bulk)
-        
+        await self.test_tool(
+            "updateParentalControlServices", profile_id=pid, services=services_bulk
+        )
+
         # Test updateParentalControlCategories (bulk replacement)
         categories_bulk = '["gambling", "dating"]'
-        await self.test_tool("updateParentalControlCategories", profile_id=pid, categories=categories_bulk)
+        await self.test_tool(
+            "updateParentalControlCategories", profile_id=pid, categories=categories_bulk
+        )
 
     # ========================================================================
     # Allowlist/Denylist Tests
@@ -737,11 +741,11 @@ class MCPServerTester:
 
         # Test bulk replacement operations (custom tools)
         print("\n🧪 Testing bulk replacement operations (custom tools)...")
-        
+
         # Test updateDenylist (bulk replacement)
         denylist_bulk = '["bulk1.example.com", "bulk2.example.com"]'
         await self.test_tool("updateDenylist", profile_id=pid, entries=denylist_bulk)
-        
+
         # Test updateAllowlist (bulk replacement)
         allowlist_bulk = '["trusted1.example.com", "trusted2.example.com"]'
         await self.test_tool("updateAllowlist", profile_id=pid, entries=allowlist_bulk)

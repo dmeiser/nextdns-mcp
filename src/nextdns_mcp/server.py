@@ -52,9 +52,9 @@ def load_openapi_spec() -> dict:
 
 def build_route_mappings() -> list[RouteMap]:
     """Create the RouteMap list used for OpenAPI conversion.
-    
+
     Combines excluded routes with default route mappings.
-    
+
     Returns:
         list[RouteMap]: Complete list of route mappings for MCP tool generation
     """
@@ -282,39 +282,40 @@ async def dohLookup(domain: str, profile_id: Optional[str] = None, record_type: 
 # These endpoints require raw JSON arrays, which FastMCP doesn't support directly.
 # We provide custom implementations that accept JSON strings and convert them.
 
+
 @mcp.tool()
 async def updateDenylist(profile_id: str, entries: str) -> dict:
     """Update the denylist for a profile.
-    
-    Replace the entire denylist with the provided domains. All previous denylist 
+
+    Replace the entire denylist with the provided domains. All previous denylist
     entries will be removed and replaced with the new list.
-    
+
     Args:
         profile_id: The profile ID (6-character alphanumeric)
         entries: JSON array string of domains to block, e.g. '["example.com", "bad.com"]'
                 Each entry can be:
                 - Domain name: "example.com"
                 - Wildcard subdomain: "*.example.com"
-    
+
     Returns:
         dict: Response containing the updated denylist
-        
+
     Example:
         result = await updateDenylist("abc123", '["ads.example.com", "tracker.net"]')
     """
     import json
-    
+
     try:
         array_data = json.loads(entries)
         if not isinstance(array_data, list):
             return {"error": "entries must be a JSON array string"}
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON: {str(e)}"}
-    
+
     # Get the HTTP client from the MCP server
-    client = mcp._client
+    client = mcp._client  # type: ignore[attr-defined]
     url = f"/profiles/{profile_id}/denylist"
-    
+
     try:
         response = await client.put(url, json=array_data)
         response.raise_for_status()
@@ -326,36 +327,36 @@ async def updateDenylist(profile_id: str, entries: str) -> dict:
 @mcp.tool()
 async def updateAllowlist(profile_id: str, entries: str) -> dict:
     """Update the allowlist for a profile.
-    
-    Replace the entire allowlist with the provided domains. All previous allowlist 
+
+    Replace the entire allowlist with the provided domains. All previous allowlist
     entries will be removed and replaced with the new list.
-    
+
     Args:
         profile_id: The profile ID (6-character alphanumeric)
         entries: JSON array string of domains to allow, e.g. '["safe.com", "trusted.org"]'
                 Each entry can be:
                 - Domain name: "example.com"
                 - Wildcard subdomain: "*.example.com"
-    
+
     Returns:
         dict: Response containing the updated allowlist
-        
+
     Example:
         result = await updateAllowlist("abc123", '["safe.com", "trusted.org"]')
     """
     import json
-    
+
     try:
         array_data = json.loads(entries)
         if not isinstance(array_data, list):
             return {"error": "entries must be a JSON array string"}
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON: {str(e)}"}
-    
+
     # Get the HTTP client from the MCP server
-    client = mcp._client
+    client = mcp._client  # type: ignore[attr-defined]
     url = f"/profiles/{profile_id}/allowlist"
-    
+
     try:
         response = await client.put(url, json=array_data)
         response.raise_for_status()
@@ -367,34 +368,34 @@ async def updateAllowlist(profile_id: str, entries: str) -> dict:
 @mcp.tool()
 async def updateParentalControlServices(profile_id: str, services: str) -> dict:
     """Update parental control services for a profile.
-    
+
     Replace the entire list of blocked services with the provided service IDs.
-    
+
     Args:
         profile_id: The profile ID (6-character alphanumeric)
         services: JSON array string of service IDs to block, e.g. '["tiktok", "fortnite", "roblox"]'
-                 Common services: tiktok, fortnite, roblox, instagram, snapchat, facebook, 
+                 Common services: tiktok, fortnite, roblox, instagram, snapchat, facebook,
                  twitter, youtube, twitch, discord, whatsapp, telegram, zoom, etc.
-    
+
     Returns:
         dict: Response containing the updated services list
-        
+
     Example:
         result = await updateParentalControlServices("abc123", '["tiktok", "fortnite"]')
     """
     import json
-    
+
     try:
         array_data = json.loads(services)
         if not isinstance(array_data, list):
             return {"error": "services must be a JSON array string"}
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON: {str(e)}"}
-    
+
     # Get the HTTP client from the MCP server
-    client = mcp._client
+    client = mcp._client  # type: ignore[attr-defined]
     url = f"/profiles/{profile_id}/parentalControl/services"
-    
+
     try:
         response = await client.put(url, json=array_data)
         response.raise_for_status()
@@ -406,34 +407,34 @@ async def updateParentalControlServices(profile_id: str, services: str) -> dict:
 @mcp.tool()
 async def updateParentalControlCategories(profile_id: str, categories: str) -> dict:
     """Update parental control website categories for a profile.
-    
+
     Replace the entire list of blocked website categories with the provided category IDs.
-    
+
     Args:
         profile_id: The profile ID (6-character alphanumeric)
         categories: JSON array string of category IDs to block, e.g. '["gambling", "dating", "piracy"]'
-                   Common categories: gambling, dating, piracy, porn, social-networks, 
+                   Common categories: gambling, dating, piracy, porn, social-networks,
                    video-streaming, gaming, etc.
-    
+
     Returns:
         dict: Response containing the updated categories list
-        
+
     Example:
         result = await updateParentalControlCategories("abc123", '["gambling", "dating"]')
     """
     import json
-    
+
     try:
         array_data = json.loads(categories)
         if not isinstance(array_data, list):
             return {"error": "categories must be a JSON array string"}
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON: {str(e)}"}
-    
+
     # Get the HTTP client from the MCP server
-    client = mcp._client
+    client = mcp._client  # type: ignore[attr-defined]
     url = f"/profiles/{profile_id}/parentalControl/categories"
-    
+
     try:
         response = await client.put(url, json=array_data)
         response.raise_for_status()
@@ -445,33 +446,33 @@ async def updateParentalControlCategories(profile_id: str, categories: str) -> d
 @mcp.tool()
 async def updateSecurityTlds(profile_id: str, tlds: str) -> dict:
     """Update blocked top-level domains (TLDs) for a profile.
-    
+
     Replace the entire list of blocked TLDs with the provided list.
-    
+
     Args:
         profile_id: The profile ID (6-character alphanumeric)
         tlds: JSON array string of TLDs to block, e.g. '["zip", "mov", "xyz"]'
               Do not include the dot (use "com" not ".com")
-    
+
     Returns:
         dict: Response containing the updated TLD list
-        
+
     Example:
         result = await updateSecurityTlds("abc123", '["zip", "mov"]')
     """
     import json
-    
+
     try:
         array_data = json.loads(tlds)
         if not isinstance(array_data, list):
             return {"error": "tlds must be a JSON array string"}
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON: {str(e)}"}
-    
+
     # Get the HTTP client from the MCP server
-    client = mcp._client
+    client = mcp._client  # type: ignore[attr-defined]
     url = f"/profiles/{profile_id}/security/tlds"
-    
+
     try:
         response = await client.put(url, json=array_data)
         response.raise_for_status()
@@ -483,34 +484,34 @@ async def updateSecurityTlds(profile_id: str, tlds: str) -> dict:
 @mcp.tool()
 async def updatePrivacyBlocklists(profile_id: str, blocklists: str) -> dict:
     """Update privacy blocklists for a profile.
-    
+
     Replace the entire list of enabled blocklists with the provided blocklist IDs.
-    
+
     Args:
         profile_id: The profile ID (6-character alphanumeric)
         blocklists: JSON array string of blocklist IDs to enable, e.g. '["nextdns-recommended", "oisd"]'
-                   Common blocklists: nextdns-recommended, energized, stevenblack, 
+                   Common blocklists: nextdns-recommended, energized, stevenblack,
                    oisd, notracking, adguard, etc.
-    
+
     Returns:
         dict: Response containing the updated blocklists
-        
+
     Example:
         result = await updatePrivacyBlocklists("abc123", '["nextdns-recommended", "oisd"]')
     """
     import json
-    
+
     try:
         array_data = json.loads(blocklists)
         if not isinstance(array_data, list):
             return {"error": "blocklists must be a JSON array string"}
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON: {str(e)}"}
-    
+
     # Get the HTTP client from the MCP server
-    client = mcp._client
+    client = mcp._client  # type: ignore[attr-defined]
     url = f"/profiles/{profile_id}/privacy/blocklists"
-    
+
     try:
         response = await client.put(url, json=array_data)
         response.raise_for_status()
@@ -522,34 +523,34 @@ async def updatePrivacyBlocklists(profile_id: str, blocklists: str) -> dict:
 @mcp.tool()
 async def updatePrivacyNatives(profile_id: str, natives: str) -> dict:
     """Update native tracking protection settings for a profile.
-    
+
     Replace the entire list of native tracking protection features with the provided list.
-    
+
     Args:
         profile_id: The profile ID (6-character alphanumeric)
         natives: JSON array string of native tracking feature IDs, e.g. '["apple", "windows", "alexa"]'
                 Common features: apple (Apple device tracking), windows (Microsoft telemetry),
                 alexa (Amazon Alexa), samsung, huawei, xiaomi, roku, sonos, etc.
-    
+
     Returns:
         dict: Response containing the updated native tracking settings
-        
+
     Example:
         result = await updatePrivacyNatives("abc123", '["apple", "windows"]')
     """
     import json
-    
+
     try:
         array_data = json.loads(natives)
         if not isinstance(array_data, list):
             return {"error": "natives must be a JSON array string"}
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON: {str(e)}"}
-    
+
     # Get the HTTP client from the MCP server
-    client = mcp._client
+    client = mcp._client  # type: ignore[attr-defined]
     url = f"/profiles/{profile_id}/privacy/natives"
-    
+
     try:
         response = await client.put(url, json=array_data)
         response.raise_for_status()
