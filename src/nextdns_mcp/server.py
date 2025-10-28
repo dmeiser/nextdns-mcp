@@ -1,4 +1,7 @@
-"""NextDNS MCP Server - FastMCP-based implementation using OpenAPI spec."""
+"""NextDNS MCP Server - FastMCP-based implementation using OpenAPI spec.
+
+SPDX-License-Identifier: MIT
+"""
 
 import os
 import sys

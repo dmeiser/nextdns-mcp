@@ -3,6 +3,7 @@ name = "nextdns-mcp"
 version = "2.0.0"
 description = "NextDNS MCP Server - Model Context Protocol server for NextDNS API built with FastMCP"
 authors = ["NextDNS MCP Contributors"]
+license = "MIT"
 readme = "README.md"
 packages = [{include = "nextdns_mcp", from = "src"}]
 include = ["src/nextdns_mcp/*.yaml"]

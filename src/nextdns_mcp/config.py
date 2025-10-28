@@ -2,6 +2,8 @@
 
 This module handles all configuration loading, validation, and constants
 for the NextDNS MCP server.
+
+SPDX-License-Identifier: MIT
 """
 
 import os
