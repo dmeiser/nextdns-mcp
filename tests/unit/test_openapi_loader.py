@@ -135,8 +135,9 @@ class TestLoadOpenApiSpec:
     ):
         """Test that loading logs the spec path."""
         import logging
+
         caplog.set_level(logging.INFO)
-        
+
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:

@@ -297,9 +297,7 @@ async def dohLookup(domain: str, profile_id: Optional[str] = None, record_type: 
 # We provide custom implementations that accept JSON strings and convert them.
 
 
-async def _bulk_update_helper(
-    profile_id: str, data: str, endpoint: str, param_name: str
-) -> dict:
+async def _bulk_update_helper(profile_id: str, data: str, endpoint: str, param_name: str) -> dict:
     """Helper function for bulk update operations that require raw JSON arrays.
 
     This function handles the common pattern of:
@@ -324,7 +322,9 @@ async def _bulk_update_helper(
     try:
         array_data = json.loads(data)
         if not isinstance(array_data, list):
-            logger.warning(f"Invalid {param_name} format: expected array, got {type(array_data).__name__}")
+            logger.warning(
+                f"Invalid {param_name} format: expected array, got {type(array_data).__name__}"
+            )
             return {"error": f"{param_name} must be a JSON array string"}
         logger.debug(f"Parsed {len(array_data)} {param_name} items")
     except json.JSONDecodeError as e:

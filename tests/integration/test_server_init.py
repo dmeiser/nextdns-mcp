@@ -123,8 +123,9 @@ class TestCreateMcpServer:
     ):
         """Test that create_mcp_server logs status messages."""
         import logging
+
         caplog.set_level(logging.INFO)
-        
+
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -158,8 +159,9 @@ class TestCreateMcpServer:
     ):
         """Test that create_mcp_server shows default profile if set."""
         import logging
+
         caplog.set_level(logging.INFO)
-        
+
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", mock_profile_id)
 
