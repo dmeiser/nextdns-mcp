@@ -3,6 +3,8 @@
 SPDX-License-Identifier: MIT
 """
 
+import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -27,6 +29,8 @@ from .config import (
 # Load environment variables from .env file
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 
 def load_openapi_spec() -> dict:
     """Load the NextDNS OpenAPI specification from YAML file.
@@ -42,11 +46,11 @@ def load_openapi_spec() -> dict:
     spec_path = Path(__file__).parent / "nextdns-openapi.yaml"
 
     if not spec_path.exists():
-        print(f"ERROR: OpenAPI spec not found at: {spec_path}", file=sys.stderr)
-        print("The nextdns-openapi.yaml file must be in the package directory.", file=sys.stderr)
+        logger.critical(f"OpenAPI spec not found at: {spec_path}")
+        logger.critical("The nextdns-openapi.yaml file must be in the package directory.")
         sys.exit(1)
 
-    print(f"Loading OpenAPI spec from: {spec_path}", file=sys.stderr)
+    logger.info(f"Loading OpenAPI spec from: {spec_path}")
     with open(spec_path, "r") as f:
         spec = yaml.safe_load(f)
 
@@ -97,15 +101,15 @@ def create_mcp_server() -> FastMCP:
         yaml.YAMLError: If OpenAPI spec is invalid
     """
     # Load the OpenAPI specification
-    print("Loading NextDNS OpenAPI specification...", file=sys.stderr)
+    logger.info("Loading NextDNS OpenAPI specification...")
     openapi_spec = load_openapi_spec()
 
     # Create authenticated HTTP client
-    print(f"Creating HTTP client for {NEXTDNS_BASE_URL}...", file=sys.stderr)
+    logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
     api_client = create_nextdns_client()
 
     # Create MCP server from OpenAPI spec
-    print("Generating MCP server from OpenAPI specification...", file=sys.stderr)
+    logger.info("Generating MCP server from OpenAPI specification...")
     route_maps = build_route_mappings()
 
     mcp = FastMCP.from_openapi(
@@ -117,9 +121,9 @@ def create_mcp_server() -> FastMCP:
     )
 
     # Add metadata about the server
-    print(f"✓ MCP server created successfully", file=sys.stderr)
+    logger.info("MCP server created successfully")
     if NEXTDNS_DEFAULT_PROFILE:
-        print(f"  Default profile: {NEXTDNS_DEFAULT_PROFILE}", file=sys.stderr)
+        logger.info(f"Default profile: {NEXTDNS_DEFAULT_PROFILE}")
 
     return mcp
 
@@ -189,6 +193,7 @@ async def _dohLookup_impl(
     # Validate record type
     record_type_upper = record_type.upper()
     if record_type_upper not in VALID_DNS_RECORD_TYPES:
+        logger.warning(f"Invalid DNS record type requested: {record_type}")
         return {
             "error": f"Invalid record type: {record_type}",
             "valid_types": VALID_DNS_RECORD_TYPES,
@@ -198,6 +203,8 @@ async def _dohLookup_impl(
     doh_url = f"https://dns.nextdns.io/{target_profile}/dns-query"
     params = {"name": domain, "type": record_type_upper}
     headers = {"accept": "application/dns-json"}
+
+    logger.info(f"DoH lookup: {domain} ({record_type_upper}) via profile {target_profile}")
 
     try:
         # Create a separate HTTP client for DoH queries (doesn't need API key)
@@ -217,13 +224,16 @@ async def _dohLookup_impl(
 
             # Add human-readable status description
             if "Status" in result:
-                result["_metadata"]["status_description"] = DNS_STATUS_CODES.get(
+                status_desc = DNS_STATUS_CODES.get(
                     result["Status"], f"Unknown status code: {result['Status']}"
                 )
+                result["_metadata"]["status_description"] = status_desc
+                logger.debug(f"DoH lookup result: {domain} -> {status_desc}")
 
             return result
 
     except httpx.HTTPError as e:
+        logger.error(f"HTTP error during DoH lookup for {domain}: {str(e)}")
         return {
             "error": f"HTTP error during DoH lookup: {str(e)}",
             "profile_id": target_profile,
@@ -231,6 +241,7 @@ async def _dohLookup_impl(
             "type": record_type_upper,
         }
     except Exception as e:
+        logger.error(f"Unexpected error during DoH lookup for {domain}: {str(e)}")
         return {
             "error": f"Unexpected error during DoH lookup: {str(e)}",
             "profile_id": target_profile,
@@ -307,12 +318,17 @@ async def _bulk_update_helper(
     """
     import json
 
+    logger.info(f"Bulk update: {param_name} for profile {profile_id}")
+
     # Parse and validate JSON array
     try:
         array_data = json.loads(data)
         if not isinstance(array_data, list):
+            logger.warning(f"Invalid {param_name} format: expected array, got {type(array_data).__name__}")
             return {"error": f"{param_name} must be a JSON array string"}
+        logger.debug(f"Parsed {len(array_data)} {param_name} items")
     except json.JSONDecodeError as e:
+        logger.warning(f"JSON decode error for {param_name}: {str(e)}")
         return {"error": f"Invalid JSON: {str(e)}"}
 
     # Make PUT request with array body
@@ -320,10 +336,13 @@ async def _bulk_update_helper(
     url = endpoint.format(profile_id=profile_id)
 
     try:
+        logger.debug(f"PUT request to {url}")
         response = await client.put(url, json=array_data)
         response.raise_for_status()
+        logger.info(f"Bulk update successful: {param_name} for profile {profile_id}")
         return response.json()
     except httpx.HTTPError as e:
+        logger.error(f"HTTP error during bulk update: {str(e)}")
         return {"error": f"HTTP error: {str(e)}"}
 
 
@@ -501,10 +520,9 @@ async def updatePrivacyNatives(profile_id: str, natives: str) -> dict:
 
 
 if __name__ == "__main__":
-    print("Starting NextDNS MCP Server...", file=sys.stderr)
-    print(f"  Base URL: {NEXTDNS_BASE_URL}", file=sys.stderr)
-    print(f"  Timeout: {NEXTDNS_HTTP_TIMEOUT}s", file=sys.stderr)
-    print("", file=sys.stderr)
+    logger.info("Starting NextDNS MCP Server...")
+    logger.info(f"  Base URL: {NEXTDNS_BASE_URL}")
+    logger.info(f"  Timeout: {NEXTDNS_HTTP_TIMEOUT}s")
 
     # Run the MCP server
     mcp.run()

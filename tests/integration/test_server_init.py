@@ -119,9 +119,12 @@ class TestCreateMcpServer:
             temp_spec.unlink(missing_ok=True)
 
     def test_create_mcp_server_prints_status(
-        self, monkeypatch, mock_api_key, mock_openapi_spec, capsys
+        self, monkeypatch, mock_api_key, mock_openapi_spec, caplog
     ):
-        """Test that create_mcp_server prints status messages."""
+        """Test that create_mcp_server logs status messages."""
+        import logging
+        caplog.set_level(logging.INFO)
+        
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -144,17 +147,19 @@ class TestCreateMcpServer:
 
                 create_mcp_server()
 
-                captured = capsys.readouterr()
-                assert "Loading NextDNS OpenAPI specification" in captured.err
-                assert "Creating HTTP client" in captured.err
-                assert "Generating MCP server" in captured.err
+                assert "Loading NextDNS OpenAPI specification" in caplog.text
+                assert "Creating HTTP client" in caplog.text
+                assert "Generating MCP server" in caplog.text
         finally:
             temp_spec.unlink(missing_ok=True)
 
     def test_create_mcp_server_shows_default_profile(
-        self, monkeypatch, mock_api_key, mock_profile_id, mock_openapi_spec, capsys
+        self, monkeypatch, mock_api_key, mock_profile_id, mock_openapi_spec, caplog
     ):
         """Test that create_mcp_server shows default profile if set."""
+        import logging
+        caplog.set_level(logging.INFO)
+        
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", mock_profile_id)
 
@@ -171,6 +176,9 @@ class TestCreateMcpServer:
 
                 import sys
 
+                # Need to reload both config and server modules to pick up new env vars
+                if "nextdns_mcp.config" in sys.modules:
+                    del sys.modules["nextdns_mcp.config"]
                 if "nextdns_mcp.server" in sys.modules:
                     del sys.modules["nextdns_mcp.server"]
 
@@ -178,7 +186,6 @@ class TestCreateMcpServer:
 
                 create_mcp_server()
 
-                captured = capsys.readouterr()
-                assert f"Default profile: {mock_profile_id}" in captured.err
+                assert f"Default profile: {mock_profile_id}" in caplog.text
         finally:
             temp_spec.unlink(missing_ok=True)

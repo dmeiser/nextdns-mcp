@@ -46,7 +46,7 @@ class TestGetApiKey:
         result = get_api_key()
         assert result == env_key
 
-    def test_get_api_key_file_not_found(self, monkeypatch, capsys):
+    def test_get_api_key_file_not_found(self, monkeypatch, caplog):
         """Test handling of missing API key file."""
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
         monkeypatch.setenv("NEXTDNS_API_KEY_FILE", "/nonexistent/file.txt")
@@ -56,11 +56,10 @@ class TestGetApiKey:
         result = get_api_key()
         assert result is None
 
-        # Check error message was printed
-        captured = capsys.readouterr()
-        assert "ERROR: API key file not found" in captured.err
+        # Check error message was logged
+        assert "API key file not found" in caplog.text
 
-    def test_get_api_key_file_read_error(self, monkeypatch, capsys):
+    def test_get_api_key_file_read_error(self, monkeypatch, caplog):
         """Test handling of file read errors."""
         # Create a directory (can't be read as a file)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -72,9 +71,8 @@ class TestGetApiKey:
             result = get_api_key()
             assert result is None
 
-            # Check error message was printed
-            captured = capsys.readouterr()
-            assert "ERROR: Failed to read API key file" in captured.err
+            # Check error message was logged
+            assert "Failed to read API key file" in caplog.text
 
     def test_get_api_key_none_when_not_set(self, monkeypatch):
         """Test that None is returned when no API key is configured."""

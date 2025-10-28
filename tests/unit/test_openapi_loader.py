@@ -84,7 +84,7 @@ class TestLoadOpenApiSpec:
             assert "getLogs" in tools
             assert "streamLogs" not in tools
 
-    def test_load_openapi_spec_file_not_found(self, monkeypatch, mock_api_key, capsys):
+    def test_load_openapi_spec_file_not_found(self, monkeypatch, mock_api_key, caplog):
         """Test error handling when OpenAPI spec file is missing."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
@@ -104,9 +104,7 @@ class TestLoadOpenApiSpec:
                 load_openapi_spec()
 
             assert exc_info.value.code == 1
-
-            captured = capsys.readouterr()
-            assert "ERROR: OpenAPI spec not found" in captured.err
+            assert "OpenAPI spec not found" in caplog.text
 
     def test_load_openapi_spec_invalid_yaml(self, monkeypatch, mock_api_key, capsys):
         """Test error handling for invalid YAML."""
@@ -133,9 +131,12 @@ class TestLoadOpenApiSpec:
             temp_spec.unlink(missing_ok=True)
 
     def test_load_openapi_spec_prints_path(
-        self, mock_openapi_spec, monkeypatch, mock_api_key, capsys
+        self, mock_openapi_spec, monkeypatch, mock_api_key, caplog
     ):
-        """Test that loading prints the spec path to stderr."""
+        """Test that loading logs the spec path."""
+        import logging
+        caplog.set_level(logging.INFO)
+        
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -153,8 +154,7 @@ class TestLoadOpenApiSpec:
 
                 load_openapi_spec()
 
-                captured = capsys.readouterr()
-                assert "Loading OpenAPI spec from:" in captured.err
+                assert "Loading OpenAPI spec from:" in caplog.text
         finally:
             temp_spec.unlink(missing_ok=True)
 

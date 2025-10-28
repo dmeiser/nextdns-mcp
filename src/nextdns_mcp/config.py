@@ -6,12 +6,21 @@ for the NextDNS MCP server.
 SPDX-License-Identifier: MIT
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
 from typing import Optional
 
 from fastmcp.server.openapi import MCPType, RouteMap
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 def get_api_key() -> Optional[str]:
@@ -33,12 +42,13 @@ def get_api_key() -> Optional[str]:
     api_key_file = os.getenv("NEXTDNS_API_KEY_FILE")
     if api_key_file:
         try:
+            logger.debug(f"Reading API key from file: {api_key_file}")
             with open(api_key_file, "r") as f:
                 return f.read().strip()
         except FileNotFoundError:
-            print(f"ERROR: API key file not found: {api_key_file}", file=sys.stderr)
+            logger.error(f"API key file not found: {api_key_file}")
         except Exception as e:
-            print(f"ERROR: Failed to read API key file: {e}", file=sys.stderr)
+            logger.error(f"Failed to read API key file: {e}")
 
     return None
 
@@ -57,10 +67,10 @@ def validate_configuration() -> None:
         SystemExit: If required configuration is missing
     """
     if not NEXTDNS_API_KEY:
-        print("ERROR: NEXTDNS_API_KEY is required", file=sys.stderr)
-        print("Set either:", file=sys.stderr)
-        print("  - NEXTDNS_API_KEY environment variable", file=sys.stderr)
-        print("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret", file=sys.stderr)
+        logger.critical("NEXTDNS_API_KEY is required")
+        logger.critical("Set either:")
+        logger.critical("  - NEXTDNS_API_KEY environment variable")
+        logger.critical("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret")
         sys.exit(1)
 
 
