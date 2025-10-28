@@ -50,5 +50,8 @@ COPY src/ /app/src/
 RUN useradd --create-home appuser
 USER appuser
 
+# Set PYTHONPATH to include /app/src so Python can find the nextdns_mcp module
+ENV PYTHONPATH=/app/src
+
 # Command to run the application
-CMD ["python", "-m", "src.nextdns_mcp.server"]
+CMD ["python", "-m", "nextdns_mcp.server"]

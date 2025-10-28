@@ -35,7 +35,7 @@ def get_api_key() -> Optional[str]:
     # Check direct environment variable first
     api_key = os.getenv("NEXTDNS_API_KEY")
     if api_key:
-        return api_key
+        return api_key.strip()
 
     # Check for Docker secret file
     api_key_file = os.getenv("NEXTDNS_API_KEY_FILE")

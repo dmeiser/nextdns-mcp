@@ -296,35 +296,47 @@ Docker MCP Gateway provides secure, isolated MCP server management with built-in
    docker build -t nextdns-mcp:latest .
    ```
 
-2. **Add to your custom catalog:**
+2. **Import the catalog:**
    ```bash
-   # Create a custom catalog
-   docker mcp catalog create my-catalog
-
-   # Add the NextDNS server
-   docker mcp catalog add my-catalog nextdns ./catalog.yaml
+   # Import the catalog file (registers the server definition)
+   docker mcp catalog import ./catalog.yaml
    ```
 
 3. **Enable and configure the server:**
    ```bash
    # Enable the server
    docker mcp server enable nextdns
-   
-   # Configure the required API key secret
-   # (This will be prompted during enable, or set it separately)
-   
-   # Optional: Set environment variables
-   docker mcp config set nextdns NEXTDNS_DEFAULT_PROFILE your_profile_id
    ```
    
-   Note: When you enable the server, Docker MCP Gateway will prompt you to configure required secrets interactively. You can also view and edit configuration in the Docker Desktop UI under MCP Toolkit → My Servers → nextdns → Configuration.
+   When you enable the server, Docker MCP Gateway will prompt you to configure the required API key secret (`nextdns.api_key`). Enter your NextDNS API key from https://my.nextdns.io/account.
+
+4. **Set the API key (if not prompted during enable):**
+   
+   If you need to set or update the API key after enabling, use the secret management command:
+   
+   ```bash
+   # Option 1: Direct assignment (simple)
+   docker mcp secret set nextdns.api_key=your_api_key_here
+   
+   # Option 2: Via STDIN (more secure, avoids shell history)
+   # PowerShell:
+   Write-Output "your_api_key_here" | docker mcp secret set nextdns.api_key
+   
+   # Bash/Zsh:
+   echo "your_api_key_here" | docker mcp secret set nextdns.api_key
+   
+   # Verify the secret is set
+   docker mcp secret ls
+   ```
+   
+   **Note**: The secret name must match what's defined in `catalog.yaml`: `nextdns.api_key`. The server automatically strips any trailing whitespace or newlines from the secret value.
 
 5. **Verify it's working:**
    ```bash
-   # List available tools
+   # List available tools (should show 76 tools)
    docker mcp tools ls
 
-   # Call a tool
+   # Call a tool to list your profiles
    docker mcp tools call nextdns listProfiles
    ```
 
@@ -412,24 +424,26 @@ Once you've enabled the server, here are useful management commands:
 ```bash
 # Server management
 docker mcp server ls                          # List all enabled servers
-docker mcp server inspect nextdns             # View server configuration
+docker mcp server enable nextdns              # Enable the server
 docker mcp server disable nextdns             # Disable the server
-docker mcp server enable nextdns              # Re-enable the server
+
+# Secret management
+docker mcp secret ls                          # List all secrets
+docker mcp secret set nextdns.api_key=value   # Set API key secret
+docker mcp secret rm nextdns.api_key          # Remove a secret
 
 # Configuration
-docker mcp config get nextdns                 # View current configuration
-docker mcp config set nextdns KEY value       # Set configuration values
+docker mcp config read                        # Read current configuration
+docker mcp config write                       # Write/edit configuration interactively
 
 # Tools
 docker mcp tools ls                           # List all available tools
-docker mcp tools ls --server nextdns          # List tools from NextDNS server
-docker mcp tools call nextdns listProfiles    # Call a specific tool
-docker mcp tools inspect nextdns getSettings  # View tool details
+docker mcp tools call createProfile '{"name":"Test"}'  # Call a tool
 
 # Catalog management
-docker mcp catalog show                       # Show default catalog
-docker mcp catalog show my-catalog            # Show custom catalog
 docker mcp catalog ls                         # List all catalogs
+docker mcp catalog show nextdns-mcp-catalog   # Show catalog contents
+docker mcp catalog import ./catalog.yaml      # Import/update catalog
 ```
 
 ## License
