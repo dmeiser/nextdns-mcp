@@ -10,6 +10,7 @@ This project provides an MCP server that exposes NextDNS API operations as tools
 
 - **55 NextDNS operations** exposed as MCP tools (54 API + 1 custom)
 - **Profile Management**: Full CRUD operations - create, read, update, and delete profiles
+- **Profile Access Control**: Fine-grained read/write restrictions per profile, with read-only mode support
 - **DNS-over-HTTPS Testing**: Perform DoH lookups to test DNS resolution through profiles
 - **Settings Configuration**: Comprehensive settings management including logs, block page, performance, and Web3
 - **Logs**: Query log retrieval, real-time streaming, download, and clearing
@@ -44,6 +45,11 @@ This project provides an MCP server that exposes NextDNS API operations as tools
    NEXTDNS_API_KEY=your_api_key_here
    NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional
    NEXTDNS_TEST_PROFILE=test_profile_id     # For write operation tests
+   
+   # Optional: Profile access control (see Profile Access Control section)
+   # NEXTDNS_READABLE_PROFILES=profile1,profile2
+   # NEXTDNS_WRITABLE_PROFILES=test_profile
+   # NEXTDNS_READ_ONLY=false
    ```
 
 ### Running with Docker
@@ -231,6 +237,71 @@ docker mcp tools call nextdns dohLookup \
 - Answer records (IP addresses, CNAMEs, etc.)
 - Query metadata (profile ID, domain, type)
 - Full DoH endpoint URL for manual testing
+
+## Profile Access Control
+
+The MCP server supports fine-grained access control to restrict which profiles can be read from or written to. This is useful for multi-tenant environments, delegated administration, or implementing read-only access.
+
+### Configuration
+
+Access control is configured via environment variables:
+
+```env
+# Restrict read access to specific profiles (comma-separated list)
+# Empty = all profiles can be read (default)
+NEXTDNS_READABLE_PROFILES=abc123,def456
+
+# Restrict write access to specific profiles (comma-separated list)
+# Empty = all profiles can be written to (default)
+NEXTDNS_WRITABLE_PROFILES=test789
+
+# Enable read-only mode (disables ALL write operations)
+NEXTDNS_READ_ONLY=true
+```
+
+### Access Control Rules
+
+1. **Empty Lists = All Allowed**: When a list is empty or not set, all profiles are accessible
+2. **Write Implies Read**: Profiles in the writable list are automatically readable (when both lists are set)
+3. **Read-Only Mode**: Overrides all write permissions when enabled
+4. **Global Operations**: Some operations like `listProfiles` are always allowed regardless of restrictions
+
+### Usage Examples
+
+**Read-only access (no modifications allowed):**
+```env
+NEXTDNS_READ_ONLY=true
+```
+
+**Restrict reading to specific profiles:**
+```env
+NEXTDNS_READABLE_PROFILES=home123,mobile456,work789
+```
+
+**Allow writing only to a test profile (all profiles readable):**
+```env
+NEXTDNS_WRITABLE_PROFILES=test123
+```
+
+**Combined restrictions:**
+```env
+# Users can read these three profiles
+NEXTDNS_READABLE_PROFILES=home123,mobile456,test789
+# But can only modify the test profile
+NEXTDNS_WRITABLE_PROFILES=test789
+```
+
+### Behavior Details
+
+When access is denied, the server returns a 403 Forbidden response with details:
+```json
+{
+  "error": "Write access denied for profile: abc123",
+  "profile_id": "abc123"
+}
+```
+
+Operations that don't involve a specific profile (like listing all profiles) are always permitted, allowing users to discover available profiles even with restrictions in place.
 
 ## Safety Mechanisms
 
