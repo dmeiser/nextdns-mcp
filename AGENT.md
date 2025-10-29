@@ -15,16 +15,13 @@ This file contains repository-specific agent rules. Agents should follow these w
     - Use mocks for external dependencies (HTTP calls, file I/O)
     - Acceptable uncovered lines: module-level initialization, `if __name__ == "__main__"` blocks
     - Coverage report available at: `htmlcov/index.html` after running tests with `--cov-report=html`
-- Docker: provide a `Dockerfile` that produces a small, runnable image; prefer using official `python:3.11-slim` as base.
+- Docker: provide a `Dockerfile` that produces a small, runnable image; prefer using official `python:3.12-slim` as base.
 - Keep `TODO.md` progress indicators in sync with the current phase while executing tasks.
 - **Write Operation Safety Rules:**
-  - **NEVER delete a NextDNS profile without asking first** - Profile deletion is strictly forbidden without permission, even though the API supports it
   - When running validation tests, you are permitted to run `tests/integration/test_live_api.py --auto-delete-profile`, which will delete the profile created for the  validation run.
   - Write operations (create, update) are only allowed against designated test profiles
-  - When testing write operations, use only the profile specifically designated for testing
   - Always verify the target profile ID before any write operation
   - Prefer mocked tests for write operations; use live API only when explicitly required
-  - After write operation tests, restore the test profile to its original state when possible
   - **Integration Test Safety:**
     - Integration tests create a dedicated "Validation Profile [timestamp]"
     - All write operations execute against this profile only
@@ -34,7 +31,7 @@ This file contains repository-specific agent rules. Agents should follow these w
 - **Integration Testing Requirements:**
   - **CRITICAL**: Integration tests MUST invoke MCP server functions via `server.py`, NOT direct API calls
   - Test script location: `tests/integration/test_live_api.py`
-  - Integration tests verify all 55 MCP tools (54 API operations + 1 custom DoH lookup) work end-to-end
+  - Integration tests verify all MCP tools work end-to-end
   - **Test Structure Requirements:**
     1. Create a "Validation Profile [timestamp]" for isolation
     2. Execute ALL operations against the validation profile using MCP server functions
