@@ -112,10 +112,12 @@ class TestEnvironmentConfiguration:
 
         # Clean import of config
         import sys
+
         if "nextdns_mcp.config" in sys.modules:
             del sys.modules["nextdns_mcp.config"]
-        
+
         from nextdns_mcp import config
+
         assert config.get_http_timeout() == 30.0
 
     def test_custom_timeout_value(self, monkeypatch):
@@ -123,15 +125,19 @@ class TestEnvironmentConfiguration:
         monkeypatch.setenv("NEXTDNS_API_KEY", "dummy_key")
         monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "60")
 
-        with patch.dict('os.environ', {'NEXTDNS_API_KEY': 'dummy_key', 'NEXTDNS_HTTP_TIMEOUT': '60'}, clear=True):
+        with patch.dict(
+            "os.environ", {"NEXTDNS_API_KEY": "dummy_key", "NEXTDNS_HTTP_TIMEOUT": "60"}, clear=True
+        ):
             # Clean import of config
-            import sys
             import importlib
+            import sys
+
             if "nextdns_mcp.config" in sys.modules:
                 del sys.modules["nextdns_mcp.config"]
-            
+
             # Import and reload to ensure fresh state
             import nextdns_mcp.config
+
             importlib.reload(nextdns_mcp.config)
             assert nextdns_mcp.config.get_http_timeout() == 60.0
 

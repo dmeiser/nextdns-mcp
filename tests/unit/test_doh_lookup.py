@@ -54,15 +54,17 @@ class TestDohLookup:
     async def test_doh_lookup_uses_default_profile(self, monkeypatch):
         """Test that dohLookup uses NEXTDNS_DEFAULT_PROFILE when profile_id not provided."""
         test_profile = "test123"
-        
+
         # Patch environment and reload config
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", test_profile)
         monkeypatch.setenv("NEXTDNS_API_KEY", "dummy_key")
-        
+
         import importlib
+
         import nextdns_mcp.server
+
         importlib.reload(nextdns_mcp.server)
-        
+
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = Mock()
@@ -77,7 +79,7 @@ class TestDohLookup:
 
             # Use the reloaded module's function
             result = await nextdns_mcp.server._dohLookup_impl("example.com")
-            
+
             assert "_metadata" in result
             assert result["_metadata"]["profile_id"] == test_profile
             assert result["_metadata"]["query_domain"] == "example.com"

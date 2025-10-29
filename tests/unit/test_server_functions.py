@@ -1,4 +1,5 @@
 """Tests for server.py helper functions and tools."""
+
 import json
 import os
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -33,7 +34,7 @@ class TestLoadOpenAPISpec:
     def test_loads_valid_spec(self):
         """Test loading valid OpenAPI spec."""
         spec = load_openapi_spec()
-        
+
         assert isinstance(spec, dict)
         assert "openapi" in spec
         assert "info" in spec
@@ -43,7 +44,7 @@ class TestLoadOpenAPISpec:
     def test_spec_has_paths(self):
         """Test that spec has expected paths."""
         spec = load_openapi_spec()
-        
+
         # Check for some expected paths
         assert "/profiles" in spec["paths"]
         assert "/profiles/{profile_id}" in spec["paths"]
@@ -56,9 +57,9 @@ class TestCreateNextDNSClient:
         """Test creating client with API key."""
         clean_env("NEXTDNS_API_KEY", "test-key")
         clean_env("NEXTDNS_HTTP_TIMEOUT", "30")
-        
+
         client = create_nextdns_client()
-        
+
         assert isinstance(client, httpx.AsyncClient)
         assert client.headers["X-Api-Key"] == "test-key"
         assert client.base_url == "https://api.nextdns.io"
@@ -66,9 +67,9 @@ class TestCreateNextDNSClient:
     def test_client_has_correct_headers(self, clean_env):
         """Test client has all required headers."""
         clean_env("NEXTDNS_API_KEY", "test-key")
-        
+
         client = create_nextdns_client()
-        
+
         assert client.headers["Accept"] == "application/json"
         assert client.headers["Content-Type"] == "application/json"
 
@@ -81,7 +82,7 @@ class TestCreateAccessDeniedResponse:
         response = create_access_denied_response(
             "GET", "/profiles/abc123", "Access denied", "abc123"
         )
-        
+
         assert response.status_code == 403
         assert response.headers["content-type"] == "application/json"
 
@@ -90,7 +91,7 @@ class TestCreateAccessDeniedResponse:
         response = create_access_denied_response(
             "POST", "/profiles/abc123/denylist", "Write denied", "abc123"
         )
-        
+
         data = response.json()
         assert "error" in data
         assert data["error"] == "Write denied"
@@ -126,7 +127,7 @@ class TestValidateRecordType:
     def test_validates_valid_types(self):
         """Test validates valid DNS record types."""
         valid_types = ["A", "AAAA", "CNAME", "MX", "TXT"]
-        
+
         for record_type in valid_types:
             is_valid, normalized = _validate_record_type(record_type)
             assert is_valid is True
@@ -152,7 +153,7 @@ class TestBuildDohMetadata:
         """Test builds metadata dictionary."""
         doh_url = "https://dns.nextdns.io/abc123"
         metadata = _build_doh_metadata("abc123", "example.com", "A", doh_url, 0)
-        
+
         assert isinstance(metadata, dict)
         assert metadata["profile_id"] == "abc123"
         assert metadata["query_domain"] == "example.com"
@@ -164,7 +165,7 @@ class TestBuildDohMetadata:
         """Test includes DoH URL in metadata."""
         doh_url = "https://dns.nextdns.io/abc123"
         metadata = _build_doh_metadata("abc123", "example.com", "A", doh_url, None)
-        
+
         assert "doh_endpoint" in metadata
         assert doh_url in metadata["doh_endpoint"]
         # When status is None, no status_description should be added
@@ -178,7 +179,7 @@ class TestDohLookupImpl:
     async def test_no_profile_returns_error(self, clean_env):
         """Test returns error when no profile_id and no default."""
         result = await _dohLookup_impl("example.com", None, "A")
-        
+
         assert "error" in result
         assert "No profile_id provided" in result["error"]
         assert "hint" in result
@@ -187,9 +188,9 @@ class TestDohLookupImpl:
     async def test_invalid_record_type_returns_error(self, clean_env):
         """Test returns error for invalid record type."""
         clean_env("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        
+
         result = await _dohLookup_impl("example.com", "abc123", "INVALID")
-        
+
         assert "error" in result
         assert "Invalid record type: INVALID" in result["error"]
 
@@ -197,22 +198,19 @@ class TestDohLookupImpl:
     async def test_successful_lookup(self, clean_env):
         """Test successful DNS lookup."""
         clean_env("NEXTDNS_HTTP_TIMEOUT", "30")
-        
+
         # Mock the httpx response
         mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "Status": 0,
-            "Answer": [{"data": "1.2.3.4"}]
-        }
-        
+        mock_response.json.return_value = {"Status": 0, "Answer": [{"data": "1.2.3.4"}]}
+
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.__aenter__.return_value = mock_client
             mock_client.get.return_value = mock_response
             mock_client_class.return_value = mock_client
-            
+
             result = await _dohLookup_impl("example.com", "abc123", "A")
-        
+
         assert "Status" in result
         assert "_metadata" in result
 
@@ -220,15 +218,15 @@ class TestDohLookupImpl:
     async def test_http_error_returns_error_dict(self, clean_env):
         """Test HTTP error returns error dict."""
         clean_env("NEXTDNS_HTTP_TIMEOUT", "30")
-        
+
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.__aenter__.return_value = mock_client
             mock_client.get.side_effect = httpx.HTTPError("Connection failed")
             mock_client_class.return_value = mock_client
-            
+
             result = await _dohLookup_impl("example.com", "abc123", "A")
-        
+
         assert "error" in result
         assert "HTTP error" in result["error"]
 
@@ -239,20 +237,16 @@ class TestBulkUpdateHelper:
     @pytest.mark.asyncio
     async def test_invalid_json_returns_error(self):
         """Test invalid JSON returns error."""
-        result = await _bulk_update_helper(
-            "abc123", "invalid json", "/endpoint", "entries"
-        )
-        
+        result = await _bulk_update_helper("abc123", "invalid json", "/endpoint", "entries")
+
         assert "error" in result
         assert "Invalid JSON" in result["error"]
 
     @pytest.mark.asyncio
     async def test_non_array_returns_error(self):
         """Test non-array JSON returns error."""
-        result = await _bulk_update_helper(
-            "abc123", '{"key": "value"}', "/endpoint", "entries"
-        )
-        
+        result = await _bulk_update_helper("abc123", '{"key": "value"}', "/endpoint", "entries")
+
         assert "error" in result
         assert "must be a JSON array" in result["error"]
 
@@ -263,18 +257,18 @@ class TestBulkUpdateHelper:
         mock_response = MagicMock()
         mock_response.json.return_value = {"success": True}
         mock_response.raise_for_status = MagicMock()  # No exception
-        
+
         # Patch the actual client instance that mcp uses
         with patch.object(mcp._client, "put", new_callable=AsyncMock) as mock_put:
             mock_put.return_value = mock_response
-            
+
             result = await _bulk_update_helper(
                 "abc123",
                 '["example.com", "test.com"]',
                 "/profiles/{profile_id}/denylist",
-                "entries"
+                "entries",
             )
-        
+
         assert "success" in result
         assert result["success"] is True
         mock_put.assert_called_once()
@@ -285,13 +279,10 @@ class TestBulkUpdateHelper:
         # Patch the actual client instance to raise an exception
         with patch.object(mcp._client, "put", new_callable=AsyncMock) as mock_put:
             mock_put.side_effect = httpx.HTTPError("Connection failed")
-            
+
             result = await _bulk_update_helper(
-                "abc123",
-                '["example.com"]',
-                "/profiles/{profile_id}/denylist",
-                "entries"
+                "abc123", '["example.com"]', "/profiles/{profile_id}/denylist", "entries"
             )
-        
+
         assert "error" in result
         assert "HTTP error" in result["error"]

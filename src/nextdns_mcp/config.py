@@ -97,7 +97,7 @@ def parse_profile_list(profile_str: str) -> set[str]:
 
 def get_readable_profiles_set() -> set[str]:
     """Get the set of profiles that are allowed to be read.
-    
+
     Returns:
         Set of profile IDs. Empty set means all profiles are readable.
     """
@@ -125,7 +125,7 @@ def get_writable_profiles_set() -> set[str]:
 
 def can_read_profile(profile_id: str) -> bool:
     """Check if a profile can be read.
-    
+
     Args:
         profile_id: The profile ID to check
 
@@ -139,7 +139,7 @@ def can_read_profile(profile_id: str) -> bool:
 
 def can_write_profile(profile_id: str) -> bool:
     """Check if a profile can be written to.
-    
+
     Args:
         profile_id: The profile ID to check
 
@@ -153,7 +153,7 @@ def can_write_profile(profile_id: str) -> bool:
     return not writable or profile_id in writable
 
 
-def _log_api_key_error():
+def _log_api_key_error() -> None:
     """Log error message for missing API key."""
     logger.critical("NEXTDNS_API_KEY is required")
     logger.critical("Set either:")
@@ -161,7 +161,7 @@ def _log_api_key_error():
     logger.critical("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret")
 
 
-def _log_access_control_settings():
+def _log_access_control_settings() -> None:
     """Log current access control configuration."""
     readable = get_readable_profiles_set()
     writable = get_writable_profiles_set()
@@ -278,6 +278,3 @@ DNS_STATUS_CODES = {
     4: "NOTIMP - Not implemented",
     5: "REFUSED - Query refused",
 }
-
-
-

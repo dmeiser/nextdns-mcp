@@ -1,4 +1,5 @@
 """Unit tests for access control configuration."""
+
 import importlib
 import os
 import sys
@@ -11,7 +12,7 @@ import pytest
 def mock_nextdns_config():
     """Create a fresh mock config module."""
     # Create clean module
-    module = ModuleType('nextdns_mcp.config')
+    module = ModuleType("nextdns_mcp.config")
     module.logger = Mock()
     module.sys = sys
 
@@ -65,26 +66,26 @@ def mock_env():
     """Provide clean module for each test."""
     # Create clean module
     module = mock_nextdns_config()
-    
+
     # Replace real module with mock
-    old_module = sys.modules.get('nextdns_mcp.config')
-    sys.modules['nextdns_mcp.config'] = module
-    
+    old_module = sys.modules.get("nextdns_mcp.config")
+    sys.modules["nextdns_mcp.config"] = module
+
     try:
         yield module
     finally:
         # Restore original module
         if old_module is not None:
-            sys.modules['nextdns_mcp.config'] = old_module
+            sys.modules["nextdns_mcp.config"] = old_module
         else:
-            del sys.modules['nextdns_mcp.config']
+            del sys.modules["nextdns_mcp.config"]
 
 
 def test_readable_profiles_empty_config(mock_env):
     """Test with no readable profiles configured."""
     mock_env.NEXTDNS_READABLE_PROFILES = ""
     mock_env.NEXTDNS_WRITABLE_PROFILES = ""
-    
+
     assert mock_env.get_readable_profiles() == set()
     assert mock_env.can_read_profile("any-profile") is True
 
@@ -93,7 +94,7 @@ def test_readable_profiles_restricted(mock_env):
     """Test with readable profiles restriction."""
     mock_env.NEXTDNS_READABLE_PROFILES = "profile1,profile2"
     mock_env.NEXTDNS_WRITABLE_PROFILES = ""
-    
+
     readable = mock_env.get_readable_profiles()
     assert readable == {"profile1", "profile2"}
     assert mock_env.can_read_profile("profile1") is True
@@ -104,7 +105,7 @@ def test_readable_includes_writable(mock_env):
     """Test that writable profiles are also readable."""
     mock_env.NEXTDNS_READABLE_PROFILES = "profile1,profile2"
     mock_env.NEXTDNS_WRITABLE_PROFILES = "profile2,profile3"
-    
+
     readable = mock_env.get_readable_profiles()
     assert readable == {"profile1", "profile2", "profile3"}
     assert mock_env.can_read_profile("profile3") is True
@@ -114,7 +115,7 @@ def test_writable_profiles_empty_config(mock_env):
     """Test with no writable profiles configured."""
     mock_env.NEXTDNS_WRITABLE_PROFILES = ""
     mock_env.NEXTDNS_READ_ONLY = False
-    
+
     assert mock_env.get_writable_profiles() == set()
     assert mock_env.can_write_profile("any-profile") is True
 
@@ -123,7 +124,7 @@ def test_writable_profiles_restricted(mock_env):
     """Test with writable profiles restriction."""
     mock_env.NEXTDNS_WRITABLE_PROFILES = "profile1,profile2"
     mock_env.NEXTDNS_READ_ONLY = False
-    
+
     writable = mock_env.get_writable_profiles()
     assert writable == {"profile1", "profile2"}
     assert mock_env.can_write_profile("profile1") is True
@@ -134,30 +135,33 @@ def test_readonly_mode_blocks_all_writes(mock_env):
     """Test that read-only mode blocks all writes."""
     mock_env.NEXTDNS_WRITABLE_PROFILES = "profile1,profile2"
     mock_env.NEXTDNS_READ_ONLY = True
-    
+
     assert mock_env.get_writable_profiles() == set()
     assert mock_env.can_write_profile("profile1") is False
     assert mock_env.can_write_profile("profile2") is False
 
 
-@pytest.mark.parametrize("value,expected", [
-    ("true", True),
-    ("True", True),
-    ("TRUE", True),
-    ("1", True),
-    ("yes", True),
-    ("false", False),
-    ("False", False),
-    ("0", False),
-    ("no", False),
-    ("", False),
-    ("anything-else", False),
-])
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("true", True),
+        ("True", True),
+        ("TRUE", True),
+        ("1", True),
+        ("yes", True),
+        ("false", False),
+        ("False", False),
+        ("0", False),
+        ("no", False),
+        ("", False),
+        ("anything-else", False),
+    ],
+)
 def test_readonly_mode_values(mock_env, value, expected):
     """Test different values for NEXTDNS_READ_ONLY."""
     mock_env.NEXTDNS_WRITABLE_PROFILES = "profile1"
     mock_env.NEXTDNS_READ_ONLY = expected
-    
+
     if expected:
         assert mock_env.get_writable_profiles() == set()
         assert mock_env.can_write_profile("profile1") is False

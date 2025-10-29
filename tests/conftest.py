@@ -12,11 +12,11 @@ import yaml
 @pytest.fixture(autouse=True)
 def intercept_exit_and_validation():
     """Disable validation and intercept sys.exit() during module imports."""
+
     def mock_exit(status):
         raise SystemExit(status)
-        
-    with patch('nextdns_mcp.config.validate_configuration'), \
-         patch('sys.exit', mock_exit):
+
+    with patch("nextdns_mcp.config.validate_configuration"), patch("sys.exit", mock_exit):
         yield
 
 

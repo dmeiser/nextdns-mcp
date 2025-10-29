@@ -87,7 +87,9 @@ class TestAccessControlledClientWriteAccess:
 
     @pytest.mark.asyncio
     @patch("nextdns_mcp.server.can_write_profile", return_value=False)
-    async def test_denies_write_when_not_permitted(self, mock_can_write, mock_super_request, clean_env):
+    async def test_denies_write_when_not_permitted(
+        self, mock_can_write, mock_super_request, clean_env
+    ):
         """Test that write requests are denied when profile is not writable."""
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
             response = await client.request(
@@ -103,7 +105,9 @@ class TestAccessControlledClientWriteAccess:
     @pytest.mark.asyncio
     @patch("nextdns_mcp.server.can_write_profile", return_value=False)
     @patch("nextdns_mcp.server.is_read_only", return_value=True)
-    async def test_denies_all_writes_in_read_only_mode(self, mock_is_readonly, mock_can_write, mock_super_request, clean_env):
+    async def test_denies_all_writes_in_read_only_mode(
+        self, mock_is_readonly, mock_can_write, mock_super_request, clean_env
+    ):
         """Test that all write requests are denied in read-only mode."""
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
             response = await client.request("DELETE", "/profiles/abc123")

@@ -9,7 +9,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 import yaml
@@ -37,7 +37,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-def load_openapi_spec() -> dict:
+def load_openapi_spec() -> dict[str, Any]:
     """Load the NextDNS OpenAPI specification from YAML file.
 
     Returns:
@@ -57,7 +57,7 @@ def load_openapi_spec() -> dict:
 
     logger.info(f"Loading OpenAPI spec from: {spec_path}")
     with open(spec_path, "r") as f:
-        spec = yaml.safe_load(f)
+        spec: dict[str, Any] = yaml.safe_load(f)
 
     return spec
 
@@ -149,7 +149,7 @@ class AccessControlledClient(httpx.AsyncClient):
         return create_access_denied_response(method, url, error_msg, profile_id)
 
     async def request(  # type: ignore[override]
-        self, method: str, url: str, **kwargs
+        self, method: str, url: str, **kwargs: Any
     ) -> httpx.Response:
         """Make an HTTP request with access control checks.
 
@@ -268,9 +268,9 @@ def _validate_record_type(record_type: str) -> tuple[bool, str]:
 
 def _build_doh_metadata(
     profile_id: str, domain: str, record_type: str, doh_url: str, status: int | None
-) -> dict:
+) -> dict[str, Any]:
     """Build metadata for DoH response."""
-    metadata = {
+    metadata: dict[str, Any] = {
         "profile_id": profile_id,
         "query_domain": domain,
         "query_type": record_type,
@@ -287,7 +287,7 @@ def _build_doh_metadata(
 # Add custom DoH lookup tool
 async def _dohLookup_impl(
     domain: str, profile_id: Optional[str] = None, record_type: str = "A"
-) -> dict:
+) -> dict[str, Any]:
     """Implementation of DoH lookup functionality.
 
     Perform a DNS-over-HTTPS lookup using a NextDNS profile.
@@ -356,7 +356,7 @@ async def _dohLookup_impl(
             response = await client.get(doh_url, params=params, headers=headers)
             response.raise_for_status()
 
-            result = response.json()
+            result: dict[str, Any] = response.json()
 
             # Add helpful metadata
             result["_metadata"] = _build_doh_metadata(
@@ -387,7 +387,9 @@ async def _dohLookup_impl(
 
 # Register the DoH lookup tool with MCP
 @mcp.tool()
-async def dohLookup(domain: str, profile_id: Optional[str] = None, record_type: str = "A") -> dict:
+async def dohLookup(
+    domain: str, profile_id: Optional[str] = None, record_type: str = "A"
+) -> dict[str, Any]:
     """Perform a DNS-over-HTTPS lookup using a NextDNS profile.
 
     This tool performs a DNS query through NextDNS's DoH endpoint, allowing you to test
@@ -432,7 +434,9 @@ async def dohLookup(domain: str, profile_id: Optional[str] = None, record_type: 
 # We provide custom implementations that accept JSON strings and convert them.
 
 
-async def _bulk_update_helper(profile_id: str, data: str, endpoint: str, param_name: str) -> dict:
+async def _bulk_update_helper(
+    profile_id: str, data: str, endpoint: str, param_name: str
+) -> dict[str, Any]:
     """Helper function for bulk update operations that require raw JSON arrays.
 
     This function handles the common pattern of:
@@ -474,14 +478,15 @@ async def _bulk_update_helper(profile_id: str, data: str, endpoint: str, param_n
         response = await client.put(url, json=array_data)
         response.raise_for_status()
         logger.info(f"Bulk update successful: {param_name} for profile {profile_id}")
-        return response.json()
+        result: dict[str, Any] = response.json()
+        return result
     except httpx.HTTPError as e:
         logger.error(f"HTTP error during bulk update: {str(e)}")
         return {"error": f"HTTP error: {str(e)}"}
 
 
 @mcp.tool()
-async def updateDenylist(profile_id: str, entries: str) -> dict:
+async def updateDenylist(profile_id: str, entries: str) -> dict[str, Any]:
     """Update the denylist for a profile.
 
     Replace the entire denylist with the provided domains. All previous denylist
@@ -506,7 +511,7 @@ async def updateDenylist(profile_id: str, entries: str) -> dict:
 
 
 @mcp.tool()
-async def updateAllowlist(profile_id: str, entries: str) -> dict:
+async def updateAllowlist(profile_id: str, entries: str) -> dict[str, Any]:
     """Update the allowlist for a profile.
 
     Replace the entire allowlist with the provided domains. All previous allowlist
@@ -531,7 +536,7 @@ async def updateAllowlist(profile_id: str, entries: str) -> dict:
 
 
 @mcp.tool()
-async def updateParentalControlServices(profile_id: str, services: str) -> dict:
+async def updateParentalControlServices(profile_id: str, services: str) -> dict[str, Any]:
     """Update parental control services for a profile.
 
     Replace the entire list of blocked services with the provided service IDs.
@@ -557,7 +562,7 @@ async def updateParentalControlServices(profile_id: str, services: str) -> dict:
 
 
 @mcp.tool()
-async def updateParentalControlCategories(profile_id: str, categories: str) -> dict:
+async def updateParentalControlCategories(profile_id: str, categories: str) -> dict[str, Any]:
     """Update parental control website categories for a profile.
 
     Replace the entire list of blocked website categories with the provided category IDs.
@@ -583,7 +588,7 @@ async def updateParentalControlCategories(profile_id: str, categories: str) -> d
 
 
 @mcp.tool()
-async def updateSecurityTlds(profile_id: str, tlds: str) -> dict:
+async def updateSecurityTlds(profile_id: str, tlds: str) -> dict[str, Any]:
     """Update blocked top-level domains (TLDs) for a profile.
 
     Replace the entire list of blocked TLDs with the provided list.
@@ -605,7 +610,7 @@ async def updateSecurityTlds(profile_id: str, tlds: str) -> dict:
 
 
 @mcp.tool()
-async def updatePrivacyBlocklists(profile_id: str, blocklists: str) -> dict:
+async def updatePrivacyBlocklists(profile_id: str, blocklists: str) -> dict[str, Any]:
     """Update privacy blocklists for a profile.
 
     Replace the entire list of enabled blocklists with the provided blocklist IDs.
@@ -631,7 +636,7 @@ async def updatePrivacyBlocklists(profile_id: str, blocklists: str) -> dict:
 
 
 @mcp.tool()
-async def updatePrivacyNatives(profile_id: str, natives: str) -> dict:
+async def updatePrivacyNatives(profile_id: str, natives: str) -> dict[str, Any]:
     """Update native tracking protection settings for a profile.
 
     Replace the entire list of native tracking protection features with the provided list.
