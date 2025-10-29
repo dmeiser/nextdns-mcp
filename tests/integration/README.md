@@ -2,11 +2,58 @@
 
 This directory contains integration tests that run against the **live NextDNS API**.
 
-## Overview
+## Test Files
 
-The `test_live_api.py` script comprehensively tests all 55 tools provided by the NextDNS MCP Server:
-- **54 API operations** from the OpenAPI specification
-- **1 custom DoH lookup tool**
+- **`run_integration_tests.py`** - **Unified test runner** (recommended)
+- `test_server_init.py` - Server initialization tests (pytest-based)
+- `test_live_api.py` - Live API validation of all 76 MCP tools
+- `test_live_access_control.py` - Access control validation (all scenarios)
+
+## Quick Start (Recommended)
+
+Use the unified test runner:
+
+```bash
+# Set your API key
+export NEXTDNS_API_KEY="your_api_key_here"
+
+# Run ALL integration tests
+poetry run python tests/integration/run_integration_tests.py
+
+# Run with auto-cleanup (no prompts)
+poetry run python tests/integration/run_integration_tests.py --auto-cleanup
+```
+
+### Run Specific Test Suites
+
+```bash
+# Run only API validation (76 tools)
+poetry run python tests/integration/run_integration_tests.py --only-api
+
+# Run only access control tests
+poetry run python tests/integration/run_integration_tests.py --only-access-control
+
+# Run only server initialization
+poetry run python tests/integration/run_integration_tests.py --only-server-init
+
+# Skip specific suites
+poetry run python tests/integration/run_integration_tests.py --skip-server-init
+```
+
+## Individual Test Scripts
+
+You can also run tests individually:
+
+```bash
+# Server initialization (pytest)
+poetry run pytest tests/integration/test_server_init.py -v
+
+# Live API validation (76 tools)
+poetry run python tests/integration/test_live_api.py
+
+# Access control validation
+poetry run python tests/integration/test_live_access_control.py
+```
 
 ## Prerequisites
 

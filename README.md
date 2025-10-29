@@ -24,6 +24,14 @@ This project provides an MCP server that exposes NextDNS API operations as tools
 - **Docker Support**: Containerized deployment with proper OCI labels
 - **Safety Mechanisms**: Write operation protections and validation
 
+## Documentation
+
+- Configuration: docs/configuration.md
+- Usage: docs/usage.md
+- Tools Catalog: docs/tools.md
+
+For a guided overview, see docs/README.md.
+
 ## Quick Start
 
 ### Prerequisites

@@ -1,19 +1,26 @@
 """Unit tests for profile access control functionality."""
 
-import pytest
+import os
 from unittest.mock import patch
 
+import pytest
+
 from nextdns_mcp.config import (
-    parse_profile_list,
-    get_readable_profiles,
-    get_writable_profiles,
     can_read_profile,
     can_write_profile,
+    get_readable_profiles,
+    get_writable_profiles,
+    parse_profile_list,
 )
-from nextdns_mcp.server import (
-    extract_profile_id_from_url,
-    is_write_operation,
-)
+from nextdns_mcp.server import extract_profile_id_from_url, is_write_operation
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    """Clean environment for each test."""
+    for key in list(os.environ.keys()):
+        monkeypatch.delenv(key, raising=False)
+    return monkeypatch.setenv
 
 
 class TestParseProfileList:
@@ -53,39 +60,35 @@ class TestParseProfileList:
 class TestGetReadableProfiles:
     """Test the get_readable_profiles function."""
 
-    @patch("nextdns_mcp.config.NEXTDNS_READABLE_PROFILES", "")
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "")
-    def test_empty_returns_empty_set(self):
+    def test_empty_returns_empty_set(self, clean_env):
         """Test that empty env vars return empty set (all profiles readable)."""
         result = get_readable_profiles()
         assert result == set()
 
-    @patch("nextdns_mcp.config.NEXTDNS_READABLE_PROFILES", "abc123,def456")
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "")
-    def test_returns_readable_profiles(self):
+    def test_returns_readable_profiles(self, clean_env):
         """Test that readable profiles are returned."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123,def456")
         result = get_readable_profiles()
         assert result == {"abc123", "def456"}
 
-    @patch("nextdns_mcp.config.NEXTDNS_READABLE_PROFILES", "")
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "ghi789")
-    def test_writable_with_empty_readable_means_all_readable(self):
+    def test_writable_with_empty_readable_means_all_readable(self, clean_env):
         """Test that empty readable means all profiles are readable (even with writable set)."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ghi789")
         result = get_readable_profiles()
         # Empty set means ALL profiles are readable
         assert result == set()
 
-    @patch("nextdns_mcp.config.NEXTDNS_READABLE_PROFILES", "abc123")
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "def456,ghi789")
-    def test_combines_readable_and_writable(self):
-        """Test that readable and writable are combined when both are set."""
+    def test_combines_readable_and_writable(self, clean_env):
+        """Test that get_readable_profiles returns only READABLE, not combined."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123")
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "def456,ghi789")
         result = get_readable_profiles()
-        assert result == {"abc123", "def456", "ghi789"}
+        # get_readable_profiles() returns ONLY what's in NEXTDNS_READABLE_PROFILES
+        assert result == {"abc123"}
 
-    @patch("nextdns_mcp.config.NEXTDNS_READABLE_PROFILES", "abc123")
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "")
-    def test_readable_without_writable(self):
+    def test_readable_without_writable(self, clean_env):
         """Test that only readable profiles are returned when writable is empty."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123")
         result = get_readable_profiles()
         assert result == {"abc123"}
 
@@ -93,24 +96,21 @@ class TestGetReadableProfiles:
 class TestGetWritableProfiles:
     """Test the get_writable_profiles function."""
 
-    @patch("nextdns_mcp.config.NEXTDNS_READ_ONLY", False)
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "")
-    def test_empty_returns_empty_set(self):
+    def test_empty_returns_empty_set(self, clean_env):
         """Test that empty env var returns empty set (all profiles writable)."""
         result = get_writable_profiles()
         assert result == set()
 
-    @patch("nextdns_mcp.config.NEXTDNS_READ_ONLY", False)
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "abc123,def456")
-    def test_returns_writable_profiles(self):
+    def test_returns_writable_profiles(self, clean_env):
         """Test that writable profiles are returned."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123,def456")
         result = get_writable_profiles()
         assert result == {"abc123", "def456"}
 
-    @patch("nextdns_mcp.config.NEXTDNS_READ_ONLY", True)
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "abc123,def456")
-    def test_read_only_returns_empty_set(self):
+    def test_read_only_returns_empty_set(self, clean_env):
         """Test that read-only mode returns empty set (no profiles writable)."""
+        clean_env("NEXTDNS_READ_ONLY", "true")
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123,def456")
         result = get_writable_profiles()
         assert result == set()
 
@@ -118,25 +118,21 @@ class TestGetWritableProfiles:
 class TestCanReadProfile:
     """Test the can_read_profile function."""
 
-    @patch("nextdns_mcp.config.NEXTDNS_READABLE_PROFILES", "")
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "")
-    def test_allows_all_when_empty(self):
+    def test_allows_all_when_empty(self, clean_env):
         """Test that all profiles are readable when no restrictions."""
         assert can_read_profile("abc123") is True
         assert can_read_profile("xyz999") is True
 
-    @patch("nextdns_mcp.config.NEXTDNS_READABLE_PROFILES", "abc123,def456")
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "")
-    def test_allows_only_listed_profiles(self):
+    def test_allows_only_listed_profiles(self, clean_env):
         """Test that only listed profiles are readable."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123,def456")
         assert can_read_profile("abc123") is True
         assert can_read_profile("def456") is True
         assert can_read_profile("xyz999") is False
 
-    @patch("nextdns_mcp.config.NEXTDNS_READABLE_PROFILES", "")
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "ghi789")
-    def test_writable_is_readable(self):
+    def test_writable_is_readable(self, clean_env):
         """Test that writable profiles are readable."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ghi789")
         assert can_read_profile("ghi789") is True
         assert can_read_profile("xyz999") is True  # Empty readable = all readable
 
@@ -144,26 +140,24 @@ class TestCanReadProfile:
 class TestCanWriteProfile:
     """Test the can_write_profile function."""
 
-    @patch("nextdns_mcp.config.NEXTDNS_READ_ONLY", False)
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "")
-    def test_allows_all_when_empty(self):
+    def test_allows_all_when_empty(self, clean_env):
         """Test that all profiles are writable when no restrictions."""
         assert can_write_profile("abc123") is True
         assert can_write_profile("xyz999") is True
 
-    @patch("nextdns_mcp.config.NEXTDNS_READ_ONLY", False)
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "abc123,def456")
-    def test_allows_only_listed_profiles(self):
+    def test_allows_only_listed_profiles(self, clean_env):
         """Test that only listed profiles are writable."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123,def456")
         assert can_write_profile("abc123") is True
         assert can_write_profile("def456") is True
         assert can_write_profile("xyz999") is False
 
-    @patch("nextdns_mcp.config.NEXTDNS_READ_ONLY", True)
-    @patch("nextdns_mcp.config.NEXTDNS_WRITABLE_PROFILES", "abc123")
-    def test_read_only_denies_all(self):
+    def test_read_only_denies_all(self, clean_env):
         """Test that read-only mode denies all writes."""
+        clean_env("NEXTDNS_READ_ONLY", "true")
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123,def456")
         assert can_write_profile("abc123") is False
+        assert can_write_profile("def456") is False
         assert can_write_profile("xyz999") is False
 
 

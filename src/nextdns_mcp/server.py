@@ -3,31 +3,32 @@
 SPDX-License-Identifier: MIT
 """
 
-import httpx
 import json
 import logging
 import os
 import re
 import sys
+from pathlib import Path
+from typing import Optional
+
+import httpx
 import yaml
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.openapi import DEFAULT_ROUTE_MAPPINGS, RouteMap
-from pathlib import Path
-from typing import Optional
 
 from .config import (
     DNS_STATUS_CODES,
     EXCLUDED_ROUTES,
     GLOBALLY_ALLOWED_OPERATIONS,
-    NEXTDNS_API_KEY,
     NEXTDNS_BASE_URL,
-    NEXTDNS_DEFAULT_PROFILE,
-    NEXTDNS_HTTP_TIMEOUT,
-    NEXTDNS_READ_ONLY,
     VALID_DNS_RECORD_TYPES,
     can_read_profile,
     can_write_profile,
+    get_api_key,
+    get_default_profile,
+    get_http_timeout,
+    is_read_only,
 )
 
 # Load environment variables from .env file
@@ -74,15 +75,15 @@ def build_route_mappings() -> list[RouteMap]:
 
 def extract_profile_id_from_url(url: str) -> Optional[str]:
     """Extract profile_id from a URL path.
-    
+
     Args:
         url: The URL path (e.g., "/profiles/abc123/settings")
-        
+
     Returns:
         The profile_id if found, None otherwise
     """
     # Match /profiles/{profile_id}/... pattern
-    match = re.match(r'^/?profiles/([^/]+)(?:/|$)', url)
+    match = re.match(r"^/?profiles/([^/]+)(?:/|$)", url)
     if match:
         return match.group(1)
     return None
@@ -90,10 +91,10 @@ def extract_profile_id_from_url(url: str) -> Optional[str]:
 
 def is_write_operation(method: str) -> bool:
     """Check if an HTTP method is a write operation.
-    
+
     Args:
         method: HTTP method (GET, POST, PUT, PATCH, DELETE)
-        
+
     Returns:
         True if it's a write operation, False otherwise
     """
@@ -104,61 +105,77 @@ def create_access_denied_response(
     method: str, url: str, error_msg: str, profile_id: str
 ) -> httpx.Response:
     """Create a 403 Forbidden response for access denied scenarios.
-    
+
     Args:
         method: HTTP method
         url: Request URL
         error_msg: Error message to include in response
         profile_id: The profile ID that was denied access
-        
+
     Returns:
         403 Forbidden Response object
     """
     response = httpx.Response(
         status_code=403,
         json={"error": error_msg, "profile_id": profile_id},
-        request=httpx.Request(method, str(url))
+        request=httpx.Request(method, str(url)),
     )
     return response
 
 
 class AccessControlledClient(httpx.AsyncClient):
     """HTTP client wrapper that enforces profile access control."""
-    
-    async def request(self, method: str, url: str, **kwargs) -> httpx.Response:
+
+    def _check_write_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
+        """Check write access and return error response if denied."""
+        if can_write_profile(profile_id):
+            return None
+
+        if is_read_only():
+            error_msg = "Write operation denied: server is in read-only mode"
+        else:
+            error_msg = f"Write access denied for profile: {profile_id}"
+
+        logger.warning(f"{error_msg} (method={method}, url={url})")
+        return create_access_denied_response(method, url, error_msg, profile_id)
+
+    def _check_read_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
+        """Check read access and return error response if denied."""
+        if can_read_profile(profile_id):
+            return None
+
+        error_msg = f"Read access denied for profile: {profile_id}"
+        logger.warning(f"{error_msg} (method={method}, url={url})")
+        return create_access_denied_response(method, url, error_msg, profile_id)
+
+    async def request(  # type: ignore[override]
+        self, method: str, url: str, **kwargs
+    ) -> httpx.Response:
         """Make an HTTP request with access control checks.
-        
+
         Args:
             method: HTTP method
             url: Request URL
             **kwargs: Additional request arguments
-            
+
         Returns:
             Response from the API, or a 403 Forbidden response if access is denied
         """
         # Extract profile_id from URL if present
         profile_id = extract_profile_id_from_url(str(url))
-        
+
         # Only check access if URL contains a profile_id
         if profile_id:
             is_write = is_write_operation(method)
-            
+
             if is_write:
-                # Check write access
-                if not can_write_profile(profile_id):
-                    if NEXTDNS_READ_ONLY:
-                        error_msg = f"Write operation denied: server is in read-only mode"
-                    else:
-                        error_msg = f"Write access denied for profile: {profile_id}"
-                    logger.warning(f"{error_msg} (method={method}, url={url})")
-                    return create_access_denied_response(method, url, error_msg, profile_id)
+                error_response = self._check_write_access(profile_id, method, url)
             else:
-                # Check read access
-                if not can_read_profile(profile_id):
-                    error_msg = f"Read access denied for profile: {profile_id}"
-                    logger.warning(f"{error_msg} (method={method}, url={url})")
-                    return create_access_denied_response(method, url, error_msg, profile_id)
-        
+                error_response = self._check_read_access(profile_id, method, url)
+
+            if error_response:
+                return error_response
+
         # Access allowed, proceed with the request
         return await super().request(method, url, **kwargs)
 
@@ -170,7 +187,7 @@ def create_nextdns_client() -> httpx.AsyncClient:
         httpx.AsyncClient: Configured async HTTP client with authentication and access control
     """
     headers = {
-        "X-Api-Key": NEXTDNS_API_KEY,
+        "X-Api-Key": get_api_key(),
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
@@ -180,7 +197,7 @@ def create_nextdns_client() -> httpx.AsyncClient:
     return AccessControlledClient(
         base_url=NEXTDNS_BASE_URL,
         headers=clean_headers,
-        timeout=NEXTDNS_HTTP_TIMEOUT,
+        timeout=get_http_timeout(),
         follow_redirects=True,
     )
 
@@ -212,19 +229,59 @@ def create_mcp_server() -> FastMCP:
         client=api_client,
         route_maps=route_maps,
         name="NextDNS MCP Server",
-        timeout=NEXTDNS_HTTP_TIMEOUT,
+        timeout=get_http_timeout(),
     )
 
     # Add metadata about the server
     logger.info("MCP server created successfully")
-    if NEXTDNS_DEFAULT_PROFILE:
-        logger.info(f"Default profile: {NEXTDNS_DEFAULT_PROFILE}")
+    default_profile = get_default_profile()
+    if default_profile:
+        logger.info(f"Default profile: {default_profile}")
 
     return mcp
 
 
 # Create the MCP server instance
 mcp = create_mcp_server()
+
+
+# Add custom DoH lookup tool
+def _get_target_profile(profile_id: Optional[str]) -> str | None:
+    """Get the target profile ID, using default if not specified."""
+    if profile_id:
+        return profile_id
+
+    # Use config function to get default profile
+    return get_default_profile()
+
+
+def _validate_record_type(record_type: str) -> tuple[bool, str]:
+    """Validate DNS record type.
+
+    Returns:
+        Tuple of (is_valid, record_type_upper)
+    """
+    record_type_upper = record_type.upper()
+    is_valid = record_type_upper in VALID_DNS_RECORD_TYPES
+    return is_valid, record_type_upper
+
+
+def _build_doh_metadata(
+    profile_id: str, domain: str, record_type: str, doh_url: str, status: int | None
+) -> dict:
+    """Build metadata for DoH response."""
+    metadata = {
+        "profile_id": profile_id,
+        "query_domain": domain,
+        "query_type": record_type,
+        "doh_endpoint": f"{doh_url}?name={domain}&type={record_type}",
+    }
+
+    if status is not None:
+        status_desc = DNS_STATUS_CODES.get(status, f"Unknown status code: {status}")
+        metadata["status_description"] = status_desc
+
+    return metadata
 
 
 # Add custom DoH lookup tool
@@ -269,16 +326,8 @@ async def _dohLookup_impl(
         # Check IPv6 address
         result = await dohLookup("google.com", "b282de", "AAAA")
     """
-    # Use default profile if not specified
-    target_profile = profile_id
-    if not target_profile:
-        # Re-read environment in case tests or callers override it after import
-        env_default = os.getenv("NEXTDNS_DEFAULT_PROFILE")
-        if env_default:
-            target_profile = env_default
-        else:
-            target_profile = NEXTDNS_DEFAULT_PROFILE
-
+    # Get target profile
+    target_profile = _get_target_profile(profile_id)
     if not target_profile:
         return {
             "error": "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
@@ -286,8 +335,8 @@ async def _dohLookup_impl(
         }
 
     # Validate record type
-    record_type_upper = record_type.upper()
-    if record_type_upper not in VALID_DNS_RECORD_TYPES:
+    is_valid, record_type_upper = _validate_record_type(record_type)
+    if not is_valid:
         logger.warning(f"Invalid DNS record type requested: {record_type}")
         return {
             "error": f"Invalid record type: {record_type}",
@@ -303,42 +352,33 @@ async def _dohLookup_impl(
 
     try:
         # Create a separate HTTP client for DoH queries (doesn't need API key)
-        async with httpx.AsyncClient(timeout=NEXTDNS_HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=get_http_timeout()) as client:
             response = await client.get(doh_url, params=params, headers=headers)
             response.raise_for_status()
 
             result = response.json()
 
             # Add helpful metadata
-            result["_metadata"] = {
-                "profile_id": target_profile,
-                "query_domain": domain,
-                "query_type": record_type_upper,
-                "doh_endpoint": f"{doh_url}?name={domain}&type={record_type_upper}",
-            }
+            result["_metadata"] = _build_doh_metadata(
+                target_profile,
+                domain,
+                record_type_upper,
+                doh_url,
+                result.get("Status"),
+            )
 
-            # Add human-readable status description
-            if "Status" in result:
-                status_desc = DNS_STATUS_CODES.get(
-                    result["Status"], f"Unknown status code: {result['Status']}"
+            if result.get("Status") is not None:
+                logger.debug(
+                    f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}"
                 )
-                result["_metadata"]["status_description"] = status_desc
-                logger.debug(f"DoH lookup result: {domain} -> {status_desc}")
 
             return result
 
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error during DoH lookup for {domain}: {str(e)}")
-        return {
-            "error": f"HTTP error during DoH lookup: {str(e)}",
-            "profile_id": target_profile,
-            "domain": domain,
-            "type": record_type_upper,
-        }
     except Exception as e:
-        logger.error(f"Unexpected error during DoH lookup for {domain}: {str(e)}")
+        error_type = "HTTP error" if isinstance(e, httpx.HTTPError) else "Unexpected error"
+        logger.error(f"{error_type} during DoH lookup for {domain}: {str(e)}")
         return {
-            "error": f"Unexpected error during DoH lookup: {str(e)}",
+            "error": f"{error_type} during DoH lookup: {str(e)}",
             "profile_id": target_profile,
             "domain": domain,
             "type": record_type_upper,
@@ -616,7 +656,7 @@ async def updatePrivacyNatives(profile_id: str, natives: str) -> dict:
 if __name__ == "__main__":
     logger.info("Starting NextDNS MCP Server...")
     logger.info(f"  Base URL: {NEXTDNS_BASE_URL}")
-    logger.info(f"  Timeout: {NEXTDNS_HTTP_TIMEOUT}s")
+    logger.info(f"  Timeout: {get_http_timeout()}s")
 
     # Run the MCP server
     mcp.run()
