@@ -7,6 +7,7 @@ import httpx
 import json
 import logging
 import os
+import re
 import sys
 import yaml
 from dotenv import load_dotenv
@@ -80,7 +81,6 @@ def extract_profile_id_from_url(url: str) -> Optional[str]:
     Returns:
         The profile_id if found, None otherwise
     """
-    import re
     # Match /profiles/{profile_id}/... pattern
     match = re.match(r'^/?profiles/([^/]+)(?:/|$)', url)
     if match:
@@ -100,6 +100,28 @@ def is_write_operation(method: str) -> bool:
     return method.upper() in ("POST", "PUT", "PATCH", "DELETE")
 
 
+def create_access_denied_response(
+    method: str, url: str, error_msg: str, profile_id: str
+) -> httpx.Response:
+    """Create a 403 Forbidden response for access denied scenarios.
+    
+    Args:
+        method: HTTP method
+        url: Request URL
+        error_msg: Error message to include in response
+        profile_id: The profile ID that was denied access
+        
+    Returns:
+        403 Forbidden Response object
+    """
+    response = httpx.Response(
+        status_code=403,
+        json={"error": error_msg, "profile_id": profile_id},
+        request=httpx.Request(method, str(url))
+    )
+    return response
+
+
 class AccessControlledClient(httpx.AsyncClient):
     """HTTP client wrapper that enforces profile access control."""
     
@@ -112,10 +134,7 @@ class AccessControlledClient(httpx.AsyncClient):
             **kwargs: Additional request arguments
             
         Returns:
-            Response from the API
-            
-        Raises:
-            httpx.HTTPStatusError: If access is denied (403)
+            Response from the API, or a 403 Forbidden response if access is denied
         """
         # Extract profile_id from URL if present
         profile_id = extract_profile_id_from_url(str(url))
@@ -132,25 +151,13 @@ class AccessControlledClient(httpx.AsyncClient):
                     else:
                         error_msg = f"Write access denied for profile: {profile_id}"
                     logger.warning(f"{error_msg} (method={method}, url={url})")
-                    # Return a 403 Forbidden response
-                    response = httpx.Response(
-                        status_code=403,
-                        json={"error": error_msg, "profile_id": profile_id},
-                        request=httpx.Request(method, str(url))
-                    )
-                    return response
+                    return create_access_denied_response(method, url, error_msg, profile_id)
             else:
                 # Check read access
                 if not can_read_profile(profile_id):
                     error_msg = f"Read access denied for profile: {profile_id}"
                     logger.warning(f"{error_msg} (method={method}, url={url})")
-                    # Return a 403 Forbidden response
-                    response = httpx.Response(
-                        status_code=403,
-                        json={"error": error_msg, "profile_id": profile_id},
-                        request=httpx.Request(method, str(url))
-                    )
-                    return response
+                    return create_access_denied_response(method, url, error_msg, profile_id)
         
         # Access allowed, proceed with the request
         return await super().request(method, url, **kwargs)
