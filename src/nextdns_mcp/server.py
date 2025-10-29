@@ -18,11 +18,15 @@ from typing import Optional
 from .config import (
     DNS_STATUS_CODES,
     EXCLUDED_ROUTES,
+    GLOBALLY_ALLOWED_OPERATIONS,
     NEXTDNS_API_KEY,
     NEXTDNS_BASE_URL,
     NEXTDNS_DEFAULT_PROFILE,
     NEXTDNS_HTTP_TIMEOUT,
+    NEXTDNS_READ_ONLY,
     VALID_DNS_RECORD_TYPES,
+    can_read_profile,
+    can_write_profile,
 )
 
 # Load environment variables from .env file
@@ -67,11 +71,96 @@ def build_route_mappings() -> list[RouteMap]:
     return [*EXCLUDED_ROUTES, *DEFAULT_ROUTE_MAPPINGS]
 
 
+def extract_profile_id_from_url(url: str) -> Optional[str]:
+    """Extract profile_id from a URL path.
+    
+    Args:
+        url: The URL path (e.g., "/profiles/abc123/settings")
+        
+    Returns:
+        The profile_id if found, None otherwise
+    """
+    import re
+    # Match /profiles/{profile_id}/... pattern
+    match = re.match(r'^/?profiles/([^/]+)(?:/|$)', url)
+    if match:
+        return match.group(1)
+    return None
+
+
+def is_write_operation(method: str) -> bool:
+    """Check if an HTTP method is a write operation.
+    
+    Args:
+        method: HTTP method (GET, POST, PUT, PATCH, DELETE)
+        
+    Returns:
+        True if it's a write operation, False otherwise
+    """
+    return method.upper() in ("POST", "PUT", "PATCH", "DELETE")
+
+
+class AccessControlledClient(httpx.AsyncClient):
+    """HTTP client wrapper that enforces profile access control."""
+    
+    async def request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Make an HTTP request with access control checks.
+        
+        Args:
+            method: HTTP method
+            url: Request URL
+            **kwargs: Additional request arguments
+            
+        Returns:
+            Response from the API
+            
+        Raises:
+            httpx.HTTPStatusError: If access is denied (403)
+        """
+        # Extract profile_id from URL if present
+        profile_id = extract_profile_id_from_url(str(url))
+        
+        # Only check access if URL contains a profile_id
+        if profile_id:
+            is_write = is_write_operation(method)
+            
+            if is_write:
+                # Check write access
+                if not can_write_profile(profile_id):
+                    if NEXTDNS_READ_ONLY:
+                        error_msg = f"Write operation denied: server is in read-only mode"
+                    else:
+                        error_msg = f"Write access denied for profile: {profile_id}"
+                    logger.warning(f"{error_msg} (method={method}, url={url})")
+                    # Return a 403 Forbidden response
+                    response = httpx.Response(
+                        status_code=403,
+                        json={"error": error_msg, "profile_id": profile_id},
+                        request=httpx.Request(method, str(url))
+                    )
+                    return response
+            else:
+                # Check read access
+                if not can_read_profile(profile_id):
+                    error_msg = f"Read access denied for profile: {profile_id}"
+                    logger.warning(f"{error_msg} (method={method}, url={url})")
+                    # Return a 403 Forbidden response
+                    response = httpx.Response(
+                        status_code=403,
+                        json={"error": error_msg, "profile_id": profile_id},
+                        request=httpx.Request(method, str(url))
+                    )
+                    return response
+        
+        # Access allowed, proceed with the request
+        return await super().request(method, url, **kwargs)
+
+
 def create_nextdns_client() -> httpx.AsyncClient:
-    """Create an authenticated HTTP client for NextDNS API.
+    """Create an authenticated HTTP client for NextDNS API with access control.
 
     Returns:
-        httpx.AsyncClient: Configured async HTTP client with authentication
+        httpx.AsyncClient: Configured async HTTP client with authentication and access control
     """
     headers = {
         "X-Api-Key": NEXTDNS_API_KEY,
@@ -81,7 +170,7 @@ def create_nextdns_client() -> httpx.AsyncClient:
     # Remove any headers that weren't set to actual values to satisfy type checkers
     clean_headers = {key: value for key, value in headers.items() if value is not None}
 
-    return httpx.AsyncClient(
+    return AccessControlledClient(
         base_url=NEXTDNS_BASE_URL,
         headers=clean_headers,
         timeout=NEXTDNS_HTTP_TIMEOUT,
