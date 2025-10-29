@@ -2,73 +2,93 @@
 
 This document provides essential guidance for AI agents working on the NextDNS MCP Server codebase.
 
-## 1. Core Architecture & Purpose
+## 1. Architecture: OpenAPI-Driven Tool Generation
 
-- **Purpose**: This project is a Python-based Model Context Protocol (MCP) server for the NextDNS API. It exposes NextDNS functionality as "tools" for AI agents to use.
-- **Core Technology**: The server is built using the `fastmcp` library.
-- **Declarative Approach**: The server's tools are generated automatically from an OpenAPI specification file: `src/nextdns_mcp/nextdns-openapi.yaml`. **To add or change API functionality, you must edit this YAML file.** The server code in `src/nextdns_mcp/server.py` then uses `FastMCP.from_openapi()` to create the tools.
-- **Configuration**: All configuration is managed via environment variables (e.g., `NEXTDNS_API_KEY`). See `src/nextdns_mcp/config.py` for details. Secrets should never be hardcoded.
+**The Key Insight**: This server uses a declarative, specification-first approach. The MCP server is NOT hand-coded—it's auto-generated from `src/nextdns_mcp/nextdns-openapi.yaml` using `FastMCP.from_openapi()`.
 
-## 2. Development Workflow
+**To add/modify API functionality**:
+1. Edit the OpenAPI YAML file (add paths, operations, schemas)
+2. The server regenerates automatically on next run
+3. Exception: Array-body PUT endpoints (see "Custom Tools" below)
 
-### Running the Server
-- **Local Development**: Use Poetry to manage dependencies and run the server.
-  ```bash
-  # Install dependencies
-  poetry install
+**Why this matters**: Don't look for traditional route handlers or controllers. The mapping happens in `server.py:create_mcp_server()` via `FastMCP.from_openapi()`. Tool names are derived from `operationId` fields in the OpenAPI spec.
 
-  # Run the server
-  poetry run python -m src.nextdns_mcp.server
-  ```
-- **Docker**: A multi-stage `Dockerfile` is provided for building a lean, production-ready image.
-  ```bash
-  docker build -t nextdns-mcp .
-  ```
+## 2. Custom Tools Pattern (Array-Body Workaround)
 
-### Testing Strategy (Critical)
-This project uses a three-tier testing approach. Understanding it is crucial for making safe and reliable changes.
+**Problem**: FastMCP doesn't support raw JSON arrays as request bodies (needs objects with named fields).
 
-1.  **Unit Tests (`tests/unit/`)**:
-    - Fast, isolated tests using `pytest` and mocks.
-    - **Run command**: `poetry run pytest tests/unit`
-    - **Coverage**: Maintain >=85% coverage. Run with `poetry run pytest --cov=src/nextdns_mcp`.
+**Solution**: Seven custom tools in `server.py` that accept JSON array strings:
+- `updateDenylist`, `updateAllowlist`, `updateParentalControlServices`, etc.
+- Pattern: `entries: str` parameter → parse JSON → validate is array → PUT to API
+- Helper: `_bulk_update_helper()` centralizes this pattern
 
-2.  **Integration Tests (`tests/integration/`)**:
-    - Verify server initialization and tool registration.
-    - `test_server_init.py` is a key file here.
-    - **Run command**: `poetry run pytest tests/integration`
+**When to add custom tools**:
+- Array-body endpoints (excluded via `EXCLUDED_ROUTES` in `config.py`)
+- Special logic like `dohLookup` (DNS testing without API key)
+- Follow existing pattern: separate `_impl()` function + `@mcp.tool()` decorator
 
-3.  **Live API Validation (`tests/integration/test_live_api.py`)**:
-    - **CRITICAL**: This is an end-to-end test against the *live* NextDNS API. It is the primary way to validate that all 55 MCP tools work correctly.
-    - **Run command**:
-      ```bash
-      export NEXTDNS_API_KEY="your_key_here"
-      poetry run python tests/integration/test_live_api.py
-      ```
-    - **Safety**: The script creates a temporary "Validation Profile" to avoid altering existing user configurations. It will prompt for deletion upon completion.
-    - **Requirement**: Before reporting completion of any feature or fix that touches an API endpoint, you **must** run this script and ensure all tests pass.
+## 3. Configuration: Docker Secrets + Env Vars
 
-## 3. Safety Rules (Non-Negotiable)
+**API Key Loading** (`config.py:get_api_key()`):
+1. Check `NEXTDNS_API_KEY` env var
+2. Fallback to `NEXTDNS_API_KEY_FILE` (Docker secrets path)
+3. Fails fast on module import if missing
 
-- **NEVER Delete Profiles Without Permission**: The `deleteProfile` tool is powerful and destructive. Do not use it unless explicitly instructed and confirmed by the user. The live API test script is permitted to delete the temporary profile it creates, but only after user confirmation.
-- **Write Operations on Test Profiles Only**: When making changes that involve creating, updating, or deleting resources (e.g., adding a domain to a denylist), always target a designated test profile.
-- **Invoke MCP Tools, Don't Call APIs Directly**: When writing tests, especially in `test_live_api.py`, do not use `httpx` to call the NextDNS API directly. Instead, import the server instance and use the MCP tools to ensure the entire stack is tested.
-  ```python
-  # Correct way to test in test_live_api.py
-  from nextdns_mcp import server
+**Critical**: `validate_configuration()` runs on import—server won't start without valid API key.
 
-  # Get tools
-  tools = await server.mcp.get_tools()
+## 4. Testing Strategy (3-Tier Pyramid)
 
-  # Call a tool
-  await tools['getProfile'].run(arguments={'profile_id': 'some_id'})
-  ```
+### Unit Tests (`tests/unit/`)
+- **Target**: 85%+ coverage
+- **Run**: `poetry run pytest tests/unit --cov=src/nextdns_mcp`
+- **Pattern**: Mock external calls (use `unittest.mock.AsyncMock` for httpx)
+- **Example**: `test_doh_lookup.py` mocks `httpx.AsyncClient` to test DNS logic
 
-## 4. Key Files & Directories
+### Integration Tests (`tests/integration/`)
+- **Purpose**: Server initialization, tool registration
+- **Run**: `poetry run pytest tests/integration`
+- **Fast**: Uses mocked OpenAPI specs, no network calls
 
-- `src/nextdns_mcp/nextdns-openapi.yaml`: The source of truth for all API-based tools.
-- `src/nextdns_mcp/server.py`: The main server entrypoint. Contains `FastMCP.from_openapi()` logic and any custom tool implementations (like `dohLookup`).
-- `src/nextdns_mcp/config.py`: Handles loading of environment variables and API keys.
-- `tests/integration/test_live_api.py`: The script for end-to-end validation of all tools.
-- `AGENTS.md`: Contains the original, more detailed rules. Refer to it for specifics not covered here.
-- `Dockerfile`: Defines the containerized build and deployment.
+### Live API Validation (`tests/integration/test_live_api.py`)
+- **CRITICAL**: End-to-end test of ALL 76 tools against real NextDNS API
+- **Run**: `poetry run python tests/integration/test_live_api.py`
+- **Safety**: Creates isolated "Validation Profile [timestamp]"
+- **Must invoke via MCP server**: `from nextdns_mcp import server; tools = await server.mcp.get_tools()`
+- **When required**: Before completing ANY feature touching API endpoints
+- **Cleanup**: Prompts user before deleting test profile (use `--auto-delete-profile` flag to skip)
+
+## 5. Development Commands
+
+```bash
+# Local development
+poetry install
+poetry run python -m nextdns_mcp.server
+
+# Run unit tests with coverage
+poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=html
+
+# Run integration tests
+poetry run pytest tests/integration
+
+# Live API validation (requires NEXTDNS_API_KEY)
+export NEXTDNS_API_KEY="your_key"
+poetry run python tests/integration/test_live_api.py
+
+# Docker build (multi-stage, Python 3.13-slim)
+docker build -t nextdns-mcp .
+```
+
+## 6. Key Files Reference
+
+- `src/nextdns_mcp/nextdns-openapi.yaml`: Source of truth for 68+ API operations
+- `src/nextdns_mcp/server.py`: FastMCP server + 8 custom tools (lines 250-527)
+- `src/nextdns_mcp/config.py`: Env vars, excluded routes, DNS constants
+- `tests/integration/test_live_api.py`: 76-tool validation script (1200+ lines)
+- `catalog.yaml`: Docker MCP Gateway integration metadata
+
+## 7. Safety Rules (Non-Negotiable)
+
+- **NEVER delete profiles** without explicit user confirmation (except test profile in validation script)
+- **Write operations** only against designated test profiles
+- **Test via MCP tools**, not direct API calls (ensures protocol layer testing)
+- **Run live validation** before claiming completion of API-touching features
