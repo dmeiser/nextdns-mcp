@@ -15,7 +15,7 @@ This file contains repository-specific agent rules. Agents should follow these w
     - Use mocks for external dependencies (HTTP calls, file I/O)
     - Acceptable uncovered lines: module-level initialization, `if __name__ == "__main__"` blocks
     - Coverage report available at: `htmlcov/index.html` after running tests with `--cov-report=html`
-- Docker: provide a `Dockerfile` that produces a small, runnable image; prefer using official `python:3.12-slim` as base.
+- Docker: provide a `Dockerfile` that produces a small, runnable image; prefer using official `python:3.13-slim` as base.
 - Keep `TODO.md` progress indicators in sync with the current phase while executing tasks.
 - **Write Operation Safety Rules:**
   - When running validation tests, you are permitted to run `tests/integration/test_live_api.py --auto-delete-profile`, which will delete the profile created for the  validation run.
