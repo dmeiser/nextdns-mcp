@@ -8,13 +8,7 @@ This file contains repository-specific agent rules. Agents should follow these w
 - Configuration should be environment-variable first. Example: `NEXTDNS_API_KEY` for API access.
 - Provide a minimal health endpoint at `/health` returning 200 OK and JSON `{ "status": "ok" }`.
 - Tests: add pytest-based unit tests for new functionality and run them with `poetry run pytest`.
-  - **Unit Test Coverage Requirements:**
-    - Maintain minimum 85% code coverage for all business logic
-    - Run coverage reports with: `poetry run pytest --cov=src/nextdns_mcp --cov-report=term-missing`
-    - Test all critical paths: API key loading, HTTP client creation, DoH lookup, settings operations
-    - Use mocks for external dependencies (HTTP calls, file I/O)
-    - Acceptable uncovered lines: module-level initialization, `if __name__ == "__main__"` blocks
-    - Coverage report available at: `htmlcov/index.html` after running tests with `--cov-report=html`
+  - See "Code Quality Standards" section below for coverage requirements and quality metrics
 - Docker: provide a `Dockerfile` that produces a small, runnable image; prefer using official `python:3.13-slim` as base.
 - Keep `TODO.md` progress indicators in sync with the current phase while executing tasks.
 - **Write Operation Safety Rules:**
@@ -68,8 +62,8 @@ This file contains repository-specific agent rules. Agents should follow these w
 1. **Unit Tests** (`tests/unit/`)
    - Fast, isolated tests with mocked dependencies
    - Test individual functions and modules
-   - Target: 85%+ coverage of business logic
    - Run frequently during development
+   - See "Code Quality Standards" section for coverage requirements
 
 2. **Integration Tests** (`tests/integration/`)
    - Test server initialization and MCP server creation
@@ -78,26 +72,178 @@ This file contains repository-specific agent rules. Agents should follow these w
    - Fast enough to run in CI/CD
 
 3. **Live API Validation** (`tests/integration/test_live_api.py`)
-   - Comprehensive end-to-end testing against live NextDNS API
-   - Invokes ALL 55 MCP tools through server.py
-   - Creates isolated "Validation Profile" for safety
-   - Requires valid NextDNS API key
-   - User confirmation required before cleanup
+   - End-to-end testing against live NextDNS API
+   - See "Integration Testing Requirements" section above for complete details
    - Run before major releases or when troubleshooting production issues
 
-### Test Coverage Expectations
-
-- **Core Functions**: 100% coverage required
-  - `get_api_key()` - API key loading
-  - `load_openapi_spec()` - Spec file loading
-  - `create_nextdns_client()` - HTTP client setup
-  - `_dohLookup_impl()` - Custom DoH lookup
-
-- **Acceptable Gaps**:
-  - Module-level `sys.exit()` calls (inherently difficult to test)
-  - `if __name__ == "__main__"` blocks (entry points)
-  - Trivial wrapper functions that delegate to implementations
-
-- **Current Coverage**: 87% (92 statements, 12 uncovered)
-
 Merging policy: small, incremental PRs. Preserve existing README/CI content; when adding new top-level files, update README to reflect run/test/build instructions.
+
+## Code Quality Standards
+
+All code changes must meet the following quality metrics before work is considered complete. These standards ensure maintainability, reliability, and consistency across the codebase.
+
+### 1. Code Formatting and Type Checking
+
+**CRITICAL**: Code formatting and type checking must be the **final step** before validation:
+
+1. Run `isort` to organize imports:
+   ```bash
+   poetry run isort src/ tests/
+   ```
+
+2. Run `black` to format code:
+   ```bash
+   poetry run black src/ tests/
+   ```
+
+3. Run `mypy` for type checking:
+   ```bash
+   poetry run mypy src/
+   ```
+
+**Workflow Order**:
+- Make code changes
+- Write/update tests
+- Run formatters: `isort` → `black`
+- Run type checker: `mypy` (fix any errors)
+- Run tests and validation
+- **If any code changes are needed after validation, repeat the formatting steps**
+
+The last commits before a successful validation run MUST be formatting/type-checking changes only.
+
+### 2. Unit Test Coverage Requirements
+
+**CRITICAL**: All unit tests must pass with 100% success rate. Failing tests are NEVER acceptable.
+
+**Minimum Coverage Standards**:
+- **Project-wide**: >95% code coverage
+- **Per-file**: No single file may have <95% coverage
+- **Exceptions**: Only for truly untestable code (e.g., `if __name__ == "__main__"`, module-level `sys.exit()`)
+
+**Running Coverage**:
+```bash
+# Generate coverage report
+poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term-missing --cov-report=html
+
+# View HTML report
+open htmlcov/index.html
+```
+
+**Coverage Validation**:
+- Check overall percentage in terminal output
+- Review HTML report for per-file coverage
+- Ensure no file falls below 95%
+- Document any intentional gaps with inline comments explaining why they're untestable
+- **All tests must pass** - zero failures, zero errors
+
+### 3. Integration Test Requirements
+
+**CRITICAL**: All integration tests must pass with 100% success rate. Failing tests are NEVER acceptable.
+
+**Running Integration Tests**:
+```bash
+# Run all integration tests
+poetry run pytest tests/integration
+
+# Run live API validation
+export NEXTDNS_API_KEY="your_key"
+poetry run python tests/integration/test_live_api.py
+```
+
+**Integration Test Validation**:
+- All tests must pass completely
+- No errors, no failures, no skipped tests (unless intentionally marked)
+- Fix any failures before proceeding
+- See "Integration Testing Requirements" section for safety rules
+
+### 4. Cyclomatic Complexity Standards
+
+**Project Complexity**: Grade A
+- Measured using `radon` tool
+- Project average complexity must be grade A
+- Run: `poetry run radon cc src/ -a`
+
+**Function Complexity**: Maximum Grade B
+- No individual function may exceed grade B (cyclomatic complexity ≤11)
+- Check with: `poetry run radon cc src/ -nc`
+- If a function exceeds grade B:
+  - Refactor into smaller functions
+  - Extract complex conditional logic
+  - Use early returns to reduce nesting
+
+**Complexity Grading Scale** (Radon):
+- A: 1-5 (simple, low risk)
+- B: 6-11 (more complex, moderate risk)
+- C: 11-20 (complex, high risk) ❌ Not allowed
+- D: 21-50 (very complex, very high risk) ❌ Not allowed
+- F: 51+ (extremely complex, extreme risk) ❌ Not allowed
+
+### 5. Pre-Commit Quality Checklist
+
+Before running integration tests or claiming work is complete:
+
+- [ ] Run `poetry run isort src/ tests/`
+- [ ] Run `poetry run black src/ tests/`
+- [ ] Run `poetry run mypy src/` (0 errors)
+- [ ] Run `poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (>95% coverage, **ALL tests pass**)
+- [ ] Verify per-file coverage: all files >95% in `htmlcov/index.html`
+- [ ] Run `poetry run radon cc src/ -a` (verify grade A)
+- [ ] Run `poetry run radon cc src/ -nc` (verify no functions exceed grade B)
+- [ ] Run integration tests: `poetry run pytest tests/integration` (**ALL tests pass**)
+- [ ] Run live API validation: `poetry run python tests/integration/test_live_api.py` (**ALL tests pass**)
+- [ ] Commit formatting changes as final commit before validation
+
+**CRITICAL**: If ANY check fails, fix the issues and restart from step 1. Continue iterating through all quality checks until every standard is met with zero failures.
+
+### 6. Quality Tools Configuration
+
+**isort** (import sorting):
+- Configured in `pyproject.toml` under `[tool.isort]` (if present)
+- Use defaults if no configuration exists
+- Ensures consistent import organization
+
+**black** (code formatting):
+- Line length: 100 characters
+- Target version: Python 3.13
+- Configuration in `pyproject.toml`:
+  ```toml
+  [tool.black]
+  line-length = 100
+  target-version = ["py313"]
+  ```
+
+**mypy** (type checking):
+- Strict mode recommended
+- Add type hints to all function signatures
+- Use `typing` module for complex types
+
+**radon** (complexity analysis):
+- Installed as dev dependency
+- Use `cc` (cyclomatic complexity) command
+- Use `-a` flag for average complexity
+- Use `-nc` flag to show only functions above grade B
+
+### 7. Handling Quality Failures
+
+**CRITICAL**: Code quality is non-negotiable. If any check fails, the quality pipeline must be rerun until ALL standards are met.
+
+**Failure Response Process**:
+
+1. **isort/black failures**: Should auto-fix, re-run all subsequent checks
+2. **mypy failures**: Add type hints, fix type errors, document `# type: ignore` if absolutely necessary, then restart quality checks
+3. **Test failures (unit or integration)**: 
+   - Debug and fix the failing test or code
+   - **NEVER ignore, skip, or comment out failing tests**
+   - Restart quality checks from step 1 after fixes
+4. **Coverage <95%**: Add missing test cases, remove dead code, or document why code is untestable, then restart quality checks
+5. **Complexity >B**: Refactor function into smaller units, extract methods, simplify logic, then restart quality checks
+
+**Iteration Loop**:
+- Fix the issue identified
+- Run `isort` → `black` → `mypy`
+- Run all unit tests with coverage
+- Run all integration tests
+- If any check fails, repeat the loop
+- Continue until 100% of quality standards are met
+
+**Never skip quality checks** — they catch bugs before production and ensure code maintainability. Failing tests indicate broken code that must be fixed, not ignored.
