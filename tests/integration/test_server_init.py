@@ -63,10 +63,13 @@ class TestServerInitialization:
 
         from nextdns_mcp import server
 
-        assert hasattr(server, "NEXTDNS_API_KEY")
+        # Check for functions and constants
+        assert hasattr(server, "get_api_key")  # Function, not constant
+        assert hasattr(server, "get_http_timeout")  # Function, not constant
         assert hasattr(server, "NEXTDNS_BASE_URL")
-        assert hasattr(server, "NEXTDNS_HTTP_TIMEOUT")
         assert server.NEXTDNS_BASE_URL == "https://api.nextdns.io"
+        assert callable(server.get_api_key)
+        assert callable(server.get_http_timeout)
 
     @pytest.mark.skip(reason="Module-level initialization prevents testing different env configs")
     def test_server_default_profile_is_optional(self, monkeypatch, mock_api_key):
