@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 import pytest
 
-from nextdns_mcp.server import _doh_lookup_impl as dohLookup
+from nextdns_mcp.server import _dohLookup_impl as dohLookup
 
 
 @pytest.fixture
@@ -51,22 +51,39 @@ class TestDohLookup:
             assert result["_metadata"]["query_type"] == "A"
 
     @pytest.mark.asyncio
-    async def test_doh_lookup_uses_default_profile(self):
+    async def test_doh_lookup_uses_default_profile(self, monkeypatch):
         """Test that dohLookup uses NEXTDNS_DEFAULT_PROFILE when profile_id not provided."""
-        # The module was imported with NEXTDNS_DEFAULT_PROFILE="test123"
+        test_profile = "test123"
+
+        # Patch environment and reload config
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", test_profile)
+        monkeypatch.setenv("NEXTDNS_API_KEY", "dummy_key")
+
+        import importlib
+
+        import nextdns_mcp.server
+
+        importlib.reload(nextdns_mcp.server)
+
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = Mock()
-            mock_response.json.return_value = {"Status": 0, "Answer": []}
+            mock_response.json.return_value = {
+                "Status": 0,
+                "Answer": [],
+            }
             mock_client.get.return_value = mock_response
             mock_client.__aenter__.return_value = mock_client
             mock_client.__aexit__.return_value = AsyncMock()
             mock_client_class.return_value = mock_client
 
-            result = await dohLookup("example.com")
+            # Use the reloaded module's function
+            result = await nextdns_mcp.server._dohLookup_impl("example.com")
 
-            # Should use the default profile we set at module level
-            assert result["_metadata"]["profile_id"] == "test123"
+            assert "_metadata" in result
+            assert result["_metadata"]["profile_id"] == test_profile
+            assert result["_metadata"]["query_domain"] == "example.com"
+            assert result["_metadata"]["query_type"] == "A"
 
     @pytest.mark.skip(reason="Module-level constant binding prevents reliable testing")
     @pytest.mark.asyncio

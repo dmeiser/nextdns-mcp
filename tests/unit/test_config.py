@@ -2,6 +2,7 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -104,19 +105,41 @@ class TestGetApiKey:
 class TestEnvironmentConfiguration:
     """Test environment variable configuration."""
 
-    @pytest.mark.skip(reason="Module-level initialization prevents testing different env configs")
-    def test_default_timeout_value(self, monkeypatch, mock_api_key):
+    def test_default_timeout_value(self, monkeypatch):
         """Test default timeout is 30 seconds."""
-        # This test is skipped because the module is already loaded with specific
-        # timeout values, and reloading doesn't work reliably in pytest.
-        pass
+        monkeypatch.setenv("NEXTDNS_API_KEY", "dummy_key")
+        monkeypatch.delenv("NEXTDNS_HTTP_TIMEOUT", raising=False)
 
-    @pytest.mark.skip(reason="Module-level initialization prevents testing different env configs")
-    def test_custom_timeout_value(self, monkeypatch, mock_api_key):
+        # Clean import of config
+        import sys
+
+        if "nextdns_mcp.config" in sys.modules:
+            del sys.modules["nextdns_mcp.config"]
+
+        from nextdns_mcp import config
+
+        assert config.get_http_timeout() == 30.0
+
+    def test_custom_timeout_value(self, monkeypatch):
         """Test custom timeout can be set."""
-        # This test is skipped because the module is already loaded with specific
-        # timeout values, and reloading doesn't work reliably in pytest.
-        pass
+        monkeypatch.setenv("NEXTDNS_API_KEY", "dummy_key")
+        monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "60")
+
+        with patch.dict(
+            "os.environ", {"NEXTDNS_API_KEY": "dummy_key", "NEXTDNS_HTTP_TIMEOUT": "60"}, clear=True
+        ):
+            # Clean import of config
+            import importlib
+            import sys
+
+            if "nextdns_mcp.config" in sys.modules:
+                del sys.modules["nextdns_mcp.config"]
+
+            # Import and reload to ensure fresh state
+            import nextdns_mcp.config
+
+            importlib.reload(nextdns_mcp.config)
+            assert nextdns_mcp.config.get_http_timeout() == 60.0
 
     def test_base_url_is_correct(self, monkeypatch, mock_api_key):
         """Test that base URL is set correctly."""

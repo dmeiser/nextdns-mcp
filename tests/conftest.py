@@ -3,9 +3,21 @@
 import tempfile
 from pathlib import Path
 from typing import Generator
+from unittest.mock import patch
 
 import pytest
 import yaml
+
+
+@pytest.fixture(autouse=True)
+def intercept_exit_and_validation():
+    """Disable validation and intercept sys.exit() during module imports."""
+
+    def mock_exit(status):
+        raise SystemExit(status)
+
+    with patch("nextdns_mcp.config.validate_configuration"), patch("sys.exit", mock_exit):
+        yield
 
 
 @pytest.fixture
