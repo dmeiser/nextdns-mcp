@@ -68,3 +68,7 @@ htmlcov/
 
 # Agent settings
 .claude/
+
+# Local caches
+.ruff_cache/
+.mypy_cache/
