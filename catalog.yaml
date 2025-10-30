@@ -31,6 +31,21 @@ registry:
             type: string
             description: "HTTP request timeout in seconds"
             default: "30"
+          readable_profiles:
+            type: string
+            description: "Comma-separated list of profile IDs that can be read (use 'ALL' for all profiles, empty for none)"
+            default: ""
+            example: "abc123,def456"
+          writable_profiles:
+            type: string
+            description: "Comma-separated list of profile IDs that can be written (use 'ALL' for all profiles, empty for none)"
+            default: ""
+            example: "test789"
+          read_only:
+            type: string
+            description: "Enable read-only mode to disable all write operations (true/false)"
+            default: "false"
+            enum: ["true", "false"]
 
     # Available tools (76 total: 68 enabled API operations + 7 custom bulk operations + 1 custom DoH lookup)
     # Note: 2 operations excluded from tools (truly unsupported):
@@ -163,10 +178,10 @@ registry:
         - parental-controls
         - bulk-operations
         - api
+        - access-control
       license: "MIT"
 
     # Documentation
-    # TODO: Replace 'yourusername' with your actual GitHub username or organization
-    readme: "https://github.com/yourusername/nextdns-mcp/blob/main/README.md"
-    source: "https://github.com/yourusername/nextdns-mcp"
+    readme: "https://github.com/dmeiser/nextdns-mcp/blob/main/README.md"
+    source: "https://github.com/dmeiser/nextdns-mcp"
     upstream: "https://api.nextdns.io"

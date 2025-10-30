@@ -1,124 +1,45 @@
-# Usage
+# Usage and Examples
 
-How to run the NextDNS MCP Server locally, in Docker, and with Docker MCP Gateway. Includes examples for invoking tools.
+How to list tools and call them from Docker MCP Gateway or other MCP clients.
 
-## Running Locally (Development)
-
-Prerequisites:
-- Python 3.13+
-- Poetry
-
-Steps:
-
+## List tools
 ```bash
-poetry install
-poetry run python -m nextdns_mcp.server
+docker mcp tools ls
 ```
 
-Environment variables can be set via a `.env` file (see Configuration) or your shell.
+## Call tools (flag style)
 
-## Running with Docker
-
-Build the image:
-
+DoH lookup
 ```bash
-docker build -t nextdns-mcp:latest .
+# Test resolution of a domain (A record)
+docker mcp tools call dohLookup '{"domain":"google.com","record_type":"A","profile_id":"YOUR_PROFILE_ID"}'
+
+# IPv6 (AAAA)
+docker mcp tools call dohLookup '{"domain":"google.com","record_type":"AAAA","profile_id":"YOUR_PROFILE_ID"}'
 ```
 
-Run with environment variables:
-
+Get profile settings
 ```bash
-docker run -i --rm \
-  -e NEXTDNS_API_KEY=your_api_key_here \
-  -e NEXTDNS_DEFAULT_PROFILE=your_profile_id \
-  nextdns-mcp:latest
+docker mcp tools call getSettings '{"profile_id":"abc123"}'
 ```
 
-Run with a `.env` file (development):
-
+Bulk updates that take JSON array strings
 ```bash
-docker run -i --rm --env-file .env nextdns-mcp:latest
+# Denylist
+# Bash/Zsh
+docker mcp tools call updateDenylist '{"profile_id":"abc123","entries":"[\"ads.example.com\",\"tracker.net\"]"}'
+# PowerShell (use single quotes to avoid escaping quotes)
+docker mcp tools call updateDenylist '{"profile_id":"abc123","entries":"[\"ads.example.com\",\"tracker.net\"]"}'
+
+# Blocked TLDs
+docker mcp tools call updateSecurityTlds '{"profile_id":"abc123","tlds":"[\"zip\",\"mov\"]"}'
 ```
 
-Run with Docker secret file (recommended):
+## Windows vs POSIX quoting
+- docker mcp tools call expects a single JSON string argument for params.
+- Use single quotes on Bash/Zsh; on PowerShell use double quotes with escaped inner quotes.
+- For complex payloads, build the JSON in a variable or load from a file.
 
-```bash
-echo "your_api_key_here" > /tmp/api_key.txt
-chmod 600 /tmp/api_key.txt
-docker run -i --rm \
-  -v /tmp/api_key.txt:/run/secrets/nextdns_api_key:ro \
-  -e NEXTDNS_API_KEY_FILE=/run/secrets/nextdns_api_key \
-  nextdns-mcp:latest
-```
-
-Note: MCP servers communicate via stdio; no network ports are exposed.
-
-## Using Docker MCP Gateway (Recommended)
-
-1) Build and tag the image:
-
-```bash
-docker build -t nextdns-mcp:latest .
-```
-
-2) Import the catalog to register the server:
-
-```bash
-docker mcp catalog import ./catalog.yaml
-```
-
-3) Enable the server:
-
-```bash
-docker mcp server enable nextdns
-```
-
-During enablement, set the required secret `nextdns.api_key`.
-
-4) Set or update the secret later (optional):
-
-```bash
-echo "your_api_key_here" | docker mcp secret set nextdns.api_key
-docker mcp secret ls
-```
-
-## Invoking Tools
-
-Example: DNS-over-HTTPS lookup through a profile
-
-```bash
-docker mcp tools call nextdns dohLookup \
-  --domain "adwords.google.com" \
-  --profile_id "abc123" \
-  --record_type "A"
-```
-
-Other examples:
-
-```bash
-# IPv6 lookup
-docker mcp tools call nextdns dohLookup --domain "google.com" --record_type "AAAA"
-
-# MX records
-docker mcp tools call nextdns dohLookup --domain "gmail.com" --record_type "MX"
-```
-
-## Access Control Examples
-
-Read-only mode (no writes allowed):
-
-```env
-NEXTDNS_READ_ONLY=true
-```
-
-Restrict reading to specific profiles:
-
-```env
-NEXTDNS_READABLE_PROFILES=home123,work456
-```
-
-Allow writing to a dedicated test profile only:
-
-```env
-NEXTDNS_WRITABLE_PROFILES=test123
-```
+## Tips
+- Set NEXTDNS_DEFAULT_PROFILE to omit profile_id for many tools.
+- Use read-only mode when exploring: set NEXTDNS_READ_ONLY=true.

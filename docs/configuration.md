@@ -1,78 +1,46 @@
-# Configuration
+# Configuration Reference
 
-This page describes all configuration for the NextDNS MCP Server, how to use environment variables, `.env` files, and Docker secrets.
+All configuration is done via environment variables (or Docker MCP Gateway secrets/config).
 
-The server validates configuration on import. If a required value is missing (API key), it will exit with a clear error.
+## Environment variables
 
-## Environment Variables
+| Variable | Type | Default | Required | Description |
+|----------|------|---------|----------|-------------|
+| NEXTDNS_API_KEY | string | - | Yes | API key used for authenticated NextDNS API calls |
+| NEXTDNS_API_KEY_FILE | string (path) | - | No | Path to a file containing only the API key (e.g., Docker secret) |
+| NEXTDNS_DEFAULT_PROFILE | string | - | No | Default profile ID to use when a tool parameter omits profile_id |
+| NEXTDNS_HTTP_TIMEOUT | number (seconds) | 30 | No | HTTP timeout for API and DoH requests |
+| NEXTDNS_READ_ONLY | bool (true/false/1/0/yes/no) | false | No | Disables all write operations when true |
+| NEXTDNS_READABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for reads; special value "ALL" allows reads of all profiles; empty/unset denies all reads |
+| NEXTDNS_WRITABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for writes; special value "ALL" allows writes to all profiles; empty/unset denies all writes; ignored if NEXTDNS_READ_ONLY=true |
 
-Required:
-- `NEXTDNS_API_KEY`: NextDNS API key. Get from https://my.nextdns.io/account
-  - Alternative: `NEXTDNS_API_KEY_FILE` path to a file containing the key (e.g., Docker secret)
+Notes
+- Global tools bypass per-profile checks: listProfiles and dohLookup.
+- "Write implies read": profiles allowed for writes are automatically considered readable.
 
-Optional:
-- `NEXTDNS_DEFAULT_PROFILE`: Default profile ID used by tools that accept an optional `profile_id` (e.g., `dohLookup`).
-- `NEXTDNS_HTTP_TIMEOUT`: HTTP timeout in seconds (default: `30`).
+## Examples
 
-Access Control:
-- `NEXTDNS_READABLE_PROFILES`: Comma-separated list of profile IDs that can be read. Empty or unset means all profiles are readable.
-- `NEXTDNS_WRITABLE_PROFILES`: Comma-separated list of profile IDs that can be written to. Empty or unset means all profiles are writable (unless read-only mode is enabled). Write implies read.
-- `NEXTDNS_READ_ONLY`: Enable read-only mode (`true|1|yes` to enable). When enabled, all write operations are denied.
-
-Notes:
-- Global operations that do not reference a specific profile are always allowed (e.g., `listProfiles`, `dohLookup`).
-- Access control is enforced by the `AccessControlledClient` in `server.py`.
-
-## .env Files
-
-The server loads environment variables from a `.env` file if present using `python-dotenv`.
-
-Example `.env`:
-```env
-NEXTDNS_API_KEY=your_api_key_here
-NEXTDNS_DEFAULT_PROFILE=your_profile_id
-NEXTDNS_HTTP_TIMEOUT=30
-
-# Access control examples
-# NEXTDNS_READABLE_PROFILES=home123,work456
-# NEXTDNS_WRITABLE_PROFILES=test789
-# NEXTDNS_READ_ONLY=false
-```
-
-## Docker Secrets
-
-For production use, store the API key as a Docker secret and reference it with `NEXTDNS_API_KEY_FILE`.
-
-Example (non-swarm):
+Bash/Zsh
 ```bash
-# Create a secret file
-echo "your_api_key_here" > /tmp/nextdns_api_key
-chmod 600 /tmp/nextdns_api_key
-
-# Run with mounted secret
-docker run -i --rm \
-  -v /tmp/nextdns_api_key:/run/secrets/nextdns_api_key:ro \
-  -e NEXTDNS_API_KEY_FILE=/run/secrets/nextdns_api_key \
-  nextdns-mcp:latest
+export NEXTDNS_API_KEY=sk_live_...
+export NEXTDNS_DEFAULT_PROFILE=abc123
+export NEXTDNS_HTTP_TIMEOUT=45
+export NEXTDNS_READABLE_PROFILES=ALL
+export NEXTDNS_WRITABLE_PROFILES=test789
+# Read-only mode (overrides writes)
+export NEXTDNS_READ_ONLY=true
 ```
 
-## Excluded Routes and Custom Tools
+PowerShell
+```powershell
+$env:NEXTDNS_API_KEY = "sk_live_..."
+$env:NEXTDNS_DEFAULT_PROFILE = "abc123"
+$env:NEXTDNS_HTTP_TIMEOUT = "45"
+$env:NEXTDNS_READABLE_PROFILES = "ALL"
+$env:NEXTDNS_WRITABLE_PROFILES = "test789"
+$env:NEXTDNS_READ_ONLY = "true"
+```
 
-FastMCP cannot accept raw JSON arrays in request bodies, so several array-body PUT endpoints are excluded from auto-generation and implemented as custom tools that accept JSON array strings:
-
-- `updateDenylist`, `updateAllowlist`
-- `updateParentalControlServices`, `updateParentalControlCategories`
-- `updateSecurityTlds`
-- `updatePrivacyBlocklists`, `updatePrivacyNatives`
-
-Unsupported endpoints (excluded due to API limitations):
-- `GET /profiles/{profile_id}/analytics/domains;series` (NextDNS API returns 404)
-- `GET /profiles/{profile_id}/logs/stream` (SSE streaming not supported)
-
-These exclusions are defined in `EXCLUDED_ROUTES` in `src/nextdns_mcp/config.py` and handled in `server.py` with custom tool implementations.
-
-## Constants
-
-- `NEXTDNS_BASE_URL`: `https://api.nextdns.io`
-- `VALID_DNS_RECORD_TYPES`: Supported DNS record types for `dohLookup`
-- `DNS_STATUS_CODES`: Mapping of DNS response status codes to descriptions
+## Secrets best practices
+- Prefer NEXTDNS_API_KEY_FILE or Docker MCP Gateway secrets in production.
+- Ensure secret files are readable only by the runtime user and never committed to source control.
