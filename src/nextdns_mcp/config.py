@@ -61,16 +61,26 @@ def get_default_profile() -> Optional[str]:
     return os.getenv("NEXTDNS_DEFAULT_PROFILE")
 
 
-def get_readable_profiles() -> set[str]:
-    """Get readable profile list from environment."""
+def get_readable_profiles() -> set[str] | None:
+    """Get readable profile list from environment.
+
+    Returns:
+        None if empty/unset (deny all), empty set if "ALL" (allow all),
+        or set of specific profile IDs
+    """
     profiles = os.getenv("NEXTDNS_READABLE_PROFILES", "")
     return parse_profile_list(profiles)
 
 
-def get_writable_profiles() -> set[str]:
-    """Get writable profile list from environment."""
+def get_writable_profiles() -> set[str] | None:
+    """Get writable profile list from environment.
+
+    Returns:
+        None if empty/unset (deny all), empty set if "ALL" (allow all),
+        or set of specific profile IDs
+    """
     if is_read_only():
-        return set()
+        return None  # Read-only mode = deny all writes
     profiles = os.getenv("NEXTDNS_WRITABLE_PROFILES", "")
     return parse_profile_list(profiles)
 
@@ -81,45 +91,63 @@ def is_read_only() -> bool:
     return value in ("true", "1", "yes")
 
 
-def parse_profile_list(profile_str: str) -> set[str]:
+def parse_profile_list(profile_str: str) -> set[str] | None:
     """Parse a comma-separated list of profile IDs.
 
     Args:
         profile_str: Comma-separated string of profile IDs
 
     Returns:
-        Set of profile IDs (empty set if string is empty)
+        Set of profile IDs, None if string is empty/unset (deny all),
+        or empty set if "ALL"/"all" specified (allow all)
     """
     if not profile_str or not profile_str.strip():
-        return set()
+        return None  # Empty/unset = deny all
+
+    # Check for special "ALL" value
+    stripped = profile_str.strip()
+    if stripped.upper() == "ALL":
+        return set()  # Empty set = allow all
+
     return {p.strip() for p in profile_str.split(",") if p.strip()}
 
 
-def get_readable_profiles_set() -> set[str]:
+def get_readable_profiles_set() -> set[str] | None:
     """Get the set of profiles that are allowed to be read.
 
     Returns:
-        Set of profile IDs. Empty set means all profiles are readable.
+        None if no profiles are readable (deny all),
+        empty set if all profiles are readable (allow all),
+        or set of specific profile IDs
     """
     readable = get_readable_profiles()  # Get from env
     writable = get_writable_profiles()  # Get from env
 
-    # If readable is empty, all profiles are readable
+    # If readable is None (unset), deny all
+    if readable is None:
+        return None
+
+    # If readable is empty set (ALL), allow all
     if not readable:
         return set()
 
     # If readable is set, combine with writable (write implies read)
+    # Handle case where writable might be None
+    if writable is None:
+        return readable
     return readable | writable
 
 
-def get_writable_profiles_set() -> set[str]:
+def get_writable_profiles_set() -> set[str] | None:
     """Get the set of profiles that are allowed to be written to.
 
     Returns:
-        Set of profile IDs. Empty set means all profiles are writable (unless read-only mode).
+        None if no profiles are writable (deny all),
+        empty set if all profiles are writable (allow all),
+        or set of specific profile IDs
     """
     if is_read_only():
-        return set()
+        return None  # Read-only mode = deny all writes
     return get_writable_profiles()  # Already checked read-only flag
 
 
@@ -133,7 +161,9 @@ def can_read_profile(profile_id: str) -> bool:
         True if the profile can be read, False otherwise
     """
     readable = get_readable_profiles_set()
-    # Empty set means all profiles are readable
+    # None means deny all, empty set means allow all, otherwise check membership
+    if readable is None:
+        return False
     return not readable or profile_id in readable
 
 
@@ -149,7 +179,9 @@ def can_write_profile(profile_id: str) -> bool:
     if is_read_only():
         return False
     writable = get_writable_profiles_set()
-    # Empty set means all profiles are writable (unless read-only)
+    # None means deny all, empty set means allow all, otherwise check membership
+    if writable is None:
+        return False
     return not writable or profile_id in writable
 
 
@@ -169,15 +201,24 @@ def _log_access_control_settings() -> None:
     if is_read_only():
         logger.info("Read-only mode is ENABLED - all write operations are disabled")
 
-    if readable:
-        logger.info(f"Readable profiles restricted to: {sorted(readable)}")
-    else:
+    # Handle readable profiles
+    if readable is None:
+        logger.info("No profiles are readable (deny all by default)")
+    elif not readable:
         logger.info("All profiles are readable (no restrictions)")
+    else:
+        logger.info(f"Readable profiles restricted to: {sorted(readable)}")
 
-    if writable:
-        logger.info(f"Writable profiles restricted to: {sorted(writable)}")
-    elif not is_read_only():
-        logger.info("All profiles are writable (no restrictions)")
+    # Handle writable profiles
+    if writable is None:
+        if not is_read_only():
+            logger.info("No profiles are writable (deny all by default)")
+    elif not writable:
+        if not is_read_only():
+            logger.info("All profiles are writable (no restrictions)")
+    else:
+        if not is_read_only():
+            logger.info(f"Writable profiles restricted to: {sorted(writable)}")
 
 
 def validate_configuration() -> None:

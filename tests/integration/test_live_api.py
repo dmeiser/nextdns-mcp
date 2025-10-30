@@ -67,6 +67,12 @@ if not os.getenv("NEXTDNS_API_KEY"):
     print("  NEXTDNS_API_KEY=your_key_here")
     sys.exit(1)
 
+# Set profile access to ALL for integration testing (unless already set)
+if not os.getenv("NEXTDNS_READABLE_PROFILES"):
+    os.environ["NEXTDNS_READABLE_PROFILES"] = "ALL"
+if not os.getenv("NEXTDNS_WRITABLE_PROFILES"):
+    os.environ["NEXTDNS_WRITABLE_PROFILES"] = "ALL"
+
 # Import the MCP server
 from nextdns_mcp import server
 
@@ -1178,7 +1184,7 @@ Examples:
     # Handle profile deletion mode
     if args.delete_profile:
         await delete_profile(args.delete_profile)
-        return
+        return 0
 
     # Run test suite
     tester = MCPServerTester(
@@ -1186,6 +1192,9 @@ Examples:
         auto_delete_profile=args.auto_delete_profile,
     )
     await tester.run_all_tests()
+
+    # Return 0 for success (no failures), 1 if there were failures
+    return 0 if len(tester.failed) == 0 else 1
 
 
 if __name__ == "__main__":

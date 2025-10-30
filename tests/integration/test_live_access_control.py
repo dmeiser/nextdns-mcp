@@ -250,6 +250,15 @@ class AccessControlTester:
         """Run baseline tests with no access restrictions."""
         self.print_header("BASELINE TESTS (No Access Restrictions)")
 
+        # Set ALL access before creating profiles
+        await self.reinitialize_server_with_env(
+            {
+                "NEXTDNS_READABLE_PROFILES": "ALL",
+                "NEXTDNS_WRITABLE_PROFILES": "ALL",
+                "NEXTDNS_READ_ONLY": "false",
+            }
+        )
+
         # Create 3 test profiles
         profile1 = await self.create_test_profile(
             f"AC Test Profile 1 {datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -319,7 +328,13 @@ class AccessControlTester:
         self.print_header("READ-ONLY MODE TESTS")
 
         # Reinitialize with read-only mode
-        await self.reinitialize_server_with_env({"NEXTDNS_READ_ONLY": "true"})
+        await self.reinitialize_server_with_env(
+            {
+                "NEXTDNS_READ_ONLY": "true",
+                "NEXTDNS_READABLE_PROFILES": "ALL",
+                "NEXTDNS_WRITABLE_PROFILES": "ALL",
+            }
+        )
 
         print("\n--- Configuration ---")
         print("Read-only mode: ENABLED")
@@ -352,7 +367,7 @@ class AccessControlTester:
         await self.reinitialize_server_with_env(
             {
                 "NEXTDNS_READABLE_PROFILES": ",".join(allowed_profiles),
-                "NEXTDNS_WRITABLE_PROFILES": "",
+                "NEXTDNS_WRITABLE_PROFILES": ",".join(allowed_profiles),
                 "NEXTDNS_READ_ONLY": "false",
             }
         )
@@ -391,7 +406,7 @@ class AccessControlTester:
 
         await self.reinitialize_server_with_env(
             {
-                "NEXTDNS_READABLE_PROFILES": "",
+                "NEXTDNS_READABLE_PROFILES": "ALL",
                 "NEXTDNS_WRITABLE_PROFILES": writable_profile,
                 "NEXTDNS_READ_ONLY": "false",
             }
@@ -483,8 +498,8 @@ class AccessControlTester:
         await self.reinitialize_server_with_env(
             {
                 "NEXTDNS_READ_ONLY": "false",
-                "NEXTDNS_READABLE_PROFILES": "",
-                "NEXTDNS_WRITABLE_PROFILES": "",
+                "NEXTDNS_READABLE_PROFILES": "ALL",
+                "NEXTDNS_WRITABLE_PROFILES": "ALL",
             }
         )
 

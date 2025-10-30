@@ -27,13 +27,33 @@ class TestParseProfileList:
     """Test the parse_profile_list function."""
 
     def test_parse_empty_string(self):
-        """Test parsing an empty string returns empty set."""
+        """Test parsing an empty string returns None (deny all)."""
         result = parse_profile_list("")
-        assert result == set()
+        assert result is None
 
     def test_parse_whitespace_only(self):
-        """Test parsing whitespace-only string returns empty set."""
+        """Test parsing whitespace-only string returns None (deny all)."""
         result = parse_profile_list("   ")
+        assert result is None
+
+    def test_parse_all_uppercase(self):
+        """Test parsing 'ALL' returns empty set (allow all)."""
+        result = parse_profile_list("ALL")
+        assert result == set()
+
+    def test_parse_all_lowercase(self):
+        """Test parsing 'all' returns empty set (allow all)."""
+        result = parse_profile_list("all")
+        assert result == set()
+
+    def test_parse_all_mixed_case(self):
+        """Test parsing 'All' returns empty set (allow all)."""
+        result = parse_profile_list("All")
+        assert result == set()
+
+    def test_parse_all_with_whitespace(self):
+        """Test parsing ' ALL ' returns empty set (allow all)."""
+        result = parse_profile_list("  ALL  ")
         assert result == set()
 
     def test_parse_single_profile(self):
@@ -60,8 +80,14 @@ class TestParseProfileList:
 class TestGetReadableProfiles:
     """Test the get_readable_profiles function."""
 
-    def test_empty_returns_empty_set(self, clean_env):
-        """Test that empty env vars return empty set (all profiles readable)."""
+    def test_empty_returns_none(self, clean_env):
+        """Test that empty env vars return None (deny all)."""
+        result = get_readable_profiles()
+        assert result is None
+
+    def test_all_returns_empty_set(self, clean_env):
+        """Test that 'ALL' returns empty set (allow all)."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
         result = get_readable_profiles()
         assert result == set()
 
@@ -71,12 +97,12 @@ class TestGetReadableProfiles:
         result = get_readable_profiles()
         assert result == {"abc123", "def456"}
 
-    def test_writable_with_empty_readable_means_all_readable(self, clean_env):
-        """Test that empty readable means all profiles are readable (even with writable set)."""
+    def test_writable_does_not_affect_readable(self, clean_env):
+        """Test that writable profiles don't affect get_readable_profiles result."""
         clean_env("NEXTDNS_WRITABLE_PROFILES", "ghi789")
         result = get_readable_profiles()
-        # Empty set means ALL profiles are readable
-        assert result == set()
+        # None means deny all (readable not set)
+        assert result is None
 
     def test_combines_readable_and_writable(self, clean_env):
         """Test that get_readable_profiles returns only READABLE, not combined."""
@@ -96,8 +122,14 @@ class TestGetReadableProfiles:
 class TestGetWritableProfiles:
     """Test the get_writable_profiles function."""
 
-    def test_empty_returns_empty_set(self, clean_env):
-        """Test that empty env var returns empty set (all profiles writable)."""
+    def test_empty_returns_none(self, clean_env):
+        """Test that empty env var returns None (deny all)."""
+        result = get_writable_profiles()
+        assert result is None
+
+    def test_all_returns_empty_set(self, clean_env):
+        """Test that 'ALL' returns empty set (allow all)."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
         result = get_writable_profiles()
         assert result == set()
 
@@ -107,19 +139,25 @@ class TestGetWritableProfiles:
         result = get_writable_profiles()
         assert result == {"abc123", "def456"}
 
-    def test_read_only_returns_empty_set(self, clean_env):
-        """Test that read-only mode returns empty set (no profiles writable)."""
+    def test_read_only_returns_none(self, clean_env):
+        """Test that read-only mode returns None (no profiles writable)."""
         clean_env("NEXTDNS_READ_ONLY", "true")
         clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123,def456")
         result = get_writable_profiles()
-        assert result == set()
+        assert result is None
 
 
 class TestCanReadProfile:
     """Test the can_read_profile function."""
 
-    def test_allows_all_when_empty(self, clean_env):
-        """Test that all profiles are readable when no restrictions."""
+    def test_denies_all_when_empty(self, clean_env):
+        """Test that no profiles are readable when not specified (deny all)."""
+        assert can_read_profile("abc123") is False
+        assert can_read_profile("xyz999") is False
+
+    def test_allows_all_when_set_to_all(self, clean_env):
+        """Test that all profiles are readable when set to ALL."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
         assert can_read_profile("abc123") is True
         assert can_read_profile("xyz999") is True
 
@@ -132,16 +170,24 @@ class TestCanReadProfile:
 
     def test_writable_is_readable(self, clean_env):
         """Test that writable profiles are readable."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123")
         clean_env("NEXTDNS_WRITABLE_PROFILES", "ghi789")
-        assert can_read_profile("ghi789") is True
-        assert can_read_profile("xyz999") is True  # Empty readable = all readable
+        assert can_read_profile("abc123") is True  # In readable list
+        assert can_read_profile("ghi789") is True  # In writable list (write implies read)
+        assert can_read_profile("xyz999") is False  # Not in either list
 
 
 class TestCanWriteProfile:
     """Test the can_write_profile function."""
 
-    def test_allows_all_when_empty(self, clean_env):
-        """Test that all profiles are writable when no restrictions."""
+    def test_denies_all_when_empty(self, clean_env):
+        """Test that no profiles are writable when not specified (deny all)."""
+        assert can_write_profile("abc123") is False
+        assert can_write_profile("xyz999") is False
+
+    def test_allows_all_when_set_to_all(self, clean_env):
+        """Test that all profiles are writable when set to ALL."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
         assert can_write_profile("abc123") is True
         assert can_write_profile("xyz999") is True
 
