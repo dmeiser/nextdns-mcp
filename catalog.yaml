@@ -1,4 +1,5 @@
-name: nextdns-mcp-catalog
+version: 3
+name: nextdns-mcp
 displayName: NextDNS MCP Server Catalog
 registry:
   nextdns:
@@ -18,34 +19,23 @@ registry:
         description: "API key from https://my.nextdns.io/account"
         example: "your_api_key_here"
 
-    # Optional environment variables (config)
-    config:
-      - name: nextdns
-        description: "NextDNS server configuration"
-        type: object
-        properties:
-          default_profile:
-            type: string
-            description: "Default NextDNS profile ID to use"
-          http_timeout:
-            type: string
-            description: "HTTP request timeout in seconds"
-            default: "30"
-          readable_profiles:
-            type: string
-            description: "Comma-separated list of profile IDs that can be read (use 'ALL' for all profiles, empty for none)"
-            default: ""
-            example: "abc123,def456"
-          writable_profiles:
-            type: string
-            description: "Comma-separated list of profile IDs that can be written (use 'ALL' for all profiles, empty for none)"
-            default: ""
-            example: "test789"
-          read_only:
-            type: string
-            description: "Enable read-only mode to disable all write operations (true/false)"
-            default: "false"
-            enum: ["true", "false"]
+    # Environment variables for configuration
+    env:
+      - name: NEXTDNS_DEFAULT_PROFILE
+        description: "Default NextDNS profile ID to use when profile_id is omitted"
+        value: ""
+      - name: NEXTDNS_HTTP_TIMEOUT
+        description: "HTTP request timeout in seconds"
+        value: "30"
+      - name: NEXTDNS_READABLE_PROFILES
+        description: "Comma-separated list of profile IDs that can be read (use 'ALL' for all profiles, empty for none)"
+        value: "ALL"
+      - name: NEXTDNS_WRITABLE_PROFILES
+        description: "Comma-separated list of profile IDs that can be written (use 'ALL' for all profiles, empty for none)"
+        value: "ALL"
+      - name: NEXTDNS_READ_ONLY
+        description: "Enable read-only mode to disable all write operations (true/false)"
+        value: "false"
 
     # Available tools (76 total: 68 enabled API operations + 7 custom bulk operations + 1 custom DoH lookup)
     # Note: 2 operations excluded from tools (truly unsupported):

@@ -27,34 +27,37 @@ echo "YOUR_API_KEY" | docker mcp secret set nextdns.api_key
 Write-Output "YOUR_API_KEY" | docker mcp secret set nextdns.api_key
 ```
 
-Create a config file (gateway-config.yaml)
+Create a config file (config.yaml on your Desktop or anywhere convenient)
 ```yaml
 servers:
   nextdns:
-    config:
-      nextdns:
-        # Default profile used when profile_id is omitted
-        default_profile: "abc123"
-        # HTTP timeout in seconds (string)
-        http_timeout: "45"
-        # Access control lists (strings): "ALL", "" (deny all), or comma-separated IDs
-        readable_profiles: "ALL"
-        writable_profiles: "test789"
-        # Read-only mode disables all writes (use "true" or "false")
-        read_only: "true"
+    env:
+      NEXTDNS_DEFAULT_PROFILE: "a97d4e"
+      NEXTDNS_HTTP_TIMEOUT: "45"
+      NEXTDNS_READABLE_PROFILES: "ALL"
+      NEXTDNS_WRITABLE_PROFILES: "ALL"
+      NEXTDNS_READ_ONLY: "false"
 ```
 
-Apply and verify
+Apply configuration
 ```bash
-# Apply configuration from file
-docker mcp config write .\gateway-config.yaml
-# View current configuration
-docker mcp config read
+# Copy config to Docker MCP directory
+# Linux/macOS
+cp config.yaml ~/.docker/mcp/config.yaml
+
+# Windows PowerShell
+Copy-Item config.yaml "$env:USERPROFILE\.docker\mcp\config.yaml" -Force
+
+# Verify it was copied correctly
+cat ~/.docker/mcp/config.yaml  # Linux/macOS
+Get-Content "$env:USERPROFILE\.docker\mcp\config.yaml"  # Windows
 ```
 
 Notes
-- All values are strings (Gateway stores strings); use "true"/"false" for booleans.
-- If a key is omitted, the server falls back to its built-in default.
+- The config file must be placed at `~/.docker/mcp/config.yaml` for Docker MCP Gateway to read it.
+- Use `env:` with direct environment variable names (e.g., `NEXTDNS_READABLE_PROFILES`), not nested `config:` structure.
+- Set `NEXTDNS_READABLE_PROFILES` and `NEXTDNS_WRITABLE_PROFILES` to `"ALL"` to allow all profiles.
+- Set to `""` (empty string) to deny all, or comma-separated profile IDs like `"abc123,def456"`.
 - You can also set environment variables when running without Gateway (see Configuration).
 
 
@@ -65,23 +68,25 @@ Notes
 docker mcp tools ls
 
 # Call a tool
-docker mcp tools call listProfiles '{}'
+docker mcp tools call listProfiles
 ```
 
 ## Example calls
 
 ```bash
 # DoH lookup (uses default profile if set)
-docker mcp tools call dohLookup '{"domain":"example.com","record_type":"A","profile_id":"YOUR_PROFILE_ID"}'
+docker mcp tools call dohLookup domain=example.com record_type=A profile_id=YOUR_PROFILE_ID
 
 # Get profile settings
-docker mcp tools call getSettings '{"profile_id":"abc123"}'
+docker mcp tools call getSettings profile_id=abc123
 
-# Bulk update denylist (JSON array string parameter)
-# Bash/Zsh
-docker mcp tools call updateDenylist '{"profile_id":"abc123","entries":"[\"ads.example.com\",\"tracker.net\"]"}'
-# PowerShell
-docker mcp tools call updateDenylist '{"profile_id":"abc123","entries":"[\"ads.example.com\",\"tracker.net\"]"}'
+# Add individual entries to denylist (recommended for Docker MCP CLI)
+docker mcp tools call addToDenylist profile_id=abc123 id=ads.example.com
+docker mcp tools call addToDenylist profile_id=abc123 id=tracker.net
+
+# Note: Bulk update tools (updateDenylist, updateAllowlist, etc.) that accept 
+# JSON array parameters work when called via MCP protocol but may have issues 
+# with complex JSON through Docker MCP CLI. Use individual add/remove operations instead.
 ```
 
 ## Troubleshooting

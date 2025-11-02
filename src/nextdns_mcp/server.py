@@ -161,6 +161,9 @@ class AccessControlledClient(httpx.AsyncClient):
         Returns:
             Response from the API, or a 403 Forbidden response if access is denied
         """
+        # Log the actual URL being requested for debugging
+        logger.info(f"HTTP Request: {method} {url}")
+
         # Extract profile_id from URL if present
         profile_id = extract_profile_id_from_url(str(url))
 

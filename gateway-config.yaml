@@ -1,0 +1,8 @@
+servers:
+  nextdns:
+    env:
+      NEXTDNS_DEFAULT_PROFILE: "abc123"
+      NEXTDNS_HTTP_TIMEOUT: "45"
+      NEXTDNS_READABLE_PROFILES: "ALL"
+      NEXTDNS_WRITABLE_PROFILES: "ALL"
+      NEXTDNS_READ_ONLY: "false"

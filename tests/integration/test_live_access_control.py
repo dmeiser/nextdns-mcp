@@ -17,13 +17,13 @@ Requirements:
 Usage:
     # Test with no restrictions (baseline)
     poetry run python tests/integration/test_live_access_control.py
-    
+
     # Test with read-only mode
     NEXTDNS_READ_ONLY=true poetry run python tests/integration/test_live_access_control.py
-    
+
     # Test with specific readable profiles
     NEXTDNS_READABLE_PROFILES=profile1,profile2 poetry run python tests/integration/test_live_access_control.py
-    
+
     # Test with specific writable profiles
     NEXTDNS_WRITABLE_PROFILES=test_profile poetry run python tests/integration/test_live_access_control.py
 """

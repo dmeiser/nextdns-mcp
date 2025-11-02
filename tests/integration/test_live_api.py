@@ -21,7 +21,7 @@ Note: 2 operations excluded from MCP tools (truly unsupported):
 - 1 getAnalyticsDomainsSeries - returns 404 from NextDNS API (API bug)
 
 Note: 7 bulk replacement operations now supported via custom implementations:
-- updateDenylist, updateAllowlist, updateParentalControlServices, 
+- updateDenylist, updateAllowlist, updateParentalControlServices,
   updateParentalControlCategories, updateSecurityTlds, updatePrivacyBlocklists,
   updatePrivacyNatives (accept JSON array strings, convert to array body)
 

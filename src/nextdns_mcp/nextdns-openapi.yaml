@@ -69,6 +69,12 @@ components:
           items:
             $ref: '#/components/schemas/Profile'
 
+    ProfileResponse:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/Profile'
+
     Settings:
       type: object
       properties:
@@ -400,7 +406,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Profile'
+                $ref: '#/components/schemas/ProfileResponse'
         '400':
           description: Bad request
           content:
@@ -429,7 +435,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Profile'
+                $ref: '#/components/schemas/ProfileResponse'
         '404':
           description: Profile not found
           content:
@@ -458,11 +464,13 @@ paths:
                   example: "Updated Home Network"
       responses:
         '200':
-          description: Profile updated successfully
+          description: Profile updated successfully (with response body)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Profile'
+                $ref: '#/components/schemas/ProfileResponse'
+        '204':
+          description: Profile updated successfully (no content returned)
         '404':
           description: Profile not found
           content:
@@ -535,12 +543,8 @@ paths:
             schema:
               $ref: '#/components/schemas/Settings'
       responses:
-        '200':
+        '204':
           description: Settings updated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Settings'
 
   /profiles/{profile_id}/settings/logs:
     get:
@@ -563,7 +567,8 @@ paths:
                     type: boolean
                   retention:
                     type: integer
-                    enum: [1, 7, 30, 90, 180, 365]
+                    description: Log retention period in seconds (86400=1d, 604800=7d, 2592000=30d, 7776000=90d, 15552000=180d, 31536000=365d)
+                    enum: [86400, 604800, 2592000, 7776000, 15552000, 31536000]
                   location:
                     type: string
 
@@ -585,11 +590,12 @@ paths:
                   type: boolean
                 retention:
                   type: integer
-                  enum: [1, 7, 30, 90, 180, 365]
+                  description: Log retention period in seconds
+                  enum: [86400, 604800, 2592000, 7776000, 15552000, 31536000]
                 location:
                   type: string
       responses:
-        '200':
+        '204':
           description: Logs settings updated
 
   /profiles/{profile_id}/settings/blockPage:
@@ -629,7 +635,7 @@ paths:
                 enabled:
                   type: boolean
       responses:
-        '200':
+        '204':
           description: Block page settings updated
 
   /profiles/{profile_id}/settings/performance:
@@ -652,9 +658,12 @@ paths:
                   ecs:
                     type: boolean
                     description: EDNS Client Subnet
-                  cache:
+                  cacheBoost:
                     type: boolean
                     description: Caching boost
+                  cnameFlattening:
+                    type: boolean
+                    description: CNAME flattening
 
     patch:
       summary: Update performance settings
@@ -672,10 +681,12 @@ paths:
               properties:
                 ecs:
                   type: boolean
-                cache:
+                cacheBoost:
+                  type: boolean
+                cnameFlattening:
                   type: boolean
       responses:
-        '200':
+        '204':
           description: Performance settings updated
 
   # Analytics - Status
@@ -749,42 +760,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnalyticsTopList'
-
-  /profiles/{profile_id}/analytics/domains;series:
-    get:
-      summary: Get top domains analytics time-series
-      description: |
-        Retrieves time-series statistics about the most queried domains for charting.
-
-        **Known Issue**: This endpoint returns 404 from NextDNS API. While the documentation
-        suggests all analytics endpoints support ;series suffix, this specific endpoint appears
-        to not be implemented. Tool generation is disabled until the API is fixed.
-      operationId: getAnalyticsDomainsSeries
-      tags:
-        - Analytics
-      parameters:
-        - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
-        - $ref: '#/components/parameters/To'
-        - name: status
-          in: query
-          description: Filter by domain status
-          schema:
-            type: string
-            enum: [default, blocked, allowed]
-        - name: root
-          in: query
-          description: Group by root domain
-          schema:
-            type: boolean
-            default: false
-      responses:
-        '200':
-          description: Top domains time-series data
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AnalyticsTimeSeriesData'
 
   # Analytics - Query Types
   /profiles/{profile_id}/analytics/queryTypes:
@@ -1189,12 +1164,8 @@ paths:
             schema:
               $ref: '#/components/schemas/AddContentEntry'
       responses:
-        '200':
+        '204':
           description: Domain added successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
     put:
       summary: Replace denylist
@@ -1223,12 +1194,8 @@ paths:
               description: Array of domain names to set as the complete denylist
               example: ["blocked.com", "malicious.org"]
       responses:
-        '200':
+        '204':
           description: Denylist replaced successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/denylist/{entry_id}:
     patch:
@@ -1256,12 +1223,8 @@ paths:
               example:
                 active: false
       responses:
-        '200':
+        '204':
           description: Entry updated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
     delete:
       summary: Remove domain from denylist
@@ -1276,12 +1239,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/EntryId'
       responses:
-        '200':
+        '204':
           description: Domain removed successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   # Allowlist Management
   /profiles/{profile_id}/allowlist:
@@ -1319,12 +1278,8 @@ paths:
             schema:
               $ref: '#/components/schemas/AddContentEntry'
       responses:
-        '200':
+        '204':
           description: Domain added successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
     put:
       summary: Replace allowlist
@@ -1353,12 +1308,8 @@ paths:
               description: Array of domain names to set as the complete allowlist
               example: ["example.com", "trusted.org"]
       responses:
-        '200':
+        '204':
           description: Allowlist replaced successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/allowlist/{entry_id}:
     patch:
@@ -1386,12 +1337,8 @@ paths:
               example:
                 active: false
       responses:
-        '200':
+        '204':
           description: Entry updated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
     delete:
       summary: Remove domain from allowlist
@@ -1406,12 +1353,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/EntryId'
       responses:
-        '200':
+        '204':
           description: Domain removed successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   # Parental Control - Services
   /profiles/{profile_id}/parentalControl/services:
@@ -1474,12 +1417,8 @@ paths:
             schema:
               $ref: '#/components/schemas/AddContentEntry'
       responses:
-        '200':
+        '204':
           description: Service added successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/parentalControl/services/{id}:
     patch:
@@ -1512,12 +1451,8 @@ paths:
               example:
                 active: false
       responses:
-        '200':
+        '204':
           description: Entry updated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
     delete:
       summary: Remove service from parental control
@@ -1537,12 +1472,8 @@ paths:
           schema:
             type: string
       responses:
-        '200':
+        '204':
           description: Service removed successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   # Parental Control - Categories
   /profiles/{profile_id}/parentalControl/categories:
@@ -1605,12 +1536,8 @@ paths:
             schema:
               $ref: '#/components/schemas/AddContentEntry'
       responses:
-        '200':
+        '204':
           description: Category added successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/parentalControl/categories/{id}:
     patch:
@@ -1643,12 +1570,8 @@ paths:
               example:
                 active: false
       responses:
-        '200':
+        '204':
           description: Entry updated successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
     delete:
       summary: Remove category from parental control
@@ -1668,12 +1591,8 @@ paths:
           schema:
             type: string
       responses:
-        '200':
+        '204':
           description: Category removed successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   # Security Settings
   /profiles/{profile_id}/security:
@@ -1753,7 +1672,7 @@ paths:
                 csam:
                   type: boolean
       responses:
-        '200':
+        '204':
           description: Security settings updated
 
   # Privacy Settings
@@ -1798,7 +1717,7 @@ paths:
                 allowAffiliate:
                   type: boolean
       responses:
-        '200':
+        '204':
           description: Privacy settings updated
 
   # Parental Control Settings
@@ -1847,7 +1766,7 @@ paths:
                 blockBypass:
                   type: boolean
       responses:
-        '200':
+        '204':
           description: Parental control settings updated
 
   # Security - TLD Management
@@ -1888,12 +1807,8 @@ paths:
             example:
               id: xyz
       responses:
-        '200':
+        '204':
           description: TLD added successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
     put:
       summary: Replace security TLD blocklist
@@ -1922,12 +1837,8 @@ paths:
               description: Array of TLD names to set as the complete blocklist
               example: ["xyz", "top", "zip"]
       responses:
-        '200':
+        '204':
           description: TLD blocklist replaced successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/security/tlds/{entry_id}:
     delete:
@@ -1943,12 +1854,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/EntryId'
       responses:
-        '200':
+        '204':
           description: TLD removed successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   # Privacy - Blocklists
   /profiles/{profile_id}/privacy/blocklists:
@@ -1988,12 +1895,8 @@ paths:
             example:
               id: nextdns-recommended
       responses:
-        '200':
+        '204':
           description: Blocklist added successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
     put:
       summary: Replace privacy blocklists
@@ -2022,12 +1925,8 @@ paths:
               description: Array of blocklist IDs to set as the complete collection
               example: ["nextdns-recommended", "easylist"]
       responses:
-        '200':
+        '204':
           description: Blocklists replaced successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/privacy/blocklists/{entry_id}:
     delete:
@@ -2043,12 +1942,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/EntryId'
       responses:
-        '200':
+        '204':
           description: Blocklist removed successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   # Privacy - Native Tracking Protection
   /profiles/{profile_id}/privacy/natives:
@@ -2088,12 +1983,8 @@ paths:
             example:
               id: alexa
       responses:
-        '200':
+        '204':
           description: Native tracking protection added successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
     put:
       summary: Replace native tracking protection
@@ -2122,12 +2013,8 @@ paths:
               description: Array of native tracker IDs to set as the complete collection
               example: ["alexa", "roku", "samsung"]
       responses:
-        '200':
+        '204':
           description: Native tracking protection replaced successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   /profiles/{profile_id}/privacy/natives/{entry_id}:
     delete:
@@ -2143,12 +2030,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/EntryId'
       responses:
-        '200':
+        '204':
           description: Native tracking protection removed successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationSuccess'
 
   # Logs
   /profiles/{profile_id}/logs:
@@ -2262,36 +2145,40 @@ paths:
 
   /profiles/{profile_id}/logs/download:
     get:
-      summary: Download logs as file
+      summary: Download all logs as file
       description: |
-        Downloads query logs as a file for offline analysis.
+        Downloads all available query logs as a file for offline analysis.
 
-        Supports filtering by date range and returns logs in a downloadable format.
+        **Important**: This endpoint does NOT accept date range or format parameters.
+        It returns a 302 redirect to a temporary download URL containing all available
+        logs in CSV format. Clients must follow redirects to download the file.
+        
+        **No filtering**: Date range filtering is not supported. The endpoint returns
+        all logs available for the profile according to the retention period configured
+        in the profile's log settings.
+        
+        **Format**: Always returns CSV format (not configurable).
       operationId: downloadLogs
       tags:
         - Logs
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
-        - $ref: '#/components/parameters/To'
-        - name: format
-          in: query
-          description: Download format
-          schema:
-            type: string
-            enum: [csv, json]
-            default: csv
+        # NO query parameters supported - endpoint rejects any query params with 400 error
       responses:
+        '302':
+          description: Redirect to temporary download URL (all logs, CSV format)
+          headers:
+            Location:
+              schema:
+                type: string
+              description: Temporary URL for downloading all available logs as CSV
         '200':
-          description: Log file
+          description: Log file (CSV format, all available logs)
           content:
             text/csv:
               schema:
                 type: string
                 format: binary
-            application/json:
-              schema:
-                type: object
 
 tags:
   - name: Profiles
