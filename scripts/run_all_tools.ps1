@@ -215,7 +215,7 @@ function Get-ToolArgs {
     $hoursAgoTimestamp = [DateTimeOffset]::UtcNow.AddHours(-1).ToUnixTimeSeconds()
     
     switch ($ToolName) {
-        { $_ -in @("getProfile", "updateProfile") } {
+        "getProfile" {
             return "profile_id=$ProfileId"
         }
         
@@ -256,7 +256,8 @@ function Get-ToolArgs {
         }
         
         "createProfile" {
-            return "name=`"Test Profile $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())`""
+            # Don't use quotes - Docker MCP CLI handles spaces correctly without them
+            return "name=Test_Profile_$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
         }
         
         { $_ -in @("addToAllowlist", "addToDenylist") } {
@@ -267,16 +268,28 @@ function Get-ToolArgs {
             return "profile_id=$ProfileId entry_id=test-example.com"
         }
         
-        { $_ -in @("addPrivacyBlocklist", "removePrivacyBlocklist") } {
+        "addPrivacyBlocklist" {
             return "profile_id=$ProfileId id=nextdns-recommended"
         }
         
-        { $_ -in @("addPrivacyNative", "removePrivacyNative") } {
+        "removePrivacyBlocklist" {
+            return "profile_id=$ProfileId entry_id=nextdns-recommended"
+        }
+        
+        "addPrivacyNative" {
             return "profile_id=$ProfileId id=apple"
         }
         
-        { $_ -in @("addSecurityTLD", "removeSecurityTLD") } {
+        "removePrivacyNative" {
+            return "profile_id=$ProfileId entry_id=apple"
+        }
+        
+        "addSecurityTLD" {
             return "profile_id=$ProfileId id=zip"
+        }
+        
+        "removeSecurityTLD" {
+            return "profile_id=$ProfileId entry_id=zip"
         }
         
         { $_ -in @("addToParentalControlCategories", "removeFromParentalControlCategories") } {
@@ -288,7 +301,7 @@ function Get-ToolArgs {
         }
         
         { $_ -in @("updateAllowlistEntry", "updateDenylistEntry") } {
-            return "profile_id=$ProfileId entry_id=example.com active=true"
+            return "profile_id=$ProfileId entry_id=test-example.com active=true"
         }
         
         { $_ -in @("updateParentalControlCategoryEntry") } {
@@ -300,7 +313,7 @@ function Get-ToolArgs {
         }
         
         "updateProfile" {
-            return "profile_id=$ProfileId name=`"Updated Test Profile`""
+            return "profile_id=$ProfileId name=Updated_Test_Profile"
         }
         
         "updateSettings" {
@@ -406,6 +419,24 @@ foreach ($toolName in $toolNames) {
     } else {
         # Get test arguments for this tool
         $toolArgs = Get-ToolArgs -ToolName $toolName
+        
+        # Pre-execution: Ensure entries exist for update operations
+        if ($toolName -eq "updateAllowlistEntry") {
+            Write-Info "Pre-check: Ensuring test entry exists in allowlist..."
+            docker mcp tools call addToAllowlist profile_id=$ProfileId id=test-example.com 2>&1 | Out-Null
+        }
+        elseif ($toolName -eq "updateDenylistEntry") {
+            Write-Info "Pre-check: Ensuring test entry exists in denylist..."
+            docker mcp tools call addToDenylist profile_id=$ProfileId id=test-example.com 2>&1 | Out-Null
+        }
+        elseif ($toolName -eq "updateParentalControlCategoryEntry") {
+            Write-Info "Pre-check: Ensuring gambling category is added..."
+            docker mcp tools call addToParentalControlCategories profile_id=$ProfileId id=gambling 2>&1 | Out-Null
+        }
+        elseif ($toolName -eq "updateParentalControlServiceEntry") {
+            Write-Info "Pre-check: Ensuring tiktok service is added..."
+            docker mcp tools call addToParentalControlServices profile_id=$ProfileId id=tiktok 2>&1 | Out-Null
+        }
         
         Write-Info "Executing: $toolName"
         

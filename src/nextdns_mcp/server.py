@@ -101,6 +101,39 @@ def is_write_operation(method: str) -> bool:
     return method.upper() in ("POST", "PUT", "PATCH", "DELETE")
 
 
+def coerce_json_types(data: Any) -> Any:
+    """Coerce string representations to proper JSON types.
+    
+    This handles type coercion for parameters passed as strings by Docker MCP CLI.
+    FastMCP's OpenAPI integration doesn't coerce types when making HTTP requests,
+    so we need to do it here.
+    
+    Args:
+        data: Input data (dict, list, or primitive)
+    
+    Returns:
+        Data with coerced types
+    """
+    if isinstance(data, dict):
+        return {key: coerce_json_types(value) for key, value in data.items()}
+    elif isinstance(data, list):
+        return [coerce_json_types(item) for item in data]
+    elif isinstance(data, str):
+        # Try to coerce boolean strings
+        if data.lower() in ("true", "false"):
+            return data.lower() == "true"
+        # Try to coerce integer strings
+        elif data.isdigit() or (data.startswith("-") and data[1:].isdigit()):
+            return int(data)
+        # Try to coerce float strings
+        elif data.replace(".", "", 1).replace("-", "", 1).isdigit():
+            try:
+                return float(data)
+            except ValueError:
+                pass
+    return data
+
+
 def create_access_denied_response(
     method: str, url: str, error_msg: str, profile_id: str
 ) -> httpx.Response:
@@ -178,6 +211,11 @@ class AccessControlledClient(httpx.AsyncClient):
 
             if error_response:
                 return error_response
+
+        # Coerce string types in JSON body (handles Docker MCP CLI passing everything as strings)
+        if "json" in kwargs and isinstance(kwargs["json"], dict):
+            kwargs["json"] = coerce_json_types(kwargs["json"])
+            logger.debug(f"Coerced JSON body: {kwargs['json']}")
 
         # Access allowed, proceed with the request
         return await super().request(method, url, **kwargs)

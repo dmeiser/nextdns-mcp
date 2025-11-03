@@ -115,8 +115,13 @@ components:
       type: object
       properties:
         device:
-          type: string
-          description: Device identifier
+          type: object
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+          description: Device information
         domain:
           type: string
           description: Queried domain name
@@ -127,8 +132,8 @@ components:
           type: string
           description: DNS query type (A, AAAA, etc.)
         status:
-          type: integer
-          description: Response status code
+          type: string
+          description: Response status (default, blocked, allowed)
         timestamp:
           type: string
           format: date-time
@@ -143,8 +148,8 @@ components:
             type: object
             properties:
               status:
-                type: integer
-                description: HTTP/DNS status code
+                type: string
+                description: Query status (default, blocked, allowed)
               queries:
                 type: integer
                 description: Number of queries with this status
@@ -153,34 +158,40 @@ components:
       type: object
       properties:
         data:
-          type: object
-          properties:
-            validated:
-              type: integer
-            notValidated:
-              type: integer
+          type: array
+          items:
+            type: object
+            properties:
+              validated:
+                type: boolean
+              queries:
+                type: integer
 
     AnalyticsEncryptionData:
       type: object
       properties:
         data:
-          type: object
-          properties:
-            encrypted:
-              type: integer
-            unencrypted:
-              type: integer
+          type: array
+          items:
+            type: object
+            properties:
+              encrypted:
+                type: boolean
+              queries:
+                type: integer
 
     AnalyticsIPVersionData:
       type: object
       properties:
         data:
-          type: object
-          properties:
-            ipv4:
-              type: integer
-            ipv6:
-              type: integer
+          type: array
+          items:
+            type: object
+            properties:
+              version:
+                type: integer
+              queries:
+                type: integer
 
     AnalyticsProtocolData:
       type: object
@@ -192,7 +203,7 @@ components:
             properties:
               protocol:
                 type: string
-                enum: [DOH, DOT, DOQ, UDP, TCP]
+                enum: [DNS-over-HTTPS, DNS-over-TLS, DNS-over-QUIC, UDP, TCP]
               queries:
                 type: integer
 
@@ -236,14 +247,25 @@ components:
           items:
             type: object
             properties:
-              timestamp:
-                type: string
-                format: date-time
-                description: Timestamp for this data point
               queries:
-                type: integer
-                description: Number of queries for this time period
-          description: Array of time-bucketed data points
+                type: array
+                items:
+                  type: integer
+                description: Array of query counts for each time bucket
+          description: Array of time-series data grouped by category
+        meta:
+          type: object
+          properties:
+            series:
+              type: object
+              properties:
+                times:
+                  type: array
+                  items:
+                    type: string
+                    format: date-time
+                interval:
+                  type: integer
 
     AnalyticsGAFAMData:
       type: object
@@ -463,14 +485,8 @@ paths:
                   description: New name for the profile
                   example: "Updated Home Network"
       responses:
-        '200':
-          description: Profile updated successfully (with response body)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProfileResponse'
         '204':
-          description: Profile updated successfully (no content returned)
+          description: Profile updated successfully
         '404':
           description: Profile not found
           content:
@@ -2058,7 +2074,8 @@ paths:
           in: query
           description: Filter by query status
           schema:
-            type: integer
+            type: string
+            enum: [default, blocked, allowed]
         - name: search
           in: query
           description: Search query for domain names
@@ -2165,17 +2182,14 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         # NO query parameters supported - endpoint rejects any query params with 400 error
       responses:
-        '302':
-          description: Redirect to temporary download URL (all logs, CSV format)
-          headers:
-            Location:
-              schema:
-                type: string
-              description: Temporary URL for downloading all available logs as CSV
         '200':
-          description: Log file (CSV format, all available logs)
+          description: Log file download (CSV format, all available logs)
           content:
             text/csv:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
               schema:
                 type: string
                 format: binary
