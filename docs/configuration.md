@@ -41,6 +41,3 @@ $env:NEXTDNS_WRITABLE_PROFILES = "test789"
 $env:NEXTDNS_READ_ONLY = "true"
 ```
 
-## Secrets best practices
-- Prefer NEXTDNS_API_KEY_FILE or Docker MCP Gateway secrets in production.
-- Ensure secret files are readable only by the runtime user and never committed to source control.

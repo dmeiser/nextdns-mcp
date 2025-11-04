@@ -7,7 +7,7 @@ How to list tools and call them from Docker MCP Gateway or other MCP clients.
 docker mcp tools ls
 ```
 
-## Call tools (flag style)
+## Call tools
 
 DoH lookup
 ```bash

@@ -44,13 +44,12 @@ Create gateway-config.yaml
 ```yaml
 servers:
   nextdns:
-    config:
-      nextdns:
-        default_profile: "abc123"
-        http_timeout: "45"
-        readable_profiles: "ALL"
-        writable_profiles: "test789"
-        read_only: "true"
+    env:
+      NEXTDNS_DEFAULT_PROFILE: "abc123"
+      NEXTDNS_HTTP_TIMEOUT: "45"
+      NEXTDNS_READABLE_PROFILES: "ALL"
+      NEXTDNS_WRITABLE_PROFILES: "test789"
+      NEXTDNS_READ_ONLY: "true"
 ```
 
 Apply and verify

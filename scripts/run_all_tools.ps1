@@ -128,9 +128,22 @@ if ([string]::IsNullOrWhiteSpace($ProfileId)) {
                 Write-Warn "CAUTION: Write operations will modify this profile!"
                 $ProfileId | Out-File -FilePath (Join-Path $ArtifactsDir "validation_profile_id.txt") -Encoding utf8
             } else {
-                Write-ErrorMsg "No profiles found"
-                Write-ErrorMsg "Please create a test profile manually first"
-                exit 1
+                # No profiles found, create one
+                Write-Info "No profiles found, creating validation profile..."
+                $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                $createResult = docker mcp tools call createProfile name="Validation_Profile_$timestamp" 2>&1 | 
+                    Where-Object { $_ -match '^\{' } | Out-String
+                
+                if ($LASTEXITCODE -eq 0 -and $createResult) {
+                    $createdProfile = $createResult | ConvertFrom-Json
+                    $ProfileId = $createdProfile.data.id
+                    Write-Success "Created validation profile: $ProfileId"
+                    $ProfileId | Out-File -FilePath (Join-Path $ArtifactsDir "validation_profile_id.txt") -Encoding utf8
+                } else {
+                    Write-ErrorMsg "Failed to create validation profile"
+                    Write-ErrorMsg "Please create a test profile manually first"
+                    exit 1
+                }
             }
         } catch {
             Write-ErrorMsg "Failed to list profiles: $_"
@@ -387,6 +400,7 @@ function Get-ToolArgs {
 $executed = 0
 $skipped = 0
 $failed = 0
+$createdTestProfileId = ""  # Track profile created by createProfile test
 
 Write-Info "Executing tools..."
 
@@ -395,8 +409,17 @@ foreach ($toolName in $toolNames) {
         continue
     }
     
+    # Skip deleteProfile here - we'll run it at the end
+    if ($toolName -eq "deleteProfile") {
+        continue
+    }
+    
     $startTime = Get-Date
     $skipReason = ""
+    $status = ""
+    $exitCode = 0
+    $stdout = ""
+    $stderr = ""
     
     # Check if tool should be skipped
     if (-not $AllowWrites -and $toolName -notin $readOnlyTools) {
@@ -407,21 +430,42 @@ foreach ($toolName in $toolNames) {
         $stderr = ""
         Write-Warn "Skipping ${toolName}: $skipReason"
         $skipped++
-    } elseif ($toolName -eq "deleteProfile") {
-        # Never actually delete profiles except the validation one
-        $skipReason = "Destructive operation (deleteProfile)"
-        $status = "skipped"
-        $exitCode = 0
-        $stdout = ""
-        $stderr = ""
-        Write-Warn "Skipping ${toolName}: $skipReason"
-        $skipped++
     } else {
         # Get test arguments for this tool
         $toolArgs = Get-ToolArgs -ToolName $toolName
         
-        # Pre-execution: Ensure entries exist for update operations
-        if ($toolName -eq "updateAllowlistEntry") {
+        # Pre-execution checks to avoid duplicate errors and ensure test data exists
+        if ($toolName -eq "addToParentalControlCategories") {
+            # Check if gambling category already exists
+            Write-Info "Pre-check: Checking if gambling category exists..."
+            $categoriesResult = docker mcp tools call getParentalControlCategories profile_id=$ProfileId 2>&1 | 
+                Where-Object { $_ -match '^\{' } | Out-String
+            if ($categoriesResult -and ($categoriesResult | ConvertFrom-Json).data -contains "gambling") {
+                Write-Info "Gambling category already exists, skipping add"
+                $skipReason = "Item already exists"
+                $status = "skipped"
+                $exitCode = 0
+                $stdout = ""
+                $stderr = ""
+                $skipped++
+            }
+        }
+        elseif ($toolName -eq "addToParentalControlServices") {
+            # Check if tiktok service already exists
+            Write-Info "Pre-check: Checking if tiktok service exists..."
+            $servicesResult = docker mcp tools call getParentalControlServices profile_id=$ProfileId 2>&1 | 
+                Where-Object { $_ -match '^\{' } | Out-String
+            if ($servicesResult -and ($servicesResult | ConvertFrom-Json).data -contains "tiktok") {
+                Write-Info "TikTok service already exists, skipping add"
+                $skipReason = "Item already exists"
+                $status = "skipped"
+                $exitCode = 0
+                $stdout = ""
+                $stderr = ""
+                $skipped++
+            }
+        }
+        elseif ($toolName -eq "updateAllowlistEntry") {
             Write-Info "Pre-check: Ensuring test entry exists in allowlist..."
             docker mcp tools call addToAllowlist profile_id=$ProfileId id=test-example.com 2>&1 | Out-Null
         }
@@ -438,39 +482,64 @@ foreach ($toolName in $toolNames) {
             docker mcp tools call addToParentalControlServices profile_id=$ProfileId id=tiktok 2>&1 | Out-Null
         }
         
-        Write-Info "Executing: $toolName"
-        
-        # Execute tool via docker mcp
-        try {
-            if ([string]::IsNullOrWhiteSpace($toolArgs)) {
-                $result = docker mcp tools call $toolName 2>&1 | Out-String
-            } else {
-                $argParts = $toolArgs -split ' '
-                $result = docker mcp tools call $toolName @argParts 2>&1 | Out-String
-            }
+        # Only execute if not already skipped by pre-checks
+        if ($status -ne "skipped") {
+            Write-Info "Executing: $toolName"
             
-            if ($LASTEXITCODE -eq 0) {
-                $exitCode = 0
-                $stdout = $result
-                $stderr = ""
-                $status = "success"
-                Write-Success "${toolName}: OK"
-                $executed++
-            } else {
-                $exitCode = $LASTEXITCODE
+            # Execute tool via docker mcp
+            try {
+                if ([string]::IsNullOrWhiteSpace($toolArgs)) {
+                    $result = docker mcp tools call $toolName 2>&1 | Out-String
+                } else {
+                    $argParts = $toolArgs -split ' '
+                    $result = docker mcp tools call $toolName @argParts 2>&1 | Out-String
+                }
+                
+                if ($LASTEXITCODE -eq 0) {
+                    $exitCode = 0
+                    $stdout = $result
+                    $stderr = ""
+                    $status = "success"
+                    Write-Success "${toolName}: OK"
+                    $executed++
+                    
+                    # Capture profile ID from createProfile for deleteProfile test
+                    if ($toolName -eq "createProfile") {
+                        try {
+                            # Parse JSON from multi-line output (skip timing lines)
+                            $jsonLines = $result -split "`n" | Where-Object { $_ -match '^\{' }
+                            if ($jsonLines) {
+                                $jsonStr = $jsonLines -join ""
+                                $profileData = $jsonStr | ConvertFrom-Json
+                                if ($profileData.data -and $profileData.data.id) {
+                                    $createdTestProfileId = $profileData.data.id
+                                    Write-Info "Created test profile: $createdTestProfileId (will be deleted by deleteProfile test)"
+                                } else {
+                                    Write-Warn "Could not parse profile ID from createProfile response"
+                                }
+                            } else {
+                                Write-Warn "No JSON output from createProfile"
+                            }
+                        } catch {
+                            Write-Warn "Error parsing createProfile response: $_"
+                        }
+                    }
+                } else {
+                    $exitCode = $LASTEXITCODE
+                    $stdout = ""
+                    $stderr = $result
+                    $status = "failed"
+                    Write-ErrorMsg "${toolName}: FAILED (exit code $exitCode)"
+                    $failed++
+                }
+            } catch {
+                $exitCode = 1
                 $stdout = ""
-                $stderr = $result
+                $stderr = $_.Exception.Message
                 $status = "failed"
-                Write-ErrorMsg "${toolName}: FAILED (exit code $exitCode)"
+                Write-ErrorMsg "${toolName}: FAILED - $_"
                 $failed++
             }
-        } catch {
-            $exitCode = 1
-            $stdout = ""
-            $stderr = $_.Exception.Message
-            $status = "failed"
-            Write-ErrorMsg "${toolName}: FAILED - $_"
-            $failed++
         }
     }
     
@@ -487,6 +556,61 @@ foreach ($toolName in $toolNames) {
         stderr = $stderr
         duration = $duration
         skip_reason = $skipReason
+        timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
+    }
+    
+    $resultObj | ConvertTo-Json -Compress -Depth 10 | Add-Content -Path $ReportFile -Encoding utf8
+}
+
+# Execute deleteProfile test at the end if writes are enabled and we created a test profile
+if ($AllowWrites -and $createdTestProfileId) {
+    Write-Info ""
+    Write-Info "Executing deleteProfile test with created profile: $createdTestProfileId"
+    
+    $startTime = Get-Date
+    $toolName = "deleteProfile"
+    $toolArgs = "profile_id=$createdTestProfileId"
+    
+    try {
+        $result = docker mcp tools call deleteProfile profile_id=$createdTestProfileId 2>&1 | Out-String
+        
+        if ($LASTEXITCODE -eq 0) {
+            $exitCode = 0
+            $stdout = $result
+            $stderr = ""
+            $status = "success"
+            Write-Success "deleteProfile: OK (deleted test profile $createdTestProfileId)"
+            $executed++
+        } else {
+            $exitCode = $LASTEXITCODE
+            $stdout = ""
+            $stderr = $result
+            $status = "failed"
+            Write-ErrorMsg "deleteProfile: FAILED (exit code $exitCode)"
+            $failed++
+        }
+    } catch {
+        $exitCode = 1
+        $stdout = ""
+        $stderr = $_.Exception.Message
+        $status = "failed"
+        Write-ErrorMsg "deleteProfile: FAILED - $_"
+        $failed++
+    }
+    
+    $endTime = Get-Date
+    $duration = ($endTime - $startTime).TotalSeconds
+    
+    # Write result to JSONL file
+    $resultObj = @{
+        tool = $toolName
+        status = $status
+        args = $toolArgs
+        exit_code = $exitCode
+        stdout = $stdout
+        stderr = $stderr
+        duration = $duration
+        skip_reason = ""
         timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
     }
     
@@ -510,8 +634,20 @@ Write-Info "Report: $ReportFile"
 # Cleanup validation profile if created and writes are allowed
 if ($AllowWrites -and (Test-Path (Join-Path $ArtifactsDir "validation_profile_id.txt"))) {
     Write-Info ""
-    Write-Info "Validation profile created: $ProfileId"
-    Write-Info "Profile cleanup is handled by the E2E script"
+    Write-Info "Attempting to delete validation profile: $ProfileId"
+    try {
+        $null = docker mcp tools call deleteProfile profile_id=$ProfileId 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "Successfully deleted validation profile: $ProfileId"
+            Remove-Item (Join-Path $ArtifactsDir "validation_profile_id.txt") -ErrorAction SilentlyContinue
+        } else {
+            Write-Warn "Failed to delete validation profile (exit code: $LASTEXITCODE)"
+            Write-Warn "You may need to manually delete profile: $ProfileId"
+        }
+    } catch {
+        Write-Warn "Error deleting validation profile: $_"
+        Write-Warn "You may need to manually delete profile: $ProfileId"
+    }
 }
 
 # Exit with failure if any tools failed

@@ -80,13 +80,13 @@ docker mcp tools call dohLookup domain=example.com record_type=A profile_id=YOUR
 # Get profile settings
 docker mcp tools call getSettings profile_id=abc123
 
-# Add individual entries to denylist (recommended for Docker MCP CLI)
+# Add individual entries to denylist
 docker mcp tools call addToDenylist profile_id=abc123 id=ads.example.com
 docker mcp tools call addToDenylist profile_id=abc123 id=tracker.net
 
-# Note: Bulk update tools (updateDenylist, updateAllowlist, etc.) that accept 
-# JSON array parameters work when called via MCP protocol but may have issues 
-# with complex JSON through Docker MCP CLI. Use individual add/remove operations instead.
+# Bulk replace with custom tools (pass JSON array string)
+docker mcp tools call updateDenylist '{"profile_id":"abc123","entries":"[\"ads.example.com\",\"tracker.net\"]"}'
+docker mcp tools call updateAllowlist '{"profile_id":"abc123","entries":"[\"safe.com\",\"trusted.org\"]"}'
 ```
 
 ## Troubleshooting

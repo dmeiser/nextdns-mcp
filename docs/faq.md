@@ -13,4 +13,4 @@ Set `NEXTDNS_READ_ONLY=true`.
 `listProfiles` and `dohLookup` are globally allowed and bypass per-profile checks.
 
 ## Where do I get logs and analytics?
-Use the `getLogs`, `downloadLogs`, and the `getAnalytics*` tools; real-time log streaming (SSE) is not supported.
+Use the `getLogs` and the `getAnalytics*` tools; real-time log streaming (SSE) and the download endpoint are not exposed as tools.
