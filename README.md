@@ -26,11 +26,7 @@ This project provides an MCP server that exposes NextDNS API operations as tools
 
 ## Documentation
 
-- Configuration: docs/configuration.md
-- Usage: docs/usage.md
-
-
-For a guided overview, see docs/index.md.
+Complete documentation can be found in [docs/index.md](docs/index.md).
 
 ## Quick Start
 

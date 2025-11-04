@@ -80,13 +80,9 @@ docker mcp tools call dohLookup domain=example.com record_type=A profile_id=YOUR
 # Get profile settings
 docker mcp tools call getSettings profile_id=abc123
 
-# Add individual entries to denylist
+# Add individual entries to denylist/allowlist
 docker mcp tools call addToDenylist profile_id=abc123 id=ads.example.com
 docker mcp tools call addToDenylist profile_id=abc123 id=tracker.net
-
-# Bulk replace with custom tools (pass JSON array string)
-docker mcp tools call updateDenylist '{"profile_id":"abc123","entries":"[\"ads.example.com\",\"tracker.net\"]"}'
-docker mcp tools call updateAllowlist '{"profile_id":"abc123","entries":"[\"safe.com\",\"trusted.org\"]"}'
 ```
 
 ## Troubleshooting
