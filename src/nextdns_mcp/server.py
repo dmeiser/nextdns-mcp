@@ -101,16 +101,53 @@ def is_write_operation(method: str) -> bool:
     return method.upper() in ("POST", "PUT", "PATCH", "DELETE")
 
 
+def _coerce_string_to_bool(value: str) -> bool | None:
+    """Try to coerce a string to boolean.
+
+    Args:
+        value: String value to coerce
+
+    Returns:
+        Boolean value or None if not a boolean string
+    """
+    if value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    return None
+
+
+def _coerce_string_to_number(value: str) -> int | float | None:
+    """Try to coerce a string to int or float.
+
+    Args:
+        value: String value to coerce
+
+    Returns:
+        Int, float, or None if not a number string
+    """
+    # Try integer
+    if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+        return int(value)
+
+    # Try float
+    if value.replace(".", "", 1).replace("-", "", 1).isdigit():
+        try:
+            return float(value)
+        except ValueError:
+            pass
+
+    return None
+
+
 def coerce_json_types(data: Any) -> Any:
     """Coerce string representations to proper JSON types.
-    
+
     This handles type coercion for parameters passed as strings by Docker MCP CLI.
     FastMCP's OpenAPI integration doesn't coerce types when making HTTP requests,
     so we need to do it here.
-    
+
     Args:
         data: Input data (dict, list, or primitive)
-    
+
     Returns:
         Data with coerced types
     """
@@ -119,18 +156,16 @@ def coerce_json_types(data: Any) -> Any:
     elif isinstance(data, list):
         return [coerce_json_types(item) for item in data]
     elif isinstance(data, str):
-        # Try to coerce boolean strings
-        if data.lower() in ("true", "false"):
-            return data.lower() == "true"
-        # Try to coerce integer strings
-        elif data.isdigit() or (data.startswith("-") and data[1:].isdigit()):
-            return int(data)
-        # Try to coerce float strings
-        elif data.replace(".", "", 1).replace("-", "", 1).isdigit():
-            try:
-                return float(data)
-            except ValueError:
-                pass
+        # Try boolean coercion
+        bool_value = _coerce_string_to_bool(data)
+        if bool_value is not None:
+            return bool_value
+
+        # Try number coercion
+        num_value = _coerce_string_to_number(data)
+        if num_value is not None:
+            return num_value
+
     return data
 
 
