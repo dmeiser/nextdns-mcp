@@ -3,6 +3,9 @@
 # 1. Builder stage: Install dependencies
 FROM python:3.13-slim AS builder
 
+# Update system packages for security
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 # Set working directory
 WORKDIR /app
 
@@ -21,6 +24,9 @@ RUN poetry install --without dev --no-interaction --no-ansi --no-root
 
 # 2. Final stage: Create the runtime image
 FROM python:3.13-slim
+
+# Update system packages for security
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
 # OCI labels for Docker MCP Gateway compatibility
 LABEL org.opencontainers.image.title="NextDNS MCP Server"
