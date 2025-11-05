@@ -366,41 +366,7 @@ async def _dohLookup_impl(
 ) -> dict[str, Any]:
     """Implementation of DoH lookup functionality.
 
-    Perform a DNS-over-HTTPS lookup using a NextDNS profile.
-
-    This tool performs a DNS query through NextDNS's DoH endpoint, allowing you to test
-    how a specific profile would resolve a domain name. This is useful for:
-    - Testing if a domain is blocked by your profile settings
-    - Verifying DNS resolution behavior
-    - Debugging DNS-related issues
-    - Testing allowlist/denylist configurations
-
-    Args:
-        domain: The domain name to look up (e.g., "adwords.google.com")
-        profile_id: NextDNS profile ID (6-character alphanumeric). If not provided, uses NEXTDNS_DEFAULT_PROFILE
-        record_type: DNS record type to query. Common types:
-            - A: IPv4 address (default)
-            - AAAA: IPv6 address
-            - CNAME: Canonical name
-            - MX: Mail exchange
-            - TXT: Text records
-            - NS: Name servers
-            - SOA: Start of authority
-            - PTR: Pointer record
-
-    Returns:
-        dict: DNS response in JSON format containing:
-            - Status: Query status (0 = NOERROR, 2 = SERVFAIL, 3 = NXDOMAIN)
-            - Answer: List of DNS records
-            - Question: The query that was made
-            - Additional metadata
-
-    Example:
-        # Check if adwords.google.com is blocked
-        result = await dohLookup("adwords.google.com", "b282de", "A")
-
-        # Check IPv6 address
-        result = await dohLookup("google.com", "b282de", "AAAA")
+    See dohLookup() for full documentation.
     """
     # Get target profile
     target_profile = _get_target_profile(profile_id)
