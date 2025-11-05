@@ -101,6 +101,74 @@ def is_write_operation(method: str) -> bool:
     return method.upper() in ("POST", "PUT", "PATCH", "DELETE")
 
 
+def _coerce_string_to_bool(value: str) -> bool | None:
+    """Try to coerce a string to boolean.
+
+    Args:
+        value: String value to coerce
+
+    Returns:
+        Boolean value or None if not a boolean string
+    """
+    if value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    return None
+
+
+def _coerce_string_to_number(value: str) -> int | float | None:
+    """Try to coerce a string to int or float.
+
+    Args:
+        value: String value to coerce
+
+    Returns:
+        Int, float, or None if not a number string
+    """
+    # Try integer
+    if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+        return int(value)
+
+    # Try float
+    if value.replace(".", "", 1).replace("-", "", 1).isdigit():
+        try:
+            return float(value)
+        except ValueError:
+            pass
+
+    return None
+
+
+def coerce_json_types(data: Any) -> Any:
+    """Coerce string representations to proper JSON types.
+
+    This handles type coercion for parameters passed as strings by Docker MCP CLI.
+    FastMCP's OpenAPI integration doesn't coerce types when making HTTP requests,
+    so we need to do it here.
+
+    Args:
+        data: Input data (dict, list, or primitive)
+
+    Returns:
+        Data with coerced types
+    """
+    if isinstance(data, dict):
+        return {key: coerce_json_types(value) for key, value in data.items()}
+    elif isinstance(data, list):
+        return [coerce_json_types(item) for item in data]
+    elif isinstance(data, str):
+        # Try boolean coercion
+        bool_value = _coerce_string_to_bool(data)
+        if bool_value is not None:
+            return bool_value
+
+        # Try number coercion
+        num_value = _coerce_string_to_number(data)
+        if num_value is not None:
+            return num_value
+
+    return data
+
+
 def create_access_denied_response(
     method: str, url: str, error_msg: str, profile_id: str
 ) -> httpx.Response:
@@ -161,6 +229,9 @@ class AccessControlledClient(httpx.AsyncClient):
         Returns:
             Response from the API, or a 403 Forbidden response if access is denied
         """
+        # Log the actual URL being requested for debugging
+        logger.info(f"HTTP Request: {method} {url}")
+
         # Extract profile_id from URL if present
         profile_id = extract_profile_id_from_url(str(url))
 
@@ -175,6 +246,11 @@ class AccessControlledClient(httpx.AsyncClient):
 
             if error_response:
                 return error_response
+
+        # Coerce string types in JSON body (handles Docker MCP CLI passing everything as strings)
+        if "json" in kwargs and isinstance(kwargs["json"], dict):
+            kwargs["json"] = coerce_json_types(kwargs["json"])
+            logger.debug(f"Coerced JSON body: {kwargs['json']}")
 
         # Access allowed, proceed with the request
         return await super().request(method, url, **kwargs)
@@ -290,41 +366,7 @@ async def _dohLookup_impl(
 ) -> dict[str, Any]:
     """Implementation of DoH lookup functionality.
 
-    Perform a DNS-over-HTTPS lookup using a NextDNS profile.
-
-    This tool performs a DNS query through NextDNS's DoH endpoint, allowing you to test
-    how a specific profile would resolve a domain name. This is useful for:
-    - Testing if a domain is blocked by your profile settings
-    - Verifying DNS resolution behavior
-    - Debugging DNS-related issues
-    - Testing allowlist/denylist configurations
-
-    Args:
-        domain: The domain name to look up (e.g., "adwords.google.com")
-        profile_id: NextDNS profile ID (6-character alphanumeric). If not provided, uses NEXTDNS_DEFAULT_PROFILE
-        record_type: DNS record type to query. Common types:
-            - A: IPv4 address (default)
-            - AAAA: IPv6 address
-            - CNAME: Canonical name
-            - MX: Mail exchange
-            - TXT: Text records
-            - NS: Name servers
-            - SOA: Start of authority
-            - PTR: Pointer record
-
-    Returns:
-        dict: DNS response in JSON format containing:
-            - Status: Query status (0 = NOERROR, 2 = SERVFAIL, 3 = NXDOMAIN)
-            - Answer: List of DNS records
-            - Question: The query that was made
-            - Additional metadata
-
-    Example:
-        # Check if adwords.google.com is blocked
-        result = await dohLookup("adwords.google.com", "b282de", "A")
-
-        # Check IPv6 address
-        result = await dohLookup("google.com", "b282de", "AAAA")
+    See dohLookup() for full documentation.
     """
     # Get target profile
     target_profile = _get_target_profile(profile_id)

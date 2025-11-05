@@ -1,94 +1,151 @@
+````instructions
 # NextDNS MCP Server - AI Agent Instructions
 
-This document provides essential guidance for AI agents working on the NextDNS MCP Server codebase.
+Essential knowledge for AI agents working on this FastMCP-based NextDNS API server.
 
 ## 1. Architecture: OpenAPI-Driven Tool Generation
 
-**The Key Insight**: This server uses a declarative, specification-first approach. The MCP server is NOT hand-coded—it's auto-generated from `src/nextdns_mcp/nextdns-openapi.yaml` using `FastMCP.from_openapi()`.
+**Core Insight**: Server is auto-generated from `src/nextdns_mcp/nextdns-openapi.yaml` via `FastMCP.from_openapi()`. No hand-coded routes.
 
-**To add/modify API functionality**:
-1. Edit the OpenAPI YAML file (add paths, operations, schemas)
-2. The server regenerates automatically on next run
-3. Exception: Array-body PUT endpoints (see "Custom Tools" below)
+**To modify API functionality**:
+1. Edit OpenAPI YAML (add paths/operations with `operationId`)
+2. Server regenerates on next run
+3. Exception: Array-body endpoints need custom tools (see below)
 
-**Why this matters**: Don't look for traditional route handlers or controllers. The mapping happens in `server.py:create_mcp_server()` via `FastMCP.from_openapi()`. Tool names are derived from `operationId` fields in the OpenAPI spec.
+**Key file**: `server.py:create_mcp_server()` - loads YAML, creates authenticated `AccessControlledClient`, generates 68+ MCP tools from spec.
 
-## 2. Custom Tools Pattern (Array-Body Workaround)
+## 2. Profile Access Control (New Feature)
 
-**Problem**: FastMCP doesn't support raw JSON arrays as request bodies (needs objects with named fields).
+**Critical Pattern**: `AccessControlledClient` in `server.py` wraps `httpx.AsyncClient` to enforce per-profile read/write restrictions.
 
-**Solution**: Seven custom tools in `server.py` that accept JSON array strings:
-- `updateDenylist`, `updateAllowlist`, `updateParentalControlServices`, etc.
-- Pattern: `entries: str` parameter → parse JSON → validate is array → PUT to API
-- Helper: `_bulk_update_helper()` centralizes this pattern
+**How it works**:
+- Extracts `profile_id` from URL paths (regex: `/profiles/{id}/...`)
+- Checks `can_read_profile()` / `can_write_profile()` from `config.py`
+- Returns 403 responses for denied access (no API call made)
+- Global operations (`listProfiles`, `dohLookup`) bypass checks
 
-**When to add custom tools**:
-- Array-body endpoints (excluded via `EXCLUDED_ROUTES` in `config.py`)
-- Special logic like `dohLookup` (DNS testing without API key)
-- Follow existing pattern: separate `_impl()` function + `@mcp.tool()` decorator
-
-## 3. Configuration: Docker Secrets + Env Vars
-
-**API Key Loading** (`config.py:get_api_key()`):
-1. Check `NEXTDNS_API_KEY` env var
-2. Fallback to `NEXTDNS_API_KEY_FILE` (Docker secrets path)
-3. Fails fast on module import if missing
-
-**Critical**: `validate_configuration()` runs on import—server won't start without valid API key.
-
-## 4. Testing Strategy (3-Tier Pyramid)
-
-### Unit Tests (`tests/unit/`)
-- **Target**: 85%+ coverage
-- **Run**: `poetry run pytest tests/unit --cov=src/nextdns_mcp`
-- **Pattern**: Mock external calls (use `unittest.mock.AsyncMock` for httpx)
-- **Example**: `test_doh_lookup.py` mocks `httpx.AsyncClient` to test DNS logic
-
-### Integration Tests (`tests/integration/`)
-- **Purpose**: Server initialization, tool registration
-- **Run**: `poetry run pytest tests/integration`
-- **Fast**: Uses mocked OpenAPI specs, no network calls
-
-### Live API Validation (`tests/integration/test_live_api.py`)
-- **CRITICAL**: End-to-end test of ALL 76 tools against real NextDNS API
-- **Run**: `poetry run python tests/integration/test_live_api.py`
-- **Safety**: Creates isolated "Validation Profile [timestamp]"
-- **Must invoke via MCP server**: `from nextdns_mcp import server; tools = await server.mcp.get_tools()`
-- **When required**: Before completing ANY feature touching API endpoints
-- **Cleanup**: Prompts user before deleting test profile (use `--auto-delete-profile` flag to skip)
-
-## 5. Development Commands
-
+**Environment variables** (`config.py`):
 ```bash
-# Local development
-poetry install
-poetry run python -m nextdns_mcp.server
-
-# Run unit tests with coverage
-poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=html
-
-# Run integration tests
-poetry run pytest tests/integration
-
-# Live API validation (requires NEXTDNS_API_KEY)
-export NEXTDNS_API_KEY="your_key"
-poetry run python tests/integration/test_live_api.py
-
-# Docker build (multi-stage, Python 3.13-slim)
-docker build -t nextdns-mcp .
+NEXTDNS_READABLE_PROFILES=abc123,def456  # or "ALL" or empty (deny all)
+NEXTDNS_WRITABLE_PROFILES=test789        # or "ALL" or empty (deny all)
+NEXTDNS_READ_ONLY=true                   # overrides all write permissions
 ```
 
-## 6. Key Files Reference
+**Testing access control**: Gateway E2E tests validate access control scenarios via Docker CLI.
 
-- `src/nextdns_mcp/nextdns-openapi.yaml`: Source of truth for 68+ API operations
-- `src/nextdns_mcp/server.py`: FastMCP server + 8 custom tools (lines 250-527)
-- `src/nextdns_mcp/config.py`: Env vars, excluded routes, DNS constants
-- `tests/integration/test_live_api.py`: 76-tool validation script (1200+ lines)
-- `catalog.yaml`: Docker MCP Gateway integration metadata
+## 3. Custom Tools Pattern (FastMCP Limitation)
 
-## 7. Safety Rules (Non-Negotiable)
+**Problem**: FastMCP requires object bodies, not raw JSON arrays.
 
-- **NEVER delete profiles** without explicit user confirmation (except test profile in validation script)
+**Solution**: 7 custom `@mcp.tool()` implementations in `server.py`:
+- `updateDenylist`, `updateAllowlist`, `updateSecurityTlds`, etc.
+- Accept `entries: str` → parse JSON → validate array → PUT to API
+- Use `_bulk_update_helper()` for DRY pattern
+
+**Pattern**:
+```python
+async def _updateThing_impl(profile_id: str, entries: str) -> dict:
+    # Validation + API call logic
+    ...
+
+@mcp.tool()
+async def updateThing(profile_id: str, entries: str) -> str:
+    return json.dumps(await _updateThing_impl(profile_id, entries))
+```
+
+## 4. Code Quality Requirements (STRICT)
+
+**ALL checks must pass before completion**. Iterate quality loop until 100% compliant:
+
+1. **Format**: `poetry run isort src/ tests/` → `poetry run black src/ tests/`
+2. **Type check**: `poetry run mypy src/` (0 errors)
+3. **Unit tests**: `poetry run pytest tests/unit --cov=src/nextdns_mcp` (>95% coverage, ALL pass, no file <95%)
+4. **Complexity**: `poetry run radon cc src/ -a` (grade A), `radon cc src/ -nc` (no function >B)
+5. **Integration**: `poetry run pytest tests/integration/test_server_init.py` (ALL pass)
+6. **Gateway E2E**: `cd scripts && ./gateway_e2e_run.{sh,ps1}` (100% pass rate REQUIRED)
+
+**If ANY check fails**: Fix, rerun formatters, repeat from step 1. Never skip, never ignore failing tests.
+
+**Last commit must be formatting** (isort/black/mypy) before validation.
+
+## 5. Testing Strategy (2-Tier)
+
+### Unit Tests (`tests/unit/`)
+- Mock external calls (`AsyncMock` for httpx)
+- Example: `test_access_control.py` mocks 403 responses to test access denial logic
+- Run frequently during development
+- Target: >95% coverage, ALL tests pass
+
+### Integration Tests (`tests/integration/`)
+- `test_server_init.py`: Server creation, tool registration with mocked dependencies
+- Fast, no network calls, no live API access
+- Tests server initialization logic only
+
+### Gateway E2E Tests (`scripts/gateway_e2e_run.{sh,ps1}`)
+- **CRITICAL**: Tests ALL 76+ tools via Docker MCP Gateway CLI (production-like)
+- Commands: `docker mcp tools call <tool> <params>`
+- Creates "Validation Profile [timestamp]" for isolation
+- Requires `NEXTDNS_API_KEY` and `NEXTDNS_READABLE_PROFILES=ALL`, `NEXTDNS_WRITABLE_PROFILES=ALL`
+- Produces machine-readable JSONL report in `scripts/artifacts/tools_report.jsonl`
+- **Required pass rate: 100%** - ALL tools must pass, no failures accepted
+- If tests fail, fix Docker CLI parameter encoding (use proper JSON format)
+
+## 6. Configuration Pattern
+
+**Fail-fast validation**: `config.py:validate_configuration()` runs on module import. Server exits if API key missing.
+
+**API key loading order**:
+1. `NEXTDNS_API_KEY` env var
+2. `NEXTDNS_API_KEY_FILE` (Docker secrets)
+3. Exit with error message
+
+**Access control parsing**: `parse_profile_list()` handles `"ALL"`, `"abc,def"`, or empty (deny all).
+
+## 7. Key Files
+
+- `src/nextdns_mcp/nextdns-openapi.yaml`: 2300+ lines, defines all API operations
+- `src/nextdns_mcp/server.py`: 668 lines - `AccessControlledClient`, custom tools, server creation
+- `src/nextdns_mcp/config.py`: 322 lines - env vars, access control logic, constants
+- `scripts/gateway_e2e_run.{sh,ps1}`: Gateway E2E test scripts - comprehensive tool validation via Docker CLI
+- `scripts/artifacts/tools_report.jsonl`: E2E test results (machine-readable)
+- `tests/integration/test_server_init.py`: Server initialization tests (no live API)
+- `AGENT.md`: Complete quality standards and workflow rules
+
+## 8. Safety Rules
+
+- **NEVER delete profiles** without explicit user confirmation (except validation test profile)
 - **Write operations** only against designated test profiles
-- **Test via MCP tools**, not direct API calls (ensures protocol layer testing)
-- **Run live validation** before claiming completion of API-touching features
+- **Test via Docker MCP Gateway CLI** (`docker mcp tools call`), not direct Python calls
+- **Run Gateway E2E validation** before claiming completion of API-touching features
+- **Access control**: Set `NEXTDNS_READABLE_PROFILES=ALL` and `NEXTDNS_WRITABLE_PROFILES=ALL` for testing
+- **E2E testing**: Set `ALLOW_LIVE_WRITES=true` to enable write operations (default: read-only)
+
+## 9. Common Patterns
+
+**Add new OpenAPI endpoint**:
+1. Add to `nextdns-openapi.yaml` with unique `operationId`
+2. Server auto-generates tool on next run
+3. Add unit tests mocking the API call
+4. Run Gateway E2E tests to validate (`cd scripts && ./gateway_e2e_run.{sh,ps1}`)
+
+**Add custom tool** (for array-body or special logic):
+1. Define `_toolName_impl()` with business logic
+2. Add `@mcp.tool()` wrapper returning JSON string
+3. Add to `EXCLUDED_ROUTES` in `config.py` if it shadows OpenAPI path
+4. Follow pattern in `server.py` lines 250-527
+
+**Debug access denial**:
+1. Check logs for "Read/Write access denied for profile: {id}"
+2. Verify `NEXTDNS_READABLE_PROFILES` / `NEXTDNS_WRITABLE_PROFILES` env vars
+3. Check `config.py:can_read_profile()` / `can_write_profile()` logic
+4. Use Gateway E2E tests to validate scenarios (`cd scripts && ./gateway_e2e_run.{sh,ps1}`)
+
+**Debug E2E test failures**:
+1. Check `scripts/artifacts/tools_report.jsonl` for failure details
+2. Parse failures: `jq 'select(.exit_code != 0)' tools_report.jsonl`
+3. Fix parameter type issues: encode as JSON, not key=value strings
+4. Ensure idempotent test data (check-before-add pattern)
+5. Verify all required parameters are passed per OpenAPI spec
+6. Re-run until 100% pass rate achieved
+
+````

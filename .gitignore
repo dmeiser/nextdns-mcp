@@ -2,6 +2,11 @@
 .env
 .env.local
 .env.*.local
+.env.test
+
+# Artifacts (E2E test outputs)
+artifacts/
+!artifacts/README.md
 
 # Python
 __pycache__/
@@ -68,3 +73,7 @@ htmlcov/
 
 # Agent settings
 .claude/
+
+# Local caches
+.ruff_cache/
+.mypy_cache/
