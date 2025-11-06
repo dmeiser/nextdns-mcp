@@ -5,7 +5,22 @@
 
 version: 2
 updates:
-  - package-ecosystem: "" # See documentation for possible values
-    directory: "/" # Location of package manifests
+updates:
+  # --- Python (Poetry) ---
+  - package-ecosystem: "pip"
+    directory: "/"
     schedule:
       interval: "weekly"
+    allow:
+      - dependency-type: "all"
+    commit-message:
+      prefix: "deps(poetry)"
+      include: "scope"
+  # --- Docker ---
+  - package-ecosystem: "docker"
+    directory: "/"                      # location of your Dockerfile
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps(docker)"
+      include: "scope"
