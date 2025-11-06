@@ -1,7 +1,7 @@
 # Multi-stage build for a lean final image
 
 # 1. Builder stage: Install dependencies
-FROM python:3.13-slim AS builder
+FROM python:3.14-slim AS builder
 
 # Update system packages for security
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
@@ -23,7 +23,7 @@ COPY pyproject.toml poetry.lock ./
 RUN poetry install --without dev --no-interaction --no-ansi --no-root
 
 # 2. Final stage: Create the runtime image
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 # Update system packages for security
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
@@ -47,7 +47,7 @@ WORKDIR /app
 
 # Copy installed packages from the builder stage's virtual environment
 # This path is predictable because of `poetry config virtualenvs.in-project true`
-COPY --from=builder /app/.venv/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
+COPY --from=builder /app/.venv/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
 
 # Copy application code
 COPY src/ /app/src/
