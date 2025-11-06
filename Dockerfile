@@ -47,7 +47,7 @@ WORKDIR /app
 
 # Copy installed packages from the builder stage's virtual environment
 # This path is predictable because of `poetry config virtualenvs.in-project true`
-COPY --from=builder /app/.venv/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
+COPY --from=builder /app/.venv/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
 
 # Copy application code
 COPY src/ /app/src/
