@@ -1,0 +1,129 @@
+name: Dependabot Auto-Merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    # Only run on dependabot PRs
+    if: github.actor == 'dependabot[bot]'
+    
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      
+      - name: Get PR metadata
+        id: pr-metadata
+        run: |
+          # Extract dependency name and type from PR title
+          # Dependabot PR titles are like: "deps(poetry)(deps): bump pytest from 8.0.0 to 8.1.0"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
+          
+          # Check if this is a Python version update (exclude from auto-merge)
+          if echo "$PR_TITLE" | grep -qi "bump python from"; then
+            echo "is_python_version=true" >> $GITHUB_OUTPUT
+            echo "This is a Python version update - will NOT auto-merge"
+          else
+            echo "is_python_version=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check if this is a poetry/pip dependency (Python package)
+          if echo "$PR_TITLE" | grep -q "deps(poetry)"; then
+            echo "is_python_package=true" >> $GITHUB_OUTPUT
+            echo "This is a Python package update"
+          else
+            echo "is_python_package=false" >> $GITHUB_OUTPUT
+            echo "This is NOT a Python package update - will NOT auto-merge"
+          fi
+      
+      - name: Set up Python
+        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      
+      - name: Install Poetry
+        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false'
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      
+      - name: Install dependencies
+        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false'
+        run: |
+          poetry install
+      
+      - name: Run unit tests with coverage
+        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false'
+        id: tests
+        run: |
+          # Run tests and capture output
+          poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term-missing -q > test_output.txt 2>&1 || TEST_EXIT_CODE=$?
+          
+          # Display output
+          cat test_output.txt
+          
+          # Check if tests passed (exit code 0)
+          if [ "${TEST_EXIT_CODE:-0}" -ne 0 ]; then
+            echo "tests_passed=false" >> $GITHUB_OUTPUT
+            echo "❌ Tests failed with exit code: ${TEST_EXIT_CODE:-0}"
+            exit 1
+          fi
+          
+          # Extract coverage percentage from output
+          COVERAGE=$(grep "TOTAL" test_output.txt | awk '{print $NF}' | sed 's/%//')
+          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+          echo "Coverage: $COVERAGE%"
+          
+          # Check if coverage is above 95%
+          if [ -z "$COVERAGE" ]; then
+            echo "tests_passed=false" >> $GITHUB_OUTPUT
+            echo "❌ Could not extract coverage percentage"
+            exit 1
+          fi
+          
+          if ! awk "BEGIN {exit ($COVERAGE >= 95)}"; then
+            echo "tests_passed=false" >> $GITHUB_OUTPUT
+            echo "❌ Coverage $COVERAGE% is below 95% threshold"
+            exit 1
+          fi
+          
+          echo "tests_passed=true" >> $GITHUB_OUTPUT
+          echo "✅ All tests passed with $COVERAGE% coverage (≥95% required)"
+      
+      - name: Approve PR
+        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false' && steps.tests.outputs.tests_passed == 'true'
+        run: |
+          gh pr review "${{ github.event.pull_request.number }}" --approve --body "✅ Auto-approved: All unit tests passed with ${{ steps.tests.outputs.coverage }}% coverage (≥95% required)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Enable auto-merge
+        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false' && steps.tests.outputs.tests_passed == 'true'
+        run: |
+          gh pr merge "${{ github.event.pull_request.number }}" --auto --squash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Comment on PR (skipped - Python version)
+        if: steps.pr-metadata.outputs.is_python_version == 'true'
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --body "⚠️ This PR updates the Python version and requires manual review before merging."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Comment on PR (skipped - not Python package)
+        if: steps.pr-metadata.outputs.is_python_package == 'false'
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --body "ℹ️ This PR is not a Python package update and will not be auto-merged. Manual review required."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
