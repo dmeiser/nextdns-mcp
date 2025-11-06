@@ -91,7 +91,7 @@ jobs:
             exit 1
           fi
           
-          if (( $(echo "$COVERAGE < 95" | bc -l) )); then
+          if ! awk "BEGIN {exit ($COVERAGE >= 95)}"; then
             echo "tests_passed=false" >> $GITHUB_OUTPUT
             echo "❌ Coverage $COVERAGE% is below 95% threshold"
             exit 1
