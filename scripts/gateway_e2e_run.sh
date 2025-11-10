@@ -152,14 +152,67 @@ else
     exit 1
 fi
 
-# Step 2: Import catalog
+# Step 2: Prepare catalog with API key (CI-specific)
 log_info ""
-log_info "Step 2: Importing catalog..."
+log_info "Step 2: Preparing catalog..."
 
-# Copy catalog to temp location for import
+# Copy catalog to temp location
 TEMP_CATALOG="${ARTIFACTS_DIR}/catalog-temp.yaml"
 cp "${PROJECT_DIR}/catalog.yaml" "${TEMP_CATALOG}"
 
+# In CI, inject API key directly into env section (bypass secrets mechanism)
+if [ "${CI:-false}" = "true" ]; then
+    log_info "CI environment detected - injecting API key into catalog env section"
+    
+    # Add NEXTDNS_API_KEY to the env section of the catalog
+    # This bypasses the secrets mechanism which may not work reliably in CI
+    python3 -c "
+import yaml
+import sys
+
+with open('${TEMP_CATALOG}', 'r') as f:
+    catalog = yaml.safe_load(f)
+
+# Add API key to env section
+if 'registry' in catalog and 'nextdns' in catalog['registry']:
+    if 'env' not in catalog['registry']['nextdns']:
+        catalog['registry']['nextdns']['env'] = []
+    
+    # Add or update NEXTDNS_API_KEY
+    env_list = catalog['registry']['nextdns']['env']
+    found = False
+    for env_var in env_list:
+        if env_var.get('name') == 'NEXTDNS_API_KEY':
+            env_var['value'] = '${NEXTDNS_API_KEY}'
+            found = True
+            break
+    
+    if not found:
+        env_list.insert(0, {
+            'name': 'NEXTDNS_API_KEY',
+            'value': '${NEXTDNS_API_KEY}',
+            'description': 'NextDNS API key (injected in CI)'
+        })
+    
+    with open('${TEMP_CATALOG}', 'w') as f:
+        yaml.dump(catalog, f, default_flow_style=False, sort_keys=False)
+    
+    sys.exit(0)
+else:
+    sys.exit(1)
+"
+    
+    if [ $? -eq 0 ]; then
+        log_success "API key injected into catalog"
+    else
+        log_error "Failed to inject API key into catalog"
+        rm -f "${TEMP_CATALOG}"
+        exit 1
+    fi
+fi
+
+# Import catalog
+log_info "Importing catalog..."
 if docker mcp catalog import "${TEMP_CATALOG}" >/dev/null 2>&1; then
     log_success "Catalog imported"
     rm -f "${TEMP_CATALOG}"
@@ -169,42 +222,46 @@ else
     exit 1
 fi
 
-# Step 3: Configure environment variables BEFORE enabling server
+# Step 3: Configure additional environment variables (if not in CI)
 log_info ""
-log_info "Step 3: Configuring environment variables..."
+log_info "Step 3: Configuring additional environment variables..."
 
-# Set NEXTDNS_READABLE_PROFILES if provided
-if [ -n "${NEXTDNS_READABLE_PROFILES:-}" ]; then
-    READABLE_PROFILES="${NEXTDNS_READABLE_PROFILES}"
-else
-    READABLE_PROFILES="ALL"
-fi
+# In CI, all env vars are already in the catalog, so skip this step
+if [ "${CI:-false}" != "true" ]; then
+    # Set NEXTDNS_READABLE_PROFILES if provided
+    if [ -n "${NEXTDNS_READABLE_PROFILES:-}" ]; then
+        READABLE_PROFILES="${NEXTDNS_READABLE_PROFILES}"
+    else
+        READABLE_PROFILES="ALL"
+    fi
 
-# Set NEXTDNS_WRITABLE_PROFILES if provided
-if [ -n "${NEXTDNS_WRITABLE_PROFILES:-}" ]; then
-    WRITABLE_PROFILES="${NEXTDNS_WRITABLE_PROFILES}"
-else
-    WRITABLE_PROFILES="ALL"
-fi
+    # Set NEXTDNS_WRITABLE_PROFILES if provided
+    if [ -n "${NEXTDNS_WRITABLE_PROFILES:-}" ]; then
+        WRITABLE_PROFILES="${NEXTDNS_WRITABLE_PROFILES}"
+    else
+        WRITABLE_PROFILES="ALL"
+    fi
 
-# Create config YAML for environment variables and secrets
-cat > "${ARTIFACTS_DIR}/config-temp.yaml" <<EOF
+    # Create config YAML for environment variables
+    cat > "${ARTIFACTS_DIR}/config-temp.yaml" <<EOF
 nextdns:
   env:
-    NEXTDNS_API_KEY: "${NEXTDNS_API_KEY}"
     NEXTDNS_READABLE_PROFILES: "${READABLE_PROFILES}"
     NEXTDNS_WRITABLE_PROFILES: "${WRITABLE_PROFILES}"
     NEXTDNS_READ_ONLY: "false"
 EOF
 
-# Write config
-if docker mcp config write "$(cat "${ARTIFACTS_DIR}/config-temp.yaml")" >/dev/null 2>&1; then
-    log_success "Environment variables configured"
-    rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
+    # Write config
+    if docker mcp config write "$(cat "${ARTIFACTS_DIR}/config-temp.yaml")" >/dev/null 2>&1; then
+        log_success "Environment variables configured"
+        rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
+    else
+        log_error "Failed to configure environment variables"
+        rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
+        exit 1
+    fi
 else
-    log_error "Failed to configure environment variables"
-    rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
-    exit 1
+    log_success "CI mode - all configuration in catalog"
 fi
 
 # Step 4: Enable server (AFTER config is set)

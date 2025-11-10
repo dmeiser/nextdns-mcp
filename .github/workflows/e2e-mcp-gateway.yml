@@ -41,6 +41,9 @@ jobs:
         run: |
           mkdir -p $HOME/.docker/cli-plugins
 
+      - name: Install PyYAML for catalog manipulation
+        run: pip install pyyaml
+
       - name: Build docker-mcp plugin from source
         run: |
           # Clone the MCP Gateway repo
