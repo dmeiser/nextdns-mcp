@@ -381,7 +381,7 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
         jq -n \
             --arg tool "${TOOL_NAME}" \
             --arg status "OK" \
-            --arg args "${TOOL_ARGS_JSON}" \
+            --arg args "${TOOL_ARGS}" \
             --arg duration "${DURATION}s" \
             '{tool: $tool, status: $status, args: $args, duration: $duration, timestamp: now | todate}' \
             >>"${REPORT_FILE}"
@@ -397,7 +397,7 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
         jq -n \
             --arg tool "${TOOL_NAME}" \
             --arg status "FAILED" \
-            --arg args "${TOOL_ARGS_JSON}" \
+            --arg args "${TOOL_ARGS}" \
             --arg error "${ERROR_MSG}" \
             --arg exit_code "${EXIT_CODE}" \
             --arg duration "${DURATION}s" \
