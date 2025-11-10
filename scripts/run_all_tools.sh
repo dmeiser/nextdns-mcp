@@ -84,9 +84,10 @@ fi
 log_success "Docker MCP is responding"
 
 # Parse tool names - tools ls returns an array of tool objects
-mapfile -t TOOL_NAMES < <(docker mcp tools ls --format json 2>&1 | jq -r '.[] | .name')
+# Filter out MCP Gateway built-in tools (mcp-*, code-*) - only test NextDNS tools
+mapfile -t ALL_TOOLS < <(docker mcp tools ls --format json 2>&1 | jq -r '.[] | .name')
 
-if [ ${#TOOL_NAMES[@]} -eq 0 ]; then
+if [ ${#ALL_TOOLS[@]} -eq 0 ]; then
     log_error "No tools found"
     log_error "The MCP server may not be properly configured"
     log_error "Run: docker mcp catalog import ./catalog.yaml"
@@ -94,8 +95,22 @@ if [ ${#TOOL_NAMES[@]} -eq 0 ]; then
     exit 1
 fi
 
+# Filter to only include NextDNS tools (exclude MCP Gateway built-in tools)
+TOOL_NAMES=()
+FILTERED_COUNT=0
+for TOOL in "${ALL_TOOLS[@]}"; do
+    # Exclude MCP Gateway built-in tools
+    if [[ "${TOOL}" =~ ^(mcp-|code-) ]]; then
+        log_info "Filtering out MCP Gateway built-in tool: ${TOOL}"
+        FILTERED_COUNT=$((FILTERED_COUNT + 1))
+        continue
+    fi
+    TOOL_NAMES+=("${TOOL}")
+done
+
+TOTAL_TOOLS=${#ALL_TOOLS[@]}
 TOOL_COUNT=${#TOOL_NAMES[@]}
-log_success "Found ${TOOL_COUNT} tools"
+log_success "Found ${TOTAL_TOOLS} tools total, ${TOOL_COUNT} NextDNS tools (filtered ${FILTERED_COUNT} non-NextDNS tools)"
 
 # Step 1: Create a test profile if writes are enabled
 CREATED_PROFILE_ID=""

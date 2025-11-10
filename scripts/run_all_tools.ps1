@@ -88,10 +88,10 @@ try {
 
 Write-Success "Docker MCP is responding"
 
-# Parse tool names
-$toolNames = docker mcp tools ls --format json 2>&1 | ConvertFrom-Json | ForEach-Object { $_.name }
+# Parse tool names - filter to only include NextDNS tools
+$allTools = docker mcp tools ls --format json 2>&1 | ConvertFrom-Json | ForEach-Object { $_.name }
 
-if ($null -eq $toolNames -or $toolNames.Count -eq 0) {
+if ($null -eq $allTools -or $allTools.Count -eq 0) {
     Write-ErrorMsg "No tools found"
     Write-ErrorMsg "The MCP server may not be properly configured"
     Write-ErrorMsg "Run: docker mcp catalog import ./catalog.yaml"
@@ -99,8 +99,22 @@ if ($null -eq $toolNames -or $toolNames.Count -eq 0) {
     exit 1
 }
 
+# Filter out MCP Gateway built-in tools (mcp-*, code-*) - only test NextDNS tools
+$toolNames = @()
+$filteredCount = 0
+foreach ($tool in $allTools) {
+    # Exclude MCP Gateway built-in tools
+    if ($tool -match '^(mcp-|code-)') {
+        Write-Info "Filtering out MCP Gateway built-in tool: $tool"
+        $filteredCount++
+        continue
+    }
+    $toolNames += $tool
+}
+
+$totalTools = $allTools.Count
 $toolCount = $toolNames.Count
-Write-Success "Found $toolCount tools"
+Write-Success "Found $totalTools tools total, $toolCount NextDNS tools (filtered $filteredCount non-NextDNS tools)"
 
 # Helper function to create a validation profile
 function New-ValidationProfile {
