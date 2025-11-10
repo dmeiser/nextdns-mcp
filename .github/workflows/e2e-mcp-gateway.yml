@@ -6,7 +6,7 @@ on:
       allow_live_writes:
         description: 'Enable write operations (creates/deletes test profiles)'
         required: false
-        default: 'false'
+        default: 'true'
         type: choice
         options:
           - 'true'
@@ -23,7 +23,7 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     env:
-      ALLOW_LIVE_WRITES: ${{ github.event.inputs.allow_live_writes || 'false' }}
+      ALLOW_LIVE_WRITES: ${{ github.event.inputs.allow_live_writes || 'true' }}
       NEXTDNS_READABLE_PROFILES: 'ALL'
       NEXTDNS_WRITABLE_PROFILES: 'ALL'
       CI: 'true'
