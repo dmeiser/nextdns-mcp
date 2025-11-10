@@ -231,10 +231,10 @@ get_tool_args() {
         getAnalyticsDomains|getAnalyticsStatus|getAnalyticsDevices|getAnalyticsProtocols|getAnalyticsEncryption|getAnalyticsIPVersions|getAnalyticsDNSSEC|getAnalyticsIPs|getAnalyticsQueryTypes|getAnalyticsReasons)
             echo "profile_id=${PROFILE_ID}" "from=${FROM_TIMESTAMP}"
             ;;
-        getAnalyticsDNSSECSeries|getAnalyticsDestinationsSeries|getAnalyticsDevicesSeries|getAnalyticsEncryptionSeries|getAnalyticsIPVersionsSeries|getAnalyticsIPsSeries|getAnalyticsProtocolsSeries|getAnalyticsQueryTypesSeries|getAnalyticsReasonsSeries|getAnalyticsStatusSeries)
+        getAnalyticsDNSSECSeries|getAnalyticsDevicesSeries|getAnalyticsEncryptionSeries|getAnalyticsIPVersionsSeries|getAnalyticsIPsSeries|getAnalyticsProtocolsSeries|getAnalyticsQueryTypesSeries|getAnalyticsReasonsSeries|getAnalyticsStatusSeries)
             echo "profile_id=${PROFILE_ID}" "from=${FROM_TIMESTAMP}"
             ;;
-        getAnalyticsDestinations)
+        getAnalyticsDestinations|getAnalyticsDestinationsSeries)
             echo "profile_id=${PROFILE_ID}" "from=${FROM_TIMESTAMP}" "type=countries"
             ;;
         getLogs|downloadLogs)
@@ -255,14 +255,23 @@ get_tool_args() {
         removeFromAllowlist|removeFromDenylist)
             echo "profile_id=${PROFILE_ID}" "entry_id=test-example.com"
             ;;
-        addPrivacyBlocklist|removePrivacyBlocklist)
+        addPrivacyBlocklist)
             echo "profile_id=${PROFILE_ID}" "id=nextdns-recommended"
             ;;
-        addPrivacyNative|removePrivacyNative)
+        removePrivacyBlocklist)
+            echo "profile_id=${PROFILE_ID}" "entry_id=nextdns-recommended"
+            ;;
+        addPrivacyNative)
             echo "profile_id=${PROFILE_ID}" "id=apple"
             ;;
-        addSecurityTLD|removeSecurityTLD)
+        removePrivacyNative)
+            echo "profile_id=${PROFILE_ID}" "entry_id=apple"
+            ;;
+        addSecurityTLD)
             echo "profile_id=${PROFILE_ID}" "id=zip"
+            ;;
+        removeSecurityTLD)
+            echo "profile_id=${PROFILE_ID}" "entry_id=zip"
             ;;
         addToParentalControlCategories|removeFromParentalControlCategories)
             echo "profile_id=${PROFILE_ID}" "id=gambling"
@@ -271,10 +280,10 @@ get_tool_args() {
             echo "profile_id=${PROFILE_ID}" "id=tiktok"
             ;;
         updateAllowlistEntry|updateDenylistEntry)
-            echo "profile_id=${PROFILE_ID}" "entry_id=example.com" "active=true"
+            echo "profile_id=${PROFILE_ID}" "entry_id=test-example.com" "active=true"
             ;;
         updateProfile)
-            echo "profile_id=${PROFILE_ID}" "name=Updated Test Profile"
+            echo "profile_id=${PROFILE_ID}" "name=UpdatedTestProfile"
             ;;
         updateSettings)
             # Note: Nested objects may not work with key=value format - skip for now
@@ -284,10 +293,10 @@ get_tool_args() {
             echo "profile_id=${PROFILE_ID}" "enabled=true"
             ;;
         updateLogsSettings)
-            echo "profile_id=${PROFILE_ID}" "enabled=true" "retention=1"
+            echo "profile_id=${PROFILE_ID}" "enabled=true" "retention=86400"
             ;;
         updatePerformanceSettings)
-            echo "profile_id=${PROFILE_ID}" "ecs=true" "cache=true"
+            echo "profile_id=${PROFILE_ID}" "ecs=true" "cacheBoost=true"
             ;;
         updatePrivacySettings)
             echo "profile_id=${PROFILE_ID}" "disguisedTrackers=true" "allowAffiliate=false"
