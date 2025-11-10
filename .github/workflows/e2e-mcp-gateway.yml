@@ -51,7 +51,8 @@ jobs:
           make docker-mcp
           
           # Install to CLI plugins directory
-          cp ./bin/docker-mcp $HOME/.docker/cli-plugins/docker-mcp
+          mkdir -p $HOME/.docker/cli-plugins
+          cp ./dist/docker-mcp $HOME/.docker/cli-plugins/docker-mcp
           chmod +x $HOME/.docker/cli-plugins/docker-mcp
 
       - name: Verify docker-mcp installation
