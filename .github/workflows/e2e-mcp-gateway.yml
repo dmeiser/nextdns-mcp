@@ -1,0 +1,119 @@
+name: E2E MCP Gateway
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_live_writes:
+        description: 'Enable write operations (creates/deletes test profiles)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      ALLOW_LIVE_WRITES: ${{ github.event.inputs.allow_live_writes || 'false' }}
+      NEXTDNS_READABLE_PROFILES: 'ALL'
+      NEXTDNS_WRITABLE_PROFILES: 'ALL'
+      CI: 'true'
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Create Docker CLI plugin directory
+        run: |
+          mkdir -p $HOME/.docker/cli-plugins
+
+      - name: Build docker-mcp plugin from source
+        run: |
+          # Clone the MCP Gateway repo
+          git clone --depth 1 https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway
+          cd /tmp/mcp-gateway
+          
+          # Build the plugin
+          make docker-mcp
+          
+          # Install to CLI plugins directory
+          cp ./bin/docker-mcp $HOME/.docker/cli-plugins/docker-mcp
+          chmod +x $HOME/.docker/cli-plugins/docker-mcp
+
+      - name: Verify docker-mcp installation
+        run: |
+          docker mcp --help
+          docker mcp version
+
+      - name: Verify Docker daemon
+        run: |
+          docker info
+          docker ps
+
+      - name: Build NextDNS MCP Docker image
+        run: |
+          docker build -t nextdns-mcp:latest .
+
+      - name: Create .env file for script
+        env:
+          NEXTDNS_API_KEY: ${{ secrets.NEXTDNS_API_KEY }}
+        run: |
+          cat > .env <<EOF
+          NEXTDNS_API_KEY=${NEXTDNS_API_KEY}
+          ALLOW_LIVE_WRITES=${ALLOW_LIVE_WRITES}
+          NEXTDNS_READABLE_PROFILES=${NEXTDNS_READABLE_PROFILES}
+          NEXTDNS_WRITABLE_PROFILES=${NEXTDNS_WRITABLE_PROFILES}
+          EOF
+
+      - name: Run E2E validation script
+        run: |
+          chmod +x scripts/gateway_e2e_run.sh
+          scripts/gateway_e2e_run.sh
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-report
+          path: artifacts/tools_report.jsonl
+          if-no-files-found: warn
+
+      - name: Display test summary
+        if: always()
+        run: |
+          if [ -f artifacts/tools_report.jsonl ]; then
+            echo "## E2E Test Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            TOTAL=$(wc -l < artifacts/tools_report.jsonl)
+            PASSED=$(grep -c '"status":"OK"' artifacts/tools_report.jsonl || echo "0")
+            FAILED=$(grep -c '"status":"FAILED"' artifacts/tools_report.jsonl || echo "0")
+            SKIPPED=$(grep -c '"status":"SKIPPED"' artifacts/tools_report.jsonl || echo "0")
+            
+            echo "- **Total Tools**: $TOTAL" >> $GITHUB_STEP_SUMMARY
+            echo "- **Passed**: ✅ $PASSED" >> $GITHUB_STEP_SUMMARY
+            echo "- **Failed**: ❌ $FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "- **Skipped**: ⏭️ $SKIPPED" >> $GITHUB_STEP_SUMMARY
+            
+            if [ $FAILED -gt 0 ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Failed Tools" >> $GITHUB_STEP_SUMMARY
+              grep '"status":"FAILED"' artifacts/tools_report.jsonl | jq -r '"\(.tool): \(.error // "Unknown error")"' >> $GITHUB_STEP_SUMMARY || echo "Could not parse failures" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "❌ No test report generated" >> $GITHUB_STEP_SUMMARY
+          fi

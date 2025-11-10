@@ -111,18 +111,25 @@ cleanup() {
         VALIDATION_PROFILE=$(cat "${ARTIFACTS_DIR}/validation_profile_id.txt")
         log_info "Validation profile created: ${VALIDATION_PROFILE}"
         
-        if [ "${ALLOW_LIVE_WRITES}" = "true" ]; then
-            read -p "Delete validation profile ${VALIDATION_PROFILE}? (yes/no): " -r
-            echo
-            if [[ $REPLY = "yes" ]]; then
-                log_info "Deleting validation profile..."
+            # Non-interactive cleanup for CI or when ALLOW_LIVE_WRITES is false
+            # If CI=true, or ALLOW_LIVE_WRITES is not "true", perform auto-delete (best-effort)
+            if [ "${CI:-false}" = "true" ] || [ "${ALLOW_LIVE_WRITES}" != "true" ]; then
+                log_info "Auto-deleting validation profile (CI or non-writes mode)"
                 docker mcp tools call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
                     >/dev/null 2>&1 || log_warn "Failed to delete validation profile"
-                log_success "Validation profile deleted"
+                log_success "Validation profile deletion attempted"
             else
-                log_info "Keeping validation profile for manual inspection"
+                read -p "Delete validation profile ${VALIDATION_PROFILE}? (yes/no): " -r
+                echo
+                if [[ $REPLY = "yes" ]]; then
+                    log_info "Deleting validation profile..."
+                    docker mcp tools call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
+                        >/dev/null 2>&1 || log_warn "Failed to delete validation profile"
+                    log_success "Validation profile deleted"
+                else
+                    log_info "Keeping validation profile for manual inspection"
+                fi
             fi
-        fi
         
         rm -f "${ARTIFACTS_DIR}/validation_profile_id.txt"
     fi
@@ -177,10 +184,47 @@ fi
 log_info ""
 log_info "Step 4: Configuring API key secret..."
 
-if docker mcp secret set NEXTDNS_API_KEY="${NEXTDNS_API_KEY}" >/dev/null 2>&1; then
+if echo "${NEXTDNS_API_KEY}" | docker mcp secret set nextdns.api_key >/dev/null 2>&1; then
     log_success "API key configured"
 else
     log_error "Failed to configure API key"
+    exit 1
+fi
+
+# Step 4.5: Configure environment variables
+log_info ""
+log_info "Step 4.5: Configuring environment variables..."
+
+# Set NEXTDNS_READABLE_PROFILES if provided
+if [ -n "${NEXTDNS_READABLE_PROFILES:-}" ]; then
+    READABLE_PROFILES="${NEXTDNS_READABLE_PROFILES}"
+else
+    READABLE_PROFILES="ALL"
+fi
+
+# Set NEXTDNS_WRITABLE_PROFILES if provided
+if [ -n "${NEXTDNS_WRITABLE_PROFILES:-}" ]; then
+    WRITABLE_PROFILES="${NEXTDNS_WRITABLE_PROFILES}"
+else
+    WRITABLE_PROFILES="ALL"
+fi
+
+# Create config YAML for environment variables
+cat > "${ARTIFACTS_DIR}/config-temp.yaml" <<EOF
+nextdns:
+  env:
+    NEXTDNS_READABLE_PROFILES: "${READABLE_PROFILES}"
+    NEXTDNS_WRITABLE_PROFILES: "${WRITABLE_PROFILES}"
+    NEXTDNS_READ_ONLY: "false"
+EOF
+
+# Write config
+if docker mcp config write "$(cat "${ARTIFACTS_DIR}/config-temp.yaml")" >/dev/null 2>&1; then
+    log_success "Environment variables configured"
+    rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
+else
+    log_error "Failed to configure environment variables"
+    rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
     exit 1
 fi
 
