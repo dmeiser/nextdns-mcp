@@ -169,45 +169,9 @@ else
     exit 1
 fi
 
-# Step 3: Enable server
+# Step 3: Configure environment variables BEFORE enabling server
 log_info ""
-log_info "Step 3: Enabling server..."
-
-if docker mcp server enable nextdns >/dev/null 2>&1; then
-    log_success "Server enabled"
-else
-    log_error "Failed to enable server"
-    exit 1
-fi
-
-# Step 4: Configure API key secret
-log_info ""
-log_info "Step 4: Configuring API key secret..."
-
-# Debug: Show API key length (not the actual key)
-log_info "API key length: ${#NEXTDNS_API_KEY} characters"
-
-# Check if we're in CI or if file-based secrets already exist
-if [ "${CI:-false}" = "true" ]; then
-    log_info "CI environment detected - using file-based secrets from ~/.docker/mcp/secrets.env"
-    log_success "API key configured via file-based secrets"
-elif [ -f "$HOME/.docker/mcp/secrets.env" ]; then
-    log_info "File-based secrets detected at ~/.docker/mcp/secrets.env"
-    log_success "API key configured via file-based secrets"
-else
-    # Try to set the secret via Docker Desktop API, capture any errors
-    if SECRET_OUTPUT=$(echo "${NEXTDNS_API_KEY}" | docker mcp secret set nextdns.api_key 2>&1); then
-        log_success "API key configured via Docker Desktop"
-    else
-        log_error "Failed to configure API key via Docker Desktop"
-        log_error "Docker MCP output: ${SECRET_OUTPUT}"
-        exit 1
-    fi
-fi
-
-# Step 4.5: Configure environment variables
-log_info ""
-log_info "Step 4.5: Configuring environment variables..."
+log_info "Step 3: Configuring environment variables..."
 
 # Set NEXTDNS_READABLE_PROFILES if provided
 if [ -n "${NEXTDNS_READABLE_PROFILES:-}" ]; then
@@ -243,15 +207,36 @@ else
     exit 1
 fi
 
-# Restart the server to pick up the new config
+# Step 4: Enable server (AFTER config is set)
 log_info ""
-log_info "Step 4.6: Restarting server to apply configuration..."
+log_info "Step 4: Enabling server..."
 
-if docker mcp server disable nextdns >/dev/null 2>&1 && docker mcp server enable nextdns >/dev/null 2>&1; then
-    log_success "Server restarted"
+if docker mcp server enable nextdns >/dev/null 2>&1; then
+    log_success "Server enabled"
 else
-    log_error "Failed to restart server"
+    log_error "Failed to enable server"
     exit 1
+fi
+
+# Debug: Show API key length (not the actual key)
+log_info "API key length: ${#NEXTDNS_API_KEY} characters"
+
+# Check if we're in CI or if file-based secrets already exist
+if [ "${CI:-false}" = "true" ]; then
+    log_info "CI environment detected - using file-based secrets from ~/.docker/mcp/secrets.env"
+    log_success "API key configured via file-based secrets"
+elif [ -f "$HOME/.docker/mcp/secrets.env" ]; then
+    log_info "File-based secrets detected at ~/.docker/mcp/secrets.env"
+    log_success "API key configured via file-based secrets"
+else
+    # Try to set the secret via Docker Desktop API, capture any errors
+    if SECRET_OUTPUT=$(echo "${NEXTDNS_API_KEY}" | docker mcp secret set nextdns.api_key 2>&1); then
+        log_success "API key configured via Docker Desktop"
+    else
+        log_error "Failed to configure API key via Docker Desktop"
+        log_error "Docker MCP output: ${SECRET_OUTPUT}"
+        exit 1
+    fi
 fi
 
 # Step 5: Wait for server readiness
