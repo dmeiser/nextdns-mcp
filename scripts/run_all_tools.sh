@@ -121,10 +121,12 @@ if [ -z "${PROFILE_ID}" ]; then
         # For read-only mode, try to get the first available profile
         log_info "Read-only mode: Looking for existing profile..."
         
-        PROFILES_RESULT=$(docker mcp tools call listProfiles '{}' 2>&1 | grep -E '^\{' || echo "")
+        PROFILES_RESULT=$(docker mcp tools call listProfiles '{}' 2>&1 | tee /tmp/listProfiles_output.txt | grep -E '^\{' || echo "")
         
         if [ -z "${PROFILES_RESULT}" ]; then
             log_error "No JSON output from listProfiles"
+            log_error "Raw output:"
+            cat /tmp/listProfiles_output.txt >&2 || echo "Could not read output file" >&2
             exit 1
         fi
         
