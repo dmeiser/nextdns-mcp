@@ -104,8 +104,11 @@ if [ "${ALLOW_WRITES}" = "true" ]; then
     TIMESTAMP=$(date +%s)
     PROFILE_NAME="E2E Test Profile ${TIMESTAMP}"
     
-    # Call createProfile with proper JSON format
-    PROFILE_RESULT=$(docker mcp tools call createProfile "{\"name\":\"${PROFILE_NAME}\"}" 2>&1 || echo "")
+    # Create JSON args - use jq to ensure proper formatting
+    PROFILE_ARGS=$(jq -n --arg name "${PROFILE_NAME}" '{name: $name}')
+    
+    # Call createProfile with JSON args as single quoted string
+    PROFILE_RESULT=$(docker mcp tools call createProfile "${PROFILE_ARGS}" 2>&1 || echo "")
     CREATE_EXIT_CODE=$?
     
     # Extract profile ID from response
@@ -407,8 +410,11 @@ done
 if [ -n "${CREATED_PROFILE_ID}" ]; then
     log_info "Step 3: Cleaning up test profile..."
     
+    # Create JSON args with jq
+    DELETE_ARGS=$(jq -n --arg pid "${CREATED_PROFILE_ID}" '{profile_id: $pid}')
+    
     # Call deleteProfile
-    DELETE_RESULT=$(docker mcp tools call deleteProfile "{\"profile_id\":\"${CREATED_PROFILE_ID}\"}" 2>&1 || echo "")
+    DELETE_RESULT=$(docker mcp tools call deleteProfile "${DELETE_ARGS}" 2>&1 || echo "")
     DELETE_EXIT_CODE=$?
     
     if [ ${DELETE_EXIT_CODE} -eq 0 ]; then
