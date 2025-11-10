@@ -243,6 +243,17 @@ else
     exit 1
 fi
 
+# Restart the server to pick up the new config
+log_info ""
+log_info "Step 4.6: Restarting server to apply configuration..."
+
+if docker mcp server disable nextdns >/dev/null 2>&1 && docker mcp server enable nextdns >/dev/null 2>&1; then
+    log_success "Server restarted"
+else
+    log_error "Failed to restart server"
+    exit 1
+fi
+
 # Step 5: Wait for server readiness
 log_info ""
 log_info "Step 5: Waiting for server readiness..."
