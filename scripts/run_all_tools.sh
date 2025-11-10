@@ -108,8 +108,9 @@ if [ "${ALLOW_WRITES}" = "true" ]; then
     PROFILE_RESULT=$(docker mcp tools call createProfile "name=${PROFILE_NAME}" 2>&1 || echo "")
     CREATE_EXIT_CODE=$?
     
-    # Extract profile ID from response - API returns {data: {id: "..."}}
-    CREATED_PROFILE_ID=$(echo "${PROFILE_RESULT}" | jq -r '.data.id // .id // empty' 2>/dev/null || echo "")
+    # Extract profile ID from response - filter out Docker MCP timing info, then parse JSON
+    # API returns {data: {id: "..."}} wrapped in timing output
+    CREATED_PROFILE_ID=$(echo "${PROFILE_RESULT}" | grep -E '^\{' | jq -r '.data.id // .id // empty' 2>/dev/null || echo "")
     
     if [ ${CREATE_EXIT_CODE} -eq 0 ] && [ -n "${CREATED_PROFILE_ID}" ] && [ "${CREATED_PROFILE_ID}" != "null" ]; then
         log_success "Created test profile: ${CREATED_PROFILE_ID}"
