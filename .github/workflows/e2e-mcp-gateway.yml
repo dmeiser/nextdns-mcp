@@ -82,10 +82,9 @@ jobs:
           
           # Create secrets file for docker-mcp (file-based secrets instead of Desktop API)
           mkdir -p ~/.docker/mcp
-          cat > ~/.docker/mcp/secrets.env <<EOF
-          nextdns.api_key=${NEXTDNS_API_KEY}
-          EOF
+          echo "NEXTDNS_API_KEY=${NEXTDNS_API_KEY}" > ~/.docker/mcp/secrets.env
           echo "Secrets file created at ~/.docker/mcp/secrets.env"
+          echo "Secret configured"
 
       - name: Run E2E validation script
         run: |

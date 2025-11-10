@@ -223,10 +223,11 @@ else
     WRITABLE_PROFILES="ALL"
 fi
 
-# Create config YAML for environment variables
+# Create config YAML for environment variables and secrets
 cat > "${ARTIFACTS_DIR}/config-temp.yaml" <<EOF
 nextdns:
   env:
+    NEXTDNS_API_KEY: "${NEXTDNS_API_KEY}"
     NEXTDNS_READABLE_PROFILES: "${READABLE_PROFILES}"
     NEXTDNS_WRITABLE_PROFILES: "${WRITABLE_PROFILES}"
     NEXTDNS_READ_ONLY: "false"
