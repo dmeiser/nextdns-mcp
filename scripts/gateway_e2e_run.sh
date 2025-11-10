@@ -184,10 +184,15 @@ fi
 log_info ""
 log_info "Step 4: Configuring API key secret..."
 
-if echo "${NEXTDNS_API_KEY}" | docker mcp secret set nextdns.api_key >/dev/null 2>&1; then
+# Debug: Show API key length (not the actual key)
+log_info "API key length: ${#NEXTDNS_API_KEY} characters"
+
+# Try to set the secret, capture any errors
+if SECRET_OUTPUT=$(echo "${NEXTDNS_API_KEY}" | docker mcp secret set nextdns.api_key 2>&1); then
     log_success "API key configured"
 else
     log_error "Failed to configure API key"
+    log_error "Docker MCP output: ${SECRET_OUTPUT}"
     exit 1
 fi
 

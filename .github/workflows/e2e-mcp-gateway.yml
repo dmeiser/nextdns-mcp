@@ -79,6 +79,7 @@ jobs:
           NEXTDNS_READABLE_PROFILES=${NEXTDNS_READABLE_PROFILES}
           NEXTDNS_WRITABLE_PROFILES=${NEXTDNS_WRITABLE_PROFILES}
           EOF
+          cat .env  # Debug: show the .env file contents
 
       - name: Run E2E validation script
         run: |
