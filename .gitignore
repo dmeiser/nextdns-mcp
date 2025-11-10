@@ -74,3 +74,6 @@ htmlcov/
 # Local caches
 .ruff_cache/
 .mypy_cache/
+
+# Test outputs
+temp-report/
