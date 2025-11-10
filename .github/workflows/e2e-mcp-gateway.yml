@@ -79,7 +79,13 @@ jobs:
           NEXTDNS_READABLE_PROFILES=${NEXTDNS_READABLE_PROFILES}
           NEXTDNS_WRITABLE_PROFILES=${NEXTDNS_WRITABLE_PROFILES}
           EOF
-          cat .env  # Debug: show the .env file contents
+          
+          # Create secrets file for docker-mcp (file-based secrets instead of Desktop API)
+          mkdir -p ~/.docker/mcp
+          cat > ~/.docker/mcp/secrets.env <<EOF
+          nextdns.api_key=${NEXTDNS_API_KEY}
+          EOF
+          echo "Secrets file created at ~/.docker/mcp/secrets.env"
 
       - name: Run E2E validation script
         run: |

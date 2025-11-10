@@ -187,13 +187,22 @@ log_info "Step 4: Configuring API key secret..."
 # Debug: Show API key length (not the actual key)
 log_info "API key length: ${#NEXTDNS_API_KEY} characters"
 
-# Try to set the secret, capture any errors
-if SECRET_OUTPUT=$(echo "${NEXTDNS_API_KEY}" | docker mcp secret set nextdns.api_key 2>&1); then
-    log_success "API key configured"
+# Check if we're in CI or if file-based secrets already exist
+if [ "${CI:-false}" = "true" ]; then
+    log_info "CI environment detected - using file-based secrets from ~/.docker/mcp/secrets.env"
+    log_success "API key configured via file-based secrets"
+elif [ -f "$HOME/.docker/mcp/secrets.env" ]; then
+    log_info "File-based secrets detected at ~/.docker/mcp/secrets.env"
+    log_success "API key configured via file-based secrets"
 else
-    log_error "Failed to configure API key"
-    log_error "Docker MCP output: ${SECRET_OUTPUT}"
-    exit 1
+    # Try to set the secret via Docker Desktop API, capture any errors
+    if SECRET_OUTPUT=$(echo "${NEXTDNS_API_KEY}" | docker mcp secret set nextdns.api_key 2>&1); then
+        log_success "API key configured via Docker Desktop"
+    else
+        log_error "Failed to configure API key via Docker Desktop"
+        log_error "Docker MCP output: ${SECRET_OUTPUT}"
+        exit 1
+    fi
 fi
 
 # Step 4.5: Configure environment variables
