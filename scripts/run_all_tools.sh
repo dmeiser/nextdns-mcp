@@ -2,21 +2,20 @@
 #
 # run_all_tools.sh - Enumerate and execute all NextDNS MCP tools via Docker MCP Gateway
 #
-# This script:
-# 1. Connects to Docker MCP Gateway via CLI
-# 2. Enumerates all available MCP tools
-# 3. Executes each tool with appropriate test arguments
-# 4. Generates a machine-readable JSONL report
+# This script follows a 4-step process:
+# 1. CREATE: Creates a test profile (if ALLOW_WRITES=true)
+# 2. TEST: Executes all tools using the test profile
+# 3. CLEANUP: Deletes the test profile (if created in step 1)
+# 4. REPORT: Displays execution summary and outcomes
 #
 # Usage:
-#   ./run_all_tools.sh [allow_writes] [profile_id]
+#   ./run_all_tools.sh [allow_writes]
 #
 # Arguments:
-#   allow_writes - Enable write operations (default: false)
-#   profile_id   - NextDNS profile ID (optional, will create if allow_writes=true)
+#   allow_writes - Enable write operations and profile creation (default: false)
 #
 # Output:
-#   - Console: Colored progress output
+#   - Console: Colored progress output with step markers
 #   - File: artifacts/tools_report.jsonl (one JSON object per line per tool)
 #
 # Exit Codes:
@@ -52,7 +51,6 @@ log_error() {
 
 # Configuration
 ALLOW_WRITES="${1:-false}"
-PROFILE_ID="${2:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 ARTIFACTS_DIR="${PROJECT_DIR}/artifacts"
@@ -99,50 +97,74 @@ fi
 TOOL_COUNT=${#TOOL_NAMES[@]}
 log_success "Found ${TOOL_COUNT} tools"
 
-# Create or use existing profile for tests
-if [ -z "${PROFILE_ID}" ]; then
-    if [ "${ALLOW_WRITES}" = "true" ]; then
-        log_info "Creating validation profile for testing..."
-        TIMESTAMP=$(date +%s)
-        PROFILE_NAME="Validation Profile ${TIMESTAMP}"
+# Step 1: Create a test profile if writes are enabled
+CREATED_PROFILE_ID=""
+if [ "${ALLOW_WRITES}" = "true" ]; then
+    log_info "Step 1: Creating test profile..."
+    TIMESTAMP=$(date +%s)
+    PROFILE_NAME="E2E Test Profile ${TIMESTAMP}"
+    
+    # Call createProfile with proper JSON format
+    PROFILE_RESULT=$(docker mcp tools call createProfile "{\"name\":\"${PROFILE_NAME}\"}" 2>&1 || echo "")
+    CREATE_EXIT_CODE=$?
+    
+    # Extract profile ID from response
+    CREATED_PROFILE_ID=$(echo "${PROFILE_RESULT}" | jq -r '.id' 2>/dev/null || echo "")
+    
+    if [ ${CREATE_EXIT_CODE} -eq 0 ] && [ -n "${CREATED_PROFILE_ID}" ] && [ "${CREATED_PROFILE_ID}" != "null" ]; then
+        log_success "Created test profile: ${CREATED_PROFILE_ID}"
+        echo "${CREATED_PROFILE_ID}" >"${ARTIFACTS_DIR}/test_profile_id.txt"
         
-        PROFILE_RESULT=$(docker mcp tools call createProfile "name=${PROFILE_NAME}" 2>&1 || echo "")
-        PROFILE_ID=$(echo "${PROFILE_RESULT}" | grep -o '{"id":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "")
+        # Record successful creation
+        jq -n \
+            --arg tool "createProfile" \
+            --arg status "OK" \
+            --arg profile_id "${CREATED_PROFILE_ID}" \
+            --arg profile_name "${PROFILE_NAME}" \
+            '{tool: $tool, status: $status, profile_id: $profile_id, profile_name: $profile_name, phase: "setup", timestamp: now | todate}' \
+            >>"${REPORT_FILE}"
         
-        if [ -z "${PROFILE_ID}" ]; then
-            log_error "Failed to create validation profile"
-            log_error "Output: ${PROFILE_RESULT}"
-            exit 1
-        fi
-        
-        log_success "Created validation profile: ${PROFILE_ID}"
-        echo "${PROFILE_ID}" >"${ARTIFACTS_DIR}/validation_profile_id.txt"
+        # Use the created profile for all tests
+        PROFILE_ID="${CREATED_PROFILE_ID}"
     else
-        # For read-only mode, try to get the first available profile
-        log_info "Read-only mode: Looking for existing profile..."
+        log_error "Failed to create test profile"
+        log_error "Response: ${PROFILE_RESULT}"
         
-        PROFILES_RESULT=$(docker mcp tools call listProfiles '{}' 2>&1 | tee /tmp/listProfiles_output.txt | grep -E '^\{' || echo "")
+        # Record failed creation
+        jq -n \
+            --arg tool "createProfile" \
+            --arg status "FAILED" \
+            --arg error "${PROFILE_RESULT}" \
+            '{tool: $tool, status: $status, error: $error, phase: "setup", timestamp: now | todate}' \
+            >>"${REPORT_FILE}"
         
-        if [ -z "${PROFILES_RESULT}" ]; then
-            log_error "No JSON output from listProfiles"
-            log_error "Raw output:"
-            cat /tmp/listProfiles_output.txt >&2 || echo "Could not read output file" >&2
-            exit 1
-        fi
-        
-        PROFILE_ID=$(echo "${PROFILES_RESULT}" | jq -r '.data[0].id' 2>/dev/null || echo "")
-        
-        if [ -z "${PROFILE_ID}" ] || [ "${PROFILE_ID}" = "null" ]; then
-            log_error "No profiles found"
-            log_error "Create a profile first or run with allow_writes=true to create one"
-            exit 1
-        fi
-        
-        log_success "Using existing profile: ${PROFILE_ID}"
+        exit 1
     fi
 else
-    log_info "Using provided profile: ${PROFILE_ID}"
+    log_info "Step 1: Skipping profile creation (ALLOW_WRITES=false)"
+    
+    # In read-only mode, get first available profile
+    log_info "Fetching existing profile for read-only tests..."
+    
+    PROFILES_RESULT=$(docker mcp tools call listProfiles '{}' 2>&1 | grep -E '^\{' || echo "")
+    
+    if [ -z "${PROFILES_RESULT}" ]; then
+        log_error "Failed to fetch profiles"
+        exit 1
+    fi
+    
+    PROFILE_ID=$(echo "${PROFILES_RESULT}" | jq -r '.data[0].id' 2>/dev/null || echo "")
+    
+    if [ -z "${PROFILE_ID}" ] || [ "${PROFILE_ID}" = "null" ]; then
+        log_error "No profiles available for testing"
+        log_error "Run with ALLOW_WRITES=true to create a test profile"
+        exit 1
+    fi
+    
+    log_success "Using existing profile: ${PROFILE_ID}"
 fi
+
+log_info "Step 2: Testing ${TOOL_COUNT} tools with profile ${PROFILE_ID}..."
 
 # Define read-only tools
 declare -A READ_ONLY_TOOLS=(
@@ -207,9 +229,6 @@ get_tool_args() {
             ;;
         listProfiles)
             echo "{}"
-            ;;
-        createProfile)
-            jq -n --arg name "Test Profile $(date +%s)" '{name: $name}'
             ;;
         addToAllowlist|addToDenylist)
             jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "test-example.com"}'
@@ -304,6 +323,21 @@ log_info "Executing tools..."
 
 # Execute each tool
 for TOOL_NAME in "${TOOL_NAMES[@]}"; do
+    # Skip profile lifecycle tools - handled in Steps 1 and 3
+    if [ "${TOOL_NAME}" = "createProfile" ] || [ "${TOOL_NAME}" = "deleteProfile" ]; then
+        log_info "Skipping ${TOOL_NAME}: Handled in setup/cleanup phases"
+        
+        jq -n \
+            --arg tool "${TOOL_NAME}" \
+            --arg status "SKIPPED" \
+            --arg reason "Handled in setup/cleanup phases" \
+            '{tool: $tool, status: $status, reason: $reason, timestamp: now | todate}' \
+            >>"${REPORT_FILE}"
+        
+        SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+        continue
+    fi
+    
     # Skip if tool is not read-only and writes are disabled
     if [ "${ALLOW_WRITES}" != "true" ] && [ -z "${READ_ONLY_TOOLS[${TOOL_NAME}]:-}" ]; then
         log_warn "Skipping ${TOOL_NAME}: Write operations disabled (ALLOW_LIVE_WRITES=false)"
@@ -369,9 +403,50 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     fi
 done
 
-# Summary
+# Step 3: Clean up test profile if we created one
+if [ -n "${CREATED_PROFILE_ID}" ]; then
+    log_info "Step 3: Cleaning up test profile..."
+    
+    # Call deleteProfile
+    DELETE_RESULT=$(docker mcp tools call deleteProfile "{\"profile_id\":\"${CREATED_PROFILE_ID}\"}" 2>&1 || echo "")
+    DELETE_EXIT_CODE=$?
+    
+    if [ ${DELETE_EXIT_CODE} -eq 0 ]; then
+        log_success "Deleted test profile: ${CREATED_PROFILE_ID}"
+        
+        # Record successful deletion
+        jq -n \
+            --arg tool "deleteProfile" \
+            --arg status "OK" \
+            --arg profile_id "${CREATED_PROFILE_ID}" \
+            '{tool: $tool, status: $status, profile_id: $profile_id, phase: "cleanup", timestamp: now | todate}' \
+            >>"${REPORT_FILE}"
+    else
+        log_error "Failed to delete test profile: ${CREATED_PROFILE_ID}"
+        log_error "Response: ${DELETE_RESULT}"
+        
+        # Record failed deletion
+        jq -n \
+            --arg tool "deleteProfile" \
+            --arg status "FAILED" \
+            --arg profile_id "${CREATED_PROFILE_ID}" \
+            --arg error "${DELETE_RESULT}" \
+            '{tool: $tool, status: $status, profile_id: $profile_id, error: $error, phase: "cleanup", timestamp: now | todate}' \
+            >>"${REPORT_FILE}"
+        
+        FAILED_COUNT=$((FAILED_COUNT + 1))
+    fi
+    
+    # Clean up marker file
+    rm -f "${ARTIFACTS_DIR}/test_profile_id.txt"
+else
+    log_info "Step 3: No test profile to clean up (read-only mode)"
+fi
+
+# Step 4: Report outcomes
+log_info ""
 log_info "================================"
-log_info "Execution Summary"
+log_info "Step 4: Execution Summary"
 log_info "================================"
 log_info "Total tools: ${TOOL_COUNT}"
 log_success "Executed: ${EXECUTED_COUNT}"
