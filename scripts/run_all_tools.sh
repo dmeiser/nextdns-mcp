@@ -200,7 +200,7 @@ declare -A READ_ONLY_TOOLS=(
     ["dohLookup"]=1
 )
 
-# Function to get test arguments for a tool (returns JSON string)
+# Function to get test arguments for a tool (returns space-separated key=value pairs)
 get_tool_args() {
     local TOOL_NAME="$1"
     local FROM_TIMESTAMP=$(date -d '1 day ago' +%s 2>/dev/null || date -v-1d +%s 2>/dev/null || echo "1704067200")
@@ -208,106 +208,110 @@ get_tool_args() {
     
     case "${TOOL_NAME}" in
         getProfile)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid}'
+            echo "profile_id=${PROFILE_ID}"
             ;;
         getSettings|getAllowlist|getDenylist|getPrivacyBlocklists|getPrivacyNatives|getPrivacySettings|getSecurityTLDs|getSecuritySettings|getParentalControlCategories|getParentalControlServices|getParentalControlSettings|getBlockPageSettings|getPerformanceSettings|getLogsSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid}'
+            echo "profile_id=${PROFILE_ID}"
             ;;
         getAnalyticsDomains|getAnalyticsStatus|getAnalyticsDevices|getAnalyticsProtocols|getAnalyticsEncryption|getAnalyticsIPVersions|getAnalyticsDNSSEC|getAnalyticsIPs|getAnalyticsQueryTypes|getAnalyticsReasons)
-            jq -n --arg pid "${PROFILE_ID}" --arg from "${FROM_TIMESTAMP}" '{profile_id: $pid, from: $from}'
+            echo "profile_id=${PROFILE_ID}" "from=${FROM_TIMESTAMP}"
             ;;
         getAnalyticsDNSSECSeries|getAnalyticsDestinationsSeries|getAnalyticsDevicesSeries|getAnalyticsEncryptionSeries|getAnalyticsIPVersionsSeries|getAnalyticsIPsSeries|getAnalyticsProtocolsSeries|getAnalyticsQueryTypesSeries|getAnalyticsReasonsSeries|getAnalyticsStatusSeries)
-            jq -n --arg pid "${PROFILE_ID}" --arg from "${FROM_TIMESTAMP}" '{profile_id: $pid, from: $from}'
+            echo "profile_id=${PROFILE_ID}" "from=${FROM_TIMESTAMP}"
             ;;
         getAnalyticsDestinations)
-            jq -n --arg pid "${PROFILE_ID}" --arg from "${FROM_TIMESTAMP}" '{profile_id: $pid, from: $from, type: "countries"}'
+            echo "profile_id=${PROFILE_ID}" "from=${FROM_TIMESTAMP}" "type=countries"
             ;;
-        getLogs|downloadLogs|clearLogs)
-            jq -n --arg pid "${PROFILE_ID}" --arg from "${HOURS_AGO_TIMESTAMP}" '{profile_id: $pid, from: $from, limit: 10}'
+        getLogs|downloadLogs)
+            echo "profile_id=${PROFILE_ID}" "from=${HOURS_AGO_TIMESTAMP}" "limit=10"
+            ;;
+        clearLogs)
+            echo "profile_id=${PROFILE_ID}"
             ;;
         dohLookup)
-            jq -n --arg pid "${PROFILE_ID}" '{domain: "example.com", profile_id: $pid, record_type: "A"}'
+            echo "domain=example.com" "profile_id=${PROFILE_ID}" "record_type=A"
             ;;
         listProfiles)
             echo "{}"
             ;;
         addToAllowlist|addToDenylist)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "test-example.com"}'
+            echo "profile_id=${PROFILE_ID}" "id=test-example.com"
             ;;
         removeFromAllowlist|removeFromDenylist)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, entry_id: "test-example.com"}'
+            echo "profile_id=${PROFILE_ID}" "entry_id=test-example.com"
             ;;
         addPrivacyBlocklist|removePrivacyBlocklist)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "nextdns-recommended"}'
+            echo "profile_id=${PROFILE_ID}" "id=nextdns-recommended"
             ;;
         addPrivacyNative|removePrivacyNative)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "apple"}'
+            echo "profile_id=${PROFILE_ID}" "id=apple"
             ;;
         addSecurityTLD|removeSecurityTLD)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "zip"}'
+            echo "profile_id=${PROFILE_ID}" "id=zip"
             ;;
         addToParentalControlCategories|removeFromParentalControlCategories)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "gambling"}'
+            echo "profile_id=${PROFILE_ID}" "id=gambling"
             ;;
         addToParentalControlServices|removeFromParentalControlServices)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "tiktok"}'
+            echo "profile_id=${PROFILE_ID}" "id=tiktok"
             ;;
         updateAllowlistEntry|updateDenylistEntry)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, entry_id: "example.com", active: true}'
+            echo "profile_id=${PROFILE_ID}" "entry_id=example.com" "active=true"
             ;;
         updateProfile)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, name: "Updated Test Profile"}'
+            echo "profile_id=${PROFILE_ID}" "name=Updated Test Profile"
             ;;
         updateSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, blockPage: {enabled: true}}'
+            # Note: Nested objects may not work with key=value format - skip for now
+            echo "profile_id=${PROFILE_ID}"
             ;;
         updateBlockPageSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, enabled: true}'
+            echo "profile_id=${PROFILE_ID}" "enabled=true"
             ;;
         updateLogsSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, enabled: true, retention: 1}'
+            echo "profile_id=${PROFILE_ID}" "enabled=true" "retention=1"
             ;;
         updatePerformanceSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, ecs: true, cache: true}'
+            echo "profile_id=${PROFILE_ID}" "ecs=true" "cache=true"
             ;;
         updatePrivacySettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, disguisedTrackers: true, allowAffiliate: false}'
+            echo "profile_id=${PROFILE_ID}" "disguisedTrackers=true" "allowAffiliate=false"
             ;;
         updateSecuritySettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, threatIntelligenceFeeds: true, googleSafeBrowsing: true}'
+            echo "profile_id=${PROFILE_ID}" "threatIntelligenceFeeds=true" "googleSafeBrowsing=true"
             ;;
         updateParentalControlSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, safeSearch: true, youtubeRestrictedMode: true}'
+            echo "profile_id=${PROFILE_ID}" "safeSearch=true" "youtubeRestrictedMode=true"
             ;;
         updateParentalControlCategoryEntry)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "gambling", active: true}'
+            echo "profile_id=${PROFILE_ID}" "id=gambling" "active=true"
             ;;
         updateParentalControlServiceEntry)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "tiktok", active: true}'
+            echo "profile_id=${PROFILE_ID}" "id=tiktok" "active=true"
             ;;
         updateAllowlist)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, entries: "[\"test1.com\",\"test2.com\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'entries=["test1.com","test2.com"]'
             ;;
         updateDenylist)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, entries: "[\"block1.com\",\"block2.com\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'entries=["block1.com","block2.com"]'
             ;;
         updatePrivacyBlocklists)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, blocklists: "[\"nextdns-recommended\",\"oisd\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'blocklists=["nextdns-recommended","oisd"]'
             ;;
         updatePrivacyNatives)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, natives: "[\"apple\",\"windows\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'natives=["apple","windows"]'
             ;;
         updateSecurityTlds)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, tlds: "[\"zip\",\"mov\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'tlds=["zip","mov"]'
             ;;
         updateParentalControlCategories)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, categories: "[\"gambling\",\"dating\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'categories=["gambling","dating"]'
             ;;
         updateParentalControlServices)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, services: "[\"tiktok\",\"fortnite\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'services=["tiktok","fortnite"]'
             ;;
         deleteProfile)
-            jq -n '{profile_id: "dummy-profile-id"}'
+            echo "profile_id=dummy-profile-id"
             ;;
         *)
             echo "{}"
@@ -357,13 +361,13 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     
     log_info "Executing: ${TOOL_NAME}"
     
-    # Get test arguments as JSON
-    TOOL_ARGS_JSON=$(get_tool_args "${TOOL_NAME}")
+    # Get test arguments as key=value pairs
+    TOOL_ARGS=$(get_tool_args "${TOOL_NAME}")
     
     # Execute tool and capture result
     START_TIME=$(date +%s)
     set +e
-    TOOL_OUTPUT=$(docker mcp tools call "${TOOL_NAME}" "${TOOL_ARGS_JSON}" 2>&1)
+    TOOL_OUTPUT=$(docker mcp tools call "${TOOL_NAME}" ${TOOL_ARGS} 2>&1)
     EXIT_CODE=$?
     set -e
     END_TIME=$(date +%s)
