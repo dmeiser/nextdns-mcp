@@ -85,8 +85,8 @@ fi
 
 log_success "Docker MCP is responding"
 
-# Parse tool names
-mapfile -t TOOL_NAMES < <(docker mcp tools ls --format json 2>&1 | jq -r '.name')
+# Parse tool names - tools ls returns an array of tool objects
+mapfile -t TOOL_NAMES < <(docker mcp tools ls --format json 2>&1 | jq -r '.[] | .name')
 
 if [ ${#TOOL_NAMES[@]} -eq 0 ]; then
     log_error "No tools found"
