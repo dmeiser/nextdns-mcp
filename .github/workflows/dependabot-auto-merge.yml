@@ -1,129 +1,174 @@
 name: Dependabot Auto-Merge
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  workflow_run:
+    workflows: ["Unit Tests", "E2E MCP Gateway"]
+    types: [completed]
 
 permissions:
   contents: write
   pull-requests: write
+  actions: read
+  checks: read
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    # Only run on dependabot PRs
-    if: github.actor == 'dependabot[bot]'
+    # Only run on dependabot PRs where workflow succeeded
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
     
     steps:
-      - name: Check out code
-        uses: actions/checkout@v4
+      - name: Get PR number
+        id: pr
+        uses: actions/github-script@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-      
-      - name: Get PR metadata
-        id: pr-metadata
+          script: |
+            const pulls = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${context.payload.workflow_run.head_branch}`,
+              state: 'open'
+            });
+            
+            if (pulls.data.length === 0) {
+              console.log('No open PR found for this branch');
+              return null;
+            }
+            
+            const pr = pulls.data[0];
+            console.log(`Found PR #${pr.number}`);
+            
+            // Check if this is a dependabot PR
+            if (pr.user.login !== 'dependabot[bot]') {
+              console.log('PR is not from dependabot');
+              return null;
+            }
+            
+            return pr.number;
+          result-encoding: string
+
+      - name: Check if all required workflows passed
+        if: steps.pr.outputs.result != 'null'
+        id: check-workflows
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr_number = ${{ steps.pr.outputs.result }};
+            const required_workflows = ['Unit Tests', 'E2E MCP Gateway'];
+            
+            // Get the PR details to find the head SHA
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr_number
+            });
+            
+            const head_sha = pr.data.head.sha;
+            console.log(`Checking workflows for PR #${pr_number}, SHA: ${head_sha}`);
+            
+            // Get all workflow runs for this SHA
+            const workflows = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head_sha: head_sha,
+              per_page: 100
+            });
+            
+            // Check each required workflow
+            const workflow_status = {};
+            for (const workflow_name of required_workflows) {
+              const matching_runs = workflows.data.workflow_runs.filter(
+                run => run.name === workflow_name && run.head_sha === head_sha
+              );
+              
+              if (matching_runs.length === 0) {
+                console.log(`❌ Workflow "${workflow_name}" has not run yet`);
+                workflow_status[workflow_name] = 'missing';
+                continue;
+              }
+              
+              // Get the most recent run
+              const latest_run = matching_runs.sort((a, b) => 
+                new Date(b.created_at) - new Date(a.created_at)
+              )[0];
+              
+              console.log(`Workflow "${workflow_name}": ${latest_run.status} / ${latest_run.conclusion}`);
+              workflow_status[workflow_name] = latest_run.conclusion;
+            }
+            
+            // Check if all workflows passed
+            const all_passed = required_workflows.every(
+              workflow => workflow_status[workflow] === 'success'
+            );
+            
+            if (all_passed) {
+              console.log('✅ All required workflows passed!');
+              return { pr_number, pr_title: pr.data.title, all_passed: true };
+            } else {
+              console.log('⏳ Not all workflows have passed yet');
+              console.log('Status:', workflow_status);
+              return { pr_number, pr_title: pr.data.title, all_passed: false };
+            }
+
+      - name: Check if should skip
+        if: steps.pr.outputs.result != 'null'
+        id: skip-check
         run: |
-          # Extract dependency name and type from PR title
-          # Dependabot PR titles are like: "deps(poetry)(deps): bump pytest from 8.0.0 to 8.1.0"
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
+          PR_TITLE='${{ fromJSON(steps.check-workflows.outputs.result).pr_title }}'
           
           # Check if this is a Python version update (exclude from auto-merge)
           if echo "$PR_TITLE" | grep -qi "bump python from"; then
             echo "is_python_version=true" >> $GITHUB_OUTPUT
-            echo "This is a Python version update - will NOT auto-merge"
-          else
-            echo "is_python_version=false" >> $GITHUB_OUTPUT
+            echo "should_skip=true" >> $GITHUB_OUTPUT
+            echo "skip_reason=Python version updates require manual review" >> $GITHUB_OUTPUT
+            exit 0
           fi
           
           # Check if this is a poetry/pip dependency (Python package)
-          if echo "$PR_TITLE" | grep -q "deps(poetry)"; then
-            echo "is_python_package=true" >> $GITHUB_OUTPUT
-            echo "This is a Python package update"
-          else
+          if ! echo "$PR_TITLE" | grep -q "deps(poetry)"; then
             echo "is_python_package=false" >> $GITHUB_OUTPUT
-            echo "This is NOT a Python package update - will NOT auto-merge"
-          fi
-      
-      - name: Set up Python
-        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-      
-      - name: Install Poetry
-        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false'
-        run: |
-          curl -sSL https://install.python-poetry.org | python3 -
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-      
-      - name: Install dependencies
-        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false'
-        run: |
-          poetry install
-      
-      - name: Run unit tests with coverage
-        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false'
-        id: tests
-        run: |
-          # Run tests and capture output
-          poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term-missing -q > test_output.txt 2>&1 || TEST_EXIT_CODE=$?
-          
-          # Display output
-          cat test_output.txt
-          
-          # Check if tests passed (exit code 0)
-          if [ "${TEST_EXIT_CODE:-0}" -ne 0 ]; then
-            echo "tests_passed=false" >> $GITHUB_OUTPUT
-            echo "❌ Tests failed with exit code: ${TEST_EXIT_CODE:-0}"
-            exit 1
+            echo "should_skip=true" >> $GITHUB_OUTPUT
+            echo "skip_reason=Not a Python package update" >> $GITHUB_OUTPUT
+            exit 0
           fi
           
-          # Extract coverage percentage from output
-          COVERAGE=$(grep "TOTAL" test_output.txt | awk '{print $NF}' | sed 's/%//')
-          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
-          echo "Coverage: $COVERAGE%"
+          echo "is_python_package=true" >> $GITHUB_OUTPUT
+          echo "should_skip=false" >> $GITHUB_OUTPUT
+
+      - name: Approve and enable auto-merge
+        if: |
+          steps.pr.outputs.result != 'null' &&
+          fromJSON(steps.check-workflows.outputs.result).all_passed &&
+          steps.skip-check.outputs.should_skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER='${{ fromJSON(steps.check-workflows.outputs.result).pr_number }}'
           
-          # Check if coverage is above 95%
-          if [ -z "$COVERAGE" ]; then
-            echo "tests_passed=false" >> $GITHUB_OUTPUT
-            echo "❌ Could not extract coverage percentage"
-            exit 1
-          fi
+          echo "✅ All checks passed for PR #$PR_NUMBER"
+          echo "Approving and enabling auto-merge..."
           
-          if ! awk "BEGIN {exit ($COVERAGE >= 95)}"; then
-            echo "tests_passed=false" >> $GITHUB_OUTPUT
-            echo "❌ Coverage $COVERAGE% is below 95% threshold"
-            exit 1
-          fi
+          # Approve the PR
+          gh pr review "$PR_NUMBER" --repo ${{ github.repository }} --approve \
+            --body "✅ Auto-approved: All workflows passed
           
-          echo "tests_passed=true" >> $GITHUB_OUTPUT
-          echo "✅ All tests passed with $COVERAGE% coverage (≥95% required)"
-      
-      - name: Approve PR
-        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false' && steps.tests.outputs.tests_passed == 'true'
-        run: |
-          gh pr review "${{ github.event.pull_request.number }}" --approve --body "✅ Auto-approved: All unit tests passed with ${{ steps.tests.outputs.coverage }}% coverage (≥95% required)"
+          - Unit Tests: ✅ Passed (≥95% overall coverage, all files ≥93%)
+          - E2E Tests: ✅ Passed (100% of tools tested)"
+          
+          # Enable auto-merge
+          gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --auto --squash
+
+      - name: Comment on skipped PR
+        if: |
+          steps.pr.outputs.result != 'null' &&
+          steps.skip-check.outputs.should_skip == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Enable auto-merge
-        if: steps.pr-metadata.outputs.is_python_package == 'true' && steps.pr-metadata.outputs.is_python_version == 'false' && steps.tests.outputs.tests_passed == 'true'
         run: |
-          gh pr merge "${{ github.event.pull_request.number }}" --auto --squash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Comment on PR (skipped - Python version)
-        if: steps.pr-metadata.outputs.is_python_version == 'true'
-        run: |
-          gh pr comment "${{ github.event.pull_request.number }}" --body "⚠️ This PR updates the Python version and requires manual review before merging."
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Comment on PR (skipped - not Python package)
-        if: steps.pr-metadata.outputs.is_python_package == 'false'
-        run: |
-          gh pr comment "${{ github.event.pull_request.number }}" --body "ℹ️ This PR is not a Python package update and will not be auto-merged. Manual review required."
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER='${{ fromJSON(steps.check-workflows.outputs.result).pr_number }}'
+          SKIP_REASON='${{ steps.skip-check.outputs.skip_reason }}'
+          
+          gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} \
+            --body "⚠️ Auto-merge skipped: $SKIP_REASON"
