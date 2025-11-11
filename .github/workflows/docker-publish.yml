@@ -73,6 +73,7 @@ jobs:
             let allComplete = false;
             let attempts = 0;
             const maxAttempts = 60; // 30 minutes (30 seconds * 60)
+            const maxAttemptsBeforeUndefinedCheck = 10; // 5 minutes - check for workflows that haven't started
             
             while (!allComplete && attempts < maxAttempts) {
               const { data: workflowRuns } = await github.rest.actions.listWorkflowRunsForRepo({
@@ -111,6 +112,17 @@ jobs:
                 if (hasFailure) {
                   core.setFailed('One or more required workflows failed');
                   return;
+                }
+                
+                // Check for workflows that haven't started after reasonable time
+                if (attempts >= maxAttemptsBeforeUndefinedCheck) {
+                  const undefinedWorkflows = requiredWorkflows.filter(workflow => !workflowStatus[workflow]);
+                  if (undefinedWorkflows.length > 0) {
+                    const errorMsg = `Required workflows have not started after ${maxAttemptsBeforeUndefinedCheck * 30} seconds: ${undefinedWorkflows.join(', ')}. ` +
+                                   'This may indicate a configuration issue or the workflow was skipped.';
+                    core.setFailed(errorMsg);
+                    return;
+                  }
                 }
                 
                 console.log(`Waiting for workflows to complete... (attempt ${attempts + 1}/${maxAttempts})`);
