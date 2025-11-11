@@ -9,6 +9,11 @@ on:
     branches:
       - main
   
+  # Trigger on version tags (v1.0.0, v2.0.0, etc.)
+  push:
+    tags:
+      - 'v*.*.*'
+  
   # Allow manual trigger
   workflow_dispatch:
 
@@ -59,10 +64,12 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             # Tag with commit SHA
             type=sha,prefix=,format=short
-            # Tag with version from pyproject.toml
-            type=semver,pattern={{version}},value=v2.0.0
-            type=semver,pattern={{major}}.{{minor}},value=v2.0.0
-            type=semver,pattern={{major}},value=v2.0.0
+            # Semantic version tags from git tags (v1.0.0 -> 1.0.0, 1.0, 1)
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # Tag with the git ref (for manual identification)
+            type=ref,event=tag
       
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
