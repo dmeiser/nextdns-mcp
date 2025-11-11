@@ -116,6 +116,7 @@ jobs:
             let allComplete = false;
             let attempts = 0;
             const maxAttempts = 60; // 30 minutes (30 seconds * 60)
+            const maxAttemptsBeforeUndefinedCheck = 10; // 5 minutes - check for workflows that haven't started
             
             if (otherWorkflows.length === 0) {
               console.log('✅ This was the last required workflow - proceeding with Docker publish');
@@ -146,36 +147,20 @@ jobs:
                   }
                 }
                 
-                console.log('Workflow status:', JSON.stringify(workflowStatus, null, 2));
-                
-                // Check if all required workflows are complete and successful
-                allComplete = requiredWorkflows.every(workflow => {
-                // Check if all other required workflows are complete and successful
-                allComplete = otherWorkflows.every(workflow => {
-                  const status = workflowStatus[workflow];
-                  return status && status.status === 'completed' && status.conclusion === 'success';
-                });
-                
-                if (!allComplete) {
-                  // Check for failures
-                  const hasFailure = requiredWorkflows.some(workflow => {
-                  const hasFailure = otherWorkflows.some(workflow => {
-                    const status = workflowStatus[workflow];
-                    return status && status.status === 'completed' && status.conclusion !== 'success';
-                  });
-                  
-                  if (hasFailure) {
-                    core.setFailed('One or more required workflows failed');
+                // Check for workflows that haven't started after reasonable time
+                if (attempts >= maxAttemptsBeforeUndefinedCheck) {
+                  const undefinedWorkflows = requiredWorkflows.filter(workflow => !workflowStatus[workflow]);
+                  if (undefinedWorkflows.length > 0) {
+                    const errorMsg = `Required workflows have not started after ${maxAttemptsBeforeUndefinedCheck * 30} seconds: ${undefinedWorkflows.join(', ')}. ` +
+                                   'This may indicate a configuration issue or the workflow was skipped.';
+                    core.setFailed(errorMsg);
                     return;
                   }
-                  
-                  console.log(`Waiting for workflows to complete... (attempt ${attempts + 1}/${maxAttempts}, next check in ${waitSeconds}s)`);
-                  await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
-                  attempts++;
-                  
-                  // Exponential backoff: double wait time until max
-                  waitSeconds = Math.min(waitSeconds * 2, maxWaitSeconds);
                 }
+                
+                console.log(`Waiting for workflows to complete... (attempt ${attempts + 1}/${maxAttempts})`);
+                await new Promise(resolve => setTimeout(resolve, 30000)); // Wait 30 seconds
+                attempts++;
               }
             }
       - name: Checkout code
