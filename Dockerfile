@@ -19,6 +19,10 @@ RUN poetry config virtualenvs.in-project true
 # Copy dependency files
 COPY pyproject.toml poetry.lock ./
 
+# Regenerate lock file to avoid timestamp issues from git checkout
+# This ensures poetry.lock matches pyproject.toml exactly
+RUN poetry lock
+
 # Install dependencies into the project's .venv
 RUN poetry install --without dev --no-interaction --no-ansi --no-root
 
