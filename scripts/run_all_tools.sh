@@ -223,7 +223,9 @@ get_tool_args() {
     
     case "${TOOL_NAME}" in
         createProfile)
-            echo 'name=E2E-Test-Profile-Tool-Validation'
+            # Use timestamp to ensure unique profile name
+            TIMESTAMP=$(date +%s)
+            echo "name=E2E-Test-Profile-${TIMESTAMP}"
             ;;
         deleteProfile)
             # Delete the profile created by createProfile test
