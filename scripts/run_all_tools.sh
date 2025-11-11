@@ -226,8 +226,13 @@ get_tool_args() {
             echo 'name=E2E-Test-Profile-Tool-Validation'
             ;;
         deleteProfile)
-            # Use a profile that doesn't exist - should fail gracefully or we create one to delete
-            echo "profile_id=test-delete-validation"
+            # Delete the profile created by createProfile test
+            if [ -n "${CREATED_TEST_PROFILE_ID:-}" ]; then
+                echo "profile_id=${CREATED_TEST_PROFILE_ID}"
+            else
+                # Fallback: use a non-existent ID (will return 404, which is expected)
+                echo "profile_id=000000"
+            fi
             ;;
         getProfile)
             echo "profile_id=${PROFILE_ID}"
@@ -379,20 +384,6 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     
     # Pre-execution setup for tools that need existing resources
     case "${TOOL_NAME}" in
-        deleteProfile)
-            # Create a profile specifically for deletion testing
-            log_info "  Pre-setup: Creating profile for deletion test"
-            DELETE_PROFILE_RESULT=$(docker mcp tools call createProfile name=E2E-Delete-Test-Profile 2>&1)
-            DELETE_PROFILE_ID=$(echo "${DELETE_PROFILE_RESULT}" | jq -r '.data.id // empty' 2>/dev/null || echo "")
-            if [ -n "${DELETE_PROFILE_ID}" ]; then
-                log_info "  Created profile ${DELETE_PROFILE_ID} for deletion test"
-                # Override the tool args to use this profile
-                TOOL_ARGS="profile_id=${DELETE_PROFILE_ID}"
-            else
-                log_warn "  Failed to create profile for deletion test, using placeholder"
-                TOOL_ARGS="profile_id=test-delete-validation"
-            fi
-            ;;
         updateAllowlistEntry)
             # Ensure entry exists before trying to update it
             log_info "  Pre-setup: Adding allowlist entry for update test"
@@ -432,6 +423,14 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     # Parse output and status
     if [ ${EXIT_CODE} -eq 0 ]; then
         log_success "${TOOL_NAME}: OK"
+        
+        # Track profile created by createProfile test for use by deleteProfile
+        if [ "${TOOL_NAME}" = "createProfile" ]; then
+            CREATED_TEST_PROFILE_ID=$(echo "${TOOL_OUTPUT}" | jq -r '.data.id // empty' 2>/dev/null || echo "")
+            if [ -n "${CREATED_TEST_PROFILE_ID}" ]; then
+                log_info "  Tracked test profile ID for deletion: ${CREATED_TEST_PROFILE_ID}"
+            fi
+        fi
         
         # Record successful execution
         jq -n \
