@@ -382,7 +382,7 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
         deleteProfile)
             # Create a profile specifically for deletion testing
             log_info "  Pre-setup: Creating profile for deletion test"
-            DELETE_PROFILE_RESULT=$(docker mcp tools call createProfile 'name=E2E Delete Test Profile' 2>&1)
+            DELETE_PROFILE_RESULT=$(docker mcp tools call createProfile 'name="E2E-Delete-Test-Profile"' 2>&1)
             DELETE_PROFILE_ID=$(echo "${DELETE_PROFILE_RESULT}" | jq -r '.data.id // empty' 2>/dev/null || echo "")
             if [ -n "${DELETE_PROFILE_ID}" ]; then
                 log_info "  Created profile ${DELETE_PROFILE_ID} for deletion test"
