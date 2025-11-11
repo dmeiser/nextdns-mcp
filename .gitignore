@@ -2,7 +2,6 @@
 .env
 .env.local
 .env.*.local
-.env.test
 
 # Artifacts (E2E test outputs)
 artifacts/
@@ -37,9 +36,6 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
-# Poetry
-poetry.lock
 
 # Testing
 .pytest_cache/
@@ -77,3 +73,6 @@ htmlcov/
 # Local caches
 .ruff_cache/
 .mypy_cache/
+
+# Test outputs
+temp-report/

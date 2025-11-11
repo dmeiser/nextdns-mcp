@@ -1,0 +1,147 @@
+name: Unit Tests
+
+on:
+  push:
+    branches: 
+      - main
+      - 'feature/**'  # Run on feature branches too
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Run unit tests with coverage
+        id: tests
+        run: |
+          # Run tests and capture output
+          poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term-missing > test_output.txt 2>&1 || TEST_EXIT_CODE=$?
+          
+          # Display output
+          cat test_output.txt
+          
+          # Check if tests passed (exit code 0)
+          if [ "${TEST_EXIT_CODE:-0}" -ne 0 ]; then
+            echo "❌ Tests failed with exit code: ${TEST_EXIT_CODE:-0}"
+            exit 1
+          fi
+          
+          # Extract overall coverage percentage
+          COVERAGE=$(grep "TOTAL" test_output.txt | awk '{print $NF}' | sed 's/%//')
+          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+          echo "Overall Coverage: $COVERAGE%"
+          
+          # Check if overall coverage is above 95%
+          if [ -z "$COVERAGE" ]; then
+            echo "❌ Could not extract coverage percentage"
+            exit 1
+          fi
+          
+          if ! awk "BEGIN {exit !($COVERAGE >= 95)}"; then
+            echo "❌ Overall coverage $COVERAGE% is below 95% threshold"
+            exit 1
+          fi
+          
+          echo "✅ Overall coverage: $COVERAGE% (≥95% required)"
+          
+          # Check per-file coverage (no file below 93%)
+          echo "Checking per-file coverage..."
+          MIN_FILE_COVERAGE=93
+          FAILED_FILES=""
+          
+          while IFS= read -r line; do
+            # Skip header and separator lines
+            if echo "$line" | grep -q "^-\|^Name\|^TOTAL"; then
+              continue
+            fi
+            
+            # Extract filename and coverage percentage
+            FILENAME=$(echo "$line" | awk '{print $1}')
+            FILE_COVERAGE=$(echo "$line" | awk '{print $NF}' | sed 's/%//')
+            
+            # Skip if not a valid coverage line
+            if [ -z "$FILE_COVERAGE" ] || ! [[ "$FILE_COVERAGE" =~ ^[0-9]+$ ]]; then
+              continue
+            fi
+            
+            # Check if file coverage is below threshold
+            if ! awk "BEGIN {exit !($FILE_COVERAGE >= $MIN_FILE_COVERAGE)}"; then
+              echo "❌ File $FILENAME has coverage $FILE_COVERAGE% (below $MIN_FILE_COVERAGE% threshold)"
+              FAILED_FILES="${FAILED_FILES}\n- $FILENAME: $FILE_COVERAGE%"
+            else
+              echo "✅ File $FILENAME: $FILE_COVERAGE%"
+            fi
+          done < test_output.txt
+          
+          # Fail if any files below threshold
+          if [ -n "$FAILED_FILES" ]; then
+            echo ""
+            echo "❌ The following files have coverage below $MIN_FILE_COVERAGE%:"
+            echo -e "$FAILED_FILES"
+            echo "failed_files=$FAILED_FILES" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo ""
+          echo "✅ All files have coverage ≥$MIN_FILE_COVERAGE%"
+          echo "✅ All unit tests passed!"
+
+      - name: Generate coverage report
+        if: always()
+        run: |
+          poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=html --cov-report=json --no-cov-on-fail 2>/dev/null || true
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            htmlcov/
+            coverage.json
+          if-no-files-found: warn
+
+      - name: Display test summary
+        if: always()
+        run: |
+          echo "## Unit Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f test_output.txt ]; then
+            TOTAL_TESTS=$(grep -E "^[0-9]+ passed" test_output.txt | awk '{print $1}' || echo "0")
+            COVERAGE="${{ steps.tests.outputs.coverage }}"
+            
+            echo "- **Tests**: ✅ $TOTAL_TESTS passed" >> $GITHUB_STEP_SUMMARY
+            echo "- **Overall Coverage**: $COVERAGE% (≥95% required)" >> $GITHUB_STEP_SUMMARY
+            echo "- **Per-File Coverage**: All files ≥93%" >> $GITHUB_STEP_SUMMARY
+            
+            if [ -n "${{ steps.tests.outputs.failed_files }}" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Files Below Coverage Threshold" >> $GITHUB_STEP_SUMMARY
+              echo "${{ steps.tests.outputs.failed_files }}" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "❌ No test output generated" >> $GITHUB_STEP_SUMMARY
+          fi

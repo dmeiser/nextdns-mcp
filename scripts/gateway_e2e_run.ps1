@@ -13,7 +13,7 @@
     7. Optionally cleans up
 
 .PARAMETER EnvFile
-    Path to environment file (default: .env, fallback: .env.example)
+    Path to environment file (default: .env)
 
 .PARAMETER Cleanup
     Whether to cleanup (disable server) after test (default: $false)
@@ -22,7 +22,7 @@
     .\gateway_e2e_run.ps1
 
 .EXAMPLE
-    .\gateway_e2e_run.ps1 -EnvFile .env.test -Cleanup $true
+    .\gateway_e2e_run.ps1 -EnvFile .env -Cleanup $true
 
 .NOTES
     Requires Docker Desktop with MCP support

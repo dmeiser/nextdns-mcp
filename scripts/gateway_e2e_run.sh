@@ -15,7 +15,7 @@
 #   ./gateway_e2e_run.sh [env_file]
 #
 # Arguments:
-#   env_file - Path to environment file (default: .env, fallback: .env.test.example)
+#   env_file - Path to environment file (default: .env)
 #
 # Environment Variables:
 #   NEXTDNS_API_KEY - Required: NextDNS API key
@@ -59,12 +59,9 @@ if [ -z "${ENV_FILE}" ]; then
     if [ -f "${PROJECT_DIR}/.env" ]; then
         ENV_FILE="${PROJECT_DIR}/.env"
         log_info "Using default .env file"
-    elif [ -f "${PROJECT_DIR}/.env.test.example" ]; then
-        ENV_FILE="${PROJECT_DIR}/.env.test.example"
-        log_warn "Using .env.test.example as fallback"
     else
-        log_error "No environment file found"
-        log_error "Please create .env or provide env file path as argument"
+        log_error "No .env file found"
+        log_error "Please create .env file (copy from .env.example)"
         exit 1
     fi
 else
@@ -111,18 +108,25 @@ cleanup() {
         VALIDATION_PROFILE=$(cat "${ARTIFACTS_DIR}/validation_profile_id.txt")
         log_info "Validation profile created: ${VALIDATION_PROFILE}"
         
-        if [ "${ALLOW_LIVE_WRITES}" = "true" ]; then
-            read -p "Delete validation profile ${VALIDATION_PROFILE}? (yes/no): " -r
-            echo
-            if [[ $REPLY = "yes" ]]; then
-                log_info "Deleting validation profile..."
+            # Non-interactive cleanup for CI or when ALLOW_LIVE_WRITES is false
+            # If CI=true, or ALLOW_LIVE_WRITES is not "true", perform auto-delete (best-effort)
+            if [ "${CI:-false}" = "true" ] || [ "${ALLOW_LIVE_WRITES}" != "true" ]; then
+                log_info "Auto-deleting validation profile (CI or non-writes mode)"
                 docker mcp tools call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
                     >/dev/null 2>&1 || log_warn "Failed to delete validation profile"
-                log_success "Validation profile deleted"
+                log_success "Validation profile deletion attempted"
             else
-                log_info "Keeping validation profile for manual inspection"
+                read -p "Delete validation profile ${VALIDATION_PROFILE}? (yes/no): " -r
+                echo
+                if [[ $REPLY = "yes" ]]; then
+                    log_info "Deleting validation profile..."
+                    docker mcp tools call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
+                        >/dev/null 2>&1 || log_warn "Failed to delete validation profile"
+                    log_success "Validation profile deleted"
+                else
+                    log_info "Keeping validation profile for manual inspection"
+                fi
             fi
-        fi
         
         rm -f "${ARTIFACTS_DIR}/validation_profile_id.txt"
     fi
@@ -145,14 +149,67 @@ else
     exit 1
 fi
 
-# Step 2: Import catalog
+# Step 2: Prepare catalog with API key (CI-specific)
 log_info ""
-log_info "Step 2: Importing catalog..."
+log_info "Step 2: Preparing catalog..."
 
-# Copy catalog to temp location for import
+# Copy catalog to temp location
 TEMP_CATALOG="${ARTIFACTS_DIR}/catalog-temp.yaml"
 cp "${PROJECT_DIR}/catalog.yaml" "${TEMP_CATALOG}"
 
+# In CI, inject API key directly into env section (bypass secrets mechanism)
+if [ "${CI:-false}" = "true" ]; then
+    log_info "CI environment detected - injecting API key into catalog env section"
+    
+    # Add NEXTDNS_API_KEY to the env section of the catalog
+    # This bypasses the secrets mechanism which may not work reliably in CI
+    python3 -c "
+import yaml
+import sys
+
+with open('${TEMP_CATALOG}', 'r') as f:
+    catalog = yaml.safe_load(f)
+
+# Add API key to env section
+if 'registry' in catalog and 'nextdns' in catalog['registry']:
+    if 'env' not in catalog['registry']['nextdns']:
+        catalog['registry']['nextdns']['env'] = []
+    
+    # Add or update NEXTDNS_API_KEY
+    env_list = catalog['registry']['nextdns']['env']
+    found = False
+    for env_var in env_list:
+        if env_var.get('name') == 'NEXTDNS_API_KEY':
+            env_var['value'] = '${NEXTDNS_API_KEY}'
+            found = True
+            break
+    
+    if not found:
+        env_list.insert(0, {
+            'name': 'NEXTDNS_API_KEY',
+            'value': '${NEXTDNS_API_KEY}',
+            'description': 'NextDNS API key (injected in CI)'
+        })
+    
+    with open('${TEMP_CATALOG}', 'w') as f:
+        yaml.dump(catalog, f, default_flow_style=False, sort_keys=False)
+    
+    sys.exit(0)
+else:
+    sys.exit(1)
+"
+    
+    if [ $? -eq 0 ]; then
+        log_success "API key injected into catalog"
+    else
+        log_error "Failed to inject API key into catalog"
+        rm -f "${TEMP_CATALOG}"
+        exit 1
+    fi
+fi
+
+# Import catalog
+log_info "Importing catalog..."
 if docker mcp catalog import "${TEMP_CATALOG}" >/dev/null 2>&1; then
     log_success "Catalog imported"
     rm -f "${TEMP_CATALOG}"
@@ -162,9 +219,51 @@ else
     exit 1
 fi
 
-# Step 3: Enable server
+# Step 3: Configure additional environment variables (if not in CI)
 log_info ""
-log_info "Step 3: Enabling server..."
+log_info "Step 3: Configuring additional environment variables..."
+
+# In CI, all env vars are already in the catalog, so skip this step
+if [ "${CI:-false}" != "true" ]; then
+    # Set NEXTDNS_READABLE_PROFILES if provided
+    if [ -n "${NEXTDNS_READABLE_PROFILES:-}" ]; then
+        READABLE_PROFILES="${NEXTDNS_READABLE_PROFILES}"
+    else
+        READABLE_PROFILES="ALL"
+    fi
+
+    # Set NEXTDNS_WRITABLE_PROFILES if provided
+    if [ -n "${NEXTDNS_WRITABLE_PROFILES:-}" ]; then
+        WRITABLE_PROFILES="${NEXTDNS_WRITABLE_PROFILES}"
+    else
+        WRITABLE_PROFILES="ALL"
+    fi
+
+    # Create config YAML for environment variables
+    cat > "${ARTIFACTS_DIR}/config-temp.yaml" <<EOF
+nextdns:
+  env:
+    NEXTDNS_READABLE_PROFILES: "${READABLE_PROFILES}"
+    NEXTDNS_WRITABLE_PROFILES: "${WRITABLE_PROFILES}"
+    NEXTDNS_READ_ONLY: "false"
+EOF
+
+    # Write config
+    if docker mcp config write "$(cat "${ARTIFACTS_DIR}/config-temp.yaml")" >/dev/null 2>&1; then
+        log_success "Environment variables configured"
+        rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
+    else
+        log_error "Failed to configure environment variables"
+        rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
+        exit 1
+    fi
+else
+    log_success "CI mode - all configuration in catalog"
+fi
+
+# Step 4: Enable server (AFTER config is set)
+log_info ""
+log_info "Step 4: Enabling server..."
 
 if docker mcp server enable nextdns >/dev/null 2>&1; then
     log_success "Server enabled"
@@ -173,15 +272,25 @@ else
     exit 1
 fi
 
-# Step 4: Configure API key secret
-log_info ""
-log_info "Step 4: Configuring API key secret..."
+# Debug: Show API key length (not the actual key)
+log_info "API key length: ${#NEXTDNS_API_KEY} characters"
 
-if docker mcp secret set NEXTDNS_API_KEY="${NEXTDNS_API_KEY}" >/dev/null 2>&1; then
-    log_success "API key configured"
+# Check if we're in CI or if file-based secrets already exist
+if [ "${CI:-false}" = "true" ]; then
+    log_info "CI environment detected - using file-based secrets from ~/.docker/mcp/secrets.env"
+    log_success "API key configured via file-based secrets"
+elif [ -f "$HOME/.docker/mcp/secrets.env" ]; then
+    log_info "File-based secrets detected at ~/.docker/mcp/secrets.env"
+    log_success "API key configured via file-based secrets"
 else
-    log_error "Failed to configure API key"
-    exit 1
+    # Try to set the secret via Docker Desktop API, capture any errors
+    if SECRET_OUTPUT=$(echo "${NEXTDNS_API_KEY}" | docker mcp secret set nextdns.api_key 2>&1); then
+        log_success "API key configured via Docker Desktop"
+    else
+        log_error "Failed to configure API key via Docker Desktop"
+        log_error "Docker MCP output: ${SECRET_OUTPUT}"
+        exit 1
+    fi
 fi
 
 # Step 5: Wait for server readiness

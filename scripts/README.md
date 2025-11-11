@@ -51,18 +51,20 @@ These scripts:
 
    **PowerShell:**
    ```powershell
-   Copy-Item .env.test.example .env.test
+   Copy-Item .env.example .env
    ```
 
    **Bash:**
    ```bash
-   cp .env.test.example .env.test
+   cp .env.example .env
    ```
 
-2. Edit `.env.test` and set your `NEXTDNS_API_KEY`:
+2. Edit `.env` and set your `NEXTDNS_API_KEY`:
 
    ```bash
    NEXTDNS_API_KEY=your-actual-api-key-here
+   NEXTDNS_READABLE_PROFILES=ALL
+   NEXTDNS_WRITABLE_PROFILES=ALL
    ```
 
 3. (Optional) Enable write operations:
@@ -77,12 +79,24 @@ These scripts:
 
 **PowerShell:**
 ```powershell
-.\scripts\gateway_e2e_run.ps1 -EnvFile .env.test
+.\scripts\gateway_e2e_run.ps1
 ```
 
 **Bash:**
 ```bash
-./scripts/gateway_e2e_run.sh .env.test
+./scripts/gateway_e2e_run.sh
+```
+
+Or specify a custom environment file:
+
+**PowerShell:**
+```powershell
+.\scripts\gateway_e2e_run.ps1 -EnvFile custom.env
+```
+
+**Bash:**
+```bash
+./scripts/gateway_e2e_run.sh custom.env
 ```
 
 ### Running Tools Only (Without E2E Setup)
@@ -214,7 +228,7 @@ jq 'select(.status == "skipped")' artifacts/tools_report.jsonl
 **Error:** `NEXTDNS_API_KEY is not set or is the default placeholder`
 
 **Solution:**
-1. Edit your `.env` or `.env.test` file
+1. Edit your `.env` file
 2. Set `NEXTDNS_API_KEY=your-actual-api-key-here`
 3. Get your API key from https://my.nextdns.io/account
 
@@ -281,9 +295,14 @@ docker exec nextdns-mcp-gateway mcp tools call deleteProfile --args "{\"profile_
 For CI/CD pipelines:
 
 ```bash
-# Set non-interactive mode and auto-cleanup
+# Set required environment variables
+export NEXTDNS_API_KEY=your-api-key
+export NEXTDNS_READABLE_PROFILES=ALL
+export NEXTDNS_WRITABLE_PROFILES=ALL
 export ALLOW_LIVE_WRITES=true
-./scripts/gateway_e2e_run.sh .env.test
+
+# Run E2E test
+./scripts/gateway_e2e_run.sh
 
 # Exit code indicates success (0) or failure (non-zero)
 ```

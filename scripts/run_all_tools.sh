@@ -2,21 +2,20 @@
 #
 # run_all_tools.sh - Enumerate and execute all NextDNS MCP tools via Docker MCP Gateway
 #
-# This script:
-# 1. Connects to Docker MCP Gateway via CLI
-# 2. Enumerates all available MCP tools
-# 3. Executes each tool with appropriate test arguments
-# 4. Generates a machine-readable JSONL report
+# This script follows a 4-step process:
+# 1. CREATE: Creates a test profile (if ALLOW_WRITES=true)
+# 2. TEST: Executes all tools using the test profile
+# 3. CLEANUP: Deletes the test profile (if created in step 1)
+# 4. REPORT: Displays execution summary and outcomes
 #
 # Usage:
-#   ./run_all_tools.sh [allow_writes] [profile_id]
+#   ./run_all_tools.sh [allow_writes]
 #
 # Arguments:
-#   allow_writes - Enable write operations (default: false)
-#   profile_id   - NextDNS profile ID (optional, will create if allow_writes=true)
+#   allow_writes - Enable write operations and profile creation (default: false)
 #
 # Output:
-#   - Console: Colored progress output
+#   - Console: Colored progress output with step markers
 #   - File: artifacts/tools_report.jsonl (one JSON object per line per tool)
 #
 # Exit Codes:
@@ -52,7 +51,6 @@ log_error() {
 
 # Configuration
 ALLOW_WRITES="${1:-false}"
-PROFILE_ID="${2:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 ARTIFACTS_DIR="${PROJECT_DIR}/artifacts"
@@ -85,10 +83,11 @@ fi
 
 log_success "Docker MCP is responding"
 
-# Parse tool names
-mapfile -t TOOL_NAMES < <(docker mcp tools ls --format json 2>&1 | jq -r '.name')
+# Parse tool names - tools ls returns an array of tool objects
+# Filter out MCP Gateway built-in tools (mcp-*, code-*) - only test NextDNS tools
+mapfile -t ALL_TOOLS < <(docker mcp tools ls --format json 2>&1 | jq -r '.[] | .name')
 
-if [ ${#TOOL_NAMES[@]} -eq 0 ]; then
+if [ ${#ALL_TOOLS[@]} -eq 0 ]; then
     log_error "No tools found"
     log_error "The MCP server may not be properly configured"
     log_error "Run: docker mcp catalog import ./catalog.yaml"
@@ -96,51 +95,92 @@ if [ ${#TOOL_NAMES[@]} -eq 0 ]; then
     exit 1
 fi
 
-TOOL_COUNT=${#TOOL_NAMES[@]}
-log_success "Found ${TOOL_COUNT} tools"
+# Filter to only include NextDNS tools (exclude MCP Gateway built-in tools)
+TOOL_NAMES=()
+FILTERED_COUNT=0
+for TOOL in "${ALL_TOOLS[@]}"; do
+    # Exclude MCP Gateway built-in tools
+    if [[ "${TOOL}" =~ ^(mcp-|code-) ]]; then
+        log_info "Filtering out MCP Gateway built-in tool: ${TOOL}"
+        FILTERED_COUNT=$((FILTERED_COUNT + 1))
+        continue
+    fi
+    TOOL_NAMES+=("${TOOL}")
+done
 
-# Create or use existing profile for tests
-if [ -z "${PROFILE_ID}" ]; then
-    if [ "${ALLOW_WRITES}" = "true" ]; then
-        log_info "Creating validation profile for testing..."
-        TIMESTAMP=$(date +%s)
-        PROFILE_NAME="Validation Profile ${TIMESTAMP}"
+TOTAL_TOOLS=${#ALL_TOOLS[@]}
+TOOL_COUNT=${#TOOL_NAMES[@]}
+log_success "Found ${TOTAL_TOOLS} tools total, ${TOOL_COUNT} NextDNS tools (filtered ${FILTERED_COUNT} non-NextDNS tools)"
+
+# Step 1: Create a test profile if writes are enabled
+CREATED_PROFILE_ID=""
+if [ "${ALLOW_WRITES}" = "true" ]; then
+    log_info "Step 1: Creating test profile..."
+    TIMESTAMP=$(date +%s)
+    PROFILE_NAME="E2E Test Profile ${TIMESTAMP}"
+    
+    # Call createProfile using key=value syntax (Docker MCP CLI format)
+    PROFILE_RESULT=$(docker mcp tools call createProfile "name=${PROFILE_NAME}" 2>&1 || echo "")
+    CREATE_EXIT_CODE=$?
+    
+    # Extract profile ID from response - filter out Docker MCP timing info, then parse JSON
+    # API returns {data: {id: "..."}} wrapped in timing output
+    CREATED_PROFILE_ID=$(echo "${PROFILE_RESULT}" | grep -E '^\{' | jq -r '.data.id // .id // empty' 2>/dev/null || echo "")
+    
+    if [ ${CREATE_EXIT_CODE} -eq 0 ] && [ -n "${CREATED_PROFILE_ID}" ] && [ "${CREATED_PROFILE_ID}" != "null" ]; then
+        log_success "Created test profile: ${CREATED_PROFILE_ID}"
+        echo "${CREATED_PROFILE_ID}" >"${ARTIFACTS_DIR}/test_profile_id.txt"
         
-        PROFILE_RESULT=$(docker mcp tools call createProfile "name=${PROFILE_NAME}" 2>&1 || echo "")
-        PROFILE_ID=$(echo "${PROFILE_RESULT}" | grep -o '{"id":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "")
+        # Record successful creation
+        jq -n \
+            --arg tool "createProfile" \
+            --arg status "OK" \
+            --arg profile_id "${CREATED_PROFILE_ID}" \
+            --arg profile_name "${PROFILE_NAME}" \
+            '{tool: $tool, status: $status, profile_id: $profile_id, profile_name: $profile_name, phase: "setup", timestamp: now | todate}' \
+            >>"${REPORT_FILE}"
         
-        if [ -z "${PROFILE_ID}" ]; then
-            log_error "Failed to create validation profile"
-            log_error "Output: ${PROFILE_RESULT}"
-            exit 1
-        fi
-        
-        log_success "Created validation profile: ${PROFILE_ID}"
-        echo "${PROFILE_ID}" >"${ARTIFACTS_DIR}/validation_profile_id.txt"
+        # Use the created profile for all tests
+        PROFILE_ID="${CREATED_PROFILE_ID}"
     else
-        # For read-only mode, try to get the first available profile
-        log_info "Read-only mode: Looking for existing profile..."
+        log_error "Failed to create test profile"
+        log_error "Response: ${PROFILE_RESULT}"
         
-        PROFILES_RESULT=$(docker mcp tools call listProfiles '{}' 2>&1 | grep -E '^\{' || echo "")
+        # Record failed creation
+        jq -n \
+            --arg tool "createProfile" \
+            --arg status "FAILED" \
+            --arg error "${PROFILE_RESULT}" \
+            '{tool: $tool, status: $status, error: $error, phase: "setup", timestamp: now | todate}' \
+            >>"${REPORT_FILE}"
         
-        if [ -z "${PROFILES_RESULT}" ]; then
-            log_error "No JSON output from listProfiles"
-            exit 1
-        fi
-        
-        PROFILE_ID=$(echo "${PROFILES_RESULT}" | jq -r '.data[0].id' 2>/dev/null || echo "")
-        
-        if [ -z "${PROFILE_ID}" ] || [ "${PROFILE_ID}" = "null" ]; then
-            log_error "No profiles found"
-            log_error "Create a profile first or run with allow_writes=true to create one"
-            exit 1
-        fi
-        
-        log_success "Using existing profile: ${PROFILE_ID}"
+        exit 1
     fi
 else
-    log_info "Using provided profile: ${PROFILE_ID}"
+    log_info "Step 1: Skipping profile creation (ALLOW_WRITES=false)"
+    
+    # In read-only mode, get first available profile
+    log_info "Fetching existing profile for read-only tests..."
+    
+    PROFILES_RESULT=$(docker mcp tools call listProfiles '{}' 2>&1 | grep -E '^\{' || echo "")
+    
+    if [ -z "${PROFILES_RESULT}" ]; then
+        log_error "Failed to fetch profiles"
+        exit 1
+    fi
+    
+    PROFILE_ID=$(echo "${PROFILES_RESULT}" | jq -r '.data[0].id' 2>/dev/null || echo "")
+    
+    if [ -z "${PROFILE_ID}" ] || [ "${PROFILE_ID}" = "null" ]; then
+        log_error "No profiles available for testing"
+        log_error "Run with ALLOW_WRITES=true to create a test profile"
+        exit 1
+    fi
+    
+    log_success "Using existing profile: ${PROFILE_ID}"
 fi
+
+log_info "Step 2: Testing ${TOOL_COUNT} tools with profile ${PROFILE_ID}..."
 
 # Define read-only tools
 declare -A READ_ONLY_TOOLS=(
@@ -175,117 +215,138 @@ declare -A READ_ONLY_TOOLS=(
     ["dohLookup"]=1
 )
 
-# Function to get test arguments for a tool (returns JSON string)
+# Function to get test arguments for a tool (returns space-separated key=value pairs)
 get_tool_args() {
     local TOOL_NAME="$1"
     local FROM_TIMESTAMP=$(date -d '1 day ago' +%s 2>/dev/null || date -v-1d +%s 2>/dev/null || echo "1704067200")
     local HOURS_AGO_TIMESTAMP=$(date -d '1 hour ago' +%s 2>/dev/null || date -v-1H +%s 2>/dev/null || echo "$(date +%s)")
     
     case "${TOOL_NAME}" in
+        createProfile)
+            # Use timestamp to ensure unique profile name
+            TIMESTAMP=$(date +%s)
+            echo "name=E2E-Test-Profile-${TIMESTAMP}"
+            ;;
+        deleteProfile)
+            # Delete the profile created by createProfile test
+            if [ -n "${CREATED_TEST_PROFILE_ID:-}" ]; then
+                echo "profile_id=${CREATED_TEST_PROFILE_ID}"
+            else
+                # Fallback: use a non-existent ID (will return 404, which is expected)
+                echo "profile_id=000000"
+            fi
+            ;;
         getProfile)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid}'
+            echo "profile_id=${PROFILE_ID}"
             ;;
         getSettings|getAllowlist|getDenylist|getPrivacyBlocklists|getPrivacyNatives|getPrivacySettings|getSecurityTLDs|getSecuritySettings|getParentalControlCategories|getParentalControlServices|getParentalControlSettings|getBlockPageSettings|getPerformanceSettings|getLogsSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid}'
+            echo "profile_id=${PROFILE_ID}"
             ;;
         getAnalyticsDomains|getAnalyticsStatus|getAnalyticsDevices|getAnalyticsProtocols|getAnalyticsEncryption|getAnalyticsIPVersions|getAnalyticsDNSSEC|getAnalyticsIPs|getAnalyticsQueryTypes|getAnalyticsReasons)
-            jq -n --arg pid "${PROFILE_ID}" --arg from "${FROM_TIMESTAMP}" '{profile_id: $pid, from: $from}'
+            echo "profile_id=${PROFILE_ID}" "from=${FROM_TIMESTAMP}"
             ;;
-        getAnalyticsDNSSECSeries|getAnalyticsDestinationsSeries|getAnalyticsDevicesSeries|getAnalyticsEncryptionSeries|getAnalyticsIPVersionsSeries|getAnalyticsIPsSeries|getAnalyticsProtocolsSeries|getAnalyticsQueryTypesSeries|getAnalyticsReasonsSeries|getAnalyticsStatusSeries)
-            jq -n --arg pid "${PROFILE_ID}" --arg from "${FROM_TIMESTAMP}" '{profile_id: $pid, from: $from}'
+        getAnalyticsDNSSECSeries|getAnalyticsDevicesSeries|getAnalyticsEncryptionSeries|getAnalyticsIPVersionsSeries|getAnalyticsIPsSeries|getAnalyticsProtocolsSeries|getAnalyticsQueryTypesSeries|getAnalyticsReasonsSeries|getAnalyticsStatusSeries)
+            echo "profile_id=${PROFILE_ID}" "from=${FROM_TIMESTAMP}"
             ;;
-        getAnalyticsDestinations)
-            jq -n --arg pid "${PROFILE_ID}" --arg from "${FROM_TIMESTAMP}" '{profile_id: $pid, from: $from, type: "countries"}'
+        getAnalyticsDestinations|getAnalyticsDestinationsSeries)
+            echo "profile_id=${PROFILE_ID}" "from=${FROM_TIMESTAMP}" "type=countries"
             ;;
-        getLogs|downloadLogs|clearLogs)
-            jq -n --arg pid "${PROFILE_ID}" --arg from "${HOURS_AGO_TIMESTAMP}" '{profile_id: $pid, from: $from, limit: 10}'
+        getLogs|downloadLogs)
+            echo "profile_id=${PROFILE_ID}" "from=${HOURS_AGO_TIMESTAMP}" "limit=10"
+            ;;
+        clearLogs)
+            echo "profile_id=${PROFILE_ID}"
             ;;
         dohLookup)
-            jq -n --arg pid "${PROFILE_ID}" '{domain: "example.com", profile_id: $pid, record_type: "A"}'
+            echo "domain=example.com" "profile_id=${PROFILE_ID}" "record_type=A"
             ;;
         listProfiles)
             echo "{}"
             ;;
-        createProfile)
-            jq -n --arg name "Test Profile $(date +%s)" '{name: $name}'
-            ;;
         addToAllowlist|addToDenylist)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "test-example.com"}'
+            echo "profile_id=${PROFILE_ID}" "id=test-example.com"
             ;;
         removeFromAllowlist|removeFromDenylist)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, entry_id: "test-example.com"}'
+            echo "profile_id=${PROFILE_ID}" "entry_id=test-example.com"
             ;;
-        addPrivacyBlocklist|removePrivacyBlocklist)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "nextdns-recommended"}'
+        addPrivacyBlocklist)
+            echo "profile_id=${PROFILE_ID}" "id=nextdns-recommended"
             ;;
-        addPrivacyNative|removePrivacyNative)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "apple"}'
+        removePrivacyBlocklist)
+            echo "profile_id=${PROFILE_ID}" "entry_id=nextdns-recommended"
             ;;
-        addSecurityTLD|removeSecurityTLD)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "zip"}'
+        addPrivacyNative)
+            echo "profile_id=${PROFILE_ID}" "id=apple"
+            ;;
+        removePrivacyNative)
+            echo "profile_id=${PROFILE_ID}" "entry_id=apple"
+            ;;
+        addSecurityTLD)
+            echo "profile_id=${PROFILE_ID}" "id=zip"
+            ;;
+        removeSecurityTLD)
+            echo "profile_id=${PROFILE_ID}" "entry_id=zip"
             ;;
         addToParentalControlCategories|removeFromParentalControlCategories)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "gambling"}'
+            echo "profile_id=${PROFILE_ID}" "id=gambling"
             ;;
         addToParentalControlServices|removeFromParentalControlServices)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "tiktok"}'
+            echo "profile_id=${PROFILE_ID}" "id=tiktok"
             ;;
         updateAllowlistEntry|updateDenylistEntry)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, entry_id: "example.com", active: true}'
+            echo "profile_id=${PROFILE_ID}" "entry_id=test-example.com" "active=true"
             ;;
         updateProfile)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, name: "Updated Test Profile"}'
+            echo "profile_id=${PROFILE_ID}" "name=UpdatedTestProfile"
             ;;
         updateSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, blockPage: {enabled: true}}'
+            # Note: Nested objects may not work with key=value format - skip for now
+            echo "profile_id=${PROFILE_ID}"
             ;;
         updateBlockPageSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, enabled: true}'
+            echo "profile_id=${PROFILE_ID}" "enabled=true"
             ;;
         updateLogsSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, enabled: true, retention: 1}'
+            echo "profile_id=${PROFILE_ID}" "enabled=true" "retention=86400"
             ;;
         updatePerformanceSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, ecs: true, cache: true}'
+            echo "profile_id=${PROFILE_ID}" "ecs=true" "cacheBoost=true"
             ;;
         updatePrivacySettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, disguisedTrackers: true, allowAffiliate: false}'
+            echo "profile_id=${PROFILE_ID}" "disguisedTrackers=true" "allowAffiliate=false"
             ;;
         updateSecuritySettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, threatIntelligenceFeeds: true, googleSafeBrowsing: true}'
+            echo "profile_id=${PROFILE_ID}" "threatIntelligenceFeeds=true" "googleSafeBrowsing=true"
             ;;
         updateParentalControlSettings)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, safeSearch: true, youtubeRestrictedMode: true}'
+            echo "profile_id=${PROFILE_ID}" "safeSearch=true" "youtubeRestrictedMode=true"
             ;;
         updateParentalControlCategoryEntry)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "gambling", active: true}'
+            echo "profile_id=${PROFILE_ID}" "id=gambling" "active=true"
             ;;
         updateParentalControlServiceEntry)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, id: "tiktok", active: true}'
+            echo "profile_id=${PROFILE_ID}" "id=tiktok" "active=true"
             ;;
         updateAllowlist)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, entries: "[\"test1.com\",\"test2.com\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'entries=["test1.com","test2.com"]'
             ;;
         updateDenylist)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, entries: "[\"block1.com\",\"block2.com\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'entries=["block1.com","block2.com"]'
             ;;
         updatePrivacyBlocklists)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, blocklists: "[\"nextdns-recommended\",\"oisd\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'blocklists=["nextdns-recommended","oisd"]'
             ;;
         updatePrivacyNatives)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, natives: "[\"apple\",\"windows\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'natives=["apple","windows"]'
             ;;
         updateSecurityTlds)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, tlds: "[\"zip\",\"mov\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'tlds=["zip","mov"]'
             ;;
         updateParentalControlCategories)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, categories: "[\"gambling\",\"dating\"]"}'
+            echo "profile_id=${PROFILE_ID}" 'categories=["gambling","dating"]'
             ;;
         updateParentalControlServices)
-            jq -n --arg pid "${PROFILE_ID}" '{profile_id: $pid, services: "[\"tiktok\",\"fortnite\"]"}'
-            ;;
-        deleteProfile)
-            jq -n '{profile_id: "dummy-profile-id"}'
+            echo "profile_id=${PROFILE_ID}" 'services=["tiktok","fortnite"]'
             ;;
         *)
             echo "{}"
@@ -297,11 +358,15 @@ get_tool_args() {
 EXECUTED_COUNT=0
 FAILED_COUNT=0
 SKIPPED_COUNT=0
+SCHEMA_ERRORS=0
 
 log_info "Executing tools..."
 
 # Execute each tool
 for TOOL_NAME in "${TOOL_NAMES[@]}"; do
+    # Reset tool args for this iteration
+    TOOL_ARGS=""
+    
     # Skip if tool is not read-only and writes are disabled
     if [ "${ALLOW_WRITES}" != "true" ] && [ -z "${READ_ONLY_TOOLS[${TOOL_NAME}]:-}" ]; then
         log_warn "Skipping ${TOOL_NAME}: Write operations disabled (ALLOW_LIVE_WRITES=false)"
@@ -320,13 +385,39 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     
     log_info "Executing: ${TOOL_NAME}"
     
-    # Get test arguments as JSON
-    TOOL_ARGS_JSON=$(get_tool_args "${TOOL_NAME}")
+    # Pre-execution setup for tools that need existing resources
+    case "${TOOL_NAME}" in
+        updateAllowlistEntry)
+            # Ensure entry exists before trying to update it
+            log_info "  Pre-setup: Adding allowlist entry for update test"
+            docker mcp tools call addToAllowlist "profile_id=${PROFILE_ID}" "id=test-example.com" >/dev/null 2>&1 || true
+            ;;
+        updateDenylistEntry)
+            # Ensure entry exists before trying to update it
+            log_info "  Pre-setup: Adding denylist entry for update test"
+            docker mcp tools call addToDenylist "profile_id=${PROFILE_ID}" "id=test-example.com" >/dev/null 2>&1 || true
+            ;;
+        updateParentalControlCategoryEntry)
+            # Ensure category exists before trying to update it
+            log_info "  Pre-setup: Adding parental control category for update test"
+            docker mcp tools call addToParentalControlCategories "profile_id=${PROFILE_ID}" "id=gambling" >/dev/null 2>&1 || true
+            ;;
+        updateParentalControlServiceEntry)
+            # Ensure service exists before trying to update it
+            log_info "  Pre-setup: Adding parental control service for update test"
+            docker mcp tools call addToParentalControlServices "profile_id=${PROFILE_ID}" "id=tiktok" >/dev/null 2>&1 || true
+            ;;
+    esac
+    
+    # Get test arguments as key=value pairs (unless overridden in pre-setup)
+    if [ -z "${TOOL_ARGS:-}" ]; then
+        TOOL_ARGS=$(get_tool_args "${TOOL_NAME}")
+    fi
     
     # Execute tool and capture result
     START_TIME=$(date +%s)
     set +e
-    TOOL_OUTPUT=$(docker mcp tools call "${TOOL_NAME}" "${TOOL_ARGS_JSON}" 2>&1)
+    TOOL_OUTPUT=$(docker mcp tools call --format json "${TOOL_NAME}" ${TOOL_ARGS} 2>&1)
     EXIT_CODE=$?
     set -e
     END_TIME=$(date +%s)
@@ -336,13 +427,52 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     if [ ${EXIT_CODE} -eq 0 ]; then
         log_success "${TOOL_NAME}: OK"
         
-        # Record successful execution
+        # Extract JSON response for schema validation
+        JSON_OUTPUT=$(echo "${TOOL_OUTPUT}" | grep -E '^\{' | head -1 || echo "")
+        
+        # Validate response schema against OpenAPI spec
+        SCHEMA_STATUS="SKIPPED"
+        SCHEMA_ERROR_MSG=""
+        if [ -n "${JSON_OUTPUT}" ]; then
+            VALIDATION_RESULT=$(python3 "${SCRIPT_DIR}/validate_schema.py" "${TOOL_NAME}" "${JSON_OUTPUT}" 2>&1 || echo "SCHEMA_VALIDATION_FAILED")
+            
+            if echo "${VALIDATION_RESULT}" | grep -q "VALID"; then
+                SCHEMA_STATUS="VALID"
+            elif echo "${VALIDATION_RESULT}" | grep -q "SKIPPED"; then
+                SCHEMA_STATUS="SKIPPED"
+            else
+                SCHEMA_STATUS="INVALID"
+                SCHEMA_ERROR_MSG=$(echo "${VALIDATION_RESULT}" | grep "SCHEMA_ERRORS" || echo "${VALIDATION_RESULT}")
+                log_warn "  Schema validation failed: ${SCHEMA_ERROR_MSG}"
+                SCHEMA_ERRORS=$((SCHEMA_ERRORS + 1))
+            fi
+        fi
+        
+        # Track profile created by createProfile test for use by deleteProfile
+        if [ "${TOOL_NAME}" = "createProfile" ]; then
+            log_info "  Parsing createProfile output for profile ID..."
+            if [ -z "${JSON_OUTPUT}" ]; then
+                log_warn "  No JSON found in output, trying full output..."
+                JSON_OUTPUT="${TOOL_OUTPUT}"
+            fi
+            CREATED_TEST_PROFILE_ID=$(echo "${JSON_OUTPUT}" | jq -r '.data.id // empty' 2>/dev/null || echo "")
+            if [ -n "${CREATED_TEST_PROFILE_ID}" ] && [ "${CREATED_TEST_PROFILE_ID}" != "null" ]; then
+                log_info "  Tracked test profile ID for deletion: ${CREATED_TEST_PROFILE_ID}"
+            else
+                log_warn "  Could not extract profile ID from createProfile output"
+                log_warn "  Full output: ${TOOL_OUTPUT}"
+            fi
+        fi
+        
+        # Record successful execution with schema validation result
         jq -n \
             --arg tool "${TOOL_NAME}" \
             --arg status "OK" \
-            --arg args "${TOOL_ARGS_JSON}" \
+            --arg schema_status "${SCHEMA_STATUS}" \
+            --arg schema_error "${SCHEMA_ERROR_MSG}" \
+            --arg args "${TOOL_ARGS}" \
             --arg duration "${DURATION}s" \
-            '{tool: $tool, status: $status, args: $args, duration: $duration, timestamp: now | todate}' \
+            '{tool: $tool, status: $status, schema_validation: $schema_status, schema_error: $schema_error, args: $args, duration: $duration, timestamp: now | todate}' \
             >>"${REPORT_FILE}"
         
         EXECUTED_COUNT=$((EXECUTED_COUNT + 1))
@@ -356,7 +486,7 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
         jq -n \
             --arg tool "${TOOL_NAME}" \
             --arg status "FAILED" \
-            --arg args "${TOOL_ARGS_JSON}" \
+            --arg args "${TOOL_ARGS}" \
             --arg error "${ERROR_MSG}" \
             --arg exit_code "${EXIT_CODE}" \
             --arg duration "${DURATION}s" \
@@ -367,18 +497,66 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     fi
 done
 
-# Summary
+# Step 3: Clean up test profile if we created one
+if [ -n "${CREATED_PROFILE_ID}" ]; then
+    log_info "Step 3: Cleaning up test profile..."
+    
+    # Call deleteProfile using key=value syntax
+    DELETE_RESULT=$(docker mcp tools call deleteProfile "profile_id=${CREATED_PROFILE_ID}" 2>&1 || echo "")
+    DELETE_EXIT_CODE=$?
+    
+    if [ ${DELETE_EXIT_CODE} -eq 0 ]; then
+        log_success "Deleted test profile: ${CREATED_PROFILE_ID}"
+        
+        # Record successful deletion
+        jq -n \
+            --arg tool "deleteProfile" \
+            --arg status "OK" \
+            --arg profile_id "${CREATED_PROFILE_ID}" \
+            '{tool: $tool, status: $status, profile_id: $profile_id, phase: "cleanup", timestamp: now | todate}' \
+            >>"${REPORT_FILE}"
+    else
+        log_error "Failed to delete test profile: ${CREATED_PROFILE_ID}"
+        log_error "Response: ${DELETE_RESULT}"
+        
+        # Record failed deletion
+        jq -n \
+            --arg tool "deleteProfile" \
+            --arg status "FAILED" \
+            --arg profile_id "${CREATED_PROFILE_ID}" \
+            --arg error "${DELETE_RESULT}" \
+            '{tool: $tool, status: $status, profile_id: $profile_id, error: $error, phase: "cleanup", timestamp: now | todate}' \
+            >>"${REPORT_FILE}"
+        
+        FAILED_COUNT=$((FAILED_COUNT + 1))
+    fi
+    
+    # Clean up marker file
+    rm -f "${ARTIFACTS_DIR}/test_profile_id.txt"
+else
+    log_info "Step 3: No test profile to clean up (read-only mode)"
+fi
+
+# Step 4: Report outcomes
+log_info ""
 log_info "================================"
-log_info "Execution Summary"
+log_info "Step 4: Execution Summary"
 log_info "================================"
 log_info "Total tools: ${TOOL_COUNT}"
 log_success "Executed: ${EXECUTED_COUNT}"
 log_warn "Skipped: ${SKIPPED_COUNT}"
 log_error "Failed: ${FAILED_COUNT}"
+if [ ${SCHEMA_ERRORS} -gt 0 ]; then
+    log_warn "Schema validation errors: ${SCHEMA_ERRORS}"
+fi
 log_info "Report: ${REPORT_FILE}"
 
-# Exit with error if any tools failed
+# Exit with error if any tools failed or had schema errors
 if [ ${FAILED_COUNT} -gt 0 ]; then
+    log_error "E2E test failed: Tool execution failed"
+    exit 1
+elif [ ${SCHEMA_ERRORS} -gt 0 ]; then
+    log_error "E2E test failed: Schema validation errors detected"
     exit 1
 else
     exit 0
