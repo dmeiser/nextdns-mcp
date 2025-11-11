@@ -3,6 +3,23 @@
 
 Essential knowledge for AI agents working on this FastMCP-based NextDNS API server.
 
+## 0. CRITICAL GIT RULES
+
+**NEVER push directly to main branch!**
+
+- ❌ NEVER use `git push origin main`
+- ❌ NEVER bypass pull requests
+- ❌ NEVER approve PRs (`gh pr review --approve`)
+- ❌ NEVER merge PRs (`gh pr merge`)
+- ✅ ALWAYS work on feature branches
+- ✅ ALWAYS create PRs for all changes
+- ✅ Let humans review and approve PRs
+- ✅ Let humans merge PRs after approval
+- ✅ Let GitHub Actions validate changes before merging
+
+Pushing to main bypasses branch protection, CI/CD validation, and code review.
+PR approval and merging are human decisions that require judgment and accountability.
+
 ## 1. Architecture: OpenAPI-Driven Tool Generation
 
 **Core Insight**: Server is auto-generated from `src/nextdns_mcp/nextdns-openapi.yaml` via `FastMCP.from_openapi()`. No hand-coded routes.
