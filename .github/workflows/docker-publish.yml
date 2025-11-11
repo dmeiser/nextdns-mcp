@@ -74,6 +74,41 @@ jobs:
               process.exit(0);
             }
             
+            // Initial check: verify current workflow status and determine what we need to wait for
+            const { data: initialRuns } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head_sha: headSha,
+              per_page: 100
+            });
+            
+            const workflowStatus = {};
+            for (const workflow of requiredWorkflows) {
+              const run = initialRuns.workflow_runs.find(r => r.name === workflow);
+              if (run) {
+                workflowStatus[workflow] = {
+                  status: run.status,
+                  conclusion: run.conclusion
+                };
+              }
+            }
+            
+            console.log('Initial workflow status:', JSON.stringify(workflowStatus, null, 2));
+            
+            // Early exit: if all workflows are already complete and successful, skip polling
+            let allComplete = requiredWorkflows.every(workflow => {
+              const status = workflowStatus[workflow];
+              return status && status.status === 'completed' && status.conclusion === 'success';
+            });
+            
+            if (allComplete) {
+              console.log('✅ All required workflows already completed successfully - skipping wait loop');
+            } else {
+              // Wait for remaining workflows with exponential backoff
+              let attempts = 0;
+              let waitSeconds = 10; // Start with 10 seconds
+              const maxWaitSeconds = 60; // Cap at 60 seconds
+              const maxAttempts = 30; // ~20 minutes max (with exponential backoff: 10+20+40+60*27)
             // The workflow that triggered this run has already completed successfully
             // We only need to wait for the OTHER required workflow(s) to complete
             const otherWorkflows = requiredWorkflows.filter(w => w !== currentWorkflow);
@@ -101,7 +136,7 @@ jobs:
                 });
                 
                 const workflowStatus = {};
-                for (const workflow of otherWorkflows) {
+                for (const workflow of requiredWorkflows) {
                   const run = workflowRuns.workflow_runs.find(r => r.name === workflow);
                   if (run) {
                     workflowStatus[workflow] = {
@@ -113,6 +148,8 @@ jobs:
                 
                 console.log('Workflow status:', JSON.stringify(workflowStatus, null, 2));
                 
+                // Check if all required workflows are complete and successful
+                allComplete = requiredWorkflows.every(workflow => {
                 // Check if all other required workflows are complete and successful
                 allComplete = otherWorkflows.every(workflow => {
                   const status = workflowStatus[workflow];
@@ -121,6 +158,7 @@ jobs:
                 
                 if (!allComplete) {
                   // Check for failures
+                  const hasFailure = requiredWorkflows.some(workflow => {
                   const hasFailure = otherWorkflows.some(workflow => {
                     const status = workflowStatus[workflow];
                     return status && status.status === 'completed' && status.conclusion !== 'success';
@@ -131,16 +169,13 @@ jobs:
                     return;
                   }
                   
-                  console.log(`Waiting for workflows to complete... (attempt ${attempts + 1}/${maxAttempts})`);
-                  await new Promise(resolve => setTimeout(resolve, 30000)); // Wait 30 seconds
+                  console.log(`Waiting for workflows to complete... (attempt ${attempts + 1}/${maxAttempts}, next check in ${waitSeconds}s)`);
+                  await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
                   attempts++;
+                  
+                  // Exponential backoff: double wait time until max
+                  waitSeconds = Math.min(waitSeconds * 2, maxWaitSeconds);
                 }
-              }
-              
-              if (!allComplete) {
-                core.setFailed('Timeout waiting for required workflows to complete');
-              } else {
-                console.log('✅ All required workflows completed successfully');
               }
             }
       - name: Checkout code
