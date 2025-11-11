@@ -414,7 +414,7 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     # Execute tool and capture result
     START_TIME=$(date +%s)
     set +e
-    TOOL_OUTPUT=$(docker mcp tools call "${TOOL_NAME}" ${TOOL_ARGS} 2>&1)
+    TOOL_OUTPUT=$(docker mcp tools call --format json "${TOOL_NAME}" ${TOOL_ARGS} 2>&1)
     EXIT_CODE=$?
     set -e
     END_TIME=$(date +%s)
