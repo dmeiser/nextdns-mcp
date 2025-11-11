@@ -426,9 +426,13 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
         
         # Track profile created by createProfile test for use by deleteProfile
         if [ "${TOOL_NAME}" = "createProfile" ]; then
+            log_info "  Parsing createProfile output for profile ID..."
             CREATED_TEST_PROFILE_ID=$(echo "${TOOL_OUTPUT}" | jq -r '.data.id // empty' 2>/dev/null || echo "")
-            if [ -n "${CREATED_TEST_PROFILE_ID}" ]; then
+            if [ -n "${CREATED_TEST_PROFILE_ID}" ] && [ "${CREATED_TEST_PROFILE_ID}" != "null" ]; then
                 log_info "  Tracked test profile ID for deletion: ${CREATED_TEST_PROFILE_ID}"
+            else
+                log_warn "  Could not extract profile ID from createProfile output"
+                log_warn "  Output was: ${TOOL_OUTPUT}"
             fi
         fi
         
