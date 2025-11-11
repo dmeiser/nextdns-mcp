@@ -1,9 +1,8 @@
 name: Dependabot Auto-Merge
 
 on:
-  workflow_run:
-    workflows: ["Unit Tests", "E2E MCP Gateway"]
-    types: [completed]
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
@@ -14,113 +13,117 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    # Only run on dependabot PRs where workflow succeeded
-    if: |
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.actor.login == 'dependabot[bot]'
+    # Only run on dependabot PRs
+    if: github.actor == 'dependabot[bot]'
     
     steps:
-      - name: Get PR number
-        id: pr
+      - name: Wait for required workflows
         uses: actions/github-script@v7
-        with:
-          script: |
-            const pulls = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              head: `${context.repo.owner}:${context.payload.workflow_run.head_branch}`,
-              state: 'open'
-            });
-            
-            if (pulls.data.length === 0) {
-              console.log('No open PR found for this branch');
-              return null;
-            }
-            
-            const pr = pulls.data[0];
-            console.log(`Found PR #${pr.number}`);
-            
-            // Check if this is a dependabot PR
-            if (pr.user.login !== 'dependabot[bot]') {
-              console.log('PR is not from dependabot');
-              return null;
-            }
-            
-            return pr.number;
-          result-encoding: string
-
-      - name: Check if all required workflows passed
-        if: steps.pr.outputs.result != 'null'
         id: check-workflows
-        uses: actions/github-script@v7
         with:
           script: |
-            const pr_number = ${{ steps.pr.outputs.result }};
             const required_workflows = ['Unit Tests', 'E2E MCP Gateway'];
+            const pr_number = context.issue.number;
+            const max_wait_minutes = 20;
+            const check_interval_seconds = 30;
+            const max_checks = (max_wait_minutes * 60) / check_interval_seconds;
             
-            // Get the PR details to find the head SHA
-            const pr = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: pr_number
-            });
+            console.log(`Waiting for required workflows on PR #${pr_number}`);
+            console.log(`Required: ${required_workflows.join(', ')}`);
             
-            const head_sha = pr.data.head.sha;
-            console.log(`Checking workflows for PR #${pr_number}, SHA: ${head_sha}`);
-            
-            // Get all workflow runs for this SHA
-            const workflows = await github.rest.actions.listWorkflowRunsForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              head_sha: head_sha,
-              per_page: 100
-            });
-            
-            // Check each required workflow
-            const workflow_status = {};
-            for (const workflow_name of required_workflows) {
-              const matching_runs = workflows.data.workflow_runs.filter(
-                run => run.name === workflow_name && run.head_sha === head_sha
-              );
+            for (let check = 0; check < max_checks; check++) {
+              // Get the PR to find the head SHA
+              const pr = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr_number
+              });
               
-              if (matching_runs.length === 0) {
-                console.log(`❌ Workflow "${workflow_name}" has not run yet`);
-                workflow_status[workflow_name] = 'missing';
-                continue;
+              const head_sha = pr.data.head.sha;
+              
+              // Get all workflow runs for this SHA
+              const workflows = await github.rest.actions.listWorkflowRunsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head_sha: head_sha,
+                per_page: 100
+              });
+              
+              // Check status of each required workflow
+              const workflow_status = {};
+              for (const workflow_name of required_workflows) {
+                const matching_runs = workflows.data.workflow_runs.filter(
+                  run => run.name === workflow_name && run.head_sha === head_sha
+                );
+                
+                if (matching_runs.length === 0) {
+                  workflow_status[workflow_name] = 'not_started';
+                  continue;
+                }
+                
+                // Get the most recent run
+                const latest_run = matching_runs.sort((a, b) => 
+                  new Date(b.created_at) - new Date(a.created_at)
+                )[0];
+                
+                workflow_status[workflow_name] = {
+                  status: latest_run.status,
+                  conclusion: latest_run.conclusion
+                };
               }
               
-              // Get the most recent run
-              const latest_run = matching_runs.sort((a, b) => 
-                new Date(b.created_at) - new Date(a.created_at)
-              )[0];
+              console.log(`Check ${check + 1}/${max_checks}:`, JSON.stringify(workflow_status, null, 2));
               
-              console.log(`Workflow "${workflow_name}": ${latest_run.status} / ${latest_run.conclusion}`);
-              workflow_status[workflow_name] = latest_run.conclusion;
+              // Check if all workflows completed successfully
+              const all_completed = required_workflows.every(
+                workflow => workflow_status[workflow]?.status === 'completed'
+              );
+              
+              const all_successful = required_workflows.every(
+                workflow => workflow_status[workflow]?.conclusion === 'success'
+              );
+              
+              if (all_completed && all_successful) {
+                console.log('✅ All required workflows passed!');
+                return { 
+                  success: true, 
+                  pr_number, 
+                  pr_title: pr.data.title 
+                };
+              }
+              
+              if (all_completed && !all_successful) {
+                console.log('❌ Some workflows failed');
+                const failed = required_workflows.filter(
+                  workflow => workflow_status[workflow]?.conclusion !== 'success'
+                );
+                return { 
+                  success: false, 
+                  reason: `Workflows failed: ${failed.join(', ')}` 
+                };
+              }
+              
+              // Wait before next check
+              if (check < max_checks - 1) {
+                console.log(`Waiting ${check_interval_seconds} seconds before next check...`);
+                await new Promise(resolve => setTimeout(resolve, check_interval_seconds * 1000));
+              }
             }
             
-            // Check if all workflows passed
-            const all_passed = required_workflows.every(
-              workflow => workflow_status[workflow] === 'success'
-            );
-            
-            if (all_passed) {
-              console.log('✅ All required workflows passed!');
-              return { pr_number, pr_title: pr.data.title, all_passed: true };
-            } else {
-              console.log('⏳ Not all workflows have passed yet');
-              console.log('Status:', workflow_status);
-              return { pr_number, pr_title: pr.data.title, all_passed: false };
-            }
+            console.log('⏱️ Timeout waiting for workflows');
+            return { 
+              success: false, 
+              reason: 'Timeout waiting for workflows to complete' 
+            };
 
       - name: Check if should skip
-        if: steps.pr.outputs.result != 'null'
+        if: fromJSON(steps.check-workflows.outputs.result).success == true
         id: skip-check
         run: |
           PR_TITLE='${{ fromJSON(steps.check-workflows.outputs.result).pr_title }}'
           
           # Check if this is a Python version update (exclude from auto-merge)
           if echo "$PR_TITLE" | grep -qi "bump python from"; then
-            echo "is_python_version=true" >> $GITHUB_OUTPUT
             echo "should_skip=true" >> $GITHUB_OUTPUT
             echo "skip_reason=Python version updates require manual review" >> $GITHUB_OUTPUT
             exit 0
@@ -128,19 +131,16 @@ jobs:
           
           # Check if this is a poetry/pip dependency (Python package)
           if ! echo "$PR_TITLE" | grep -q "deps(poetry)"; then
-            echo "is_python_package=false" >> $GITHUB_OUTPUT
             echo "should_skip=true" >> $GITHUB_OUTPUT
             echo "skip_reason=Not a Python package update" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          echo "is_python_package=true" >> $GITHUB_OUTPUT
           echo "should_skip=false" >> $GITHUB_OUTPUT
 
       - name: Approve and enable auto-merge
         if: |
-          steps.pr.outputs.result != 'null' &&
-          fromJSON(steps.check-workflows.outputs.result).all_passed &&
+          fromJSON(steps.check-workflows.outputs.result).success == true &&
           steps.skip-check.outputs.should_skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -162,7 +162,7 @@ jobs:
 
       - name: Comment on skipped PR
         if: |
-          steps.pr.outputs.result != 'null' &&
+          fromJSON(steps.check-workflows.outputs.result).success == true &&
           steps.skip-check.outputs.should_skip == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -172,3 +172,14 @@ jobs:
           
           gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} \
             --body "⚠️ Auto-merge skipped: $SKIP_REASON"
+
+      - name: Comment on failed workflows
+        if: fromJSON(steps.check-workflows.outputs.result).success == false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER='${{ github.event.pull_request.number }}'
+          REASON='${{ fromJSON(steps.check-workflows.outputs.result).reason }}'
+          
+          gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} \
+            --body "❌ Auto-merge cancelled: $REASON"
