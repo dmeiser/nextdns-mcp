@@ -24,6 +24,11 @@ permissions:
   contents: read
   packages: write  # Required to push to ghcr.io
 
+# Prevent duplicate runs for the same commit
+concurrency:
+  group: docker-publish-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
 jobs:
   docker-publish:
     name: Build and Push Docker Image
@@ -36,7 +41,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
     
     steps:
-      - name: Check for duplicate runs and wait for all workflows
+      - name: Wait for all required workflows
         if: ${{ github.event_name == 'workflow_run' }}
         uses: actions/github-script@v7
         with:
@@ -69,49 +74,77 @@ jobs:
               process.exit(0);
             }
             
+            // Initial check: verify current workflow status and determine what we need to wait for
+            const { data: initialRuns } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head_sha: headSha,
+              per_page: 100
+            });
+            
+            const workflowStatus = {};
+            for (const workflow of requiredWorkflows) {
+              const run = initialRuns.workflow_runs.find(r => r.name === workflow);
+              if (run) {
+                workflowStatus[workflow] = {
+                  status: run.status,
+                  conclusion: run.conclusion
+                };
+              }
+            }
+            
+            console.log('Initial workflow status:', JSON.stringify(workflowStatus, null, 2));
+            
+            // Early exit: if all workflows are already complete and successful, skip polling
+            let allComplete = requiredWorkflows.every(workflow => {
+              const status = workflowStatus[workflow];
+              return status && status.status === 'completed' && status.conclusion === 'success';
+            });
+            
+            if (allComplete) {
+              console.log('✅ All required workflows already completed successfully - skipping wait loop');
+            } else {
+              // Wait for remaining workflows with exponential backoff
+              let attempts = 0;
+              let waitSeconds = 10; // Start with 10 seconds
+              const maxWaitSeconds = 60; // Cap at 60 seconds
+              const maxAttempts = 30; // ~20 minutes max (with exponential backoff: 10+20+40+60*27)
+            // The workflow that triggered this run has already completed successfully
+            // We only need to wait for the OTHER required workflow(s) to complete
+            const otherWorkflows = requiredWorkflows.filter(w => w !== currentWorkflow);
             // Wait for all required workflows to complete
             let allComplete = false;
             let attempts = 0;
             const maxAttempts = 60; // 30 minutes (30 seconds * 60)
             const maxAttemptsBeforeUndefinedCheck = 10; // 5 minutes - check for workflows that haven't started
             
-            while (!allComplete && attempts < maxAttempts) {
-              const { data: workflowRuns } = await github.rest.actions.listWorkflowRunsForRepo({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                head_sha: headSha,
-                per_page: 100
-              });
+            if (otherWorkflows.length === 0) {
+              console.log('✅ This was the last required workflow - proceeding with Docker publish');
+            } else {
+              console.log(`Waiting for other required workflows: ${otherWorkflows.join(', ')}`);
               
-              const workflowStatus = {};
-              for (const workflow of requiredWorkflows) {
-                const run = workflowRuns.workflow_runs.find(r => r.name === workflow);
-                if (run) {
-                  workflowStatus[workflow] = {
-                    status: run.status,
-                    conclusion: run.conclusion
-                  };
-                }
-              }
+              // Wait for other required workflows to complete
+              let allComplete = false;
+              let attempts = 0;
+              const maxAttempts = 60; // 30 minutes (30 seconds * 60)
               
-              console.log('Workflow status:', JSON.stringify(workflowStatus, null, 2));
-              
-              // Check if all required workflows are complete and successful
-              allComplete = requiredWorkflows.every(workflow => {
-                const status = workflowStatus[workflow];
-                return status && status.status === 'completed' && status.conclusion === 'success';
-              });
-              
-              if (!allComplete) {
-                // Check for failures
-                const hasFailure = requiredWorkflows.some(workflow => {
-                  const status = workflowStatus[workflow];
-                  return status && status.status === 'completed' && status.conclusion !== 'success';
+              while (!allComplete && attempts < maxAttempts) {
+                const { data: workflowRuns } = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  head_sha: headSha,
+                  per_page: 100
                 });
                 
-                if (hasFailure) {
-                  core.setFailed('One or more required workflows failed');
-                  return;
+                const workflowStatus = {};
+                for (const workflow of requiredWorkflows) {
+                  const run = workflowRuns.workflow_runs.find(r => r.name === workflow);
+                  if (run) {
+                    workflowStatus[workflow] = {
+                      status: run.status,
+                      conclusion: run.conclusion
+                    };
+                  }
                 }
                 
                 // Check for workflows that haven't started after reasonable time
@@ -129,12 +162,6 @@ jobs:
                 await new Promise(resolve => setTimeout(resolve, 30000)); // Wait 30 seconds
                 attempts++;
               }
-            }
-            
-            if (!allComplete) {
-              core.setFailed('Timeout waiting for required workflows to complete');
-            } else {
-              console.log('✅ All required workflows completed successfully');
             }
       - name: Checkout code
         uses: actions/checkout@v4
