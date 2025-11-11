@@ -12,7 +12,9 @@ on:
           - 'true'
           - 'false'
   push:
-    branches: [ main ]
+    branches: 
+      - main
+      - 'feature/**'  # Run on feature branches too
   pull_request:
     branches: [ main ]
 
