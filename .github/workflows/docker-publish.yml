@@ -24,6 +24,11 @@ permissions:
   contents: read
   packages: write  # Required to push to ghcr.io
 
+# Prevent duplicate runs for the same commit
+concurrency:
+  group: docker-publish-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
 jobs:
   docker-publish:
     name: Build and Push Docker Image
@@ -36,7 +41,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
     
     steps:
-      - name: Check for duplicate runs and wait for all workflows
+      - name: Wait for all required workflows
         if: ${{ github.event_name == 'workflow_run' }}
         uses: actions/github-script@v7
         with:
@@ -104,6 +109,23 @@ jobs:
               let waitSeconds = 10; // Start with 10 seconds
               const maxWaitSeconds = 60; // Cap at 60 seconds
               const maxAttempts = 30; // ~20 minutes max (with exponential backoff: 10+20+40+60*27)
+            // The workflow that triggered this run has already completed successfully
+            // We only need to wait for the OTHER required workflow(s) to complete
+            const otherWorkflows = requiredWorkflows.filter(w => w !== currentWorkflow);
+            // Wait for all required workflows to complete
+            let allComplete = false;
+            let attempts = 0;
+            const maxAttempts = 60; // 30 minutes (30 seconds * 60)
+            
+            if (otherWorkflows.length === 0) {
+              console.log('✅ This was the last required workflow - proceeding with Docker publish');
+            } else {
+              console.log(`Waiting for other required workflows: ${otherWorkflows.join(', ')}`);
+              
+              // Wait for other required workflows to complete
+              let allComplete = false;
+              let attempts = 0;
+              const maxAttempts = 60; // 30 minutes (30 seconds * 60)
               
               while (!allComplete && attempts < maxAttempts) {
                 const { data: workflowRuns } = await github.rest.actions.listWorkflowRunsForRepo({
@@ -128,6 +150,8 @@ jobs:
                 
                 // Check if all required workflows are complete and successful
                 allComplete = requiredWorkflows.every(workflow => {
+                // Check if all other required workflows are complete and successful
+                allComplete = otherWorkflows.every(workflow => {
                   const status = workflowStatus[workflow];
                   return status && status.status === 'completed' && status.conclusion === 'success';
                 });
@@ -135,6 +159,7 @@ jobs:
                 if (!allComplete) {
                   // Check for failures
                   const hasFailure = requiredWorkflows.some(workflow => {
+                  const hasFailure = otherWorkflows.some(workflow => {
                     const status = workflowStatus[workflow];
                     return status && status.status === 'completed' && status.conclusion !== 'success';
                   });
@@ -152,12 +177,6 @@ jobs:
                   waitSeconds = Math.min(waitSeconds * 2, maxWaitSeconds);
                 }
               }
-            }
-            
-            if (!allComplete) {
-              core.setFailed('Timeout waiting for required workflows to complete');
-            } else {
-              console.log('✅ All required workflows completed successfully');
             }
       - name: Checkout code
         uses: actions/checkout@v4
