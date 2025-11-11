@@ -223,7 +223,7 @@ get_tool_args() {
     
     case "${TOOL_NAME}" in
         createProfile)
-            echo 'name=E2E Test Profile (Tool Validation)'
+            echo 'name="E2E Test Profile (Tool Validation)"'
             ;;
         deleteProfile)
             # Use a profile that doesn't exist - should fail gracefully or we create one to delete
