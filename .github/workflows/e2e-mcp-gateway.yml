@@ -13,10 +13,9 @@ on:
           - 'false'
   push:
     branches: 
-      - main
-      - 'feature/**'  # Run on feature branches too
+      - main  # Only run on main branch pushes
   pull_request:
-    branches: [ main ]
+    branches: [ main ]  # Run on all PRs to main
 
 permissions:
   contents: read
