@@ -385,6 +385,30 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     
     log_info "Executing: ${TOOL_NAME}"
     
+    # Pre-execution setup for tools that need existing resources
+    case "${TOOL_NAME}" in
+        updateAllowlistEntry)
+            # Ensure entry exists before trying to update it
+            log_info "  Pre-setup: Adding allowlist entry for update test"
+            docker mcp tools call addToAllowlist "profile_id=${PROFILE_ID}" "id=test-example.com" >/dev/null 2>&1 || true
+            ;;
+        updateDenylistEntry)
+            # Ensure entry exists before trying to update it
+            log_info "  Pre-setup: Adding denylist entry for update test"
+            docker mcp tools call addToDenylist "profile_id=${PROFILE_ID}" "id=test-example.com" >/dev/null 2>&1 || true
+            ;;
+        updateParentalControlCategoryEntry)
+            # Ensure category exists before trying to update it
+            log_info "  Pre-setup: Adding parental control category for update test"
+            docker mcp tools call addToParentalControlCategories "profile_id=${PROFILE_ID}" "id=gambling" >/dev/null 2>&1 || true
+            ;;
+        updateParentalControlServiceEntry)
+            # Ensure service exists before trying to update it
+            log_info "  Pre-setup: Adding parental control service for update test"
+            docker mcp tools call addToParentalControlServices "profile_id=${PROFILE_ID}" "id=tiktok" >/dev/null 2>&1 || true
+            ;;
+    esac
+    
     # Get test arguments as key=value pairs
     TOOL_ARGS=$(get_tool_args "${TOOL_NAME}")
     
