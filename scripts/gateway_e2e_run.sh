@@ -15,7 +15,7 @@
 #   ./gateway_e2e_run.sh [env_file]
 #
 # Arguments:
-#   env_file - Path to environment file (default: .env, fallback: .env.test.example)
+#   env_file - Path to environment file (default: .env)
 #
 # Environment Variables:
 #   NEXTDNS_API_KEY - Required: NextDNS API key
@@ -59,12 +59,9 @@ if [ -z "${ENV_FILE}" ]; then
     if [ -f "${PROJECT_DIR}/.env" ]; then
         ENV_FILE="${PROJECT_DIR}/.env"
         log_info "Using default .env file"
-    elif [ -f "${PROJECT_DIR}/.env.test.example" ]; then
-        ENV_FILE="${PROJECT_DIR}/.env.test.example"
-        log_warn "Using .env.test.example as fallback"
     else
-        log_error "No environment file found"
-        log_error "Please create .env or provide env file path as argument"
+        log_error "No .env file found"
+        log_error "Please create .env file (copy from .env.example)"
         exit 1
     fi
 else
