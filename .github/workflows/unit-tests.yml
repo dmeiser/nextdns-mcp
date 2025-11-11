@@ -59,7 +59,7 @@ jobs:
             exit 1
           fi
           
-          if ! awk "BEGIN {exit ($COVERAGE >= 95)}"; then
+          if ! awk "BEGIN {exit !($COVERAGE >= 95)}"; then
             echo "❌ Overall coverage $COVERAGE% is below 95% threshold"
             exit 1
           fi
@@ -87,7 +87,7 @@ jobs:
             fi
             
             # Check if file coverage is below threshold
-            if ! awk "BEGIN {exit ($FILE_COVERAGE >= $MIN_FILE_COVERAGE)}"; then
+            if ! awk "BEGIN {exit !($FILE_COVERAGE >= $MIN_FILE_COVERAGE)}"; then
               echo "❌ File $FILENAME has coverage $FILE_COVERAGE% (below $MIN_FILE_COVERAGE% threshold)"
               FAILED_FILES="${FAILED_FILES}\n- $FILENAME: $FILE_COVERAGE%"
             else
