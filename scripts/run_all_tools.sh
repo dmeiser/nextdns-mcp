@@ -222,6 +222,13 @@ get_tool_args() {
     local HOURS_AGO_TIMESTAMP=$(date -d '1 hour ago' +%s 2>/dev/null || date -v-1H +%s 2>/dev/null || echo "$(date +%s)")
     
     case "${TOOL_NAME}" in
+        createProfile)
+            echo 'name=E2E Test Profile (Tool Validation)'
+            ;;
+        deleteProfile)
+            # Use a profile that doesn't exist - should fail gracefully or we create one to delete
+            echo "profile_id=test-delete-validation"
+            ;;
         getProfile)
             echo "profile_id=${PROFILE_ID}"
             ;;
@@ -334,9 +341,6 @@ get_tool_args() {
         updateParentalControlServices)
             echo "profile_id=${PROFILE_ID}" 'services=["tiktok","fortnite"]'
             ;;
-        deleteProfile)
-            echo "profile_id=dummy-profile-id"
-            ;;
         *)
             echo "{}"
             ;;
@@ -352,20 +356,8 @@ log_info "Executing tools..."
 
 # Execute each tool
 for TOOL_NAME in "${TOOL_NAMES[@]}"; do
-    # Skip profile lifecycle tools - handled in Steps 1 and 3
-    if [ "${TOOL_NAME}" = "createProfile" ] || [ "${TOOL_NAME}" = "deleteProfile" ]; then
-        log_info "Skipping ${TOOL_NAME}: Handled in setup/cleanup phases"
-        
-        jq -n \
-            --arg tool "${TOOL_NAME}" \
-            --arg status "SKIPPED" \
-            --arg reason "Handled in setup/cleanup phases" \
-            '{tool: $tool, status: $status, reason: $reason, timestamp: now | todate}' \
-            >>"${REPORT_FILE}"
-        
-        SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
-        continue
-    fi
+    # Reset tool args for this iteration
+    TOOL_ARGS=""
     
     # Skip if tool is not read-only and writes are disabled
     if [ "${ALLOW_WRITES}" != "true" ] && [ -z "${READ_ONLY_TOOLS[${TOOL_NAME}]:-}" ]; then
@@ -387,6 +379,20 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     
     # Pre-execution setup for tools that need existing resources
     case "${TOOL_NAME}" in
+        deleteProfile)
+            # Create a profile specifically for deletion testing
+            log_info "  Pre-setup: Creating profile for deletion test"
+            DELETE_PROFILE_RESULT=$(docker mcp tools call createProfile 'name=E2E Delete Test Profile' 2>&1)
+            DELETE_PROFILE_ID=$(echo "${DELETE_PROFILE_RESULT}" | jq -r '.data.id // empty' 2>/dev/null || echo "")
+            if [ -n "${DELETE_PROFILE_ID}" ]; then
+                log_info "  Created profile ${DELETE_PROFILE_ID} for deletion test"
+                # Override the tool args to use this profile
+                TOOL_ARGS="profile_id=${DELETE_PROFILE_ID}"
+            else
+                log_warn "  Failed to create profile for deletion test, using placeholder"
+                TOOL_ARGS="profile_id=test-delete-validation"
+            fi
+            ;;
         updateAllowlistEntry)
             # Ensure entry exists before trying to update it
             log_info "  Pre-setup: Adding allowlist entry for update test"
@@ -409,8 +415,10 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
             ;;
     esac
     
-    # Get test arguments as key=value pairs
-    TOOL_ARGS=$(get_tool_args "${TOOL_NAME}")
+    # Get test arguments as key=value pairs (unless overridden in pre-setup)
+    if [ -z "${TOOL_ARGS:-}" ]; then
+        TOOL_ARGS=$(get_tool_args "${TOOL_NAME}")
+    fi
     
     # Execute tool and capture result
     START_TIME=$(date +%s)
