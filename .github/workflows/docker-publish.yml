@@ -9,6 +9,14 @@ on:
     branches:
       - main
   
+  # Trigger on version tags (v1.0.0, v2.0.0, etc.)
+  push:
+    tags:
+      - 'v*.*.*'           # Stable releases: v1.0.0
+      - 'v*.*.*-alpha.*'   # Alpha releases: v1.0.0-alpha.1
+      - 'v*.*.*-beta.*'    # Beta releases: v1.0.0-beta.1
+      - 'v*.*.*-rc.*'      # Release candidates: v1.0.0-rc.1
+  
   # Allow manual trigger
   workflow_dispatch:
 
@@ -55,14 +63,18 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
             ghcr.io/${{ github.repository }}
           tags: |
-            # Tag with 'latest' for main branch
-            type=raw,value=latest,enable={{is_default_branch}}
+            # Tag with 'latest' for main branch (stable releases only)
+            type=raw,value=latest,enable=${{ github.ref_type == 'branch' && github.ref_name == 'main' }}
             # Tag with commit SHA
             type=sha,prefix=,format=short
-            # Tag with version from pyproject.toml
-            type=semver,pattern={{version}},value=v2.0.0
-            type=semver,pattern={{major}}.{{minor}},value=v2.0.0
-            type=semver,pattern={{major}},value=v2.0.0
+            # Semantic version tags from git tags (v1.0.0 -> 1.0.0, 1.0, 1)
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !contains(github.ref, '-') }}
+            # Pre-release tags (alpha, beta, rc) - tag with full version only
+            type=semver,pattern={{version}},enable=${{ contains(github.ref, '-') }}
+            # Tag with the git ref (for manual identification)
+            type=ref,event=tag
       
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
