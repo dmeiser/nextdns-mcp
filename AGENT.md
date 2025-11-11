@@ -2,6 +2,18 @@
 
 This file contains repository-specific agent rules. Agents should follow these when making changes.
 
+## CRITICAL GIT RULES
+
+- **NEVER push directly to main branch** - All changes MUST go through pull requests
+- **NEVER use `git push origin main`** - This bypasses branch protection and CI/CD
+- **NEVER approve PRs** - PR approval requires human judgment and review
+- **NEVER merge PRs** - PR merging is a human decision with accountability
+- Always work on feature branches and create PRs for review
+- Let humans review, approve, and merge PRs
+- Let GitHub Actions workflows validate changes before merging
+
+## Project Guidelines
+
 - Purpose: implement an MCP server for NextDNS API in Python using the `fastmcp` library, containerized with Docker.
 - Keep changes minimal and self-contained. Prefer adding new files rather than editing many unrelated files.
 - Use the `fastmcp` library to build the MCP server, specifically using the `from_openapi` function to generate the server from OpenAPI/Swagger documentation.
