@@ -44,6 +44,9 @@ jobs:
       - name: Install PyYAML for catalog manipulation
         run: pip install pyyaml
 
+      - name: Install Python dependencies for schema validation
+        run: pip install jsonschema pyyaml
+
       - name: Build docker-mcp plugin from source
         run: |
           # Clone the MCP Gateway repo
@@ -118,16 +121,30 @@ jobs:
             PASSED=$(grep -c '"status":"OK"' artifacts/tools_report.jsonl || echo "0")
             FAILED=$(grep -c '"status":"FAILED"' artifacts/tools_report.jsonl || echo "0")
             SKIPPED=$(grep -c '"status":"SKIPPED"' artifacts/tools_report.jsonl || echo "0")
+            SCHEMA_VALID=$(grep -c '"schema_validation":"VALID"' artifacts/tools_report.jsonl || echo "0")
+            SCHEMA_INVALID=$(grep -c '"schema_validation":"INVALID"' artifacts/tools_report.jsonl || echo "0")
+            SCHEMA_SKIPPED=$(grep -c '"schema_validation":"SKIPPED"' artifacts/tools_report.jsonl || echo "0")
             
             echo "- **Total Tools**: $TOTAL" >> $GITHUB_STEP_SUMMARY
             echo "- **Passed**: ✅ $PASSED" >> $GITHUB_STEP_SUMMARY
             echo "- **Failed**: ❌ $FAILED" >> $GITHUB_STEP_SUMMARY
             echo "- **Skipped**: ⏭️ $SKIPPED" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Schema Validation" >> $GITHUB_STEP_SUMMARY
+            echo "- **Valid**: ✅ $SCHEMA_VALID" >> $GITHUB_STEP_SUMMARY
+            echo "- **Invalid**: ❌ $SCHEMA_INVALID" >> $GITHUB_STEP_SUMMARY
+            echo "- **Skipped**: ⏭️ $SCHEMA_SKIPPED" >> $GITHUB_STEP_SUMMARY
             
             if [ $FAILED -gt 0 ]; then
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "### Failed Tools" >> $GITHUB_STEP_SUMMARY
               grep '"status":"FAILED"' artifacts/tools_report.jsonl | jq -r '"\(.tool): \(.error // "Unknown error")"' >> $GITHUB_STEP_SUMMARY || echo "Could not parse failures" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            if [ $SCHEMA_INVALID -gt 0 ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Schema Validation Failures" >> $GITHUB_STEP_SUMMARY
+              grep '"schema_validation":"INVALID"' artifacts/tools_report.jsonl | jq -r '"\(.tool): \(.schema_error)"' >> $GITHUB_STEP_SUMMARY || echo "Could not parse schema errors" >> $GITHUB_STEP_SUMMARY
             fi
           else
             echo "❌ No test report generated" >> $GITHUB_STEP_SUMMARY

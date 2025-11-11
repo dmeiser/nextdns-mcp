@@ -358,6 +358,7 @@ get_tool_args() {
 EXECUTED_COUNT=0
 FAILED_COUNT=0
 SKIPPED_COUNT=0
+SCHEMA_ERRORS=0
 
 log_info "Executing tools..."
 
@@ -426,12 +427,30 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     if [ ${EXIT_CODE} -eq 0 ]; then
         log_success "${TOOL_NAME}: OK"
         
+        # Extract JSON response for schema validation
+        JSON_OUTPUT=$(echo "${TOOL_OUTPUT}" | grep -E '^\{' | head -1 || echo "")
+        
+        # Validate response schema against OpenAPI spec
+        SCHEMA_STATUS="SKIPPED"
+        SCHEMA_ERROR_MSG=""
+        if [ -n "${JSON_OUTPUT}" ]; then
+            VALIDATION_RESULT=$(python3 "${SCRIPT_DIR}/validate_schema.py" "${TOOL_NAME}" "${JSON_OUTPUT}" 2>&1 || echo "SCHEMA_VALIDATION_FAILED")
+            
+            if echo "${VALIDATION_RESULT}" | grep -q "VALID"; then
+                SCHEMA_STATUS="VALID"
+            elif echo "${VALIDATION_RESULT}" | grep -q "SKIPPED"; then
+                SCHEMA_STATUS="SKIPPED"
+            else
+                SCHEMA_STATUS="INVALID"
+                SCHEMA_ERROR_MSG=$(echo "${VALIDATION_RESULT}" | grep "SCHEMA_ERRORS" || echo "${VALIDATION_RESULT}")
+                log_warn "  Schema validation failed: ${SCHEMA_ERROR_MSG}"
+                SCHEMA_ERRORS=$((SCHEMA_ERRORS + 1))
+            fi
+        fi
+        
         # Track profile created by createProfile test for use by deleteProfile
         if [ "${TOOL_NAME}" = "createProfile" ]; then
             log_info "  Parsing createProfile output for profile ID..."
-            # Docker MCP Gateway outputs JSON followed by timing info
-            # Extract just the JSON part (lines starting with { or containing "data")
-            JSON_OUTPUT=$(echo "${TOOL_OUTPUT}" | grep -E '^\{' | head -1 || echo "")
             if [ -z "${JSON_OUTPUT}" ]; then
                 log_warn "  No JSON found in output, trying full output..."
                 JSON_OUTPUT="${TOOL_OUTPUT}"
@@ -445,13 +464,15 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
             fi
         fi
         
-        # Record successful execution
+        # Record successful execution with schema validation result
         jq -n \
             --arg tool "${TOOL_NAME}" \
             --arg status "OK" \
+            --arg schema_status "${SCHEMA_STATUS}" \
+            --arg schema_error "${SCHEMA_ERROR_MSG}" \
             --arg args "${TOOL_ARGS}" \
             --arg duration "${DURATION}s" \
-            '{tool: $tool, status: $status, args: $args, duration: $duration, timestamp: now | todate}' \
+            '{tool: $tool, status: $status, schema_validation: $schema_status, schema_error: $schema_error, args: $args, duration: $duration, timestamp: now | todate}' \
             >>"${REPORT_FILE}"
         
         EXECUTED_COUNT=$((EXECUTED_COUNT + 1))
@@ -525,10 +546,17 @@ log_info "Total tools: ${TOOL_COUNT}"
 log_success "Executed: ${EXECUTED_COUNT}"
 log_warn "Skipped: ${SKIPPED_COUNT}"
 log_error "Failed: ${FAILED_COUNT}"
+if [ ${SCHEMA_ERRORS} -gt 0 ]; then
+    log_warn "Schema validation errors: ${SCHEMA_ERRORS}"
+fi
 log_info "Report: ${REPORT_FILE}"
 
-# Exit with error if any tools failed
+# Exit with error if any tools failed or had schema errors
 if [ ${FAILED_COUNT} -gt 0 ]; then
+    log_error "E2E test failed: Tool execution failed"
+    exit 1
+elif [ ${SCHEMA_ERRORS} -gt 0 ]; then
+    log_error "E2E test failed: Schema validation errors detected"
     exit 1
 else
     exit 0
