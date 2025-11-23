@@ -9,22 +9,17 @@ RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 # Set working directory
 WORKDIR /app
 
-# Install poetry
-RUN pip install --no-cache-dir poetry
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Configure poetry to create the virtualenv in the project directory,
-# so we know where to copy from.
-RUN poetry config virtualenvs.in-project true
-
-# Copy dependency files
-COPY pyproject.toml poetry.lock ./
-
-# Regenerate lock file to avoid timestamp issues from git checkout
-# This ensures poetry.lock matches pyproject.toml exactly
-RUN poetry lock
+# Copy dependency files and source code for build
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
 
 # Install dependencies into the project's .venv
-RUN poetry install --without dev --no-interaction --no-ansi --no-root
+# --frozen: use exact versions from uv.lock without updating
+# --no-dev: exclude development dependencies
+RUN uv sync --frozen --no-dev
 
 # 2. Final stage: Create the runtime image
 FROM python:3.14-slim
@@ -50,7 +45,6 @@ LABEL com.docker.mcp.server.category="dns,api,networking"
 WORKDIR /app
 
 # Copy installed packages from the builder stage's virtual environment
-# This path is predictable because of `poetry config virtualenvs.in-project true`
 COPY --from=builder /app/.venv/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
 
 # Copy application code

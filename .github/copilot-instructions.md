@@ -74,11 +74,11 @@ async def updateThing(profile_id: str, entries: str) -> str:
 
 **ALL checks must pass before completion**. Iterate quality loop until 100% compliant:
 
-1. **Format**: `poetry run isort src/ tests/` → `poetry run black src/ tests/`
-2. **Type check**: `poetry run mypy src/` (0 errors)
-3. **Unit tests**: `poetry run pytest tests/unit --cov=src/nextdns_mcp` (>95% coverage, ALL pass, no file <95%)
-4. **Complexity**: `poetry run radon cc src/ -a` (grade A), `radon cc src/ -nc` (no function >B)
-5. **Integration**: `poetry run pytest tests/integration/test_server_init.py` (ALL pass)
+1. **Format**: `uv run isort src/ tests/` → `uv run black src/ tests/`
+2. **Type check**: `uv run mypy src/` (0 errors)
+3. **Unit tests**: `uv run pytest tests/unit --cov=src/nextdns_mcp` (>95% coverage, ALL pass, no file <95%)
+4. **Complexity**: `uv run radon cc src/ -a` (grade A), `radon cc src/ -nc` (no function >B)
+5. **Integration**: `uv run pytest tests/integration/test_server_init.py` (ALL pass)
 6. **Gateway E2E**: `cd scripts && ./gateway_e2e_run.{sh,ps1}` (100% pass rate REQUIRED)
 
 **If ANY check fails**: Fix, rerun formatters, repeat from step 1. Never skip, never ignore failing tests.

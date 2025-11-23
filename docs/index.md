@@ -1,6 +1,6 @@
 # NextDNS MCP Server
 
-A Model Context Protocol (MCP) server that exposes the NextDNS API as tools for AI assistants and other MCP clients. Use it via Docker MCP Gateway (recommended) or run it locally with Python/Poetry.
+A Model Context Protocol (MCP) server that exposes the NextDNS API as tools for AI assistants and other MCP clients. Use it via Docker MCP Gateway (recommended) or run it locally with Python/uv.
 
 ## What you can do
 - Manage profiles (create, read, update, delete)
@@ -11,7 +11,7 @@ A Model Context Protocol (MCP) server that exposes the NextDNS API as tools for 
 ## Runtimes
 - Docker MCP Gateway (recommended)
 - Docker CLI (stdin/stdout program)
-- Local (Python 3.12+ with Poetry)
+- Local (Python 3.12+ with uv)
 
 ## Quick links
 - Getting Started: [getting-started.md](getting-started.md)
