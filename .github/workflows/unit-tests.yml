@@ -19,24 +19,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: '3.14'
+          enable-cache: true
 
-      - name: Install Poetry
-        run: |
-          curl -sSL https://install.python-poetry.org | python3 -
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Set up Python
+        run: uv python install 3.14
 
       - name: Install dependencies
-        run: poetry install
+        run: uv sync --frozen
 
       - name: Run unit tests with coverage
         id: tests
         run: |
           # Run tests and capture output
-          poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term-missing > test_output.txt 2>&1 || TEST_EXIT_CODE=$?
+          uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term-missing > test_output.txt 2>&1 || TEST_EXIT_CODE=$?
           
           # Display output
           cat test_output.txt
@@ -110,7 +108,7 @@ jobs:
       - name: Generate coverage report
         if: always()
         run: |
-          poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=html --cov-report=json --no-cov-on-fail 2>/dev/null || true
+          uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=html --cov-report=json --no-cov-on-fail 2>/dev/null || true
 
       - name: Upload coverage report
         if: always()

@@ -1,34 +1,42 @@
-[tool.poetry]
+[project]
 name = "nextdns-mcp"
 version = "2.0.0"
 description = "NextDNS MCP Server - Model Context Protocol server for NextDNS API built with FastMCP"
-authors = ["NextDNS MCP Contributors"]
-license = "MIT"
+authors = [{name = "NextDNS MCP Contributors"}]
+license = {text = "MIT"}
 readme = "README.md"
-packages = [{include = "nextdns_mcp", from = "src"}]
-include = ["src/nextdns_mcp/*.yaml"]
+requires-python = ">=3.14"
+dependencies = [
+    "fastmcp>=2.12.0",
+    "httpx>=0.28.1",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+]
 
-[tool.poetry.dependencies]
-python = "^3.14"
-fastmcp = "^2.12.0"
-httpx = "^0.28.1"
-pyyaml = "^6.0"
-python-dotenv = "^1.0.0"
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^9.0.0"
-pytest-asyncio = "^1.2.0"
-pytest-cov = "^7.0.0"
-black = "^25.9.0"
-ruff = "^0.14.3"
-isort = "^7.0.0"
-mypy = "^1.18.2"
-types-pyyaml = "^6.0.12.20250915"
-radon = "^6.0.1"
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.2.0",
+    "pytest-cov>=7.0.0",
+    "black>=25.9.0",
+    "ruff>=0.14.3",
+    "isort>=7.0.0",
+    "mypy>=1.18.2",
+    "types-pyyaml>=6.0.12.20250915",
+    "radon>=6.0.1",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nextdns_mcp"]
+
+[tool.hatch.build]
+include = [
+    "src/nextdns_mcp/*.yaml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

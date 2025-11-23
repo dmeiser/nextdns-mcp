@@ -19,7 +19,7 @@ This file contains repository-specific agent rules. Agents should follow these w
 - Use the `fastmcp` library to build the MCP server, specifically using the `from_openapi` function to generate the server from OpenAPI/Swagger documentation.
 - Configuration should be environment-variable first. Example: `NEXTDNS_API_KEY` for API access.
 - Provide a minimal health endpoint at `/health` returning 200 OK and JSON `{ "status": "ok" }`.
-- Tests: add pytest-based unit tests for new functionality and run them with `poetry run pytest`.
+- Tests: add pytest-based unit tests for new functionality and run them with `uv run pytest`.
   - See "Code Quality Standards" section below for coverage requirements and quality metrics
 - Docker: provide a `Dockerfile` that produces a small, runnable image; prefer using official `python:3.13-slim` as base.
 - Keep `TODO.md` progress indicators in sync with the current phase while executing tasks.
@@ -111,17 +111,17 @@ All code changes must meet the following quality metrics before work is consider
 
 1. Run `isort` to organize imports:
    ```bash
-   poetry run isort src/ tests/
+   uv run isort src/ tests/
    ```
 
 2. Run `black` to format code:
    ```bash
-   poetry run black src/ tests/
+   uv run black src/ tests/
    ```
 
 3. Run `mypy` for type checking:
    ```bash
-   poetry run mypy src/
+   uv run mypy src/
    ```
 
 **Workflow Order**:
@@ -146,7 +146,7 @@ The last commits before a successful validation run MUST be formatting/type-chec
 **Running Coverage**:
 ```bash
 # Generate coverage report
-poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term-missing --cov-report=html
+uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term-missing --cov-report=html
 
 # View HTML report
 open htmlcov/index.html
@@ -186,11 +186,11 @@ cd scripts
 **Project Complexity**: Grade A
 - Measured using `radon` tool
 - Project average complexity must be grade A
-- Run: `poetry run radon cc src/ -a`
+- Run: `uv run radon cc src/ -a`
 
 **Function Complexity**: Maximum Grade B
 - No individual function may exceed grade B (cyclomatic complexity ≤11)
-- Check with: `poetry run radon cc src/ -nc`
+- Check with: `uv run radon cc src/ -nc`
 - If a function exceeds grade B:
   - Refactor into smaller functions
   - Extract complex conditional logic
@@ -207,13 +207,13 @@ cd scripts
 
 Before running E2E tests or claiming work is complete:
 
-- [ ] Run `poetry run isort src/ tests/`
-- [ ] Run `poetry run black src/ tests/`
-- [ ] Run `poetry run mypy src/` (0 errors)
-- [ ] Run `poetry run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (>95% coverage, **ALL tests pass**)
+- [ ] Run `uv run isort src/ tests/`
+- [ ] Run `uv run black src/ tests/`
+- [ ] Run `uv run mypy src/` (0 errors)
+- [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (>95% coverage, **ALL tests pass**)
 - [ ] Verify per-file coverage: all files >95% in `htmlcov/index.html`
-- [ ] Run `poetry run radon cc src/ -a` (verify grade A)
-- [ ] Run `poetry run radon cc src/ -nc` (verify no functions exceed grade B)
+- [ ] Run `uv run radon cc src/ -a` (verify grade A)
+- [ ] Run `uv run radon cc src/ -nc` (verify no functions exceed grade B)
 - [ ] Run Gateway E2E tests: `cd scripts && ./gateway_e2e_run.{sh,ps1}` (**100% pass rate required**)
 - [ ] Review `scripts/artifacts/tools_report.jsonl` - zero failures allowed
 - [ ] Commit formatting changes as final commit before validation

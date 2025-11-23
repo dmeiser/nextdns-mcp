@@ -72,12 +72,6 @@ jobs:
           docker info
           docker ps
 
-      - name: Fix poetry.lock timestamp
-        run: |
-          # Touch poetry.lock to ensure it's newer than pyproject.toml
-          # This prevents "pyproject.toml changed significantly" errors in Docker builds
-          touch poetry.lock
-
       - name: Build NextDNS MCP Docker image
         run: |
           docker build -t nextdns-mcp:latest .

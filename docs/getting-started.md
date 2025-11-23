@@ -3,7 +3,7 @@
 Set up the NextDNS MCP Server and make your first tool call in minutes.
 
 ## Prerequisites
-- Docker 24+ (for Docker MCP Gateway) OR Python 3.12+ and Poetry
+- Docker 24+ (for Docker MCP Gateway) OR Python 3.12+ and uv
 - NextDNS API key
 
 ## Option A: Docker MCP Gateway (recommended)
@@ -86,14 +86,14 @@ docker run -i --rm \
 
 Then configure your MCP client (e.g., Claude Desktop) to run the above Docker command.
 
-## Option C: Run locally with Poetry
+## Option C: Run locally with uv
 
 ```bash
 # Install dependencies
-poetry install
+uv sync
 
 # Run the server
-poetry run python -m nextdns_mcp.server
+uv run python -m nextdns_mcp.server
 ```
 
 Tip: For local development, set environment variables in your shell before launching (see [Configuration](configuration.md)).

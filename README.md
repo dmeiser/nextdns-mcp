@@ -33,7 +33,7 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
 ### Prerequisites
 
 - Python 3.12+
-- Poetry (for development)
+- uv (for development)
 - Docker (for containerized deployment)
 - NextDNS API key ([get one here](https://my.nextdns.io/account))
 
