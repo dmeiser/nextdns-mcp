@@ -10,7 +10,7 @@ This directory contains integration tests for the NextDNS MCP server.
 
 ```bash
 # Run server initialization tests
-poetry run pytest tests/integration/test_server_init.py -v
+uv run pytest tests/integration/test_server_init.py -v
 ```
 
 ## End-to-End Testing
@@ -45,7 +45,7 @@ These tests use mocked dependencies and do NOT make live API calls.
 
 1. **Python Environment**
    ```bash
-   poetry install
+   uv sync
    ```
 
 2. **Environment Configuration**
@@ -74,13 +74,13 @@ For complete API endpoint testing, use the Gateway E2E scripts in `scripts/`.
 
 ```bash
 # Run with verbose output
-poetry run pytest tests/integration/test_server_init.py -v
+uv run pytest tests/integration/test_server_init.py -v
 
 # Run with coverage
-poetry run pytest tests/integration/test_server_init.py --cov=src/nextdns_mcp
+uv run pytest tests/integration/test_server_init.py --cov=src/nextdns_mcp
 
 # Run specific test
-poetry run pytest tests/integration/test_server_init.py::TestServerInitialization::test_create_mcp_server -v
+uv run pytest tests/integration/test_server_init.py::TestServerInitialization::test_create_mcp_server -v
 ```
 
 ### Adding New Tests
