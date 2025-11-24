@@ -705,5 +705,17 @@ if __name__ == "__main__":
     logger.info(f"  Base URL: {NEXTDNS_BASE_URL}")
     logger.info(f"  Timeout: {get_http_timeout()}s")
 
-    # Run the MCP server
-    mcp.run()
+    # Determine transport mode from environment
+    transport_mode = os.getenv("MCP_TRANSPORT", "stdio").lower()
+
+    if transport_mode == "http":
+        # HTTP streamable transport for network services
+        host = os.getenv("MCP_HOST", "0.0.0.0")
+        port = int(os.getenv("MCP_PORT", "8000"))
+        logger.info(f"  Transport: HTTP streamable on {host}:{port}")
+        logger.info(f"  MCP endpoint: http://{host}:{port}/mcp")
+        mcp.run(transport="http", host=host, port=port)
+    else:
+        # Default: stdio transport for Claude Desktop, MCP Gateway, CLI
+        logger.info("  Transport: stdio")
+        mcp.run()
