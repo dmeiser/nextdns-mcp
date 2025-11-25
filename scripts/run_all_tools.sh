@@ -414,12 +414,32 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
         TOOL_ARGS=$(get_tool_args "${TOOL_NAME}")
     fi
     
-    # Execute tool and capture result
+    # Execute tool with retry logic for network failures
     START_TIME=$(date +%s)
-    set +e
-    TOOL_OUTPUT=$(docker mcp tools call --format json "${TOOL_NAME}" ${TOOL_ARGS} 2>&1)
-    EXIT_CODE=$?
-    set -e
+    MAX_RETRIES=3
+    RETRY_DELAY=5
+    ATTEMPT=1
+    
+    while [ ${ATTEMPT} -le ${MAX_RETRIES} ]; do
+        set +e
+        TOOL_OUTPUT=$(docker mcp tools call --format json "${TOOL_NAME}" ${TOOL_ARGS} 2>&1)
+        EXIT_CODE=$?
+        set -e
+        
+        # Check if this is a network-related failure that should be retried
+        if [ ${EXIT_CODE} -ne 0 ] && [ ${ATTEMPT} -lt ${MAX_RETRIES} ]; then
+            if echo "${TOOL_OUTPUT}" | grep -qiE "(Temporary failure in name resolution|network|timeout|connection|timed out|Request error:$)"; then
+                log_warn "  Network error on attempt ${ATTEMPT}/${MAX_RETRIES}, retrying in ${RETRY_DELAY}s..."
+                sleep ${RETRY_DELAY}
+                ATTEMPT=$((ATTEMPT + 1))
+                continue
+            fi
+        fi
+        
+        # Success or non-network failure - don't retry
+        break
+    done
+    
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     

@@ -41,6 +41,14 @@ LABEL com.docker.mcp.server.type="stdio"
 LABEL com.docker.mcp.server.protocol="mcp"
 LABEL com.docker.mcp.server.category="dns,api,networking"
 
+# Transport modes:
+# - stdio (default): For Claude Desktop, MCP Gateway, CLI tools
+# - http: For network services, web-based clients, production deployments
+#   Set MCP_TRANSPORT=http, optionally MCP_HOST and MCP_PORT
+
+# Expose port for HTTP transport mode (optional)
+EXPOSE 8000
+
 # Set working directory
 WORKDIR /app
 

@@ -194,3 +194,41 @@ class TestCreateMcpServer:
                 assert f"Default profile: {mock_profile_id}" in caplog.text
         finally:
             temp_spec.unlink(missing_ok=True)
+
+    def test_server_initialization_http_transport(
+        self, monkeypatch, mock_api_key, mock_openapi_spec
+    ):
+        """Test server can be initialized with HTTP transport mode."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("MCP_TRANSPORT", "http")
+        monkeypatch.setenv("MCP_HOST", "127.0.0.1")
+        monkeypatch.setenv("MCP_PORT", "9999")
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(mock_openapi_spec, f)
+            temp_spec = Path(f.name)
+
+        try:
+            with patch("nextdns_mcp.server.Path") as mock_path:
+                mock_spec_path = temp_spec
+                mock_parent = Mock()
+                mock_parent.__truediv__ = Mock(return_value=mock_spec_path)
+                mock_path.return_value.parent = mock_parent
+
+                import sys
+
+                if "nextdns_mcp.server" in sys.modules:
+                    del sys.modules["nextdns_mcp.server"]
+
+                from nextdns_mcp.server import create_mcp_server
+
+                mcp = create_mcp_server()
+
+                # Verify server created successfully
+                assert mcp is not None
+                assert hasattr(mcp, "run")
+
+                # Note: We don't actually call mcp.run() to avoid binding ports
+                # This test verifies configuration parsing only
+        finally:
+            temp_spec.unlink(missing_ok=True)

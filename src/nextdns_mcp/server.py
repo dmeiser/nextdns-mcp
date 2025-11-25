@@ -17,19 +17,11 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.openapi import DEFAULT_ROUTE_MAPPINGS, RouteMap
 
-from .config import (
-    DNS_STATUS_CODES,
-    EXCLUDED_ROUTES,
-    GLOBALLY_ALLOWED_OPERATIONS,
-    NEXTDNS_BASE_URL,
-    VALID_DNS_RECORD_TYPES,
-    can_read_profile,
-    can_write_profile,
-    get_api_key,
-    get_default_profile,
-    get_http_timeout,
-    is_read_only,
-)
+from .config import (DNS_STATUS_CODES, EXCLUDED_ROUTES,
+                     GLOBALLY_ALLOWED_OPERATIONS, NEXTDNS_BASE_URL,
+                     VALID_DNS_RECORD_TYPES, can_read_profile,
+                     can_write_profile, get_api_key, get_default_profile,
+                     get_http_timeout, is_read_only)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -115,6 +107,21 @@ def _coerce_string_to_bool(value: str) -> bool | None:
     return None
 
 
+def _is_integer(value: str) -> bool:
+    """Check if string represents an integer."""
+    return value.isdigit() or (value.startswith("-") and value[1:].isdigit())
+
+
+def _try_parse_float(value: str) -> float | None:
+    """Try to parse string as float."""
+    if value.replace(".", "", 1).replace("-", "", 1).isdigit():
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
 def _coerce_string_to_number(value: str) -> int | float | None:
     """Try to coerce a string to int or float.
 
@@ -124,18 +131,32 @@ def _coerce_string_to_number(value: str) -> int | float | None:
     Returns:
         Int, float, or None if not a number string
     """
-    # Try integer
-    if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+    if _is_integer(value):
         return int(value)
+    return _try_parse_float(value)
 
-    # Try float
-    if value.replace(".", "", 1).replace("-", "", 1).isdigit():
-        try:
-            return float(value)
-        except ValueError:
-            pass
 
-    return None
+def _coerce_string(value: str) -> Any:
+    """Coerce a string to bool or number if possible."""
+    bool_value = _coerce_string_to_bool(value)
+    if bool_value is not None:
+        return bool_value
+
+    num_value = _coerce_string_to_number(value)
+    if num_value is not None:
+        return num_value
+
+    return value
+
+
+def _coerce_dict(data: dict[Any, Any]) -> dict[Any, Any]:
+    """Recursively coerce dictionary values."""
+    return {key: coerce_json_types(value) for key, value in data.items()}
+
+
+def _coerce_list(data: list[Any]) -> list[Any]:
+    """Recursively coerce list items."""
+    return [coerce_json_types(item) for item in data]
 
 
 def coerce_json_types(data: Any) -> Any:
@@ -152,20 +173,11 @@ def coerce_json_types(data: Any) -> Any:
         Data with coerced types
     """
     if isinstance(data, dict):
-        return {key: coerce_json_types(value) for key, value in data.items()}
-    elif isinstance(data, list):
-        return [coerce_json_types(item) for item in data]
-    elif isinstance(data, str):
-        # Try boolean coercion
-        bool_value = _coerce_string_to_bool(data)
-        if bool_value is not None:
-            return bool_value
-
-        # Try number coercion
-        num_value = _coerce_string_to_number(data)
-        if num_value is not None:
-            return num_value
-
+        return _coerce_dict(data)
+    if isinstance(data, list):
+        return _coerce_list(data)
+    if isinstance(data, str):
+        return _coerce_string(data)
     return data
 
 
@@ -216,6 +228,18 @@ class AccessControlledClient(httpx.AsyncClient):
         logger.warning(f"{error_msg} (method={method}, url={url})")
         return create_access_denied_response(method, url, error_msg, profile_id)
 
+    def _check_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
+        """Check access control for profile operations."""
+        if is_write_operation(method):
+            return self._check_write_access(profile_id, method, url)
+        return self._check_read_access(profile_id, method, url)
+
+    def _coerce_json_body(self, kwargs: dict[str, Any]) -> None:
+        """Coerce string types in JSON request body."""
+        if "json" in kwargs and isinstance(kwargs["json"], dict):
+            kwargs["json"] = coerce_json_types(kwargs["json"])
+            logger.debug(f"Coerced JSON body: {kwargs['json']}")
+
     async def request(  # type: ignore[override]
         self, method: str, url: str, **kwargs: Any
     ) -> httpx.Response:
@@ -229,30 +253,15 @@ class AccessControlledClient(httpx.AsyncClient):
         Returns:
             Response from the API, or a 403 Forbidden response if access is denied
         """
-        # Log the actual URL being requested for debugging
         logger.info(f"HTTP Request: {method} {url}")
 
-        # Extract profile_id from URL if present
         profile_id = extract_profile_id_from_url(str(url))
-
-        # Only check access if URL contains a profile_id
         if profile_id:
-            is_write = is_write_operation(method)
-
-            if is_write:
-                error_response = self._check_write_access(profile_id, method, url)
-            else:
-                error_response = self._check_read_access(profile_id, method, url)
-
+            error_response = self._check_access(profile_id, method, url)
             if error_response:
                 return error_response
 
-        # Coerce string types in JSON body (handles Docker MCP CLI passing everything as strings)
-        if "json" in kwargs and isinstance(kwargs["json"], dict):
-            kwargs["json"] = coerce_json_types(kwargs["json"])
-            logger.debug(f"Coerced JSON body: {kwargs['json']}")
-
-        # Access allowed, proceed with the request
+        self._coerce_json_body(kwargs)
         return await super().request(method, url, **kwargs)
 
 
@@ -361,6 +370,37 @@ def _build_doh_metadata(
 
 
 # Add custom DoH lookup tool
+async def _execute_doh_query(
+    doh_url: str, domain: str, record_type: str, target_profile: str
+) -> dict[str, Any]:
+    """Execute DoH query and return result with metadata."""
+    params = {"name": domain, "type": record_type}
+    headers = {"accept": "application/dns-json"}
+
+    try:
+        async with httpx.AsyncClient(timeout=get_http_timeout()) as client:
+            response = await client.get(doh_url, params=params, headers=headers)
+            response.raise_for_status()
+            result: dict[str, Any] = response.json()
+            result["_metadata"] = _build_doh_metadata(
+                target_profile, domain, record_type, doh_url, result.get("Status")
+            )
+            if result.get("Status") is not None:
+                logger.debug(
+                    f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}"
+                )
+            return result
+    except Exception as e:
+        error_type = "HTTP error" if isinstance(e, httpx.HTTPError) else "Unexpected error"
+        logger.error(f"{error_type} during DoH lookup for {domain}: {str(e)}")
+        return {
+            "error": f"{error_type} during DoH lookup: {str(e)}",
+            "profile_id": target_profile,
+            "domain": domain,
+            "type": record_type,
+        }
+
+
 async def _dohLookup_impl(
     domain: str, profile_id: Optional[str] = None, record_type: str = "A"
 ) -> dict[str, Any]:
@@ -368,7 +408,6 @@ async def _dohLookup_impl(
 
     See dohLookup() for full documentation.
     """
-    # Get target profile
     target_profile = _get_target_profile(profile_id)
     if not target_profile:
         return {
@@ -376,7 +415,6 @@ async def _dohLookup_impl(
             "hint": "Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
         }
 
-    # Validate record type
     is_valid, record_type_upper = _validate_record_type(record_type)
     if not is_valid:
         logger.warning(f"Invalid DNS record type requested: {record_type}")
@@ -385,46 +423,9 @@ async def _dohLookup_impl(
             "valid_types": VALID_DNS_RECORD_TYPES,
         }
 
-    # Construct DoH query URL
     doh_url = f"https://dns.nextdns.io/{target_profile}/dns-query"
-    params = {"name": domain, "type": record_type_upper}
-    headers = {"accept": "application/dns-json"}
-
     logger.info(f"DoH lookup: {domain} ({record_type_upper}) via profile {target_profile}")
-
-    try:
-        # Create a separate HTTP client for DoH queries (doesn't need API key)
-        async with httpx.AsyncClient(timeout=get_http_timeout()) as client:
-            response = await client.get(doh_url, params=params, headers=headers)
-            response.raise_for_status()
-
-            result: dict[str, Any] = response.json()
-
-            # Add helpful metadata
-            result["_metadata"] = _build_doh_metadata(
-                target_profile,
-                domain,
-                record_type_upper,
-                doh_url,
-                result.get("Status"),
-            )
-
-            if result.get("Status") is not None:
-                logger.debug(
-                    f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}"
-                )
-
-            return result
-
-    except Exception as e:
-        error_type = "HTTP error" if isinstance(e, httpx.HTTPError) else "Unexpected error"
-        logger.error(f"{error_type} during DoH lookup for {domain}: {str(e)}")
-        return {
-            "error": f"{error_type} during DoH lookup: {str(e)}",
-            "profile_id": target_profile,
-            "domain": domain,
-            "type": record_type_upper,
-        }
+    return await _execute_doh_query(doh_url, domain, record_type_upper, target_profile)
 
 
 # Register the DoH lookup tool with MCP
@@ -700,10 +701,34 @@ async def updatePrivacyNatives(profile_id: str, natives: str) -> dict[str, Any]:
     )
 
 
-if __name__ == "__main__":
+def get_mcp_run_options() -> dict[str, Any]:
+    """Build MCP server run options based on environment configuration.
+
+    Returns:
+        Dictionary of options to pass to mcp.run() via **kwargs.
+        Empty dict for stdio (default), or dict with transport/host/port for HTTP.
+    """
+    transport_mode = os.getenv("MCP_TRANSPORT", "stdio").lower()
+
+    if transport_mode == "http":
+        host = os.getenv("MCP_HOST", "0.0.0.0")
+        port = int(os.getenv("MCP_PORT", "8000"))
+        logger.info(f"  Transport: HTTP streamable on {host}:{port}")
+        logger.info(f"  MCP endpoint: http://{host}:{port}/mcp")
+        return {"transport": "http", "host": host, "port": port}
+
+    # Default: stdio transport
+    logger.info("  Transport: stdio")
+    return {}
+
+
+if __name__ == "__main__":  # pragma: no cover
+    # Note: This block is excluded from unit test coverage because:
+    # 1. It only executes when running `python -m nextdns_mcp.server` directly
+    # 2. When pytest imports the module, __name__ != "__main__"
+    # 3. The mcp.run() call starts a blocking event loop unsuitable for unit tests
+    # The options building logic IS tested via tests/unit/test_mcp_run_options.py
     logger.info("Starting NextDNS MCP Server...")
     logger.info(f"  Base URL: {NEXTDNS_BASE_URL}")
     logger.info(f"  Timeout: {get_http_timeout()}s")
-
-    # Run the MCP server
-    mcp.run()
+    mcp.run(**get_mcp_run_options())

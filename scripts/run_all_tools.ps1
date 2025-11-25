@@ -382,15 +382,49 @@ function Invoke-Tool {
     )
     
     $startTime = Get-Date
+    $maxRetries = 3
+    $retryDelay = 5
+    $attempt = 1
+    $exitCode = 0
+    $result = ""
+    $status = "failed"
     
-    try {
-        if ([string]::IsNullOrWhiteSpace($ToolArgs)) {
-            $result = docker mcp tools call $ToolName 2>&1 | Out-String
-        } else {
-            $argParts = $ToolArgs -split ' '
-            $result = docker mcp tools call $ToolName @argParts 2>&1 | Out-String
+    # Retry loop for network failures
+    while ($attempt -le $maxRetries) {
+        try {
+            if ([string]::IsNullOrWhiteSpace($ToolArgs)) {
+                $result = docker mcp tools call $ToolName 2>&1 | Out-String
+            } else {
+                $argParts = $ToolArgs -split ' '
+                $result = docker mcp tools call $ToolName @argParts 2>&1 | Out-String
+            }
+            
+            # Check if network error and should retry
+            if ($LASTEXITCODE -ne 0 -and $attempt -lt $maxRetries) {
+                if ($result -match '(Temporary failure in name resolution|network|timeout|connection|timed out|Request error:\s*$)') {
+                    Write-Warn "  Network error on attempt $attempt/$maxRetries, retrying in ${retryDelay}s..."
+                    Start-Sleep -Seconds $retryDelay
+                    $attempt++
+                    continue
+                }
+            }
+            
+            # Success or non-network failure - don't retry
+            break
+        } catch {
+            # Exception occurred
+            if ($attempt -lt $maxRetries) {
+                Write-Warn "  Error on attempt $attempt/$maxRetries, retrying in ${retryDelay}s..."
+                Start-Sleep -Seconds $retryDelay
+                $attempt++
+                continue
+            }
+            throw
         }
-        
+    }
+    
+    # Process result after all retry attempts
+    try {
         if ($LASTEXITCODE -eq 0) {
             $exitCode = 0
             $stdout = $result
