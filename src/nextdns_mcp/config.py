@@ -25,9 +25,6 @@ logger = logging.getLogger(__name__)
 NEXTDNS_BASE_URL = "https://api.nextdns.io"
 
 # MCP Transport configuration
-DEFAULT_MCP_TRANSPORT = "stdio"  # Options: "stdio", "http"
-DEFAULT_MCP_HOST = "0.0.0.0"
-DEFAULT_MCP_PORT = 8000
 
 # Operations that bypass profile access control
 GLOBALLY_ALLOWED_OPERATIONS = {
