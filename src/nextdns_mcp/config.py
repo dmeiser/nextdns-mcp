@@ -96,6 +96,16 @@ def is_read_only() -> bool:
     return value in ("true", "1", "yes")
 
 
+def _is_empty_profile_list(profile_str: str) -> bool:
+    """Check if profile string is empty or whitespace."""
+    return not profile_str or not profile_str.strip()
+
+
+def _is_allow_all(profile_str: str) -> bool:
+    """Check if profile string means 'allow all'."""
+    return profile_str.strip().upper() == "ALL"
+
+
 def parse_profile_list(profile_str: str) -> set[str] | None:
     """Parse a comma-separated list of profile IDs.
 
@@ -106,14 +116,10 @@ def parse_profile_list(profile_str: str) -> set[str] | None:
         Set of profile IDs, None if string is empty/unset (deny all),
         or empty set if "ALL"/"all" specified (allow all)
     """
-    if not profile_str or not profile_str.strip():
+    if _is_empty_profile_list(profile_str):
         return None  # Empty/unset = deny all
-
-    # Check for special "ALL" value
-    stripped = profile_str.strip()
-    if stripped.upper() == "ALL":
+    if _is_allow_all(profile_str):
         return set()  # Empty set = allow all
-
     return {p.strip() for p in profile_str.split(",") if p.strip()}
 
 
@@ -198,32 +204,28 @@ def _log_api_key_error() -> None:
     logger.critical("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret")
 
 
+def _log_profile_access(profile_set: set[str] | None, access_type: str) -> None:
+    """Log profile access configuration."""
+    if profile_set is None:
+        logger.info(f"No profiles are {access_type} (deny all by default)")
+    elif not profile_set:
+        logger.info(f"All profiles are {access_type} (no restrictions)")
+    else:
+        logger.info(f"{access_type.capitalize()} profiles restricted to: {sorted(profile_set)}")
+
+
 def _log_access_control_settings() -> None:
     """Log current access control configuration."""
     readable = get_readable_profiles_set()
     writable = get_writable_profiles_set()
+    read_only = is_read_only()
 
-    if is_read_only():
+    if read_only:
         logger.info("Read-only mode is ENABLED - all write operations are disabled")
 
-    # Handle readable profiles
-    if readable is None:
-        logger.info("No profiles are readable (deny all by default)")
-    elif not readable:
-        logger.info("All profiles are readable (no restrictions)")
-    else:
-        logger.info(f"Readable profiles restricted to: {sorted(readable)}")
-
-    # Handle writable profiles
-    if writable is None:
-        if not is_read_only():
-            logger.info("No profiles are writable (deny all by default)")
-    elif not writable:
-        if not is_read_only():
-            logger.info("All profiles are writable (no restrictions)")
-    else:
-        if not is_read_only():
-            logger.info(f"Writable profiles restricted to: {sorted(writable)}")
+    _log_profile_access(readable, "readable")
+    if not read_only:
+        _log_profile_access(writable, "writable")
 
 
 def validate_configuration() -> None:
