@@ -55,25 +55,19 @@ class TestGetMcpRunOptions:
 
     def test_http_with_only_custom_host(self):
         """Test HTTP with only host customized."""
-        with patch.dict(
-            os.environ, {"MCP_TRANSPORT": "http", "MCP_HOST": "localhost"}, clear=True
-        ):
+        with patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_HOST": "localhost"}, clear=True):
             options = get_mcp_run_options()
             assert options == {"transport": "http", "host": "localhost", "port": 8000}
 
     def test_http_with_only_custom_port(self):
         """Test HTTP with only port customized."""
-        with patch.dict(
-            os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "3000"}, clear=True
-        ):
+        with patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "3000"}, clear=True):
             options = get_mcp_run_options()
             assert options == {"transport": "http", "host": "0.0.0.0", "port": 3000}
 
     def test_invalid_port_raises_value_error(self):
         """Test that invalid port value raises ValueError."""
-        with patch.dict(
-            os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "invalid"}
-        ):
+        with patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "invalid"}):
             with pytest.raises(ValueError):
                 get_mcp_run_options()
 

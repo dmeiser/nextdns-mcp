@@ -6,7 +6,7 @@
 version: 2
 updates:
 updates:
-  # --- Python (Poetry) ---
+  # --- Python (uv) ---
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
@@ -14,7 +14,7 @@ updates:
     allow:
       - dependency-type: "all"
     commit-message:
-      prefix: "deps(poetry)"
+      prefix: "deps(uv)"
       include: "scope"
   # --- Docker ---
   - package-ecosystem: "docker"

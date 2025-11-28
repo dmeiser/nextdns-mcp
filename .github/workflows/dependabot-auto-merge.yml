@@ -129,8 +129,8 @@ jobs:
             exit 0
           fi
           
-          # Check if this is a poetry/pip dependency (Python package)
-          if ! echo "$PR_TITLE" | grep -q "deps(poetry)"; then
+          # Check if this is a uv/pip dependency (Python package)
+          if ! echo "$PR_TITLE" | grep -q "deps(uv)"; then
             echo "should_skip=true" >> $GITHUB_OUTPUT
             echo "skip_reason=Not a Python package update" >> $GITHUB_OUTPUT
             exit 0

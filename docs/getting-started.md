@@ -78,6 +78,7 @@ docker mcp tools call dohLookup '{"domain":"google.com","record_type":"A","profi
 
 ## Option B: Run with Docker (without Gateway)
 
+
 ```bash
 docker run -i --rm \
   -e NEXTDNS_API_KEY=YOUR_API_KEY \
@@ -87,6 +88,7 @@ docker run -i --rm \
 Then configure your MCP client (e.g., Claude Desktop) to run the above Docker command.
 
 ## Option C: Run locally with uv
+
 
 ```bash
 # Install dependencies
