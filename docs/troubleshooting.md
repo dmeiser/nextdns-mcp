@@ -1,28 +1,24 @@
 # Extra/Unknown Fields in Tool Input
 
-**Problem:** AI or CLI clients send extra/unknown fields to MCP tools, causing 400 errors or schema validation failures.
+**Problem:** AI clients (like OpenAI) or CLI tools may send extra/unknown fields with tool arguments that don't match the tool's input schema, causing validation errors like "Unexpected keyword argument".
 
-**Solution:** The server is configured to ignore extra/unknown fields for all tool input models (custom and OpenAPI-imported) by:
+**Solution:** The server uses a custom middleware (`StripExtraFieldsMiddleware`) that intercepts all tool calls and filters out unknown fields before they reach FastMCP's validation layer. This approach:
 
-- Setting `strict_input_validation=False` in the FastMCP server constructor.
-- Patching all OpenAPI-imported Pydantic models to allow extra fields using a custom `mcp_component_fn`:
+- **Silently ignores** extra fields (no errors)
+- **Maintains type safety** for known/required fields
+- **Works with all tools** (both OpenAPI-imported and custom `@mcp_server.tool()` decorated)
+- **Logs stripped fields** at DEBUG level for troubleshooting
 
-  ```python
-  def allow_extra_fields_component_fn(component, *args, **kwargs):
-	  # For Pydantic v2
-	  if hasattr(component, "model_config"):
-		  component.model_config = {**getattr(component, "model_config", {}), "extra": "ignore"}
-	  # For Pydantic v1
-	  elif hasattr(component, "__config__"):
-		  class Config(getattr(component, "__config__")):
-			  extra = "ignore"
-		  component.__config__ = Config
-	  return component
-  ...
-  mcp = FastMCP.from_openapi(..., mcp_component_fn=allow_extra_fields_component_fn)
-  ```
+The middleware inspects each tool's parameter schema and removes any arguments that aren't defined in the schema. For example:
 
-This ensures all tools accept extra/unknown fields in input without error, while still enforcing required/typed fields. See `src/nextdns_mcp/server.py` for implementation details.
+```python
+# Tool expects: {"domain": str, "record_type": str}
+# Client sends: {"domain": "example.com", "record_type": "A", "extra": "ignored", "schema_hint": "..."}
+# Middleware filters to: {"domain": "example.com", "record_type": "A"}
+```
+
+See `src/nextdns_mcp/server.py` for implementation details (class `StripExtraFieldsMiddleware`).
+
 # Troubleshooting
 
 Fix common setup and runtime issues.

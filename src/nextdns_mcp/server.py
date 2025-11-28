@@ -2,13 +2,21 @@
 # Extra Field Relaxation for MCP Tool Arguments
 #
 # AI clients (like OpenAI) often send extra/unknown fields with tool calls.
-# To allow this, we use a middleware that strips unknown fields from arguments
-# BEFORE they reach FastMCP's tool validation. This ensures:
-# 1. Unknown fields are silently ignored (not rejected)
-# 2. Required/typed fields are still validated
-# 3. Works with both OpenAPI-imported and custom @mcp.tool() decorated tools
+# We use a two-layer approach to handle this:
 #
-# See AGENT.md and troubleshooting.md for details.
+# 1. StripExtraFieldsMiddleware: Intercepts tool calls and filters arguments
+#    to only include fields defined in the tool's schema. This is the primary
+#    mechanism that prevents validation errors from unknown fields.
+#
+# 2. allow_extra_fields_component_fn: Sets "extra": "ignore" on OpenAPI-imported
+#    Pydantic models as an additional safety layer.
+#
+# Together these ensure:
+# - Unknown fields are silently ignored (not rejected)
+# - Required/typed fields are still validated
+# - Works with both OpenAPI-imported and custom @mcp_server.tool() decorated tools
+#
+# See docs/troubleshooting.md for details.
 # ---
 """NextDNS MCP Server - FastMCP-based implementation using OpenAPI spec.
 
@@ -430,7 +438,7 @@ def create_mcp_server() -> FastMCP:
 
 
 # Create the MCP server instance
-mcp = create_mcp_server()
+mcp_server = create_mcp_server()
 
 
 # Add custom DoH lookup tool
@@ -532,7 +540,7 @@ async def _dohLookup_impl(
 
 
 # Register the DoH lookup tool with MCP
-@mcp.tool()
+@mcp_server.tool()
 async def dohLookup(
     domain: str, profile_id: Optional[str] = None, record_type: str = "A"
 ) -> dict[str, Any]:
@@ -616,7 +624,7 @@ async def _bulk_update_helper(
         return {"error": f"Invalid JSON: {str(e)}"}
 
     # Make PUT request with array body
-    client = mcp._client  # type: ignore[attr-defined]
+    client = mcp_server._client  # type: ignore[attr-defined]
     url = endpoint.format(profile_id=profile_id)
 
     try:
@@ -631,7 +639,7 @@ async def _bulk_update_helper(
         return {"error": f"HTTP error: {str(e)}"}
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def updateDenylist(profile_id: str, entries: str) -> dict[str, Any]:
     """Update the denylist for a profile.
 
@@ -656,7 +664,7 @@ async def updateDenylist(profile_id: str, entries: str) -> dict[str, Any]:
     )
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def updateAllowlist(profile_id: str, entries: str) -> dict[str, Any]:
     """Update the allowlist for a profile.
 
@@ -681,7 +689,7 @@ async def updateAllowlist(profile_id: str, entries: str) -> dict[str, Any]:
     )
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def updateParentalControlServices(profile_id: str, services: str) -> dict[str, Any]:
     """Update parental control services for a profile.
 
@@ -707,7 +715,7 @@ async def updateParentalControlServices(profile_id: str, services: str) -> dict[
     )
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def updateParentalControlCategories(profile_id: str, categories: str) -> dict[str, Any]:
     """Update parental control website categories for a profile.
 
@@ -733,7 +741,7 @@ async def updateParentalControlCategories(profile_id: str, categories: str) -> d
     )
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def updateSecurityTlds(profile_id: str, tlds: str) -> dict[str, Any]:
     """Update blocked top-level domains (TLDs) for a profile.
 
@@ -755,7 +763,7 @@ async def updateSecurityTlds(profile_id: str, tlds: str) -> dict[str, Any]:
     )
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def updatePrivacyBlocklists(profile_id: str, blocklists: str) -> dict[str, Any]:
     """Update privacy blocklists for a profile.
 
@@ -781,7 +789,7 @@ async def updatePrivacyBlocklists(profile_id: str, blocklists: str) -> dict[str,
     )
 
 
-@mcp.tool()
+@mcp_server.tool()
 async def updatePrivacyNatives(profile_id: str, natives: str) -> dict[str, Any]:
     """Update native tracking protection settings for a profile.
 
@@ -829,9 +837,9 @@ if __name__ == "__main__":  # pragma: no cover
     # Note: This block is excluded from unit test coverage because:
     # 1. It only executes when running `python -m nextdns_mcp.server` directly
     # 2. When pytest imports the module, __name__ != "__main__"
-    # 3. The mcp.run() call starts a blocking event loop unsuitable for unit tests
+    # 3. The mcp_server.run() call starts a blocking event loop unsuitable for unit tests
     # The options building logic IS tested via tests/unit/test_mcp_run_options.py
     logger.info("Starting NextDNS MCP Server...")
     logger.info(f"  Base URL: {NEXTDNS_BASE_URL}")
     logger.info(f"  Timeout: {get_http_timeout()}s")
-    mcp.run(**get_mcp_run_options())
+    mcp_server.run(**get_mcp_run_options())

@@ -112,12 +112,12 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
 
 1. Install dependencies:
    ```bash
-   poetry install
+   uv sync
    ```
 
 2. Run the server:
    ```bash
-   poetry run python -m nextdns_mcp.server
+   uv run python -m nextdns_mcp.server
    ```
 
 ## Architecture
