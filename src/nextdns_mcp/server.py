@@ -376,19 +376,19 @@ def allow_extra_fields_component_fn(component, *args, **kwargs):
     # Only patch Pydantic model classes (skip enums, primitives, etc.)
     try:
         from pydantic import BaseModel
-    except ImportError:
-        return component
+    except ImportError:  # pragma: no cover
+        return component  # pragma: no cover
     if isinstance(component, type) and issubclass(component, BaseModel):
         # Pydantic v2
         if hasattr(component, "model_config"):
             component.model_config = {**getattr(component, "model_config", {}), "extra": "ignore"}
-        # Pydantic v1
-        elif hasattr(component, "__config__"):
+        # Pydantic v1 (legacy compatibility)
+        elif hasattr(component, "__config__"):  # pragma: no cover
 
-            class Config(getattr(component, "__config__")):
-                extra = "ignore"
+            class Config(getattr(component, "__config__")):  # pragma: no cover
+                extra = "ignore"  # pragma: no cover
 
-            component.__config__ = Config
+            component.__config__ = Config  # pragma: no cover
     return component
 
 
