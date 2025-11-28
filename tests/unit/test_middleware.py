@@ -157,7 +157,6 @@ class TestAllowExtraFieldsComponentFn:
             name: str
 
         # Before patching
-        original_config = getattr(TestModel, "model_config", {})
 
         result = allow_extra_fields_component_fn(TestModel)
 
