@@ -1,4 +1,8 @@
-# Extra/Unknown Fields in Tool Input
+# Troubleshooting
+
+Fix common setup and runtime issues.
+
+## Extra/Unknown Fields in Tool Input
 
 **Problem:** AI clients (like OpenAI) or CLI tools may send extra/unknown fields with tool arguments that don't match the tool's input schema, causing validation errors like "Unexpected keyword argument".
 
@@ -18,10 +22,6 @@ The middleware inspects each tool's parameter schema and removes any arguments t
 ```
 
 See `src/nextdns_mcp/server.py` for implementation details (class `StripExtraFieldsMiddleware`).
-
-# Troubleshooting
-
-Fix common setup and runtime issues.
 
 ## "NEXTDNS_API_KEY is required" or 401 errors
 - Set `NEXTDNS_API_KEY` or configure the `nextdns.api_key` secret in Docker MCP Gateway.
