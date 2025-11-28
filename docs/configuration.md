@@ -1,3 +1,7 @@
+# Configuration Reference
+
+All configuration is done via environment variables (or Docker MCP Gateway secrets/config).
+
 ## Extra Field Relaxation
 
 All tool input models (custom and OpenAPI-imported) are configured to ignore extra/unknown fields. This is achieved by:
@@ -5,9 +9,6 @@ All tool input models (custom and OpenAPI-imported) are configured to ignore ext
 - Patching OpenAPI-imported models with a custom `mcp_component_fn` (see troubleshooting.md)
 
 This allows AI/CLI clients to send extra fields without causing errors, while still enforcing required/typed fields.
-# Configuration Reference
-
-All configuration is done via environment variables (or Docker MCP Gateway secrets/config).
 
 ## Environment variables
 
