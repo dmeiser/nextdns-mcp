@@ -2,16 +2,17 @@
 # Extra Field Relaxation for MCP Tool Arguments
 #
 # AI clients (like OpenAI) often send extra/unknown fields with tool calls.
-# We use a two-layer approach to handle this:
+# We use a complementary two-layer approach to handle this:
 #
 # 1. StripExtraFieldsMiddleware: Intercepts tool calls and filters arguments
-#    to only include fields defined in the tool's schema. This is the primary
-#    mechanism that prevents validation errors from unknown fields.
+#    to only include fields defined in the tool's schema. This operates at the
+#    MCP call level, preventing most validation errors from unknown fields.
 #
-# 2. allow_extra_fields_component_fn: Sets "extra": "ignore" on OpenAPI-imported
-#    Pydantic models as an additional safety layer.
+# 2. allow_extra_fields_component_fn: Configures OpenAPI-imported Pydantic models
+#    with "extra": "ignore" (via strict_input_validation=False), ensuring that any
+#    extra fields that reach model validation are silently ignored.
 #
-# Together these ensure:
+# These mechanisms work together at different layers to ensure:
 # - Unknown fields are silently ignored (not rejected)
 # - Required/typed fields are still validated
 # - Works with both OpenAPI-imported and custom @mcp_server.tool() decorated tools
