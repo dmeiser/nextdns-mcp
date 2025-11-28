@@ -1,3 +1,28 @@
+# Extra/Unknown Fields in Tool Input
+
+**Problem:** AI or CLI clients send extra/unknown fields to MCP tools, causing 400 errors or schema validation failures.
+
+**Solution:** The server is configured to ignore extra/unknown fields for all tool input models (custom and OpenAPI-imported) by:
+
+- Setting `strict_input_validation=False` in the FastMCP server constructor.
+- Patching all OpenAPI-imported Pydantic models to allow extra fields using a custom `mcp_component_fn`:
+
+  ```python
+  def allow_extra_fields_component_fn(component, *args, **kwargs):
+	  # For Pydantic v2
+	  if hasattr(component, "model_config"):
+		  component.model_config = {**getattr(component, "model_config", {}), "extra": "ignore"}
+	  # For Pydantic v1
+	  elif hasattr(component, "__config__"):
+		  class Config(getattr(component, "__config__")):
+			  extra = "ignore"
+		  component.__config__ = Config
+	  return component
+  ...
+  mcp = FastMCP.from_openapi(..., mcp_component_fn=allow_extra_fields_component_fn)
+  ```
+
+This ensures all tools accept extra/unknown fields in input without error, while still enforcing required/typed fields. See `src/nextdns_mcp/server.py` for implementation details.
 # Troubleshooting
 
 Fix common setup and runtime issues.

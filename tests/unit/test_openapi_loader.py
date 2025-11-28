@@ -47,42 +47,42 @@ class TestLoadOpenApiSpec:
     async def test_build_route_mappings_excludes_disabled_operations(self, set_env_api_key):
         """Ensure custom route mappings exclude unsupported OpenAPI operations."""
 
-        spec = {
-            "openapi": "3.0.3",
-            "info": {"title": "NextDNS Logs API", "version": "1.0.0"},
-            "servers": [{"url": "https://api.example.com"}],
-            "paths": {
-                "/profiles/{profile_id}/logs": {
-                    "get": {
-                        "operationId": "getLogs",
-                        "responses": {"200": {"description": "OK"}},
-                    }
-                },
-                "/profiles/{profile_id}/logs/stream": {
-                    "get": {
-                        "operationId": "streamLogs",
-                        "responses": {"200": {"description": "Stream"}},
-                    }
-                },
-            },
-            "components": {},
-        }
+        # Use the real OpenAPI spec and configuration to ensure tool generation works correctly
+        from nextdns_mcp.server import (
+            allow_extra_fields_component_fn,
+            build_route_mappings,
+            load_openapi_spec,
+        )
 
-        from nextdns_mcp.server import build_route_mappings
+        spec = load_openapi_spec()
 
-        async with httpx.AsyncClient(base_url="https://api.example.com") as client:
+        async with httpx.AsyncClient(base_url="https://api.nextdns.io") as client:
             mcp = FastMCP.from_openapi(
                 openapi_spec=spec,
                 client=client,
                 route_maps=build_route_mappings(),
                 name="Test Server",
                 timeout=5,
+                strict_input_validation=False,
+                mcp_component_fn=allow_extra_fields_component_fn,
             )
 
             tools = await mcp.get_tools()
 
-            assert "getLogs" in tools
-            assert "streamLogs" not in tools
+            # Verify that getLogs is generated (normal JSON endpoint)
+            assert (
+                "getLogs" in tools
+            ), "getLogs should be generated from /profiles/{profile_id}/logs"
+
+            # Verify that streamLogs is NOT generated (SSE streaming endpoint, explicitly excluded)
+            assert (
+                "streamLogs" not in tools
+            ), "streamLogs should be excluded (SSE streaming not supported)"
+
+            # Verify that downloadLogs is NOT generated (binary CSV download, explicitly excluded)
+            assert (
+                "downloadLogs" not in tools
+            ), "downloadLogs should be excluded (binary response not supported)"
 
     def test_load_openapi_spec_file_not_found(self, monkeypatch, mock_api_key, caplog):
         """Test error handling when OpenAPI spec file is missing."""

@@ -1,3 +1,15 @@
+# ---
+# Extra Field Relaxation for MCP Tool Arguments
+#
+# AI clients (like OpenAI) often send extra/unknown fields with tool calls.
+# To allow this, we use a middleware that strips unknown fields from arguments
+# BEFORE they reach FastMCP's tool validation. This ensures:
+# 1. Unknown fields are silently ignored (not rejected)
+# 2. Required/typed fields are still validated
+# 3. Works with both OpenAPI-imported and custom @mcp.tool() decorated tools
+#
+# See AGENT.md and troubleshooting.md for details.
+# ---
 """NextDNS MCP Server - FastMCP-based implementation using OpenAPI spec.
 
 SPDX-License-Identifier: MIT
@@ -12,21 +24,81 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+import mcp.types
 import yaml
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.openapi import DEFAULT_ROUTE_MAPPINGS, RouteMap
+from fastmcp.tools.tool import ToolResult
 
-from .config import (DNS_STATUS_CODES, EXCLUDED_ROUTES,
-                     GLOBALLY_ALLOWED_OPERATIONS, NEXTDNS_BASE_URL,
-                     VALID_DNS_RECORD_TYPES, can_read_profile,
-                     can_write_profile, get_api_key, get_default_profile,
-                     get_http_timeout, is_read_only)
+from .config import (
+    DNS_STATUS_CODES,
+    EXCLUDED_ROUTES,
+    GLOBALLY_ALLOWED_OPERATIONS,
+    NEXTDNS_BASE_URL,
+    VALID_DNS_RECORD_TYPES,
+    can_read_profile,
+    can_write_profile,
+    get_api_key,
+    get_default_profile,
+    get_http_timeout,
+    is_read_only,
+)
 
 # Load environment variables from .env file
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+class StripExtraFieldsMiddleware(Middleware):
+    """Middleware that strips unknown fields from tool arguments.
+
+    AI clients (like OpenAI) often send extra/unknown fields with tool calls
+    that don't match the tool's input schema. This middleware filters arguments
+    to only include fields that are defined in the tool's parameter schema,
+    preventing validation errors while maintaining type safety for known fields.
+
+    Example:
+        A tool with parameters {"domain": str, "record_type": str} receiving
+        {"domain": "example.com", "record_type": "A", "extra_field": "ignored"}
+        will have the arguments filtered to just {"domain": "example.com", "record_type": "A"}
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mcp.types.CallToolRequestParams],
+        call_next: CallNext[mcp.types.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        """Filter tool arguments to only include known parameters."""
+        tool_name = context.message.name
+        arguments = context.message.arguments
+
+        if arguments and context.fastmcp_context:
+            try:
+                # Get the tool's parameter schema
+                fastmcp_server = context.fastmcp_context.fastmcp
+                tool = await fastmcp_server._tool_manager.get_tool(tool_name)
+                known_params = set(tool.parameters.get("properties", {}).keys())
+
+                # Filter arguments to only include known parameters
+                original_keys = set(arguments.keys())
+                filtered_args = {k: v for k, v in arguments.items() if k in known_params}
+
+                # Log if any fields were stripped (for debugging)
+                stripped_keys = original_keys - known_params
+                if stripped_keys:
+                    logger.debug(f"Tool '{tool_name}': Stripped unknown fields: {stripped_keys}")
+
+                # Update the arguments in place
+                context.message.arguments = filtered_args
+            except Exception as e:
+                # If we can't get the tool schema, proceed with original arguments
+                # This should rarely happen, but we don't want to break the flow
+                logger.warning(f"Could not filter arguments for tool '{tool_name}': {e}")
+
+        return await call_next(context)
 
 
 def load_openapi_spec() -> dict[str, Any]:
@@ -287,6 +359,31 @@ def create_nextdns_client() -> httpx.AsyncClient:
     )
 
 
+def allow_extra_fields_component_fn(component, *args, **kwargs):
+    """
+    Patch OpenAPI-imported Pydantic models to allow extra fields (ignore unknown fields).
+    Only applies to Pydantic model classes, not enums or primitives.
+    Compatible with Pydantic v2 and v1.
+    """
+    # Only patch Pydantic model classes (skip enums, primitives, etc.)
+    try:
+        from pydantic import BaseModel
+    except ImportError:
+        return component
+    if isinstance(component, type) and issubclass(component, BaseModel):
+        # Pydantic v2
+        if hasattr(component, "model_config"):
+            component.model_config = {**getattr(component, "model_config", {}), "extra": "ignore"}
+        # Pydantic v1
+        elif hasattr(component, "__config__"):
+
+            class Config(getattr(component, "__config__")):
+                extra = "ignore"
+
+            component.__config__ = Config
+    return component
+
+
 def create_mcp_server() -> FastMCP:
     """Create and configure the NextDNS MCP server.
 
@@ -315,7 +412,13 @@ def create_mcp_server() -> FastMCP:
         route_maps=route_maps,
         name="NextDNS MCP Server",
         timeout=get_http_timeout(),
+        strict_input_validation=False,
+        mcp_component_fn=allow_extra_fields_component_fn,
     )
+
+    # Add middleware to strip unknown fields from tool arguments
+    # This allows AI clients (like OpenAI) that send extra fields to work properly
+    mcp.add_middleware(StripExtraFieldsMiddleware())
 
     # Add metadata about the server
     logger.info("MCP server created successfully")
