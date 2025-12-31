@@ -44,7 +44,6 @@ from fastmcp.tools.tool import ToolResult
 from .config import (
     DNS_STATUS_CODES,
     EXCLUDED_ROUTES,
-    GLOBALLY_ALLOWED_OPERATIONS,
     NEXTDNS_BASE_URL,
     VALID_DNS_RECORD_TYPES,
     can_read_profile,

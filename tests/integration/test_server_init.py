@@ -19,7 +19,7 @@ class TestServerInitialization:
         # This test is skipped because the module is already imported by other tests,
         # making it impossible to test the sys.exit(1) behavior in module-level code.
         # This is a known limitation documented in /tmp/fix_test_approach.md (lines 12-13).
-        pass
+        pass  # pragma: no cover
 
     def test_server_module_loads_with_api_key(self, monkeypatch, mock_api_key, mock_openapi_spec):
         """Test that server module loads successfully with API key."""
@@ -76,14 +76,14 @@ class TestServerInitialization:
         """Test that NEXTDNS_DEFAULT_PROFILE is optional."""
         # This test is skipped because the module is already loaded with specific
         # environment variables, and reloading doesn't work reliably in pytest.
-        pass
+        pass  # pragma: no cover
 
     @pytest.mark.skip(reason="Module-level initialization prevents testing different env configs")
     def test_server_can_set_default_profile(self, monkeypatch, mock_api_key, mock_profile_id):
         """Test that default profile can be set."""
         # This test is skipped because the module is already loaded with specific
         # environment variables, and reloading doesn't work reliably in pytest.
-        pass
+        pass  # pragma: no cover
 
 
 class TestCreateMcpServer:

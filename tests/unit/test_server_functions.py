@@ -1,8 +1,7 @@
 """Tests for server.py helper functions and tools."""
 
-import json
 import os
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest

@@ -1,6 +1,5 @@
 """Unit tests for type coercion functions in server.py."""
 
-import pytest
 
 from nextdns_mcp.server import _coerce_string_to_bool, _coerce_string_to_number, coerce_json_types
 

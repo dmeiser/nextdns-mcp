@@ -4,7 +4,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 # We need to test the functions before the module initializes
 # So we'll import them individually after setting up the environment

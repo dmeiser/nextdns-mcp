@@ -134,7 +134,7 @@ class TestStripExtraFieldsMiddleware:
         """Test that stripped fields are logged at debug level."""
         call_next = AsyncMock(return_value=MagicMock())
 
-        with patch("nextdns_mcp.server.logger") as mock_logger:
+        with patch("nextdns_mcp.server.logger"):
             await middleware.on_call_tool(mock_context, call_next)
 
             # Verify call_next was called (middleware completed successfully)

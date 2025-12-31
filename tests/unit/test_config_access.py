@@ -1,10 +1,8 @@
 """Unit tests for access control configuration."""
 
-import importlib
-import os
 import sys
 from types import ModuleType
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -102,7 +100,7 @@ def mock_env():
         if old_module is not None:
             sys.modules["nextdns_mcp.config"] = old_module
         else:
-            del sys.modules["nextdns_mcp.config"]
+            del sys.modules["nextdns_mcp.config"]  # pragma: no cover
 
 
 def test_readable_profiles_empty_config(mock_env):
