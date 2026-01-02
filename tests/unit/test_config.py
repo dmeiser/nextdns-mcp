@@ -4,7 +4,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-
 # We need to test the functions before the module initializes
 # So we'll import them individually after setting up the environment
 
@@ -124,9 +123,7 @@ class TestEnvironmentConfiguration:
         monkeypatch.setenv("NEXTDNS_API_KEY", "dummy_key")
         monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "60")
 
-        with patch.dict(
-            "os.environ", {"NEXTDNS_API_KEY": "dummy_key", "NEXTDNS_HTTP_TIMEOUT": "60"}, clear=True
-        ):
+        with patch.dict("os.environ", {"NEXTDNS_API_KEY": "dummy_key", "NEXTDNS_HTTP_TIMEOUT": "60"}, clear=True):
             # Clean import of config
             import importlib
             import sys

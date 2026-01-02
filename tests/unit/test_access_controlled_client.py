@@ -92,9 +92,7 @@ class TestAccessControlledClientWriteAccess:
         clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request(
-                "PATCH", "/profiles/abc123/settings", json={"name": "Test"}
-            )
+            response = await client.request("PATCH", "/profiles/abc123/settings", json={"name": "Test"})
 
         # Should call the parent request method
         mock_super_request.assert_called_once()
@@ -109,9 +107,7 @@ class TestAccessControlledClientWriteAccess:
         clean_env("NEXTDNS_WRITABLE_PROFILES", "xyz999")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request(
-                "POST", "/profiles/abc123/denylist", json={"id": "example.com"}
-            )
+            response = await client.request("POST", "/profiles/abc123/denylist", json={"id": "example.com"})
 
         # Should NOT call the parent request method
         mock_super_request.assert_not_called()
@@ -153,9 +149,7 @@ class TestAccessControlledClientMethods:
     """Test different HTTP methods."""
 
     @pytest.mark.asyncio
-    async def test_put_is_write_operation(
-        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
-    ) -> None:
+    async def test_put_is_write_operation(self, mock_super_request: Any, clean_env: Callable[[str, str], None]) -> None:
         """Test that PUT is treated as a write operation."""
         # Set up environment to allow writes
         clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
@@ -176,9 +170,7 @@ class TestAccessControlledClientMethods:
         clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request(
-                "PATCH", "/profiles/abc123/settings", json={"name": "Test"}
-            )
+            response = await client.request("PATCH", "/profiles/abc123/settings", json={"name": "Test"})
 
         # Should call the parent request method
         mock_super_request.assert_called_once()

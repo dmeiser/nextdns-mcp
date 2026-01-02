@@ -226,9 +226,7 @@ class TestDohLookup:
 
             result = await dohLookup("example.com", mock_profile_id, "A")
 
-            expected_url = (
-                f"https://dns.nextdns.io/{mock_profile_id}/dns-query?name=example.com&type=A"
-            )
+            expected_url = f"https://dns.nextdns.io/{mock_profile_id}/dns-query?name=example.com&type=A"
             assert result["_metadata"]["doh_endpoint"] == expected_url
 
     @pytest.mark.asyncio

@@ -80,11 +80,7 @@ def mock_openapi_spec() -> dict:
                 }
             }
         },
-        "components": {
-            "securitySchemes": {
-                "ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}
-            }
-        },
+        "components": {"securitySchemes": {"ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}}},
     }
 
 

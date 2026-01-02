@@ -35,11 +35,7 @@ def mock_nextdns_config():
 
     def get_writable_profiles() -> set[str]:
         """Get writable profiles set."""
-        return (
-            set()
-            if module.NEXTDNS_READ_ONLY
-            else parse_profile_list(module.NEXTDNS_WRITABLE_PROFILES)
-        )
+        return set() if module.NEXTDNS_READ_ONLY else parse_profile_list(module.NEXTDNS_WRITABLE_PROFILES)
 
     def get_api_key() -> str | None:
         """Get API key with logging."""
@@ -138,9 +134,7 @@ def test_log_access_control_settings_restricted(mock_module):
     ]
 
     for expected_call in expected_calls:
-        assert (
-            expected_call in mock_module.logger.info.mock_calls
-        ), f"Missing expected info log: {expected_call}"
+        assert expected_call in mock_module.logger.info.mock_calls, f"Missing expected info log: {expected_call}"
 
 
 def test_log_access_control_settings_unrestricted(mock_module):
@@ -160,9 +154,7 @@ def test_log_access_control_settings_unrestricted(mock_module):
     ]
 
     for expected_call in expected_calls:
-        assert (
-            expected_call in mock_module.logger.info.mock_calls
-        ), f"Missing expected info log: {expected_call}"
+        assert expected_call in mock_module.logger.info.mock_calls, f"Missing expected info log: {expected_call}"
 
     # Ensure no unexpected calls
     assert mock_module.logger.info.call_count == 2
@@ -200,10 +192,7 @@ def test_validate_configuration_logs_settings(mock_module):
     mock_module.validate_configuration()
 
     # Check read-only mode log
-    assert (
-        call("Read-only mode is ENABLED - all write operations are disabled")
-        in mock_module.logger.info.mock_calls
-    )
+    assert call("Read-only mode is ENABLED - all write operations are disabled") in mock_module.logger.info.mock_calls
 
     # Check default access control logging
     assert call("All profiles are readable (no restrictions)") in mock_module.logger.info.mock_calls

@@ -15,7 +15,9 @@ def test_conftest_temp_files_exist(temp_api_key_file, temp_openapi_file, mock_op
     assert "openapi" in mock_openapi_spec
 
 
-def test_conftest_env_and_profiles(clean_env, set_env_api_key, mock_profile_id, mock_profiles_response, mock_doh_response, mock_nextdns_base_url):
+def test_conftest_env_and_profiles(
+    clean_env, set_env_api_key, mock_profile_id, mock_profiles_response, mock_doh_response, mock_nextdns_base_url
+):
     # Ensure fixtures return values as expected
     assert set_env_api_key is not None
     assert isinstance(mock_profile_id, str)

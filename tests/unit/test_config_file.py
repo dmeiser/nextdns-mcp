@@ -10,7 +10,6 @@ from unittest.mock import Mock, patch
 import pytest
 
 
-
 def mock_nextdns_config():
     """Create fresh mock config module."""
     module = ModuleType("nextdns_mcp.config")
