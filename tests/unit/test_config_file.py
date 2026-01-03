@@ -9,8 +9,6 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from nextdns_mcp.config import get_api_key, parse_profile_list
-
 
 def mock_nextdns_config():
     """Create fresh mock config module."""
@@ -62,7 +60,7 @@ def mock_env():
         if old_module is not None:
             sys.modules["nextdns_mcp.config"] = old_module
         else:
-            del sys.modules["nextdns_mcp.config"]
+            del sys.modules["nextdns_mcp.config"]  # pragma: no cover
 
 
 def test_get_api_key_from_file(mock_env):
@@ -130,3 +128,9 @@ def test_parse_profile_list_empty(mock_env):
 def test_parse_profile_list_variants(mock_env, input_str, expected):
     """Test parse_profile_list with various inputs."""
     assert mock_env.parse_profile_list(input_str) == expected
+
+
+def test_get_api_key_from_env(mock_env):
+    """Test reading API key directly from environment."""
+    with patch.dict("os.environ", {"NEXTDNS_API_KEY": "env-key"}, clear=True):
+        assert mock_env.get_api_key() == "env-key"

@@ -1,8 +1,7 @@
 """Tests for server.py helper functions and tools."""
 
-import json
 import os
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -79,18 +78,14 @@ class TestCreateAccessDeniedResponse:
 
     def test_creates_403_response(self):
         """Test creates response with 403 status."""
-        response = create_access_denied_response(
-            "GET", "/profiles/abc123", "Access denied", "abc123"
-        )
+        response = create_access_denied_response("GET", "/profiles/abc123", "Access denied", "abc123")
 
         assert response.status_code == 403
         assert response.headers["content-type"] == "application/json"
 
     def test_response_contains_error_details(self):
         """Test response contains error information."""
-        response = create_access_denied_response(
-            "POST", "/profiles/abc123/denylist", "Write denied", "abc123"
-        )
+        response = create_access_denied_response("POST", "/profiles/abc123/denylist", "Write denied", "abc123")
 
         data = response.json()
         assert "error" in data

@@ -48,11 +48,7 @@ class TestLoadOpenApiSpec:
         """Ensure custom route mappings exclude unsupported OpenAPI operations."""
 
         # Use the real OpenAPI spec and configuration to ensure tool generation works correctly
-        from nextdns_mcp.server import (
-            allow_extra_fields_component_fn,
-            build_route_mappings,
-            load_openapi_spec,
-        )
+        from nextdns_mcp.server import allow_extra_fields_component_fn, build_route_mappings, load_openapi_spec
 
         spec = load_openapi_spec()
 
@@ -70,19 +66,13 @@ class TestLoadOpenApiSpec:
             tools = await mcp.get_tools()
 
             # Verify that getLogs is generated (normal JSON endpoint)
-            assert (
-                "getLogs" in tools
-            ), "getLogs should be generated from /profiles/{profile_id}/logs"
+            assert "getLogs" in tools, "getLogs should be generated from /profiles/{profile_id}/logs"
 
             # Verify that streamLogs is NOT generated (SSE streaming endpoint, explicitly excluded)
-            assert (
-                "streamLogs" not in tools
-            ), "streamLogs should be excluded (SSE streaming not supported)"
+            assert "streamLogs" not in tools, "streamLogs should be excluded (SSE streaming not supported)"
 
             # Verify that downloadLogs is NOT generated (binary CSV download, explicitly excluded)
-            assert (
-                "downloadLogs" not in tools
-            ), "downloadLogs should be excluded (binary response not supported)"
+            assert "downloadLogs" not in tools, "downloadLogs should be excluded (binary response not supported)"
 
     def test_load_openapi_spec_file_not_found(self, monkeypatch, mock_api_key, caplog):
         """Test error handling when OpenAPI spec file is missing."""
@@ -130,9 +120,7 @@ class TestLoadOpenApiSpec:
         finally:
             temp_spec.unlink(missing_ok=True)
 
-    def test_load_openapi_spec_prints_path(
-        self, mock_openapi_spec, monkeypatch, mock_api_key, caplog
-    ):
+    def test_load_openapi_spec_prints_path(self, mock_openapi_spec, monkeypatch, mock_api_key, caplog):
         """Test that loading logs the spec path."""
         import logging
 

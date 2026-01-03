@@ -1,8 +1,6 @@
 """Unit tests for error handling in configuration."""
 
-import importlib
 import logging
-import os
 import sys
 from types import ModuleType
 from unittest.mock import Mock, call, patch
@@ -37,24 +35,20 @@ def mock_nextdns_config():
 
     def get_writable_profiles() -> set[str]:
         """Get writable profiles set."""
-        return (
-            set()
-            if module.NEXTDNS_READ_ONLY
-            else parse_profile_list(module.NEXTDNS_WRITABLE_PROFILES)
-        )
+        return set() if module.NEXTDNS_READ_ONLY else parse_profile_list(module.NEXTDNS_WRITABLE_PROFILES)
 
     def get_api_key() -> str | None:
         """Get API key with logging."""
         return module.NEXTDNS_API_KEY
 
-    def _log_api_key_error():
+    def _log_api_key_error():  # pragma: no cover
         """Log missing API key."""
         module.logger.critical("NEXTDNS_API_KEY is required")
         module.logger.critical("Set either:")
         module.logger.critical("  - NEXTDNS_API_KEY environment variable")
         module.logger.critical("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret")
 
-    def _log_access_control_settings():
+    def _log_access_control_settings():  # pragma: no cover
         """Log access control configuration."""
         readable = get_readable_profiles()
         writable = get_writable_profiles()
@@ -117,6 +111,12 @@ def test_log_api_key_error(mock_module):
         ), f"Missing expected critical log: {expected_call}"
 
 
+def test_get_api_key_returns_value(mock_module):
+    """Test get_api_key returns the configured key"""
+    mock_module.NEXTDNS_API_KEY = "some-key"
+    assert mock_module.get_api_key() == "some-key"
+
+
 def test_log_access_control_settings_restricted(mock_module):
     """Test access control logging with both readable and writable restrictions."""
     # Set up restricted profiles
@@ -134,9 +134,7 @@ def test_log_access_control_settings_restricted(mock_module):
     ]
 
     for expected_call in expected_calls:
-        assert (
-            expected_call in mock_module.logger.info.mock_calls
-        ), f"Missing expected info log: {expected_call}"
+        assert expected_call in mock_module.logger.info.mock_calls, f"Missing expected info log: {expected_call}"
 
 
 def test_log_access_control_settings_unrestricted(mock_module):
@@ -156,9 +154,7 @@ def test_log_access_control_settings_unrestricted(mock_module):
     ]
 
     for expected_call in expected_calls:
-        assert (
-            expected_call in mock_module.logger.info.mock_calls
-        ), f"Missing expected info log: {expected_call}"
+        assert expected_call in mock_module.logger.info.mock_calls, f"Missing expected info log: {expected_call}"
 
     # Ensure no unexpected calls
     assert mock_module.logger.info.call_count == 2
@@ -196,10 +192,7 @@ def test_validate_configuration_logs_settings(mock_module):
     mock_module.validate_configuration()
 
     # Check read-only mode log
-    assert (
-        call("Read-only mode is ENABLED - all write operations are disabled")
-        in mock_module.logger.info.mock_calls
-    )
+    assert call("Read-only mode is ENABLED - all write operations are disabled") in mock_module.logger.info.mock_calls
 
     # Check default access control logging
     assert call("All profiles are readable (no restrictions)") in mock_module.logger.info.mock_calls

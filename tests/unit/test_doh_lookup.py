@@ -19,6 +19,9 @@ def mock_httpx_client():
         "Answer": [{"name": "google.com.", "type": 1, "TTL": 300, "data": "142.250.190.46"}],
     }
     mock_client.get.return_value = mock_response
+    # Make it usable as an async context manager
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = AsyncMock()
     return mock_client
 
 
@@ -92,7 +95,7 @@ class TestDohLookup:
         # This test is skipped because the module-level NEXTDNS_DEFAULT_PROFILE constant
         # is bound at import time and can't be reliably mocked. The error handling logic
         # for missing profile is simple validation code (lines 189-193 in server.py).
-        pass
+        pass  # pragma: no cover
 
     @pytest.mark.asyncio
     async def test_doh_lookup_invalid_record_type(self, mock_profile_id):
@@ -223,9 +226,7 @@ class TestDohLookup:
 
             result = await dohLookup("example.com", mock_profile_id, "A")
 
-            expected_url = (
-                f"https://dns.nextdns.io/{mock_profile_id}/dns-query?name=example.com&type=A"
-            )
+            expected_url = f"https://dns.nextdns.io/{mock_profile_id}/dns-query?name=example.com&type=A"
             assert result["_metadata"]["doh_endpoint"] == expected_url
 
     @pytest.mark.asyncio
@@ -247,3 +248,12 @@ class TestDohLookup:
             # Test mixed case
             result = await dohLookup("example.com", mock_profile_id, "AaAa")
             assert result["_metadata"]["query_type"] == "AAAA"
+
+
+@pytest.mark.asyncio
+async def test_mock_httpx_client_fixture_usage(mock_httpx_client, mock_profile_id):
+    """Ensure the reusable mock_httpx_client fixture can be used by tests."""
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client_class.return_value = mock_httpx_client
+        result = await dohLookup("google.com", mock_profile_id, "A")
+        assert result["Status"] == 0

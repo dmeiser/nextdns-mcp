@@ -1,7 +1,6 @@
 """Unit tests for profile access control functionality."""
 
 import os
-from unittest.mock import patch
 
 import pytest
 

@@ -11,15 +11,13 @@ import yaml
 class TestServerInitialization:
     """Test MCP server initialization."""
 
-    @pytest.mark.skip(
-        reason="Module-level initialization makes this test difficult - requires clean import"
-    )
+    @pytest.mark.skip(reason="Module-level initialization makes this test difficult - requires clean import")
     def test_server_module_requires_api_key(self, monkeypatch, capsys):
         """Test that server module exits if API key is not set."""
         # This test is skipped because the module is already imported by other tests,
         # making it impossible to test the sys.exit(1) behavior in module-level code.
         # This is a known limitation documented in /tmp/fix_test_approach.md (lines 12-13).
-        pass
+        pass  # pragma: no cover
 
     def test_server_module_loads_with_api_key(self, monkeypatch, mock_api_key, mock_openapi_spec):
         """Test that server module loads successfully with API key."""
@@ -76,22 +74,20 @@ class TestServerInitialization:
         """Test that NEXTDNS_DEFAULT_PROFILE is optional."""
         # This test is skipped because the module is already loaded with specific
         # environment variables, and reloading doesn't work reliably in pytest.
-        pass
+        pass  # pragma: no cover
 
     @pytest.mark.skip(reason="Module-level initialization prevents testing different env configs")
     def test_server_can_set_default_profile(self, monkeypatch, mock_api_key, mock_profile_id):
         """Test that default profile can be set."""
         # This test is skipped because the module is already loaded with specific
         # environment variables, and reloading doesn't work reliably in pytest.
-        pass
+        pass  # pragma: no cover
 
 
 class TestCreateMcpServer:
     """Test the create_mcp_server() function."""
 
-    def test_create_mcp_server_returns_fastmcp_instance(
-        self, monkeypatch, mock_api_key, mock_openapi_spec
-    ):
+    def test_create_mcp_server_returns_fastmcp_instance(self, monkeypatch, mock_api_key, mock_openapi_spec):
         """Test that create_mcp_server returns a FastMCP instance."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
@@ -121,9 +117,7 @@ class TestCreateMcpServer:
         finally:
             temp_spec.unlink(missing_ok=True)
 
-    def test_create_mcp_server_prints_status(
-        self, monkeypatch, mock_api_key, mock_openapi_spec, caplog
-    ):
+    def test_create_mcp_server_prints_status(self, monkeypatch, mock_api_key, mock_openapi_spec, caplog):
         """Test that create_mcp_server logs status messages."""
         import logging
 
@@ -195,9 +189,7 @@ class TestCreateMcpServer:
         finally:
             temp_spec.unlink(missing_ok=True)
 
-    def test_server_initialization_http_transport(
-        self, monkeypatch, mock_api_key, mock_openapi_spec
-    ):
+    def test_server_initialization_http_transport(self, monkeypatch, mock_api_key, mock_openapi_spec):
         """Test server can be initialized with HTTP transport mode."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
         monkeypatch.setenv("MCP_TRANSPORT", "http")

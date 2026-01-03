@@ -1,7 +1,6 @@
 """Test API key validation and error handling."""
 
 import os
-from unittest.mock import patch
 
 import pytest
 

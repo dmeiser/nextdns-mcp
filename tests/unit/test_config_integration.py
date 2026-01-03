@@ -21,7 +21,6 @@ def test_validate_configuration_calls_sys_exit(clean_env):
     # No API key set
 
     # Need to reload the module to get fresh state
-    import importlib
 
     if "nextdns_mcp.config" in sys.modules:
         del sys.modules["nextdns_mcp.config"]

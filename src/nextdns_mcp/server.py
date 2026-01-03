@@ -44,7 +44,6 @@ from fastmcp.tools.tool import ToolResult
 from .config import (
     DNS_STATUS_CODES,
     EXCLUDED_ROUTES,
-    GLOBALLY_ALLOWED_OPERATIONS,
     NEXTDNS_BASE_URL,
     VALID_DNS_RECORD_TYPES,
     can_read_profile,
@@ -62,25 +61,55 @@ logger = logging.getLogger(__name__)
 
 
 class StripExtraFieldsMiddleware(Middleware):
-    """Middleware that strips unknown fields from tool arguments.
+    """Middleware that strips unknown fields and coerces types in tool arguments.
 
     AI clients (like OpenAI) often send extra/unknown fields with tool calls
-    that don't match the tool's input schema. This middleware filters arguments
-    to only include fields that are defined in the tool's parameter schema,
-    preventing validation errors while maintaining type safety for known fields.
+    that don't match the tool's input schema. Docker MCP CLI also passes values
+    as strings (e.g., "true" instead of true). This middleware:
+    1. Filters arguments to only include fields defined in the tool's parameter schema
+    2. Coerces string values to proper types (booleans, integers, floats)
 
     Example:
-        A tool with parameters {"domain": str, "record_type": str} receiving
-        {"domain": "example.com", "record_type": "A", "extra_field": "ignored"}
-        will have the arguments filtered to just {"domain": "example.com", "record_type": "A"}
+        A tool with parameters {"domain": str, "enabled": bool} receiving
+        {"domain": "example.com", "enabled": "true", "extra_field": "ignored"}
+        will have arguments filtered and coerced to {"domain": "example.com", "enabled": true}
     """
+
+    def _coerce_string_value(self, s: str) -> Any:
+        """Coerce a string to bool, int, float, or return original string.
+
+        Separated into its own helper to reduce method complexity for radon.
+        """
+        sl = s.lower()
+        if sl == "true":
+            return True
+        if sl == "false":
+            return False
+        if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+            return int(s)
+        if s.replace(".", "", 1).replace("-", "", 1).isdigit():
+            try:
+                return float(s)
+            except ValueError:
+                return s
+        return s
+
+    def _coerce_value(self, value: Any) -> Any:
+        """Coerce a value (recursing into dicts/lists) or delegate string coercion."""
+        if isinstance(value, str):
+            return self._coerce_string_value(value)
+        if isinstance(value, dict):
+            return {k: self._coerce_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._coerce_value(item) for item in value]
+        return value
 
     async def on_call_tool(
         self,
         context: MiddlewareContext[mcp.types.CallToolRequestParams],
         call_next: CallNext[mcp.types.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        """Filter tool arguments to only include known parameters."""
+        """Filter tool arguments to only include known parameters and coerce types."""
         tool_name = context.message.name
         arguments = context.message.arguments
 
@@ -100,8 +129,13 @@ class StripExtraFieldsMiddleware(Middleware):
                 if stripped_keys:
                     logger.debug(f"Tool '{tool_name}': Stripped unknown fields: {stripped_keys}")
 
+                # Coerce string values to proper types (bool, int, float)
+                coerced_args = {k: self._coerce_value(v) for k, v in filtered_args.items()}
+                if coerced_args != filtered_args:
+                    logger.debug(f"Tool '{tool_name}': Coerced types in arguments")
+
                 # Update the arguments in place
-                context.message.arguments = filtered_args
+                context.message.arguments = coerced_args
             except Exception as e:
                 # If we can't get the tool schema, proceed with original arguments
                 # This should rarely happen, but we don't want to break the flow
@@ -262,9 +296,7 @@ def coerce_json_types(data: Any) -> Any:
     return data
 
 
-def create_access_denied_response(
-    method: str, url: str, error_msg: str, profile_id: str
-) -> httpx.Response:
+def create_access_denied_response(method: str, url: str, error_msg: str, profile_id: str) -> httpx.Response:
     """Create a 403 Forbidden response for access denied scenarios.
 
     Args:
@@ -316,14 +348,17 @@ class AccessControlledClient(httpx.AsyncClient):
         return self._check_read_access(profile_id, method, url)
 
     def _coerce_json_body(self, kwargs: dict[str, Any]) -> None:
-        """Coerce string types in JSON request body."""
+        """Coerce string types in JSON request body.
+
+        This handles type coercion for parameters passed as strings by clients like
+        Docker MCP CLI. FastMCP's OpenAPI integration may pass string values for
+        boolean/integer fields which need to be coerced before sending to the API.
+        """
         if "json" in kwargs and isinstance(kwargs["json"], dict):
             kwargs["json"] = coerce_json_types(kwargs["json"])
             logger.debug(f"Coerced JSON body: {kwargs['json']}")
 
-    async def request(  # type: ignore[override]
-        self, method: str, url: str, **kwargs: Any
-    ) -> httpx.Response:
+    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
         """Make an HTTP request with access control checks.
 
         Args:
@@ -482,9 +517,7 @@ def _build_doh_metadata(
 
 
 # Add custom DoH lookup tool
-async def _execute_doh_query(
-    doh_url: str, domain: str, record_type: str, target_profile: str
-) -> dict[str, Any]:
+async def _execute_doh_query(doh_url: str, domain: str, record_type: str, target_profile: str) -> dict[str, Any]:
     """Execute DoH query and return result with metadata."""
     params = {"name": domain, "type": record_type}
     headers = {"accept": "application/dns-json"}
@@ -498,9 +531,7 @@ async def _execute_doh_query(
                 target_profile, domain, record_type, doh_url, result.get("Status")
             )
             if result.get("Status") is not None:
-                logger.debug(
-                    f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}"
-                )
+                logger.debug(f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}")
             return result
     except Exception as e:
         error_type = "HTTP error" if isinstance(e, httpx.HTTPError) else "Unexpected error"
@@ -513,9 +544,7 @@ async def _execute_doh_query(
         }
 
 
-async def _dohLookup_impl(
-    domain: str, profile_id: Optional[str] = None, record_type: str = "A"
-) -> dict[str, Any]:
+async def _dohLookup_impl(domain: str, profile_id: Optional[str] = None, record_type: str = "A") -> dict[str, Any]:
     """Implementation of DoH lookup functionality.
 
     See dohLookup() for full documentation.
@@ -542,9 +571,7 @@ async def _dohLookup_impl(
 
 # Register the DoH lookup tool with MCP
 @mcp_server.tool()
-async def dohLookup(
-    domain: str, profile_id: Optional[str] = None, record_type: str = "A"
-) -> dict[str, Any]:
+async def dohLookup(domain: str, profile_id: Optional[str] = None, record_type: str = "A") -> dict[str, Any]:
     """Perform a DNS-over-HTTPS lookup using a NextDNS profile.
 
     This tool performs a DNS query through NextDNS's DoH endpoint, allowing you to test
@@ -589,9 +616,7 @@ async def dohLookup(
 # We provide custom implementations that accept JSON strings and convert them.
 
 
-async def _bulk_update_helper(
-    profile_id: str, data: str, endpoint: str, param_name: str
-) -> dict[str, Any]:
+async def _bulk_update_helper(profile_id: str, data: str, endpoint: str, param_name: str) -> dict[str, Any]:
     """Helper function for bulk update operations that require raw JSON arrays.
 
     This function handles the common pattern of:
@@ -615,9 +640,7 @@ async def _bulk_update_helper(
     try:
         array_data = json.loads(data)
         if not isinstance(array_data, list):
-            logger.warning(
-                f"Invalid {param_name} format: expected array, got {type(array_data).__name__}"
-            )
+            logger.warning(f"Invalid {param_name} format: expected array, got {type(array_data).__name__}")
             return {"error": f"{param_name} must be a JSON array string"}
         logger.debug(f"Parsed {len(array_data)} {param_name} items")
     except json.JSONDecodeError as e:
@@ -660,9 +683,7 @@ async def updateDenylist(profile_id: str, entries: str) -> dict[str, Any]:
     Example:
         result = await updateDenylist("abc123", '["ads.example.com", "tracker.net"]')
     """
-    return await _bulk_update_helper(
-        profile_id, entries, "/profiles/{profile_id}/denylist", "entries"
-    )
+    return await _bulk_update_helper(profile_id, entries, "/profiles/{profile_id}/denylist", "entries")
 
 
 @mcp_server.tool()
@@ -685,9 +706,7 @@ async def updateAllowlist(profile_id: str, entries: str) -> dict[str, Any]:
     Example:
         result = await updateAllowlist("abc123", '["safe.com", "trusted.org"]')
     """
-    return await _bulk_update_helper(
-        profile_id, entries, "/profiles/{profile_id}/allowlist", "entries"
-    )
+    return await _bulk_update_helper(profile_id, entries, "/profiles/{profile_id}/allowlist", "entries")
 
 
 @mcp_server.tool()
@@ -759,9 +778,7 @@ async def updateSecurityTlds(profile_id: str, tlds: str) -> dict[str, Any]:
     Example:
         result = await updateSecurityTlds("abc123", '["zip", "mov"]')
     """
-    return await _bulk_update_helper(
-        profile_id, tlds, "/profiles/{profile_id}/security/tlds", "tlds"
-    )
+    return await _bulk_update_helper(profile_id, tlds, "/profiles/{profile_id}/security/tlds", "tlds")
 
 
 @mcp_server.tool()
@@ -808,9 +825,7 @@ async def updatePrivacyNatives(profile_id: str, natives: str) -> dict[str, Any]:
     Example:
         result = await updatePrivacyNatives("abc123", '["apple", "windows"]')
     """
-    return await _bulk_update_helper(
-        profile_id, natives, "/profiles/{profile_id}/privacy/natives", "natives"
-    )
+    return await _bulk_update_helper(profile_id, natives, "/profiles/{profile_id}/privacy/natives", "natives")
 
 
 def get_mcp_run_options() -> dict[str, Any]:

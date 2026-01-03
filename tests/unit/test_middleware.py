@@ -116,9 +116,7 @@ class TestStripExtraFieldsMiddleware:
     @pytest.mark.asyncio
     async def test_handles_tool_manager_exception(self, middleware, mock_context):
         """Test graceful handling when tool manager raises exception."""
-        mock_context.fastmcp_context.fastmcp._tool_manager.get_tool = AsyncMock(
-            side_effect=Exception("Tool not found")
-        )
+        mock_context.fastmcp_context.fastmcp._tool_manager.get_tool = AsyncMock(side_effect=Exception("Tool not found"))
         mock_context.message.arguments = {"domain": "test.com", "extra": "field"}
         call_next = AsyncMock(return_value=MagicMock())
 
@@ -134,7 +132,7 @@ class TestStripExtraFieldsMiddleware:
         """Test that stripped fields are logged at debug level."""
         call_next = AsyncMock(return_value=MagicMock())
 
-        with patch("nextdns_mcp.server.logger") as mock_logger:
+        with patch("nextdns_mcp.server.logger"):
             await middleware.on_call_tool(mock_context, call_next)
 
             # Verify call_next was called (middleware completed successfully)

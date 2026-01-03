@@ -162,9 +162,7 @@ def test_log_access_control_read_only(mock_logger, patch_env):
         config._log_access_control_settings()
 
     # Verify read-only mode message
-    mock_logger.info.assert_any_call(
-        "Read-only mode is ENABLED - all write operations are disabled"
-    )
+    mock_logger.info.assert_any_call("Read-only mode is ENABLED - all write operations are disabled")
 
 
 def test_log_access_control_restricted(mock_logger, patch_env):
