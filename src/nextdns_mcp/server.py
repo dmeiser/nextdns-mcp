@@ -75,33 +75,32 @@ class StripExtraFieldsMiddleware(Middleware):
         will have arguments filtered and coerced to {"domain": "example.com", "enabled": true}
     """
 
-    def _coerce_value(self, value: Any) -> Any:
-        """Coerce a string value to boolean, int, float, or leave as string.
+    def _coerce_string_value(self, s: str) -> Any:
+        """Coerce a string to bool, int, float, or return original string.
 
-        Args:
-            value: The value to coerce
-
-        Returns:
-            The coerced value
+        Separated into its own helper to reduce method complexity for radon.
         """
+        sl = s.lower()
+        if sl == "true":
+            return True
+        if sl == "false":
+            return False
+        if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+            return int(s)
+        if s.replace(".", "", 1).replace("-", "", 1).isdigit():
+            try:
+                return float(s)
+            except ValueError:
+                return s
+        return s
+
+    def _coerce_value(self, value: Any) -> Any:
+        """Coerce a value (recursing into dicts/lists) or delegate string coercion."""
         if isinstance(value, str):
-            # Try boolean
-            if value.lower() == "true":
-                return True
-            if value.lower() == "false":
-                return False
-            # Try integer
-            if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
-                return int(value)
-            # Try float
-            if value.replace(".", "", 1).replace("-", "", 1).isdigit():
-                try:
-                    return float(value)
-                except ValueError:
-                    pass
-        elif isinstance(value, dict):
+            return self._coerce_string_value(value)
+        if isinstance(value, dict):
             return {k: self._coerce_value(v) for k, v in value.items()}
-        elif isinstance(value, list):
+        if isinstance(value, list):
             return [self._coerce_value(item) for item in value]
         return value
 
