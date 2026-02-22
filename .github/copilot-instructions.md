@@ -27,7 +27,6 @@ PR approval and merging are human decisions that require judgment and accountabi
 **To modify API functionality**:
 1. Edit OpenAPI YAML (add paths/operations with `operationId`)
 2. Server regenerates on next run
-3. Exception: Array-body endpoints need custom tools (see below)
 
 **Key file**: `server.py:create_mcp_server()` - loads YAML, creates authenticated `AccessControlledClient`, generates 68+ MCP tools from spec.
 
@@ -50,25 +49,13 @@ NEXTDNS_READ_ONLY=true                   # overrides all write permissions
 
 **Testing access control**: Gateway E2E tests validate access control scenarios via Docker CLI.
 
-## 3. Custom Tools Pattern (FastMCP Limitation)
+## 3. Array-body Endpoints (FastMCP 3.x)
 
-**Problem**: FastMCP requires object bodies, not raw JSON arrays.
+FastMCP 3.x supports array bodies natively via the `body` parameter. Array-body endpoints are generated directly from OpenAPI.
 
-**Solution**: 7 custom `@mcp.tool()` implementations in `server.py`:
-- `updateDenylist`, `updateAllowlist`, `updateSecurityTlds`, etc.
-- Accept `entries: str` → parse JSON → validate array → PUT to API
-- Use `_bulk_update_helper()` for DRY pattern
-
-**Pattern**:
-```python
-async def _updateThing_impl(profile_id: str, entries: str) -> dict:
-    # Validation + API call logic
-    ...
-
-@mcp.tool()
-async def updateThing(profile_id: str, entries: str) -> str:
-    return json.dumps(await _updateThing_impl(profile_id, entries))
-```
+**Usage pattern**:
+- Use `body=[{"id":"value"}]` for list replacement tools (e.g., `replaceDenylist`, `replaceAllowlist`).
+- Do **not** use legacy `update*` custom tools (they no longer exist).
 
 ## 4. Code Quality Requirements (STRICT)
 
@@ -121,7 +108,7 @@ async def updateThing(profile_id: str, entries: str) -> str:
 ## 7. Key Files
 
 - `src/nextdns_mcp/nextdns-openapi.yaml`: 2300+ lines, defines all API operations
-- `src/nextdns_mcp/server.py`: 668 lines - `AccessControlledClient`, custom tools, server creation
+- `src/nextdns_mcp/server.py`: 650+ lines - `AccessControlledClient`, DoH tool, server creation
 - `src/nextdns_mcp/config.py`: 322 lines - env vars, access control logic, constants
 - `scripts/gateway_e2e_run.{sh,ps1}`: Gateway E2E test scripts - comprehensive tool validation via Docker CLI
 - `scripts/artifacts/tools_report.jsonl`: E2E test results (machine-readable)
@@ -145,7 +132,7 @@ async def updateThing(profile_id: str, entries: str) -> str:
 3. Add unit tests mocking the API call
 4. Run Gateway E2E tests to validate (`cd scripts && ./gateway_e2e_run.{sh,ps1}`)
 
-**Add custom tool** (for array-body or special logic):
+**Add custom tool** (for special logic not covered by OpenAPI):
 1. Define `_toolName_impl()` with business logic
 2. Add `@mcp.tool()` wrapper returning JSON string
 3. Add to `EXCLUDED_ROUTES` in `config.py` if it shadows OpenAPI path
@@ -160,7 +147,7 @@ async def updateThing(profile_id: str, entries: str) -> str:
 **Debug E2E test failures**:
 1. Check `scripts/artifacts/tools_report.jsonl` for failure details
 2. Parse failures: `jq 'select(.exit_code != 0)' tools_report.jsonl`
-3. Fix parameter type issues: encode as JSON, not key=value strings
+3. Fix parameter type issues: encode arrays as JSON objects in `body` (e.g., `body=[{"id":"value"}]`)
 4. Ensure idempotent test data (check-before-add pattern)
 5. Verify all required parameters are passed per OpenAPI spec
 6. Re-run until 100% pass rate achieved
