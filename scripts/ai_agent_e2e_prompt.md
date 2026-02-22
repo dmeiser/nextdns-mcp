@@ -29,9 +29,9 @@ Follow these instructions exactly, report all results, and do not skip steps.
 4) If not provided and `ALLOW_LIVE_WRITES=true`:
    - Create a profile named `"AI E2E Test Profile [timestamp]"`.
    - Extract `profile_id` from the response.
-   - If ALLOW_LIVE_WRITES is not specified, assume it is true.
-5) If `ALLOW_LIVE_WRITES=false`:
+5) If `ALLOW_LIVE_WRITES` is not provided or `ALLOW_LIVE_WRITES=false`:
    - Use the first profile from `listProfiles`.
+   - Treat the environment as read-only and do not perform any write operations.
 
 ## Read-only checks (always run)
 - Verify the profile is retrievable and returns valid metadata for `PROFILE_ID`.
