@@ -240,18 +240,12 @@ def validate_configuration() -> None:
 
 
 # Routes to exclude from MCP tool generation
-# Routes excluded from FastMCP's auto-generation (custom implementations provided in server.py)
-#
-# Array-based PUT endpoints (7 routes): These require raw JSON arrays as request body,
-# which FastMCP doesn't support. Custom @mcp.tool() implementations are provided that
-# accept JSON strings and convert them to arrays.
 #
 # Unsupported endpoints (3 routes):
 # - GET /analytics/domains;series: NextDNS API returns 404 (API bug)
 # - GET /logs/stream: Uses Server-Sent Events (SSE), not supported by FastMCP
 # - GET /logs/download: Returns binary CSV file, FastMCP cannot validate binary responses
 EXCLUDED_ROUTES = [
-    # Truly unsupported endpoints
     RouteMap(
         methods=["GET"],
         pattern=r"^/profiles/\{profile_id\}/analytics/domains;series$",
