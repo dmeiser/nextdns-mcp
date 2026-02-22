@@ -21,14 +21,16 @@ Follow these instructions exactly, report all results, and do not skip steps.
 ## Preflight
 1) Verify authentication and tool access:
    - If `authRequired`, stop and report.
+2) Create a SQL table tool_calls (tool_name TEXT, status TEXT, notes TEXT) before making any tool calls.
+
 
 ## Profile setup
-2) If `MCP_PROFILE_ID` is provided, use it.
-3) If not provided and `ALLOW_LIVE_WRITES=true`:
+3) If `MCP_PROFILE_ID` is provided, use it.
+4) If not provided and `ALLOW_LIVE_WRITES=true`:
    - Create a profile named `"AI E2E Test Profile [timestamp]"`.
    - Extract `profile_id` from the response.
    - If ALLOW_LIVE_WRITES is not specified, assume it is true.
-4) If `ALLOW_LIVE_WRITES=false`:
+5) If `ALLOW_LIVE_WRITES=false`:
    - Use the first profile from `listProfiles`.
 
 ## Read-only checks (always run)
@@ -95,11 +97,13 @@ Perform the following tasks in order. Each task should invoke the specific tool(
 ### 10) Parental control lists and settings
 - Retrieve parental control settings, services, and categories.
 - If writes are enabled: update parental control settings; add, update, remove, and replace services and categories.
+   - Use a known valid category ID such as `porn` (the API rejects `adult`).
 
 ## Cleanup
 - If you created the profile in this run, delete it.
 
 ## Reporting
-- For each tool call, record: tool name, exit code, and JSON output.
-- If a call fails, include full error details in the report.
-
+- Use the SQL tool to create a `tool_calls (tool_name TEXT, status TEXT, notes TEXT) table before making any tool calls, and insert a row for every call as you make it.
+- For each tool call, record: tool name, status (pass/fail), and a brief note on the output.
+- If a call fails, include full error details in the notes column and in the final report.
+- In the final report, list every tool name exercised exactly once (deduplicated), sorted alphabetically, with its status — derived from `SELECT DISTINCT tool_name ...` on the SQL table. Never estimate counts from memory.
