@@ -42,11 +42,15 @@ jobs:
         run: |
           mkdir -p $HOME/.docker/cli-plugins
 
-      - name: Install PyYAML for catalog manipulation
-        run: pip install pyyaml
+      - name: Install Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14' 
 
-      - name: Install Python dependencies for schema validation
-        run: pip install jsonschema pyyaml
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          activate-environment: "true"
 
       - name: Build docker-mcp plugin from source
         run: |
