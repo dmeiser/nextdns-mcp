@@ -143,43 +143,6 @@ async def test_coerce_json_body_and_request(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_bulk_update_helper_and_error_cases(monkeypatch):
-    # Successful PUT case
-    async def fake_put_ok(url, json=None):
-        class Resp:
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return {"ok": True}
-
-        return Resp()
-
-    # Replace api_client
-    monkeypatch.setattr(server, "api_client", SimpleNamespace(put=fake_put_ok))
-
-    success = await server._bulk_update_helper("abc", '["a"]', "/profiles/{profile_id}/denylist", "entries")
-    assert success == {"ok": True}
-
-    # Invalid JSON
-    bad = await server._bulk_update_helper("abc", "notjson", "/profiles/{profile_id}/denylist", "entries")
-    assert "error" in bad
-
-    # JSON not an array
-    not_array = await server._bulk_update_helper("abc", '{"a":1}', "/profiles/{profile_id}/denylist", "entries")
-    assert "error" in not_array
-
-    # HTTP error
-    async def fake_put_err(url, json=None):
-        raise httpx.HTTPError("boom")
-
-    monkeypatch.setattr(server, "api_client", SimpleNamespace(put=fake_put_err))
-
-    http_err = await server._bulk_update_helper("abc", '["a"]', "/profiles/{profile_id}/denylist", "entries")
-    assert "error" in http_err
-
-
-@pytest.mark.asyncio
 async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_profiles_response):
     # Mock AsyncClient used in _execute_doh_query
     class DummyResponse:

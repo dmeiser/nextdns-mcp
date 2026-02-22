@@ -8,11 +8,9 @@ import pytest
 
 from nextdns_mcp.server import (
     _build_doh_metadata,
-    _bulk_update_helper,
     _dohLookup_impl,
     _get_target_profile,
     _validate_record_type,
-    api_client,
     create_access_denied_response,
     create_nextdns_client,
     load_openapi_spec,
@@ -223,63 +221,6 @@ class TestDohLookupImpl:
             mock_client_class.return_value = mock_client
 
             result = await _dohLookup_impl("example.com", "abc123", "A")
-
-        assert "error" in result
-        assert "HTTP error" in result["error"]
-
-
-class TestBulkUpdateHelper:
-    """Tests for _bulk_update_helper function."""
-
-    @pytest.mark.asyncio
-    async def test_invalid_json_returns_error(self):
-        """Test invalid JSON returns error."""
-        result = await _bulk_update_helper("abc123", "invalid json", "/endpoint", "entries")
-
-        assert "error" in result
-        assert "Invalid JSON" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_non_array_returns_error(self):
-        """Test non-array JSON returns error."""
-        result = await _bulk_update_helper("abc123", '{"key": "value"}', "/endpoint", "entries")
-
-        assert "error" in result
-        assert "must be a JSON array" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_successful_update(self):
-        """Test successful bulk update."""
-        # Mock the response
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"success": True}
-        mock_response.raise_for_status = MagicMock()  # No exception
-
-        # Patch the actual client instance that mcp uses
-        with patch.object(api_client, "put", new_callable=AsyncMock) as mock_put:
-            mock_put.return_value = mock_response
-
-            result = await _bulk_update_helper(
-                "abc123",
-                '["example.com", "test.com"]',
-                "/profiles/{profile_id}/denylist",
-                "entries",
-            )
-
-        assert "success" in result
-        assert result["success"] is True
-        mock_put.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_http_error_returns_error_dict(self):
-        """Test HTTP error returns error dict."""
-        # Patch the actual client instance to raise an exception
-        with patch.object(api_client, "put", new_callable=AsyncMock) as mock_put:
-            mock_put.side_effect = httpx.HTTPError("Connection failed")
-
-            result = await _bulk_update_helper(
-                "abc123", '["example.com"]', "/profiles/{profile_id}/denylist", "entries"
-            )
 
         assert "error" in result
         assert "HTTP error" in result["error"]

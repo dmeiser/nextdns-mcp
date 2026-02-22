@@ -1,6 +1,6 @@
 """Tests for configuration constants and route mappings."""
 
-from nextdns_mcp.config import DNS_STATUS_CODES, EXCLUDED_ROUTES, VALID_DNS_RECORD_TYPES, MCPType
+from nextdns_mcp.config import DNS_STATUS_CODES, EXCLUDED_ROUTES, VALID_DNS_RECORD_TYPES
 
 
 def test_dns_status_codes_contain_required_codes():
@@ -44,31 +44,15 @@ def test_excluded_routes_contain_required_patterns():
     # Extract route patterns for easy validation
     patterns = [route.pattern for route in EXCLUDED_ROUTES]
 
-    # Array-based PUT endpoints
-    assert r"^/profiles/\{profile_id\}/denylist$" in patterns
-    assert r"^/profiles/\{profile_id\}/allowlist$" in patterns
-    assert r"^/profiles/\{profile_id\}/parentalControl/services$" in patterns
-    assert r"^/profiles/\{profile_id\}/parentalControl/categories$" in patterns
-    assert r"^/profiles/\{profile_id\}/security/tlds$" in patterns
-    assert r"^/profiles/\{profile_id\}/privacy/blocklists$" in patterns
-    assert r"^/profiles/\{profile_id\}/privacy/natives$" in patterns
-
-    # Unsupported endpoints
+    # Truly unsupported endpoints remain excluded
     assert r"^/profiles/\{profile_id\}/analytics/domains;series$" in patterns
     assert r"^/profiles/\{profile_id\}/logs/stream$" in patterns
 
-    # Verify PUT methods for array-based endpoints
-    array_patterns = [
-        r"^/profiles/\{profile_id\}/denylist$",
-        r"^/profiles/\{profile_id\}/allowlist$",
-        r"^/profiles/\{profile_id\}/parentalControl/services$",
-        r"^/profiles/\{profile_id\}/parentalControl/categories$",
-        r"^/profiles/\{profile_id\}/security/tlds$",
-        r"^/profiles/\{profile_id\}/privacy/blocklists$",
-        r"^/profiles/\{profile_id\}/privacy/natives$",
-    ]
-
-    for pattern in array_patterns:
-        route = next(r for r in EXCLUDED_ROUTES if r.pattern == pattern)
-        assert route.methods == ["PUT"]
-        assert route.mcp_type == MCPType.EXCLUDE
+    # Array-based PUT endpoints are no longer excluded - FastMCP 3.x handles them natively
+    assert r"^/profiles/\{profile_id\}/denylist$" not in patterns
+    assert r"^/profiles/\{profile_id\}/allowlist$" not in patterns
+    assert r"^/profiles/\{profile_id\}/parentalControl/services$" not in patterns
+    assert r"^/profiles/\{profile_id\}/parentalControl/categories$" not in patterns
+    assert r"^/profiles/\{profile_id\}/security/tlds$" not in patterns
+    assert r"^/profiles/\{profile_id\}/privacy/blocklists$" not in patterns
+    assert r"^/profiles/\{profile_id\}/privacy/natives$" not in patterns

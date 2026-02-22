@@ -334,33 +334,33 @@ function Get-ToolArgs {
             return "profile_id=$ProfileId safeSearch=true youtubeRestrictedMode=true"
         }
         
-        # PUT/replace operations (custom tools use update* naming)
-        { $_ -in @("updateAllowlist") } {
-            return "profile_id=$ProfileId entries=`"[\`"test1.com\`",\`"test2.com\`"]`""
+        # PUT/replace operations (auto-generated from OpenAPI spec via FastMCP 3.x)
+        { $_ -in @("replaceDenylist") } {
+            return 'profile_id=' + $ProfileId + ' body=[{"id":"test-replace.example.com"}]'
         }
         
-        { $_ -in @("updateDenylist") } {
-            return "profile_id=$ProfileId entries=`"[\`"block1.com\`",\`"block2.com\`"]`""
+        { $_ -in @("replaceAllowlist") } {
+            return 'profile_id=' + $ProfileId + ' body=[{"id":"safe-replace.example.com"}]'
         }
         
-        { $_ -in @("updatePrivacyBlocklists") } {
-            return "profile_id=$ProfileId blocklists=`"[\`"nextdns-recommended\`",\`"oisd\`"]`""
+        { $_ -in @("replacePrivacyBlocklists") } {
+            return 'profile_id=' + $ProfileId + ' body=[{"id":"nextdns-recommended"}]'
         }
         
-        { $_ -in @("updatePrivacyNatives") } {
-            return "profile_id=$ProfileId natives=`"[\`"apple\`",\`"windows\`"]`""
+        { $_ -in @("replacePrivacyNatives") } {
+            return 'profile_id=' + $ProfileId + ' body=[{"id":"apple"}]'
         }
         
-        { $_ -in @("updateSecurityTlds") } {
-            return "profile_id=$ProfileId tlds=`"[\`"zip\`",\`"mov\`"]`""
+        { $_ -in @("replaceSecurityTLDs") } {
+            return 'profile_id=' + $ProfileId + ' body=[{"id":"zip"}]'
         }
         
-        { $_ -in @("updateParentalControlCategories") } {
-            return "profile_id=$ProfileId categories=`"[\`"gambling\`",\`"dating\`"]`""
+        { $_ -in @("replaceParentalControlCategories") } {
+            return 'profile_id=' + $ProfileId + ' body=[{"id":"gambling"}]'
         }
         
-        { $_ -in @("updateParentalControlServices") } {
-            return "profile_id=$ProfileId services=`"[\`"tiktok\`",\`"fortnite\`"]`""
+        { $_ -in @("replaceParentalControlServices") } {
+            return 'profile_id=' + $ProfileId + ' body=[{"id":"tiktok"}]'
         }
         
         "deleteProfile" {

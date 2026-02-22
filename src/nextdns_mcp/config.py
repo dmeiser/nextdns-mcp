@@ -251,42 +251,6 @@ def validate_configuration() -> None:
 # - GET /logs/stream: Uses Server-Sent Events (SSE), not supported by FastMCP
 # - GET /logs/download: Returns binary CSV file, FastMCP cannot validate binary responses
 EXCLUDED_ROUTES = [
-    # Array-based PUT endpoints (custom implementations provided)
-    RouteMap(
-        methods=["PUT"],
-        pattern=r"^/profiles/\{profile_id\}/denylist$",
-        mcp_type=MCPType.EXCLUDE,
-    ),
-    RouteMap(
-        methods=["PUT"],
-        pattern=r"^/profiles/\{profile_id\}/allowlist$",
-        mcp_type=MCPType.EXCLUDE,
-    ),
-    RouteMap(
-        methods=["PUT"],
-        pattern=r"^/profiles/\{profile_id\}/parentalControl/services$",
-        mcp_type=MCPType.EXCLUDE,
-    ),
-    RouteMap(
-        methods=["PUT"],
-        pattern=r"^/profiles/\{profile_id\}/parentalControl/categories$",
-        mcp_type=MCPType.EXCLUDE,
-    ),
-    RouteMap(
-        methods=["PUT"],
-        pattern=r"^/profiles/\{profile_id\}/security/tlds$",
-        mcp_type=MCPType.EXCLUDE,
-    ),
-    RouteMap(
-        methods=["PUT"],
-        pattern=r"^/profiles/\{profile_id\}/privacy/blocklists$",
-        mcp_type=MCPType.EXCLUDE,
-    ),
-    RouteMap(
-        methods=["PUT"],
-        pattern=r"^/profiles/\{profile_id\}/privacy/natives$",
-        mcp_type=MCPType.EXCLUDE,
-    ),
     # Truly unsupported endpoints
     RouteMap(
         methods=["GET"],

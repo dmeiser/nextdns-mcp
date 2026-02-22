@@ -112,6 +112,19 @@ class TestStripExtraFieldsMiddleware:
         call_next.assert_called_once_with(mock_context)
 
     @pytest.mark.asyncio
+    async def test_handles_tool_not_found(self, middleware, mock_context):
+        """Test pass-through when get_tool returns None (tool not found)."""
+        mock_context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=None)
+        mock_context.message.arguments = {"domain": "test.com", "extra": "field"}
+        call_next = AsyncMock(return_value=MagicMock())
+
+        await middleware.on_call_tool(mock_context, call_next)
+
+        # Arguments should remain unchanged; call_next invoked as pass-through
+        assert mock_context.message.arguments == {"domain": "test.com", "extra": "field"}
+        call_next.assert_called_once_with(mock_context)
+
+    @pytest.mark.asyncio
     async def test_handles_tool_manager_exception(self, middleware, mock_context):
         """Test graceful handling when get_tool raises exception."""
         mock_context.fastmcp_context.fastmcp.get_tool = AsyncMock(side_effect=Exception("Tool not found"))
