@@ -30,7 +30,7 @@ class TestCreateNextdnsClient:
         pass  # pragma: no cover
 
     def test_create_client_has_api_key_header(self, monkeypatch, mock_api_key):
-        """Test that X-Api-Key header is injected at request time."""
+        """Test that X-Api-Key header is set as a static header during client creation."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         import sys
@@ -51,7 +51,7 @@ class TestCreateNextdnsClient:
         assert isinstance(client, httpx.AsyncClient)
 
     def test_create_client_has_correct_headers(self, monkeypatch, mock_api_key):
-        """Test that client has all required headers except API key (injected at request time)."""
+        """Test that client has all required headers including the API key set during client creation."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         import sys
