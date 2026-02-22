@@ -37,12 +37,12 @@ registry:
         description: "Enable read-only mode to disable all write operations (true/false)"
         value: "false"
 
-    # Available tools (76 total: 68 enabled API operations + 7 custom bulk operations + 1 custom DoH lookup)
+    # Available tools (76 total: 75 API operations + 1 custom DoH lookup)
     # Note: 2 operations excluded from tools (truly unsupported):
     #       - 1 streamLogs SSE endpoint (FastMCP limitation - Server-Sent Events)
     #       - 1 getAnalyticsDomainsSeries (NextDNS API bug - returns 404)
-    # Note: 7 PUT bulk operations now available via custom implementations:
-    #       - Custom tools accept JSON array strings and handle array-to-body conversion
+    # Note: 7 PUT bulk replacement tools are auto-generated from OpenAPI spec (FastMCP 3.x
+    #       natively handles array-body endpoints via the body parameter)
     tools:
       # DNS Testing (1 custom)
       - name: dohLookup
@@ -97,62 +97,62 @@ registry:
       - name: getAnalyticsEncryptionSeries
       - name: getAnalyticsDestinationsSeries
 
-      # Content Lists - Denylist (5 - includes custom bulk update)
+      # Content Lists - Denylist (5)
       - name: getDenylist
       - name: addToDenylist
       - name: removeFromDenylist
-      - name: updateDenylist           # Custom bulk replacement (JSON array string)
+      - name: replaceDenylist          # Bulk replacement (JSON array via body param)
       - name: updateDenylistEntry      # Update individual entry (PATCH)
 
-      # Content Lists - Allowlist (5 - includes custom bulk update)
+      # Content Lists - Allowlist (5)
       - name: getAllowlist
       - name: addToAllowlist
       - name: removeFromAllowlist
-      - name: updateAllowlist          # Custom bulk replacement (JSON array string)
+      - name: replaceAllowlist         # Bulk replacement (JSON array via body param)
       - name: updateAllowlistEntry     # Update individual entry (PATCH)
 
       # Security - Settings (2)
       - name: getSecuritySettings
       - name: updateSecuritySettings
 
-      # Security - TLDs (4 - includes custom bulk update)
+      # Security - TLDs (4)
       - name: getSecurityTLDs
       - name: addSecurityTLD
       - name: removeSecurityTLD
-      - name: updateSecurityTlds       # Custom bulk replacement (JSON array string)
+      - name: replaceSecurityTLDs      # Bulk replacement (JSON array via body param)
 
       # Privacy - Settings (2)
       - name: getPrivacySettings
       - name: updatePrivacySettings
 
-      # Privacy - Blocklists (4 - includes custom bulk update)
+      # Privacy - Blocklists (4)
       - name: getPrivacyBlocklists
       - name: addPrivacyBlocklist
       - name: removePrivacyBlocklist
-      - name: updatePrivacyBlocklists  # Custom bulk replacement (JSON array string)
+      - name: replacePrivacyBlocklists # Bulk replacement (JSON array via body param)
 
-      # Privacy - Native Tracking (4 - includes custom bulk update)
+      # Privacy - Native Tracking (4)
       - name: getPrivacyNatives
       - name: addPrivacyNative
       - name: removePrivacyNative
-      - name: updatePrivacyNatives     # Custom bulk replacement (JSON array string)
+      - name: replacePrivacyNatives    # Bulk replacement (JSON array via body param)
 
       # Parental Control - Settings (2)
       - name: getParentalControlSettings
       - name: updateParentalControlSettings
 
-      # Parental Control - Services (5 - includes custom bulk update)
+      # Parental Control - Services (5)
       - name: getParentalControlServices
       - name: addToParentalControlServices
       - name: removeFromParentalControlServices
-      - name: updateParentalControlServices     # Custom bulk replacement (JSON array string)
+      - name: replaceParentalControlServices    # Bulk replacement (JSON array via body param)
       - name: updateParentalControlServiceEntry # Update individual service (PATCH)
 
-      # Parental Control - Categories (5 - includes custom bulk update)
+      # Parental Control - Categories (5)
       - name: getParentalControlCategories
       - name: addToParentalControlCategories
       - name: removeFromParentalControlCategories
-      - name: updateParentalControlCategories     # Custom bulk replacement (JSON array string)
+      - name: replaceParentalControlCategories    # Bulk replacement (JSON array via body param)
       - name: updateParentalControlCategoryEntry  # Update individual category (PATCH)
 
     # Metadata

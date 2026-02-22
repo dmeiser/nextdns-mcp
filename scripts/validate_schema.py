@@ -41,7 +41,7 @@ def get_operation_response_schema(spec: Dict[str, Any], operation_id: str) -> Op
 
 def validate_field_type(value: Any, expected_type: str) -> bool:
     """Validate that a value matches the expected OpenAPI type."""
-    type_map = {
+    type_map: dict[str, type | tuple[type, ...]] = {
         'string': str,
         'integer': int,
         'number': (int, float),

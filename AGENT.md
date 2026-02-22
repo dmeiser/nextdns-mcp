@@ -261,23 +261,22 @@ All Gateway E2E tests must pass. If tests fail, fix the underlying issues - do n
 
 **Fixing Parameter Type Issues**:
 
-The E2E scripts currently pass parameters as simple key=value strings. To achieve 100% pass rate, update parameter handling:
+The E2E scripts pass parameters as key=value strings. This generally works because the server coerces primitive types, but **arrays and nested objects must be encoded explicitly**.
 
 ```bash
-# WRONG (causes type errors)
+# OK for simple booleans and integers (server coerces types)
 docker mcp tools call updateBlockPageSettings profile_id=abc123 enabled=true
 
-# RIGHT (proper JSON encoding)
-docker mcp tools call updateBlockPageSettings --param '{"profile_id": "abc123", "enabled": true}'
+# REQUIRED for array bodies (FastMCP 3.x array-body support)
+docker mcp tools call replaceDenylist profile_id=abc123 'body=[{"id":"ads.example.com"}]'
 
-# OR use JSON file
-echo '{"profile_id": "abc123", "enabled": true}' > params.json
-docker mcp tools call updateBlockPageSettings --param-file params.json
+# REQUIRED for nested objects if needed
+docker mcp tools call updateSettings --param '{"profile_id": "abc123", "blockPage": {"enabled": true}}'
 ```
 
 **Action Items for 100% Pass Rate**:
-1. Update `run_all_tools.{sh,ps1}` to encode all parameters as JSON
-2. Handle type conversion for booleans, integers, and arrays
+1. Ensure `run_all_tools.{sh,ps1}` passes correct parameter types per OpenAPI
+2. Use `body=[{"id":"value"}]` for list replacement tools
 3. Implement idempotent test data (check-before-add pattern)
 4. Verify all required parameters are passed for each tool
 5. Ensure output formats match OpenAPI spec definitions

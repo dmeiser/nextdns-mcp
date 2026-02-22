@@ -24,7 +24,6 @@
 SPDX-License-Identifier: MIT
 """
 
-import json
 import logging
 import os
 import re
@@ -38,7 +37,8 @@ import yaml
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.server.openapi import DEFAULT_ROUTE_MAPPINGS, RouteMap
+from fastmcp.server.providers.openapi import RouteMap
+from fastmcp.server.providers.openapi.routing import DEFAULT_ROUTE_MAPPINGS
 from fastmcp.tools.tool import ToolResult
 
 from .config import (
@@ -117,7 +117,10 @@ class StripExtraFieldsMiddleware(Middleware):
             try:
                 # Get the tool's parameter schema
                 fastmcp_server = context.fastmcp_context.fastmcp
-                tool = await fastmcp_server._tool_manager.get_tool(tool_name)
+                tool = await fastmcp_server.get_tool(tool_name)
+                if tool is None:
+                    # Tool not found, pass through
+                    return await call_next(context)
                 known_params = set(tool.parameters.get("properties", {}).keys())
 
                 # Filter arguments to only include known parameters
@@ -428,8 +431,11 @@ def allow_extra_fields_component_fn(component, *args, **kwargs):
     return component
 
 
-def create_mcp_server() -> FastMCP:
+def create_mcp_server(api_client: httpx.AsyncClient) -> FastMCP:
     """Create and configure the NextDNS MCP server.
+
+    Args:
+        api_client: Pre-configured AsyncClient for API calls
 
     Returns:
         FastMCP: Configured MCP server instance
@@ -442,10 +448,6 @@ def create_mcp_server() -> FastMCP:
     logger.info("Loading NextDNS OpenAPI specification...")
     openapi_spec = load_openapi_spec()
 
-    # Create authenticated HTTP client
-    logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
-    api_client = create_nextdns_client()
-
     # Create MCP server from OpenAPI spec
     logger.info("Generating MCP server from OpenAPI specification...")
     route_maps = build_route_mappings()
@@ -455,7 +457,6 @@ def create_mcp_server() -> FastMCP:
         client=api_client,
         route_maps=route_maps,
         name="NextDNS MCP Server",
-        timeout=get_http_timeout(),
         strict_input_validation=False,
         mcp_component_fn=allow_extra_fields_component_fn,
     )
@@ -473,8 +474,12 @@ def create_mcp_server() -> FastMCP:
     return mcp
 
 
+# Create authenticated HTTP client (module-level for access by helper functions)
+logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
+api_client = create_nextdns_client()
+
 # Create the MCP server instance
-mcp_server = create_mcp_server()
+mcp_server = create_mcp_server(api_client)
 
 
 # Add custom DoH lookup tool
@@ -609,223 +614,6 @@ async def dohLookup(domain: str, profile_id: Optional[str] = None, record_type: 
         result = await dohLookup("google.com", "b282de", "AAAA")
     """
     return await _dohLookup_impl(domain, profile_id, record_type)
-
-
-# Custom tools for array-based PUT endpoints (excluded from FastMCP auto-generation)
-# These endpoints require raw JSON arrays, which FastMCP doesn't support directly.
-# We provide custom implementations that accept JSON strings and convert them.
-
-
-async def _bulk_update_helper(profile_id: str, data: str, endpoint: str, param_name: str) -> dict[str, Any]:
-    """Helper function for bulk update operations that require raw JSON arrays.
-
-    This function handles the common pattern of:
-    1. Parsing a JSON array string
-    2. Validating it's actually an array
-    3. Making a PUT request with the array as the body
-
-    Args:
-        profile_id: The profile ID (6-character alphanumeric)
-        data: JSON array string to send
-        endpoint: API endpoint path (e.g., "/profiles/{profile_id}/denylist")
-        param_name: Parameter name for error messages (e.g., "entries", "services")
-
-    Returns:
-        dict: API response or error dict
-    """
-
-    logger.info(f"Bulk update: {param_name} for profile {profile_id}")
-
-    # Parse and validate JSON array
-    try:
-        array_data = json.loads(data)
-        if not isinstance(array_data, list):
-            logger.warning(f"Invalid {param_name} format: expected array, got {type(array_data).__name__}")
-            return {"error": f"{param_name} must be a JSON array string"}
-        logger.debug(f"Parsed {len(array_data)} {param_name} items")
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON decode error for {param_name}: {str(e)}")
-        return {"error": f"Invalid JSON: {str(e)}"}
-
-    # Make PUT request with array body
-    client = mcp_server._client  # type: ignore[attr-defined]
-    url = endpoint.format(profile_id=profile_id)
-
-    try:
-        logger.debug(f"PUT request to {url}")
-        response = await client.put(url, json=array_data)
-        response.raise_for_status()
-        logger.info(f"Bulk update successful: {param_name} for profile {profile_id}")
-        result: dict[str, Any] = response.json()
-        return result
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error during bulk update: {str(e)}")
-        return {"error": f"HTTP error: {str(e)}"}
-
-
-@mcp_server.tool()
-async def updateDenylist(profile_id: str, entries: str) -> dict[str, Any]:
-    """Update the denylist for a profile.
-
-    Replace the entire denylist with the provided domains. All previous denylist
-    entries will be removed and replaced with the new list.
-
-    Args:
-        profile_id: The profile ID (6-character alphanumeric)
-        entries: JSON array string of domains to block, e.g. '["example.com", "bad.com"]'
-                Each entry can be:
-                - Domain name: "example.com"
-                - Wildcard subdomain: "*.example.com"
-
-    Returns:
-        dict: Response containing the updated denylist
-
-    Example:
-        result = await updateDenylist("abc123", '["ads.example.com", "tracker.net"]')
-    """
-    return await _bulk_update_helper(profile_id, entries, "/profiles/{profile_id}/denylist", "entries")
-
-
-@mcp_server.tool()
-async def updateAllowlist(profile_id: str, entries: str) -> dict[str, Any]:
-    """Update the allowlist for a profile.
-
-    Replace the entire allowlist with the provided domains. All previous allowlist
-    entries will be removed and replaced with the new list.
-
-    Args:
-        profile_id: The profile ID (6-character alphanumeric)
-        entries: JSON array string of domains to allow, e.g. '["safe.com", "trusted.org"]'
-                Each entry can be:
-                - Domain name: "example.com"
-                - Wildcard subdomain: "*.example.com"
-
-    Returns:
-        dict: Response containing the updated allowlist
-
-    Example:
-        result = await updateAllowlist("abc123", '["safe.com", "trusted.org"]')
-    """
-    return await _bulk_update_helper(profile_id, entries, "/profiles/{profile_id}/allowlist", "entries")
-
-
-@mcp_server.tool()
-async def updateParentalControlServices(profile_id: str, services: str) -> dict[str, Any]:
-    """Update parental control services for a profile.
-
-    Replace the entire list of blocked services with the provided service IDs.
-
-    Args:
-        profile_id: The profile ID (6-character alphanumeric)
-        services: JSON array string of service IDs to block, e.g. '["tiktok", "fortnite", "roblox"]'
-                 Common services: tiktok, fortnite, roblox, instagram, snapchat, facebook,
-                 twitter, youtube, twitch, discord, whatsapp, telegram, zoom, etc.
-
-    Returns:
-        dict: Response containing the updated services list
-
-    Example:
-        result = await updateParentalControlServices("abc123", '["tiktok", "fortnite"]')
-    """
-    return await _bulk_update_helper(
-        profile_id,
-        services,
-        "/profiles/{profile_id}/parentalControl/services",
-        "services",
-    )
-
-
-@mcp_server.tool()
-async def updateParentalControlCategories(profile_id: str, categories: str) -> dict[str, Any]:
-    """Update parental control website categories for a profile.
-
-    Replace the entire list of blocked website categories with the provided category IDs.
-
-    Args:
-        profile_id: The profile ID (6-character alphanumeric)
-        categories: JSON array string of category IDs to block, e.g. '["gambling", "dating", "piracy"]'
-                   Common categories: gambling, dating, piracy, porn, social-networks,
-                   video-streaming, gaming, etc.
-
-    Returns:
-        dict: Response containing the updated categories list
-
-    Example:
-        result = await updateParentalControlCategories("abc123", '["gambling", "dating"]')
-    """
-    return await _bulk_update_helper(
-        profile_id,
-        categories,
-        "/profiles/{profile_id}/parentalControl/categories",
-        "categories",
-    )
-
-
-@mcp_server.tool()
-async def updateSecurityTlds(profile_id: str, tlds: str) -> dict[str, Any]:
-    """Update blocked top-level domains (TLDs) for a profile.
-
-    Replace the entire list of blocked TLDs with the provided list.
-
-    Args:
-        profile_id: The profile ID (6-character alphanumeric)
-        tlds: JSON array string of TLDs to block, e.g. '["zip", "mov", "xyz"]'
-              Do not include the dot (use "com" not ".com")
-
-    Returns:
-        dict: Response containing the updated TLD list
-
-    Example:
-        result = await updateSecurityTlds("abc123", '["zip", "mov"]')
-    """
-    return await _bulk_update_helper(profile_id, tlds, "/profiles/{profile_id}/security/tlds", "tlds")
-
-
-@mcp_server.tool()
-async def updatePrivacyBlocklists(profile_id: str, blocklists: str) -> dict[str, Any]:
-    """Update privacy blocklists for a profile.
-
-    Replace the entire list of enabled blocklists with the provided blocklist IDs.
-
-    Args:
-        profile_id: The profile ID (6-character alphanumeric)
-        blocklists: JSON array string of blocklist IDs to enable, e.g. '["nextdns-recommended", "oisd"]'
-                   Common blocklists: nextdns-recommended, energized, stevenblack,
-                   oisd, notracking, adguard, etc.
-
-    Returns:
-        dict: Response containing the updated blocklists
-
-    Example:
-        result = await updatePrivacyBlocklists("abc123", '["nextdns-recommended", "oisd"]')
-    """
-    return await _bulk_update_helper(
-        profile_id,
-        blocklists,
-        "/profiles/{profile_id}/privacy/blocklists",
-        "blocklists",
-    )
-
-
-@mcp_server.tool()
-async def updatePrivacyNatives(profile_id: str, natives: str) -> dict[str, Any]:
-    """Update native tracking protection settings for a profile.
-
-    Replace the entire list of native tracking protection features with the provided list.
-
-    Args:
-        profile_id: The profile ID (6-character alphanumeric)
-        natives: JSON array string of native tracking feature IDs, e.g. '["apple", "windows", "alexa"]'
-                Common features: apple (Apple device tracking), windows (Microsoft telemetry),
-                alexa (Amazon Alexa), samsung, huawei, xiaomi, roku, sonos, etc.
-
-    Returns:
-        dict: Response containing the updated native tracking settings
-
-    Example:
-        result = await updatePrivacyNatives("abc123", '["apple", "windows"]')
-    """
-    return await _bulk_update_helper(profile_id, natives, "/profiles/{profile_id}/privacy/natives", "natives")
 
 
 def get_mcp_run_options() -> dict[str, Any]:

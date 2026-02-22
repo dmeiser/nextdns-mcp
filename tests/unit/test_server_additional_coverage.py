@@ -41,7 +41,7 @@ def test_coerce_helpers():
 
 
 class DummyTool:
-    parameters = {"properties": {"keep": {}}}
+    parameters: dict[str, object] = {"properties": {"keep": {}}}
 
 
 class DummyToolManager:
@@ -56,7 +56,7 @@ class DummyToolManager:
 
 class DummyFastMCPContext:
     def __init__(self, raise_exc=False):
-        self.fastmcp = SimpleNamespace(_tool_manager=DummyToolManager(raise_exc=raise_exc))
+        self.fastmcp = SimpleNamespace(get_tool=DummyToolManager(raise_exc=raise_exc).get_tool)
 
 
 class DummyMessage:
@@ -140,43 +140,6 @@ async def test_coerce_json_body_and_request(monkeypatch):
 
     r = await client.request("GET", "/profiles/abc/something")
     assert r.status_code == 200
-
-
-@pytest.mark.asyncio
-async def test_bulk_update_helper_and_error_cases(monkeypatch):
-    # Successful PUT case
-    async def fake_put_ok(url, json=None):
-        class Resp:
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return {"ok": True}
-
-        return Resp()
-
-    # Replace mcp_server._client
-    monkeypatch.setattr(server.mcp_server, "_client", SimpleNamespace(put=fake_put_ok))
-
-    success = await server._bulk_update_helper("abc", '["a"]', "/profiles/{profile_id}/denylist", "entries")
-    assert success == {"ok": True}
-
-    # Invalid JSON
-    bad = await server._bulk_update_helper("abc", "notjson", "/profiles/{profile_id}/denylist", "entries")
-    assert "error" in bad
-
-    # JSON not an array
-    not_array = await server._bulk_update_helper("abc", '{"a":1}', "/profiles/{profile_id}/denylist", "entries")
-    assert "error" in not_array
-
-    # HTTP error
-    async def fake_put_err(url, json=None):
-        raise httpx.HTTPError("boom")
-
-    monkeypatch.setattr(server.mcp_server, "_client", SimpleNamespace(put=fake_put_err))
-
-    http_err = await server._bulk_update_helper("abc", '["a"]', "/profiles/{profile_id}/denylist", "entries")
-    assert "error" in http_err
 
 
 @pytest.mark.asyncio

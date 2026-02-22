@@ -23,16 +23,16 @@ Get profile settings
 docker mcp tools call getSettings '{"profile_id":"abc123"}'
 ```
 
-Bulk updates that take JSON array strings
+Bulk replacements (array of objects)
 ```bash
 # Denylist
 # Bash/Zsh
-docker mcp tools call updateDenylist '{"profile_id":"abc123","entries":"[\"ads.example.com\",\"tracker.net\"]"}'
+docker mcp tools call replaceDenylist '{"profile_id":"abc123","body":[{"id":"ads.example.com"},{"id":"tracker.net"}]}'
 # PowerShell (use single quotes to avoid escaping quotes)
-docker mcp tools call updateDenylist '{"profile_id":"abc123","entries":"[\"ads.example.com\",\"tracker.net\"]"}'
+docker mcp tools call replaceDenylist '{"profile_id":"abc123","body":[{"id":"ads.example.com"},{"id":"tracker.net"}]}'
 
 # Blocked TLDs
-docker mcp tools call updateSecurityTlds '{"profile_id":"abc123","tlds":"[\"zip\",\"mov\"]"}'
+docker mcp tools call replaceSecurityTLDs '{"profile_id":"abc123","body":[{"id":"zip"},{"id":"mov"}]}'
 ```
 
 ## Windows vs POSIX quoting
@@ -43,3 +43,6 @@ docker mcp tools call updateSecurityTlds '{"profile_id":"abc123","tlds":"[\"zip\
 ## Tips
 - Set NEXTDNS_DEFAULT_PROFILE to omit profile_id for many tools.
 - Use read-only mode when exploring: set NEXTDNS_READ_ONLY=true.
+
+## AI agent E2E prompt (task-level)
+We maintain the full AI-agent E2E prompt in `scripts/ai_agent_e2e_prompt.md`.

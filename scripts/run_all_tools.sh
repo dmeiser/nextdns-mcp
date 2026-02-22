@@ -327,26 +327,26 @@ get_tool_args() {
         updateParentalControlServiceEntry)
             echo "profile_id=${PROFILE_ID}" "id=tiktok" "active=true"
             ;;
-        updateAllowlist)
-            echo "profile_id=${PROFILE_ID}" 'entries=["test1.com","test2.com"]'
+        replaceDenylist)
+            echo "profile_id=${PROFILE_ID}" 'body=[{"id":"test-replace.example.com"}]'
             ;;
-        updateDenylist)
-            echo "profile_id=${PROFILE_ID}" 'entries=["block1.com","block2.com"]'
+        replaceAllowlist)
+            echo "profile_id=${PROFILE_ID}" 'body=[{"id":"safe-replace.example.com"}]'
             ;;
-        updatePrivacyBlocklists)
-            echo "profile_id=${PROFILE_ID}" 'blocklists=["nextdns-recommended","oisd"]'
+        replacePrivacyBlocklists)
+            echo "profile_id=${PROFILE_ID}" 'body=[{"id":"nextdns-recommended"}]'
             ;;
-        updatePrivacyNatives)
-            echo "profile_id=${PROFILE_ID}" 'natives=["apple","windows"]'
+        replacePrivacyNatives)
+            echo "profile_id=${PROFILE_ID}" 'body=[{"id":"apple"}]'
             ;;
-        updateSecurityTlds)
-            echo "profile_id=${PROFILE_ID}" 'tlds=["zip","mov"]'
+        replaceSecurityTLDs)
+            echo "profile_id=${PROFILE_ID}" 'body=[{"id":"zip"}]'
             ;;
-        updateParentalControlCategories)
-            echo "profile_id=${PROFILE_ID}" 'categories=["gambling","dating"]'
+        replaceParentalControlCategories)
+            echo "profile_id=${PROFILE_ID}" 'body=[{"id":"gambling"}]'
             ;;
-        updateParentalControlServices)
-            echo "profile_id=${PROFILE_ID}" 'services=["tiktok","fortnite"]'
+        replaceParentalControlServices)
+            echo "profile_id=${PROFILE_ID}" 'body=[{"id":"tiktok"}]'
             ;;
         *)
             echo "{}"
