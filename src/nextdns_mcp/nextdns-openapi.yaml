@@ -79,8 +79,12 @@ components:
       type: object
       properties:
         blockPage:
-          type: boolean
-          description: Enable block page for blocked domains
+          type: object
+          description: Block page configuration
+          properties:
+            enabled:
+              type: boolean
+              description: Enable block page for blocked domains
         logs:
           type: object
           properties:
