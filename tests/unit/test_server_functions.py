@@ -52,7 +52,7 @@ class TestCreateNextDNSClient:
     """Tests for create_nextdns_client function."""
 
     def test_creates_client_with_api_key(self, clean_env):
-        """Test creating client with API key (injected at request time)."""
+        """Test creating client with API key set in static headers at initialization."""
         clean_env("NEXTDNS_API_KEY", "test-key")
         clean_env("NEXTDNS_HTTP_TIMEOUT", "30")
 
