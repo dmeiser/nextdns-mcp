@@ -38,7 +38,8 @@ import yaml
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.server.openapi import DEFAULT_ROUTE_MAPPINGS, RouteMap
+from fastmcp.server.providers.openapi import RouteMap
+from fastmcp.server.providers.openapi.routing import DEFAULT_ROUTE_MAPPINGS
 from fastmcp.tools.tool import ToolResult
 
 from .config import (
@@ -117,7 +118,10 @@ class StripExtraFieldsMiddleware(Middleware):
             try:
                 # Get the tool's parameter schema
                 fastmcp_server = context.fastmcp_context.fastmcp
-                tool = await fastmcp_server._tool_manager.get_tool(tool_name)
+                tool = await fastmcp_server.get_tool(tool_name)
+                if tool is None:
+                    # Tool not found, pass through
+                    return await call_next(context)
                 known_params = set(tool.parameters.get("properties", {}).keys())
 
                 # Filter arguments to only include known parameters
@@ -428,8 +432,11 @@ def allow_extra_fields_component_fn(component, *args, **kwargs):
     return component
 
 
-def create_mcp_server() -> FastMCP:
+def create_mcp_server(api_client: httpx.AsyncClient) -> FastMCP:
     """Create and configure the NextDNS MCP server.
+
+    Args:
+        api_client: Pre-configured AsyncClient for API calls
 
     Returns:
         FastMCP: Configured MCP server instance
@@ -442,10 +449,6 @@ def create_mcp_server() -> FastMCP:
     logger.info("Loading NextDNS OpenAPI specification...")
     openapi_spec = load_openapi_spec()
 
-    # Create authenticated HTTP client
-    logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
-    api_client = create_nextdns_client()
-
     # Create MCP server from OpenAPI spec
     logger.info("Generating MCP server from OpenAPI specification...")
     route_maps = build_route_mappings()
@@ -455,7 +458,6 @@ def create_mcp_server() -> FastMCP:
         client=api_client,
         route_maps=route_maps,
         name="NextDNS MCP Server",
-        timeout=get_http_timeout(),
         strict_input_validation=False,
         mcp_component_fn=allow_extra_fields_component_fn,
     )
@@ -473,8 +475,12 @@ def create_mcp_server() -> FastMCP:
     return mcp
 
 
+# Create authenticated HTTP client (module-level for access by helper functions)
+logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
+api_client = create_nextdns_client()
+
 # Create the MCP server instance
-mcp_server = create_mcp_server()
+mcp_server = create_mcp_server(api_client)
 
 
 # Add custom DoH lookup tool
@@ -648,12 +654,11 @@ async def _bulk_update_helper(profile_id: str, data: str, endpoint: str, param_n
         return {"error": f"Invalid JSON: {str(e)}"}
 
     # Make PUT request with array body
-    client = mcp_server._client  # type: ignore[attr-defined]
     url = endpoint.format(profile_id=profile_id)
 
     try:
         logger.debug(f"PUT request to {url}")
-        response = await client.put(url, json=array_data)
+        response = await api_client.put(url, json=array_data)
         response.raise_for_status()
         logger.info(f"Bulk update successful: {param_name} for profile {profile_id}")
         result: dict[str, Any] = response.json()

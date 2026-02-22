@@ -107,9 +107,10 @@ class TestCreateMcpServer:
                 if "nextdns_mcp.server" in sys.modules:
                     del sys.modules["nextdns_mcp.server"]
 
-                from nextdns_mcp.server import create_mcp_server
+                from nextdns_mcp.server import create_mcp_server, create_nextdns_client
 
-                result = create_mcp_server()
+                api_client = create_nextdns_client()
+                result = create_mcp_server(api_client)
 
                 # Should return a FastMCP-like object
                 assert result is not None
@@ -141,9 +142,10 @@ class TestCreateMcpServer:
                 if "nextdns_mcp.server" in sys.modules:
                     del sys.modules["nextdns_mcp.server"]
 
-                from nextdns_mcp.server import create_mcp_server
+                from nextdns_mcp.server import create_mcp_server, create_nextdns_client
 
-                create_mcp_server()
+                api_client = create_nextdns_client()
+                create_mcp_server(api_client)
 
                 assert "Loading NextDNS OpenAPI specification" in caplog.text
                 assert "Creating HTTP client" in caplog.text
@@ -181,9 +183,10 @@ class TestCreateMcpServer:
                 if "nextdns_mcp.server" in sys.modules:
                     del sys.modules["nextdns_mcp.server"]
 
-                from nextdns_mcp.server import create_mcp_server
+                from nextdns_mcp.server import create_mcp_server, create_nextdns_client
 
-                create_mcp_server()
+                api_client = create_nextdns_client()
+                create_mcp_server(api_client)
 
                 assert f"Default profile: {mock_profile_id}" in caplog.text
         finally:
@@ -212,9 +215,10 @@ class TestCreateMcpServer:
                 if "nextdns_mcp.server" in sys.modules:
                     del sys.modules["nextdns_mcp.server"]
 
-                from nextdns_mcp.server import create_mcp_server
+                from nextdns_mcp.server import create_mcp_server, create_nextdns_client
 
-                mcp = create_mcp_server()
+                api_client = create_nextdns_client()
+                mcp = create_mcp_server(api_client)
 
                 # Verify server created successfully
                 assert mcp is not None

@@ -163,7 +163,8 @@ if [ "${CI:-false}" = "true" ]; then
     
     # Add NEXTDNS_API_KEY to the env section of the catalog
     # This bypasses the secrets mechanism which may not work reliably in CI
-    python3 -c "
+    cd ${PROJECT_DIR}
+    uv run python3 -c "
 import yaml
 import sys
 

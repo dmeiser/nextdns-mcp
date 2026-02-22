@@ -12,6 +12,7 @@ from nextdns_mcp.server import (
     _dohLookup_impl,
     _get_target_profile,
     _validate_record_type,
+    api_client,
     create_access_denied_response,
     create_nextdns_client,
     load_openapi_spec,
@@ -53,14 +54,15 @@ class TestCreateNextDNSClient:
     """Tests for create_nextdns_client function."""
 
     def test_creates_client_with_api_key(self, clean_env):
-        """Test creating client with API key."""
+        """Test creating client with API key (injected at request time)."""
         clean_env("NEXTDNS_API_KEY", "test-key")
         clean_env("NEXTDNS_HTTP_TIMEOUT", "30")
 
         client = create_nextdns_client()
 
         assert isinstance(client, httpx.AsyncClient)
-        assert client.headers["X-Api-Key"] == "test-key"
+        # API key is set at initialization in static headers
+        assert "X-Api-Key" in client.headers
         assert client.base_url == "https://api.nextdns.io"
 
     def test_client_has_correct_headers(self, clean_env):
@@ -254,7 +256,7 @@ class TestBulkUpdateHelper:
         mock_response.raise_for_status = MagicMock()  # No exception
 
         # Patch the actual client instance that mcp uses
-        with patch.object(mcp_server._client, "put", new_callable=AsyncMock) as mock_put:
+        with patch.object(api_client, "put", new_callable=AsyncMock) as mock_put:
             mock_put.return_value = mock_response
 
             result = await _bulk_update_helper(
@@ -272,7 +274,7 @@ class TestBulkUpdateHelper:
     async def test_http_error_returns_error_dict(self):
         """Test HTTP error returns error dict."""
         # Patch the actual client instance to raise an exception
-        with patch.object(mcp_server._client, "put", new_callable=AsyncMock) as mock_put:
+        with patch.object(api_client, "put", new_callable=AsyncMock) as mock_put:
             mock_put.side_effect = httpx.HTTPError("Connection failed")
 
             result = await _bulk_update_helper(

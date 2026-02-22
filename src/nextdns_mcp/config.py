@@ -11,7 +11,7 @@ import os
 import sys
 from typing import Optional
 
-from fastmcp.server.openapi import MCPType, RouteMap
+from fastmcp.server.providers.openapi import MCPType, RouteMap
 
 # Configure logging
 logging.basicConfig(
@@ -39,6 +39,7 @@ def get_api_key() -> Optional[str]:
     if key:
         return key.strip()
 
+    # 2. Check file specified in environment variable
     key_file = os.getenv("NEXTDNS_API_KEY_FILE")
     if key_file:
         try:

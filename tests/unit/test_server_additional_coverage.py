@@ -41,7 +41,7 @@ def test_coerce_helpers():
 
 
 class DummyTool:
-    parameters = {"properties": {"keep": {}}}
+    parameters: dict[str, object] = {"properties": {"keep": {}}}
 
 
 class DummyToolManager:
@@ -56,7 +56,7 @@ class DummyToolManager:
 
 class DummyFastMCPContext:
     def __init__(self, raise_exc=False):
-        self.fastmcp = SimpleNamespace(_tool_manager=DummyToolManager(raise_exc=raise_exc))
+        self.fastmcp = SimpleNamespace(get_tool=DummyToolManager(raise_exc=raise_exc).get_tool)
 
 
 class DummyMessage:
@@ -155,8 +155,8 @@ async def test_bulk_update_helper_and_error_cases(monkeypatch):
 
         return Resp()
 
-    # Replace mcp_server._client
-    monkeypatch.setattr(server.mcp_server, "_client", SimpleNamespace(put=fake_put_ok))
+    # Replace api_client
+    monkeypatch.setattr(server, "api_client", SimpleNamespace(put=fake_put_ok))
 
     success = await server._bulk_update_helper("abc", '["a"]', "/profiles/{profile_id}/denylist", "entries")
     assert success == {"ok": True}
@@ -173,7 +173,7 @@ async def test_bulk_update_helper_and_error_cases(monkeypatch):
     async def fake_put_err(url, json=None):
         raise httpx.HTTPError("boom")
 
-    monkeypatch.setattr(server.mcp_server, "_client", SimpleNamespace(put=fake_put_err))
+    monkeypatch.setattr(server, "api_client", SimpleNamespace(put=fake_put_err))
 
     http_err = await server._bulk_update_helper("abc", '["a"]', "/profiles/{profile_id}/denylist", "entries")
     assert "error" in http_err

@@ -6,16 +6,7 @@ implementation functions. The actual logic is tested in test_server_functions.py
 
 import pytest
 
-from nextdns_mcp.server import (
-    dohLookup,
-    updateAllowlist,
-    updateDenylist,
-    updateParentalControlCategories,
-    updateParentalControlServices,
-    updatePrivacyBlocklists,
-    updatePrivacyNatives,
-    updateSecurityTlds,
-)
+from nextdns_mcp.server import _bulk_update_helper, _dohLookup_impl
 
 
 class TestDohLookupWrapper:
@@ -24,7 +15,7 @@ class TestDohLookupWrapper:
     @pytest.mark.asyncio
     async def test_wrapper_returns_error_without_profile(self):
         """Test wrapper properly calls implementation without default profile."""
-        result = await dohLookup.fn("example.com", None, "A")
+        result = await _dohLookup_impl("example.com", None, "A")
 
         # Should return error dict when no profile provided
         assert "error" in result
@@ -35,7 +26,7 @@ class TestDohLookupWrapper:
         """Test wrapper properly calls implementation with invalid record type."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
 
-        result = await dohLookup.fn("example.com", "abc123", "INVALID")
+        result = await _dohLookup_impl("example.com", "abc123", "INVALID")
 
         # Should return error dict for invalid record type
         assert "error" in result
@@ -48,7 +39,7 @@ class TestUpdateDenylistWrapper:
     @pytest.mark.asyncio
     async def test_wrapper_handles_invalid_json(self):
         """Test wrapper properly calls bulk helper with invalid JSON."""
-        result = await updateDenylist.fn("abc123", "not valid json")
+        result = await _bulk_update_helper("abc123", "not valid json", "/profiles/{profile_id}/denylist", "entries")
 
         assert "error" in result
         assert "Invalid JSON" in result["error"]
@@ -56,7 +47,7 @@ class TestUpdateDenylistWrapper:
     @pytest.mark.asyncio
     async def test_wrapper_handles_non_array(self):
         """Test wrapper properly calls bulk helper with non-array data."""
-        result = await updateDenylist.fn("abc123", '{"key": "value"}')
+        result = await _bulk_update_helper("abc123", '{"key": "value"}', "/profiles/{profile_id}/denylist", "entries")
 
         assert "error" in result
         assert "must be a JSON array" in result["error"]
@@ -68,7 +59,7 @@ class TestUpdateAllowlistWrapper:
     @pytest.mark.asyncio
     async def test_wrapper_handles_invalid_json(self):
         """Test wrapper properly calls bulk helper with invalid JSON."""
-        result = await updateAllowlist.fn("abc123", "not valid json")
+        result = await _bulk_update_helper("abc123", "not valid json", "/profiles/{profile_id}/allowlist", "entries")
 
         assert "error" in result
         assert "Invalid JSON" in result["error"]
@@ -80,7 +71,9 @@ class TestUpdateParentalControlServicesWrapper:
     @pytest.mark.asyncio
     async def test_wrapper_handles_invalid_json(self):
         """Test wrapper properly calls bulk helper with invalid JSON."""
-        result = await updateParentalControlServices.fn("abc123", "not valid json")
+        result = await _bulk_update_helper(
+            "abc123", "not valid json", "/profiles/{profile_id}/parental_control/services", "services"
+        )
 
         assert "error" in result
         assert "Invalid JSON" in result["error"]
@@ -92,7 +85,9 @@ class TestUpdateParentalControlCategoriesWrapper:
     @pytest.mark.asyncio
     async def test_wrapper_handles_invalid_json(self):
         """Test wrapper properly calls bulk helper with invalid JSON."""
-        result = await updateParentalControlCategories.fn("abc123", "not valid json")
+        result = await _bulk_update_helper(
+            "abc123", "not valid json", "/profiles/{profile_id}/parental_control/categories", "categories"
+        )
 
         assert "error" in result
         assert "Invalid JSON" in result["error"]
@@ -104,7 +99,7 @@ class TestUpdateSecurityTldsWrapper:
     @pytest.mark.asyncio
     async def test_wrapper_handles_invalid_json(self):
         """Test wrapper properly calls bulk helper with invalid JSON."""
-        result = await updateSecurityTlds.fn("abc123", "not valid json")
+        result = await _bulk_update_helper("abc123", "not valid json", "/profiles/{profile_id}/security/tlds", "tlds")
 
         assert "error" in result
         assert "Invalid JSON" in result["error"]
@@ -116,7 +111,9 @@ class TestUpdatePrivacyBlocklistsWrapper:
     @pytest.mark.asyncio
     async def test_wrapper_handles_invalid_json(self):
         """Test wrapper properly calls bulk helper with invalid JSON."""
-        result = await updatePrivacyBlocklists.fn("abc123", "not valid json")
+        result = await _bulk_update_helper(
+            "abc123", "not valid json", "/profiles/{profile_id}/privacy/blocklists", "blocklists"
+        )
 
         assert "error" in result
         assert "Invalid JSON" in result["error"]
@@ -128,7 +125,9 @@ class TestUpdatePrivacyNativesWrapper:
     @pytest.mark.asyncio
     async def test_wrapper_handles_invalid_json(self):
         """Test wrapper properly calls bulk helper with invalid JSON."""
-        result = await updatePrivacyNatives.fn("abc123", "not valid json")
+        result = await _bulk_update_helper(
+            "abc123", "not valid json", "/profiles/{profile_id}/privacy/natives", "natives"
+        )
 
         assert "error" in result
         assert "Invalid JSON" in result["error"]

@@ -52,27 +52,27 @@ class TestLoadOpenApiSpec:
 
         spec = load_openapi_spec()
 
-        async with httpx.AsyncClient(base_url="https://api.nextdns.io") as client:
+        async with httpx.AsyncClient(base_url="https://api.nextdns.io", timeout=5) as client:
             mcp = FastMCP.from_openapi(
                 openapi_spec=spec,
                 client=client,
                 route_maps=build_route_mappings(),
                 name="Test Server",
-                timeout=5,
                 strict_input_validation=False,
                 mcp_component_fn=allow_extra_fields_component_fn,
             )
 
-            tools = await mcp.get_tools()
+            tools = await mcp.list_tools()
+            tool_names = {tool.name for tool in tools}
 
             # Verify that getLogs is generated (normal JSON endpoint)
-            assert "getLogs" in tools, "getLogs should be generated from /profiles/{profile_id}/logs"
+            assert "getLogs" in tool_names, "getLogs should be generated from /profiles/{profile_id}/logs"
 
             # Verify that streamLogs is NOT generated (SSE streaming endpoint, explicitly excluded)
-            assert "streamLogs" not in tools, "streamLogs should be excluded (SSE streaming not supported)"
+            assert "streamLogs" not in tool_names, "streamLogs should be excluded (SSE streaming not supported)"
 
             # Verify that downloadLogs is NOT generated (binary CSV download, explicitly excluded)
-            assert "downloadLogs" not in tools, "downloadLogs should be excluded (binary response not supported)"
+            assert "downloadLogs" not in tool_names, "downloadLogs should be excluded (binary response not supported)"
 
     def test_load_openapi_spec_file_not_found(self, monkeypatch, mock_api_key, caplog):
         """Test error handling when OpenAPI spec file is missing."""
