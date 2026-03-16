@@ -157,12 +157,27 @@ log_info "Step 2: Preparing catalog..."
 TEMP_CATALOG="${ARTIFACTS_DIR}/catalog-temp.yaml"
 cp "${PROJECT_DIR}/catalog.yaml" "${TEMP_CATALOG}"
 
-# In CI, inject API key directly into env section (bypass secrets mechanism)
-if [ "${CI:-false}" = "true" ]; then
-    log_info "CI environment detected - injecting API key into catalog env section"
-    
-    # Add NEXTDNS_API_KEY to the env section of the catalog
-    # This bypasses the secrets mechanism which may not work reliably in CI
+# Determine whether to inject the API key directly into the catalog env section.
+#
+# Rationale:
+# - On Linux (no Docker Desktop), the Docker MCP secrets engine may be unavailable.
+# - When secrets are unavailable, the server starts without NEXTDNS_API_KEY and all tool calls fail with authRequired.
+#
+# Injection keeps credentials ephemeral (catalog is copied to artifacts, imported, then deleted).
+INJECT_API_KEY="${CI:-false}"
+if [ "${INJECT_API_KEY}" != "true" ]; then
+    if [ ! -f "$HOME/.docker/mcp/secrets.env" ]; then
+        if ! docker mcp secret ls >/dev/null 2>&1; then
+            INJECT_API_KEY="true"
+            log_warn "Docker MCP secrets engine unavailable and no file-based secrets detected; injecting NEXTDNS_API_KEY into catalog env for this run"
+        fi
+    fi
+fi
+
+if [ "${INJECT_API_KEY}" = "true" ]; then
+    log_info "Injecting API key into catalog env section"
+
+    # Add NEXTDNS_API_KEY to the env section of the catalog.
     cd ${PROJECT_DIR}
     uv run python3 -c "
 import yaml
@@ -171,35 +186,34 @@ import sys
 with open('${TEMP_CATALOG}', 'r') as f:
     catalog = yaml.safe_load(f)
 
-# Add API key to env section
 if 'registry' in catalog and 'nextdns' in catalog['registry']:
     if 'env' not in catalog['registry']['nextdns']:
         catalog['registry']['nextdns']['env'] = []
-    
-    # Add or update NEXTDNS_API_KEY
+
     env_list = catalog['registry']['nextdns']['env']
     found = False
     for env_var in env_list:
         if env_var.get('name') == 'NEXTDNS_API_KEY':
             env_var['value'] = '${NEXTDNS_API_KEY}'
+            env_var['description'] = env_var.get('description') or 'NextDNS API key (injected at runtime)'
             found = True
             break
-    
+
     if not found:
         env_list.insert(0, {
             'name': 'NEXTDNS_API_KEY',
             'value': '${NEXTDNS_API_KEY}',
-            'description': 'NextDNS API key (injected in CI)'
+            'description': 'NextDNS API key (injected at runtime)'
         })
-    
+
     with open('${TEMP_CATALOG}', 'w') as f:
         yaml.dump(catalog, f, default_flow_style=False, sort_keys=False)
-    
+
     sys.exit(0)
 else:
     sys.exit(1)
 "
-    
+
     if [ $? -eq 0 ]; then
         log_success "API key injected into catalog"
     else
@@ -276,8 +290,11 @@ fi
 # Debug: Show API key length (not the actual key)
 log_info "API key length: ${#NEXTDNS_API_KEY} characters"
 
-# Check if we're in CI or if file-based secrets already exist
-if [ "${CI:-false}" = "true" ]; then
+# Check if we're using injected env, CI/file-based secrets, or Docker Desktop secrets.
+if [ "${INJECT_API_KEY:-false}" = "true" ]; then
+    log_info "API key provided via catalog env injection"
+    log_success "API key configured via catalog env"
+elif [ "${CI:-false}" = "true" ]; then
     log_info "CI environment detected - using file-based secrets from ~/.docker/mcp/secrets.env"
     log_success "API key configured via file-based secrets"
 elif [ -f "$HOME/.docker/mcp/secrets.env" ]; then
