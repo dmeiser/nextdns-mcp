@@ -20,13 +20,17 @@ on:
   # Allow manual trigger
   workflow_dispatch:
 
+  # Nightly build for base image security updates
+  schedule:
+    - cron: '0 3 * * *'
+
 permissions:
   contents: read
   packages: write  # Required to push to ghcr.io
 
 # Prevent duplicate runs for the same commit
 concurrency:
-  group: docker-publish-${{ github.event.workflow_run.head_sha || github.sha }}
+  group: docker-publish-${{ github.event.workflow_run.head_sha || github.sha }}-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
@@ -34,11 +38,12 @@ jobs:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
     
-    # Only run on main branch (after merge), tags, or manual dispatch - never on PRs
+    # Run on main branch completion, tags, manual dispatch, or nightly schedule
     if: |
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
     
     steps:
       - name: Wait for all required workflows to complete
@@ -139,8 +144,8 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
             ghcr.io/${{ github.repository }}
           tags: |
-            # Tag with 'latest' for main branch (stable releases only)
-            type=raw,value=latest,enable=${{ github.ref_type == 'branch' && github.ref_name == 'main' }}
+            # Tag with 'latest' for main branch or schedule (stable releases/nightly)
+            type=raw,value=latest,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' }}
             # Tag with commit SHA
             type=sha,prefix=,format=short
             # Semantic version tags from git tags (v1.0.0 -> 1.0.0, 1.0, 1)
