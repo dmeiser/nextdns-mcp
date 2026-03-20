@@ -119,7 +119,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           # For workflow_run events, checkout the commit that triggered the workflow
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # For schedule events, checkout main (stable release code)
+          ref: ${{ github.event.workflow_run.head_sha || (github.event_name == 'schedule' && 'main') || github.sha }}
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -140,17 +141,42 @@ jobs:
       - name: Extract project version
         id: version
         run: |
-          VERSION=$(grep -m 1 'version = ' pyproject.toml | cut -d'"' -f2)
+          VERSION=$(python - << 'PY'
+          import pathlib
+          import sys
+          import tomllib
+          
+          path = pathlib.Path("pyproject.toml")
+          if not path.is_file():
+              print("Error: pyproject.toml not found", file=sys.stderr)
+              raise SystemExit(1)
+          
+          with path.open("rb") as f:
+              data = tomllib.load(f)
+          
+          try:
+              version = data["project"]["version"]
+          except KeyError:
+              print("Error: 'project.version' not found in pyproject.toml", file=sys.stderr)
+              raise SystemExit(1)
+          
+          if not isinstance(version, str) or not version.strip():
+              print("Error: 'project.version' is empty or not a string", file=sys.stderr)
+              raise SystemExit(1)
+          
+          print(version.strip())
+          PY
+          )
           if [ -z "$VERSION" ]; then
             echo "Error: Could not extract version from pyproject.toml"
             exit 1
           fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           
-          MAJOR=$(echo $VERSION | cut -d. -f1)
-          MINOR=$(echo $VERSION | cut -d. -f2)
-          echo "major=$MAJOR" >> $GITHUB_OUTPUT
-          echo "major_minor=$MAJOR.$MINOR" >> $GITHUB_OUTPUT
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$MAJOR.$MINOR" >> "$GITHUB_OUTPUT"
       
       - name: Extract metadata for Docker
         id: meta
@@ -164,7 +190,7 @@ jobs:
             type=raw,value=latest,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' }}
             # Tag with commit SHA
             type=sha,prefix=,format=short
-            # Floating major/minor tags for nightly rebuilds
+            # Floating major/minor tags for nightly rebuilds (only from main or schedule)
             type=raw,value=${{ steps.version.outputs.major }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' }}
             type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' }}
             # Semantic version tags from git tags (v1.0.0 -> 1.0.0, 1.0, 1)
@@ -208,6 +234,9 @@ jobs:
           echo "docker pull ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Tags Applied:** latest, commit SHA, ${{ steps.version.outputs.major }}, ${{ steps.version.outputs.major_minor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags Applied:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
