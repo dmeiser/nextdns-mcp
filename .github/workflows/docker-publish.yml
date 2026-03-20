@@ -114,6 +114,7 @@ jobs:
             }
             
             console.log('✅ All required workflows completed successfully');
+      
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -135,6 +136,21 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract project version
+        id: version
+        run: |
+          VERSION=$(grep -m 1 'version = ' pyproject.toml | cut -d'"' -f2)
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not extract version from pyproject.toml"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          MINOR=$(echo $VERSION | cut -d. -f2)
+          echo "major=$MAJOR" >> $GITHUB_OUTPUT
+          echo "major_minor=$MAJOR.$MINOR" >> $GITHUB_OUTPUT
       
       - name: Extract metadata for Docker
         id: meta
@@ -148,6 +164,9 @@ jobs:
             type=raw,value=latest,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' }}
             # Tag with commit SHA
             type=sha,prefix=,format=short
+            # Floating major/minor tags for nightly rebuilds
+            type=raw,value=${{ steps.version.outputs.major }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' }}
+            type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' }}
             # Semantic version tags from git tags (v1.0.0 -> 1.0.0, 1.0, 1)
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -189,6 +208,6 @@ jobs:
           echo "docker pull ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Tags Applied:** latest, commit SHA, v2.0.0, v2.0, v2" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags Applied:** latest, commit SHA, ${{ steps.version.outputs.major }}, ${{ steps.version.outputs.major_minor }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY

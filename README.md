@@ -137,6 +137,17 @@ This server uses a modern, declarative approach:
 - `Dockerfile`: Container definition with OCI labels for MCP Gateway
 - `AGENT.md`: Development guidelines and safety rules
 
+### Docker Tags
+
+This project publishes official Docker images with a standardized tagging policy:
+
+- `:latest`: Always points to the most recent tip of the `main` branch, rebuilt nightly.
+- `:<major>`: Points to the latest release of a major version (e.g., `:2`), updated with each release and rebuilt nightly for security patches.
+- `:<major>.<minor>`: Points to the latest release of a minor version (e.g., `:2.0`), updated with each release and rebuilt nightly.
+- `:<major>.<minor>.<patch>`: Tags for specific application releases (e.g., `:2.0.3`). These are immutable once published via the release workflow.
+
+All floating tags (`:latest`, `:<major>`, `:<major>.<minor>`) are rebuilt nightly to include the latest OS security updates while preserving application version stability (the application code remains the same even if the underlying image digest changes).
+
 ## License
 
 This project is released under the [MIT License](LICENSE).
