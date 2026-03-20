@@ -1,6 +1,14 @@
 name: Unit Tests
 
 on:
+  workflow_call:
+    outputs:
+      coverage:
+        description: "Overall coverage percentage"
+        value: ${{ jobs.unit-tests.outputs.coverage }}
+      failed_files:
+        description: "List of files below threshold"
+        value: ${{ jobs.unit-tests.outputs.failed_files }}
   push:
     branches: 
       - main  # Only run on main branch pushes
@@ -14,6 +22,9 @@ permissions:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
+    outputs:
+      coverage: ${{ steps.tests.outputs.coverage }}
+      failed_files: ${{ steps.tests.outputs.failed_files }}
     
     steps:
       - name: Checkout

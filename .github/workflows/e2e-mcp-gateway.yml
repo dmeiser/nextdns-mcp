@@ -1,6 +1,7 @@
 name: E2E MCP Gateway
 
 on:
+  workflow_call:
   workflow_dispatch:
     inputs:
       allow_live_writes:
