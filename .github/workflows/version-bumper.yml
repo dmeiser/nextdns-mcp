@@ -74,7 +74,7 @@ jobs:
               else:
                   print(f"⚠️ No change needed for {path}")
 
-          update_file("pyproject.toml", r'^version = ".*"', f'version = "{next_v}"')
+          update_file("pyproject.toml", r'^version = .*', f'version = "{next_v}"')
           update_file("src/nextdns_mcp/__init__.py", r'__version__ = ".*"', f'__version__ = "{next_v}"')
           update_file("Dockerfile", r'LABEL org\.opencontainers\.image\.version=".*"', f'LABEL org.opencontainers.image.version="{next_v}"')
           
