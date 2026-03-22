@@ -30,6 +30,7 @@ jobs:
         run: |
           # Use Python to reliably extract version from pyproject.toml
           python3 << 'PY'
+          import os
           import sys
           import tomllib
           from pathlib import Path
@@ -38,8 +39,8 @@ jobs:
           with p.open("rb") as f:
               data = tomllib.load(f)
               v = data["project"]["version"]
-          
-          with open("${GITHUB_OUTPUT}", "a") as f:
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"tag=v{v}\n")
           PY
 
