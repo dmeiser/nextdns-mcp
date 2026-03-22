@@ -9,17 +9,44 @@ permissions:
   contents: read
 
 jobs:
-  check-version:
-    name: Verify Version Sync
+  check-labels:
+    name: Verify Release Labels
     runs-on: ubuntu-latest
     steps:
-      - name: Check for bypass label
+      - name: Validate Labels
+        run: |
+          LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
+          echo "Current labels: $LABELS"
+          
+          HAS_RELEASE_LABEL=false
+          if echo "$LABELS" | grep -qE "bump-patch|bump-minor|bump-major|no-release"; then
+            HAS_RELEASE_LABEL=true
+          fi
+          
+          if [ "$HAS_RELEASE_LABEL" = "false" ]; then
+            echo "❌ Error: No release label found!"
+            echo "Please add one of the following labels to this PR:"
+            echo "- bump-patch"
+            echo "- bump-minor"
+            echo "- bump-major"
+            echo "- no-release"
+            exit 1
+          fi
+          
+          echo "✅ Valid release label found."
+
+  check-sync:
+    name: Verify Version Sync
+    runs-on: ubuntu-latest
+    needs: check-labels
+    steps:
+      - name: Check for no-release label
         id: bypass
         run: |
           HAS_LABEL="${{ contains(github.event.pull_request.labels.*.name, 'no-release') }}"
           echo "has_label=$HAS_LABEL" >> $GITHUB_OUTPUT
           if [ "$HAS_LABEL" = "true" ]; then
-            echo "✅ Bypass label 'no-release' found. Skipping checks."
+            echo "✅ 'no-release' label found. Skipping version sync check."
           fi
 
       - name: Checkout main (baseline)
@@ -40,7 +67,6 @@ jobs:
         run: |
           echo "### 🔍 Extracting Versions..."
           
-          # Extract versions using grep and cut for simplicity/robustness in runner
           PR_PYPROJECT=$(grep "^version =" pr/pyproject.toml | cut -d'"' -f2)
           PR_INIT=$(grep "__version__ =" pr/src/nextdns_mcp/__init__.py | cut -d'"' -f2)
           PR_DOCKER=$(grep "LABEL org.opencontainers.image.version=" pr/Dockerfile | cut -d'"' -f2)
@@ -60,19 +86,14 @@ jobs:
           fi
 
           # 2. Check for internal consistency
-          if [ "$PR_PYPROJECT" != "$PR_INIT" ]; then
-            echo "❌ Error: Version mismatch! pyproject.toml ($PR_PYPROJECT) != __init__.py ($PR_INIT)"
-            FAILED=1
-          fi
-
-          if [ "$PR_PYPROJECT" != "$PR_DOCKER" ]; then
-            echo "❌ Error: Version mismatch! pyproject.toml ($PR_PYPROJECT) != Dockerfile ($PR_DOCKER)"
+          if [ "$PR_PYPROJECT" != "$PR_INIT" ] || [ "$PR_PYPROJECT" != "$PR_DOCKER" ]; then
+            echo "❌ Error: Version mismatch between files!"
             FAILED=1
           fi
 
           if [ $FAILED -eq 1 ]; then
             echo ""
-            echo "🚨 Version check failed! Please update all version strings or add the 'no-release' label to the PR."
+            echo "🚨 Version check failed! Use a 'bump-*' label to auto-fix (coming soon) or update manually."
             exit 1
           fi
 

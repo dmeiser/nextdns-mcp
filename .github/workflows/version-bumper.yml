@@ -1,0 +1,77 @@
+name: Version Bumper (Auto-Sync)
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: write
+
+jobs:
+  bump-version:
+    if: |
+      contains(github.event.label.name, 'bump-') &&
+      github.event.pull_request.state == 'open'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Checkout Main (Baseline)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-ref
+
+      - name: Extract Current Version
+        id: get_current
+        run: |
+          VERSION=$(grep "^version =" main-ref/pyproject.toml | cut -d'"' -f2)
+          echo "current_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Current Version on main: $VERSION"
+
+      - name: Calculate Next Version
+        id: get_next
+        run: |
+          CURRENT="${{ steps.get_current.outputs.current_version }}"
+          LABEL="${{ github.event.label.name }}"
+          
+          # Use Python to handle version increment reliably
+          NEXT=$(python -c "
+          v = '$CURRENT'.split('.')
+          major, minor, patch = int(v[0]), int(v[1]), int(v[2])
+          if '$LABEL' == 'bump-major':
+              major += 1; minor = 0; patch = 0
+          elif '$LABEL' == 'bump-minor':
+              minor += 1; patch = 0
+          elif '$LABEL' == 'bump-patch':
+              patch += 1
+          print(f'{major}.{minor}.{patch}')
+          ")
+          echo "next_version=$NEXT" >> $GITHUB_OUTPUT
+          echo "Next Version: $NEXT"
+
+      - name: Update Files
+        run: |
+          NEXT="${{ steps.get_next.outputs.next_version }}"
+          echo "Updating files to version $NEXT..."
+          
+          # Update pyproject.toml
+          sed -i "s/^version = \".*\"/version = \"$NEXT\"/" pyproject.toml
+          
+          # Update __init__.py
+          sed -i "s/__version__ = \".*\"/__version__ = \"$NEXT\"/" src/nextdns_mcp/__init__.py
+          
+          # Update Dockerfile
+          sed -i "s/LABEL org.opencontainers.image.version=\".*\"/LABEL org.opencontainers.image.version=\"$NEXT\"/" Dockerfile
+
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml src/nextdns_mcp/__init__.py Dockerfile
+          git commit -m "chore: bump version to ${{ steps.get_next.outputs.next_version }} (${{ github.event.label.name }})"
+          git push origin ${{ github.head_ref }}
