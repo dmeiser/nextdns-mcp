@@ -33,7 +33,7 @@ LABEL org.opencontainers.image.description="Model Context Protocol server for Ne
 LABEL org.opencontainers.image.authors="NextDNS MCP Contributors"
 LABEL org.opencontainers.image.source="https://github.com/dmeiser/nextdns-mcp"
 LABEL org.opencontainers.image.documentation="https://github.com/dmeiser/nextdns-mcp/blob/main/README.md"
-LABEL org.opencontainers.image.version="2.0.4"
+LABEL org.opencontainers.image.version="2.0.5"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # MCP-specific labels
