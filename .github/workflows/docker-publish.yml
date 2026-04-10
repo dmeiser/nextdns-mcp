@@ -209,8 +209,8 @@ jobs:
             type=raw,value=latest,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             # Tag with commit SHA
             type=sha,prefix=,format=short
-            # Exact version and floating major/minor tags for main or schedule
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Exact version tag for main branch or manual dispatch only (NOT for schedule)
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'workflow_dispatch' }}
             type=raw,value=${{ steps.version.outputs.major }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             # Semantic version tags from git tags (v1.0.0 -> 1.0.0, 1.0, 1)
