@@ -26,8 +26,6 @@ def clean_env(monkeypatch):
     return monkeypatch.setenv
 
 
-
-
 class TestParseProfileList:
     """Test the parse_profile_list function."""
 
