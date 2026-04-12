@@ -26,6 +26,13 @@ NEXTDNS_BASE_URL = "https://api.nextdns.io"
 
 # MCP Transport configuration
 
+# Constants for profile access control
+ALLOW_ALL_PROFILES = set()  # Represents "ALL" profiles
+
+# Cached profile access sets (populated after validation)
+_readable_profiles_cache: Optional[set[str] | None] = None
+_writable_profiles_cache: Optional[set[str] | None] = None
+
 # Operations that bypass profile access control
 GLOBALLY_ALLOWED_OPERATIONS = {
     "listProfiles",  # Required to discover available profiles
@@ -71,6 +78,8 @@ def get_readable_profiles() -> set[str] | None:
         None if empty/unset (deny all), empty set if "ALL" (allow all),
         or set of specific profile IDs
     """
+    global _readable_profiles_cache
+    _readable_profiles_cache = None  # Clear cache when env changes
     profiles = os.getenv("NEXTDNS_READABLE_PROFILES", "")
     return parse_profile_list(profiles)
 
@@ -82,6 +91,8 @@ def get_writable_profiles() -> set[str] | None:
         None if empty/unset (deny all), empty set if "ALL" (allow all),
         or set of specific profile IDs
     """
+    global _writable_profiles_cache
+    _writable_profiles_cache = None  # Clear cache when env changes
     if is_read_only():
         return None  # Read-only mode = deny all writes
     profiles = os.getenv("NEXTDNS_WRITABLE_PROFILES", "")
@@ -129,23 +140,33 @@ def get_readable_profiles_set() -> set[str] | None:
         empty set if all profiles are readable (allow all),
         or set of specific profile IDs
     """
+    global _readable_profiles_cache
+    
+    # Return cached value if available
+    if _readable_profiles_cache is not None:
+        return _readable_profiles_cache
+        
     readable = get_readable_profiles()  # Get from env
     writable = get_writable_profiles()  # Get from env
 
     # If readable is None (unset), deny all
     if readable is None:
+        _readable_profiles_cache = None
         return None
 
     # If readable is empty set (ALL), allow all
     if not readable:
-        return set()
+        _readable_profiles_cache = ALLOW_ALL_PROFILES
+        return ALLOW_ALL_PROFILES
 
     # If readable is set, combine with writable (write implies read)
     # Handle case where writable might be None
     if writable is None:
+        _readable_profiles_cache = readable
         return readable
-    return readable | writable
-
+    result = readable | writable
+    _readable_profiles_cache = result
+    return result
 
 def get_writable_profiles_set() -> set[str] | None:
     """Get the set of profiles that are allowed to be written to.
@@ -155,9 +176,18 @@ def get_writable_profiles_set() -> set[str] | None:
         empty set if all profiles are writable (allow all),
         or set of specific profile IDs
     """
+    global _writable_profiles_cache
+    
+    # Return cached value if available
+    if _writable_profiles_cache is not None:
+        return _writable_profiles_cache
+        
     if is_read_only():
-        return None  # Read-only mode = deny all writes
-    return get_writable_profiles()  # Already checked read-only flag
+        _writable_profiles_cache = None  # Read-only mode = deny all writes
+        return None
+    result = get_writable_profiles()  # Already checked read-only flag
+    _writable_profiles_cache = result
+    return result
 
 
 def can_read_profile(profile_id: str) -> bool:

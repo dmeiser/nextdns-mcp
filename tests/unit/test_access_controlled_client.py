@@ -20,6 +20,10 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> Callable[[str, str], None]:
 
     # Set minimal required env for the module to load
     monkeypatch.setenv("NEXTDNS_API_KEY", "test-key-12345")
+    # Clear the profile cache to prevent test pollution
+    import nextdns_mcp.config
+    nextdns_mcp.config._readable_profiles_cache = None
+    nextdns_mcp.config._writable_profiles_cache = None
     return monkeypatch.setenv
 
 
