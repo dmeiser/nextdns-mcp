@@ -41,6 +41,12 @@ from fastmcp.server.providers.openapi import RouteMap
 from fastmcp.server.providers.openapi.routing import DEFAULT_ROUTE_MAPPINGS
 from fastmcp.tools.tool import ToolResult
 
+# Pydantic import for allow_extra_fields_component_fn
+try:
+    from pydantic import BaseModel
+except ImportError:
+    BaseModel = None  # type: ignore
+
 from .config import (
     DNS_STATUS_CODES,
     EXCLUDED_ROUTES,
@@ -522,7 +528,7 @@ def _build_doh_metadata(
 
 
 # Add custom DoH lookup tool
-async def _execute_doh_query(doh_url: str, domain: str, record_type: str, target_profile: str) -> dict[str, Any]:
+async def doh_lookup(doh_url: str, domain: str, record_type: str, target_profile: str) -> dict[str, Any]:
     """Execute DoH query and return result with metadata."""
     params = {"name": domain, "type": record_type}
     headers = {"accept": "application/dns-json"}
@@ -571,7 +577,7 @@ async def _dohLookup_impl(domain: str, profile_id: Optional[str] = None, record_
 
     doh_url = f"https://dns.nextdns.io/{target_profile}/dns-query"
     logger.info(f"DoH lookup: {domain} ({record_type_upper}) via profile {target_profile}")
-    return await _execute_doh_query(doh_url, domain, record_type_upper, target_profile)
+    return await doh_lookup(doh_url, domain, record_type_upper, target_profile)
 
 
 # Register the DoH lookup tool with MCP
