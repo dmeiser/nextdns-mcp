@@ -21,11 +21,10 @@ def clean_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     # Clear the profile cache to prevent test pollution
     import nextdns_mcp.config
+
     nextdns_mcp.config._readable_profiles_cache = None
     nextdns_mcp.config._writable_profiles_cache = None
     return monkeypatch.setenv
-
-
 
 
 class TestParseProfileList:

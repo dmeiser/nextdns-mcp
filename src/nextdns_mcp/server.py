@@ -39,7 +39,7 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.providers.openapi import RouteMap
 from fastmcp.server.providers.openapi.routing import DEFAULT_ROUTE_MAPPINGS
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 # Pydantic import for allow_extra_fields_component_fn
 try:

@@ -27,7 +27,7 @@ NEXTDNS_BASE_URL = "https://api.nextdns.io"
 # MCP Transport configuration
 
 # Constants for profile access control
-ALLOW_ALL_PROFILES = set()  # Represents "ALL" profiles
+ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
 
 # Cached profile access sets (populated after validation)
 _readable_profiles_cache: Optional[set[str] | None] = None
@@ -141,11 +141,11 @@ def get_readable_profiles_set() -> set[str] | None:
         or set of specific profile IDs
     """
     global _readable_profiles_cache
-    
+
     # Return cached value if available
     if _readable_profiles_cache is not None:
         return _readable_profiles_cache
-        
+
     readable = get_readable_profiles()  # Get from env
     writable = get_writable_profiles()  # Get from env
 
@@ -168,6 +168,7 @@ def get_readable_profiles_set() -> set[str] | None:
     _readable_profiles_cache = result
     return result
 
+
 def get_writable_profiles_set() -> set[str] | None:
     """Get the set of profiles that are allowed to be written to.
 
@@ -177,11 +178,11 @@ def get_writable_profiles_set() -> set[str] | None:
         or set of specific profile IDs
     """
     global _writable_profiles_cache
-    
+
     # Return cached value if available
     if _writable_profiles_cache is not None:
         return _writable_profiles_cache
-        
+
     if is_read_only():
         _writable_profiles_cache = None  # Read-only mode = deny all writes
         return None
