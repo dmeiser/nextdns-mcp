@@ -19,6 +19,11 @@ def patch_env(monkeypatch):
     # Clear all environment variables for clean test
     for key in list(os.environ.keys()):
         monkeypatch.delenv(key, raising=False)
+    # Clear the profile cache to prevent test pollution
+    import nextdns_mcp.config
+
+    nextdns_mcp.config._readable_profiles_cache = None
+    nextdns_mcp.config._writable_profiles_cache = None
 
     # Return monkeypatch.setenv for test use
     return monkeypatch.setenv

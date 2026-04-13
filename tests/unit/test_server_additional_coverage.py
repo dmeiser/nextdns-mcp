@@ -168,8 +168,8 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
 
     monkeypatch.setattr(server.httpx, "AsyncClient", DummyClient)
 
-    # _execute_doh_query success
-    res = await server._execute_doh_query("https://dns.nextdns.io/abc/dns-query", "google.com", "A", "abc")
+    # doh_lookup success
+    res = await server.doh_lookup("https://dns.nextdns.io/abc/dns-query", "google.com", "A", "abc")
     assert "_metadata" in res
 
     # _dohLookup_impl: no default profile
@@ -182,11 +182,11 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     r2 = await server._dohLookup_impl("example.com", record_type="INVALID")
     assert "error" in r2 and "Invalid record type" in r2["error"]
 
-    # success path uses _execute_doh_query
+    # success path uses doh_lookup
     async def fake_exec(doh_url, domain, record_type, profile):
         return {"ok": True}
 
-    monkeypatch.setattr(server, "_execute_doh_query", fake_exec)
+    monkeypatch.setattr(server, "doh_lookup", fake_exec)
     r3 = await server._dohLookup_impl("example.com")
     assert r3 == {"ok": True}
 
