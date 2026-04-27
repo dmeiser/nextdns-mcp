@@ -14,7 +14,9 @@ on:
           - 'false'
   push:
     branches: 
-      - main  # Only run on main branch pushes
+      - main
+    tags:
+      - 'v*.*.*'  # Also run on version tags
   pull_request:
     branches: [ main ]  # Run on all PRs to main
 
