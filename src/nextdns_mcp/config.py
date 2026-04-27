@@ -140,33 +140,23 @@ def get_readable_profiles_set() -> set[str] | None:
         empty set if all profiles are readable (allow all),
         or set of specific profile IDs
     """
-    global _readable_profiles_cache
-
-    # Return cached value if available
-    if _readable_profiles_cache is not None:
-        return _readable_profiles_cache
-
+    # Always compute fresh to avoid stale cache across tests or env changes
     readable = get_readable_profiles()  # Get from env
     writable = get_writable_profiles()  # Get from env
 
     # If readable is None (unset), deny all
     if readable is None:
-        _readable_profiles_cache = None
         return None
 
     # If readable is empty set (ALL), allow all
     if not readable:
-        _readable_profiles_cache = ALLOW_ALL_PROFILES
         return ALLOW_ALL_PROFILES
 
     # If readable is set, combine with writable (write implies read)
     # Handle case where writable might be None
     if writable is None:
-        _readable_profiles_cache = readable
         return readable
-    result = readable | writable
-    _readable_profiles_cache = result
-    return result
+    return readable | writable
 
 
 def get_writable_profiles_set() -> set[str] | None:
@@ -177,18 +167,10 @@ def get_writable_profiles_set() -> set[str] | None:
         empty set if all profiles are writable (allow all),
         or set of specific profile IDs
     """
-    global _writable_profiles_cache
-
-    # Return cached value if available
-    if _writable_profiles_cache is not None:
-        return _writable_profiles_cache
-
+    # Always compute fresh to avoid stale cache across tests or env changes
     if is_read_only():
-        _writable_profiles_cache = None  # Read-only mode = deny all writes
         return None
-    result = get_writable_profiles()  # Already checked read-only flag
-    _writable_profiles_cache = result
-    return result
+    return get_writable_profiles()  # Already checks read-only flag
 
 
 def can_read_profile(profile_id: str) -> bool:
