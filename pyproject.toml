@@ -51,3 +51,6 @@ target-version = ["py314"]
 line-length = 120
 target-version = "py314"
 
+
+[tool.uv]
+exclude-newer = "1 week"
