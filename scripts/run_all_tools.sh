@@ -59,6 +59,23 @@ REPORT_FILE="${ARTIFACTS_DIR}/tools_report.jsonl"
 # Ensure artifacts directory exists
 mkdir -p "${ARTIFACTS_DIR}"
 
+# Build gateway-arg flags for legacy catalog mode.
+# Recent docker-mcp versions always enable the profiles feature, which makes
+# 'docker mcp server enable' obsolete.  Passing --catalog / --servers to the
+# gateway forces it into legacy catalog mode so tool calls work without a profile.
+# NEXTDNS_GATEWAY_ARGS is set by gateway_e2e_run.sh; falls back to empty so
+# this script can still be invoked standalone against a pre-configured default profile.
+_MCP_GATEWAY_ARGS=()
+if [ -n "${NEXTDNS_GATEWAY_ARGS:-}" ]; then
+    for _arg in ${NEXTDNS_GATEWAY_ARGS}; do
+        _MCP_GATEWAY_ARGS+=("--gateway-arg=${_arg}")
+    done
+fi
+
+mcp_tools() {
+    docker mcp tools "${_MCP_GATEWAY_ARGS[@]}" "$@"
+}
+
 log_info "Starting NextDNS MCP tools enumeration and execution"
 log_info "Allow writes: ${ALLOW_WRITES}"
 log_info "Report file: ${REPORT_FILE}"
@@ -70,7 +87,7 @@ log_info "Report file: ${REPORT_FILE}"
 log_info "Performing preflight checks..."
 
 # Check Docker MCP is responding
-if ! docker mcp tools ls >/dev/null 2>&1; then
+if ! mcp_tools ls >/dev/null 2>&1; then
     log_error "Failed to enumerate tools from Docker MCP"
     log_error ""
     log_error "Troubleshooting steps:"
@@ -85,13 +102,13 @@ log_success "Docker MCP is responding"
 
 # Parse tool names - tools ls returns an array of tool objects
 # Filter out MCP Gateway built-in tools (mcp-*, code-*) - only test NextDNS tools
-mapfile -t ALL_TOOLS < <(docker mcp tools ls --format json 2>&1 | jq -r '.[] | .name')
+mapfile -t ALL_TOOLS < <(docker mcp tools "${_MCP_GATEWAY_ARGS[@]}" ls 2>/dev/null | grep '^ - ' | awk '{print $2}')
 
 if [ ${#ALL_TOOLS[@]} -eq 0 ]; then
     log_error "No tools found"
     log_error "The MCP server may not be properly configured"
     log_error "Run: docker mcp catalog import ./catalog.yaml"
-    log_error "Run: docker mcp server enable nextdns"
+    log_error "Run: scripts/gateway_e2e_run.sh to configure the server"
     exit 1
 fi
 
@@ -120,7 +137,7 @@ if [ "${ALLOW_WRITES}" = "true" ]; then
     PROFILE_NAME="E2E Test Profile ${TIMESTAMP}"
     
     # Call createProfile using key=value syntax (Docker MCP CLI format)
-    PROFILE_RESULT=$(docker mcp tools call createProfile "name=${PROFILE_NAME}" 2>&1 || echo "")
+    PROFILE_RESULT=$(mcp_tools call createProfile "name=${PROFILE_NAME}" 2>&1 || echo "")
     CREATE_EXIT_CODE=$?
     
     # Extract profile ID from response - filter out Docker MCP timing info, then parse JSON
@@ -162,7 +179,7 @@ else
     # In read-only mode, get first available profile
     log_info "Fetching existing profile for read-only tests..."
     
-    PROFILES_RESULT=$(docker mcp tools call listProfiles '{}' 2>&1 | grep -E '^\{' || echo "")
+    PROFILES_RESULT=$(mcp_tools call listProfiles '{}' 2>&1 | grep -E '^\{' || echo "")
     
     if [ -z "${PROFILES_RESULT}" ]; then
         log_error "Failed to fetch profiles"
@@ -390,22 +407,22 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
         updateAllowlistEntry)
             # Ensure entry exists before trying to update it
             log_info "  Pre-setup: Adding allowlist entry for update test"
-            docker mcp tools call addToAllowlist "profile_id=${PROFILE_ID}" "id=test-example.com" >/dev/null 2>&1 || true
+            mcp_tools call addToAllowlist "profile_id=${PROFILE_ID}" "id=test-example.com" >/dev/null 2>&1 || true
             ;;
         updateDenylistEntry)
             # Ensure entry exists before trying to update it
             log_info "  Pre-setup: Adding denylist entry for update test"
-            docker mcp tools call addToDenylist "profile_id=${PROFILE_ID}" "id=test-example.com" >/dev/null 2>&1 || true
+            mcp_tools call addToDenylist "profile_id=${PROFILE_ID}" "id=test-example.com" >/dev/null 2>&1 || true
             ;;
         updateParentalControlCategoryEntry)
             # Ensure category exists before trying to update it
             log_info "  Pre-setup: Adding parental control category for update test"
-            docker mcp tools call addToParentalControlCategories "profile_id=${PROFILE_ID}" "id=gambling" >/dev/null 2>&1 || true
+            mcp_tools call addToParentalControlCategories "profile_id=${PROFILE_ID}" "id=gambling" >/dev/null 2>&1 || true
             ;;
         updateParentalControlServiceEntry)
             # Ensure service exists before trying to update it
             log_info "  Pre-setup: Adding parental control service for update test"
-            docker mcp tools call addToParentalControlServices "profile_id=${PROFILE_ID}" "id=tiktok" >/dev/null 2>&1 || true
+            mcp_tools call addToParentalControlServices "profile_id=${PROFILE_ID}" "id=tiktok" >/dev/null 2>&1 || true
             ;;
     esac
     
@@ -422,7 +439,7 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
     
     while [ ${ATTEMPT} -le ${MAX_RETRIES} ]; do
         set +e
-        TOOL_OUTPUT=$(docker mcp tools call --format json "${TOOL_NAME}" ${TOOL_ARGS} 2>&1)
+        TOOL_OUTPUT=$(mcp_tools call --format json "${TOOL_NAME}" ${TOOL_ARGS} 2>&1)
         EXIT_CODE=$?
         set -e
         
@@ -522,7 +539,7 @@ if [ -n "${CREATED_PROFILE_ID}" ]; then
     log_info "Step 3: Cleaning up test profile..."
     
     # Call deleteProfile using key=value syntax
-    DELETE_RESULT=$(docker mcp tools call deleteProfile "profile_id=${CREATED_PROFILE_ID}" 2>&1 || echo "")
+    DELETE_RESULT=$(mcp_tools call deleteProfile "profile_id=${CREATED_PROFILE_ID}" 2>&1 || echo "")
     DELETE_EXIT_CODE=$?
     
     if [ ${DELETE_EXIT_CODE} -eq 0 ]; then

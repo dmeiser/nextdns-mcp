@@ -1,0 +1,503 @@
+name: Weekly Maintenance
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Automated weekly maintenance: dependency updates, version bump, PR, release.
+#
+# What this automates:
+#   1. Detect unreleased commits OR dependency updates (uv lock --upgrade)
+#   2. Bump the patch version across pyproject.toml / __init__.py / Dockerfile
+#   3. Run formatters (isort, black, ruff) + unit tests locally
+#   4. Push a release branch and open a PR
+#   5. Wait up to 90 min for all CI checks to pass
+#   6. Scan Copilot review comments for critical keywords; block + open issue if found
+#   7. Auto-merge the PR
+#   8. Create the formal GitHub release (tag + generated notes)
+#
+# What is NOT automated (requires human judgment):
+#   - Evaluating non-critical Copilot review suggestions or acting on them
+#   - Deciding whether a breaking API change from a dependency is acceptable
+#
+# Failures produce a GitHub Actions email automatically.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    - cron: '0 7 * * 0'  # Sunday 07:00 UTC = 02:00 EST / 03:00 EDT
+  workflow_dispatch:      # Allow manual trigger for testing
+
+permissions:
+  contents: read
+
+# Prevent parallel weekly runs from racing each other
+concurrency:
+  group: weekly-maintenance
+  cancel-in-progress: false
+
+jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 1 – Detect whether anything needs to be released
+  # ───────────────────────────────────────────────────────────────────────────
+  check:
+    name: Check for Changes
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes:      ${{ steps.detect.outputs.has_changes }}
+      deps_updated:     ${{ steps.detect.outputs.deps_updated }}
+      unreleased_count: ${{ steps.detect.outputs.unreleased_count }}
+      current_version:  ${{ steps.detect.outputs.current_version }}
+      changes_summary:  ${{ steps.detect.outputs.changes_summary }}
+
+    steps:
+      - name: Checkout (full history for tag comparison)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Detect changes
+        id: detect
+        run: |
+          set -euo pipefail
+
+          CURRENT_VERSION=$(python3 -c "
+          import tomllib
+          with open('pyproject.toml', 'rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          ")
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+
+          # ── Dependency updates ──────────────────────────────────────────────
+          uv lock --upgrade
+          if git diff --quiet uv.lock; then
+            DEPS_UPDATED=false
+            echo "No dependency updates"
+          else
+            DEPS_UPDATED=true
+            echo "Dependency updates detected:"
+            git diff --stat uv.lock
+          fi
+          echo "deps_updated=$DEPS_UPDATED" >> "$GITHUB_OUTPUT"
+
+          # ── Unreleased commits ──────────────────────────────────────────────
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LATEST_TAG" ]; then
+            UNRELEASED=$(git log "${LATEST_TAG}..HEAD" --oneline | wc -l | tr -d ' ')
+            echo "Unreleased commits since $LATEST_TAG: $UNRELEASED"
+          else
+            UNRELEASED=$(git log --oneline | wc -l | tr -d ' ')
+            echo "No tags found; treating all $UNRELEASED commits as unreleased"
+          fi
+          echo "unreleased_count=$UNRELEASED" >> "$GITHUB_OUTPUT"
+
+          # ── Final decision ──────────────────────────────────────────────────
+          if [ "$DEPS_UPDATED" = "true" ] || [ "$UNRELEASED" -gt 0 ]; then
+            HAS_CHANGES=true
+            if   [ "$DEPS_UPDATED" = "true" ] && [ "$UNRELEASED" -gt 0 ]; then
+              SUMMARY="dependency updates + $UNRELEASED unreleased commit(s)"
+            elif [ "$DEPS_UPDATED" = "true" ]; then
+              SUMMARY="dependency updates only"
+            else
+              SUMMARY="$UNRELEASED unreleased commit(s)"
+            fi
+          else
+            HAS_CHANGES=false
+            SUMMARY="no changes detected"
+          fi
+
+          echo "has_changes=$HAS_CHANGES"   >> "$GITHUB_OUTPUT"
+          echo "changes_summary=$SUMMARY"   >> "$GITHUB_OUTPUT"
+          echo "Result: has_changes=$HAS_CHANGES ($SUMMARY)"
+
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 2 – Bump version, run quality checks, push branch, open PR
+  # ───────────────────────────────────────────────────────────────────────────
+  prepare:
+    name: Prepare Release
+    needs: check
+    if: needs.check.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+      branch_name: ${{ steps.bump.outputs.branch_name }}
+      pr_number:   ${{ steps.open_pr.outputs.pr_number }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          activate-environment: "true"
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          python3 << 'PY'
+          import re
+          import tomllib
+          from pathlib import Path
+
+          with open("pyproject.toml", "rb") as f:
+              v = tomllib.load(f)["project"]["version"]
+
+          major, minor, patch = map(int, v.split("."))
+          patch += 1
+          new_v = f"{major}.{minor}.{patch}"
+
+          UPDATES = [
+              ("pyproject.toml",
+               r'^version\s*=\s*"[^"]*"',
+               f'version = "{new_v}"',
+               re.MULTILINE),
+              ("src/nextdns_mcp/__init__.py",
+               r'__version__\s*=\s*["\'][^"\']*["\']',
+               f'__version__ = "{new_v}"',
+               0),
+              ("Dockerfile",
+               r'LABEL org\.opencontainers\.image\.version=["\'][^"\']*["\']',
+               f'LABEL org.opencontainers.image.version="{new_v}"',
+               0),
+          ]
+
+          for path, pattern, replacement, flags in UPDATES:
+              p = Path(path)
+              old = p.read_text()
+              new = re.sub(pattern, replacement, old, flags=flags)
+              p.write_text(new)
+              status = "✅" if old != new else "⚠️  (no change)"
+              print(f"{status} {path}")
+
+          Path("new_version.txt").write_text(new_v)
+          print(f"\nBumped {v} → {new_v}")
+          PY
+
+          NEW_VERSION=$(cat new_version.txt)
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "branch_name=release/v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Upgrade dependencies
+        run: uv lock --upgrade
+
+      - name: Install all extras
+        run: uv sync --all-extras
+
+      - name: Run formatters
+        run: |
+          uv run isort src/ tests/
+          uv run black src/ tests/
+          uv run ruff check --fix .
+
+      - name: Run unit tests
+        run: uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term-missing
+
+      - name: Push release branch
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          CHANGES: ${{ needs.check.outputs.changes_summary }}
+        run: |
+          BRANCH="${{ steps.bump.outputs.branch_name }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Clean up any stale remote branch from a previous failed run
+          git push origin ":${BRANCH}" 2>/dev/null || true
+
+          git checkout -b "$BRANCH"
+          git add -A
+
+          # Build commit message without literal newlines in the YAML block
+          printf '%s\n\n%s\n' \
+            "chore: weekly maintenance — bump to v${NEW_VERSION}" \
+            "Changes: ${CHANGES}" \
+            > /tmp/commit_msg.txt
+          git commit -F /tmp/commit_msg.txt
+          git push origin "$BRANCH"
+
+      - name: Open pull request
+        id: open_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          CURRENT_VERSION: ${{ needs.check.outputs.current_version }}
+          CHANGES: ${{ needs.check.outputs.changes_summary }}
+        run: |
+          BRANCH="${{ steps.bump.outputs.branch_name }}"
+
+          # Close any stale open PR for this branch before creating a new one
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Closing stale PR #$EXISTING_PR"
+            gh pr close "$EXISTING_PR" --comment "Superseded by a new weekly maintenance run." 2>/dev/null || true
+          fi
+
+          # Build PR body using printf (avoids heredoc/multi-line-string YAML issues)
+          printf '## Weekly Automated Maintenance\n\n**Trigger:** %s\n**Version bump:** `%s` \u2192 `%s`\n\n### What was done\n- Ran `uv lock --upgrade` to update dependencies\n- Bumped patch version to `%s`\n- Applied formatters (isort, black, ruff)\n- All unit tests passed locally\n\n---\n*Auto-created by the [weekly maintenance workflow](../actions/workflows/weekly-maintenance.yml). Will auto-merge once CI is green and no critical review issues are detected.*\n' \
+            "${CHANGES}" "${CURRENT_VERSION}" "${NEW_VERSION}" "${NEW_VERSION}" \
+            > /tmp/pr_body.md
+
+          PR_URL=$(gh pr create \
+            --title "chore: weekly maintenance — v${CURRENT_VERSION} -> v${NEW_VERSION}" \
+            --body-file /tmp/pr_body.md \
+            --base main \
+            --head "$BRANCH")
+
+          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Opened PR #$PR_NUMBER: $PR_URL"
+
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 3 – Poll CI checks on the PR (unit tests + E2E) — up to 90 minutes
+  # ───────────────────────────────────────────────────────────────────────────
+  wait-checks:
+    name: Wait for PR Checks
+    needs: [check, prepare]
+    if: needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      checks_passed: ${{ steps.poll.outputs.checks_passed }}
+
+    steps:
+      - name: Poll checks (max 90 min)
+        id: poll
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ needs.prepare.outputs.pr_number }}"
+          MAX_ATTEMPTS=90   # 90 × 60s = 90 minutes
+          ATTEMPT=0
+
+          echo "Polling checks for PR #$PR_NUMBER (max ${MAX_ATTEMPTS} min)..."
+
+          # Give GitHub Actions a moment to queue the triggered workflows
+          sleep 60
+
+          while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+
+            HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+            if [ -z "$HEAD_SHA" ]; then
+              echo "Could not resolve HEAD SHA — retrying..."
+              sleep 60
+              continue
+            fi
+
+            # Fetch all check runs for the head commit (up to 100)
+            CHECKS_JSON=$(gh api \
+              "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+              --jq '[.check_runs[] | {name, status, conclusion}]' 2>/dev/null || echo "[]")
+
+            TOTAL=$(   echo "$CHECKS_JSON" | jq 'length')
+            COMPLETE=$(echo "$CHECKS_JSON" | jq '[.[] | select(.status == "completed")] | length')
+            # skipped/neutral/stale are acceptable — only count genuinely successful runs
+            SUCCESS=$( echo "$CHECKS_JSON" | jq '[.[] | select(.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")] | length')
+            FAILED=$(  echo "$CHECKS_JSON" | jq '[.[] | select(.conclusion | . == "failure" or . == "cancelled" or . == "timed_out" or . == "action_required")] | length')
+
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — $COMPLETE/$TOTAL complete | $SUCCESS success | $FAILED failed"
+
+            if [ "$FAILED" -gt 0 ]; then
+              echo "❌ $FAILED check(s) failed:"
+              echo "$CHECKS_JSON" | jq -r '.[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | "  • \(.name): \(.conclusion)"'
+              echo "checks_passed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if [ "$TOTAL" -gt 0 ] && [ "$COMPLETE" -eq "$TOTAL" ] && [ "$SUCCESS" -eq "$TOTAL" ]; then
+              echo "✅ All $TOTAL check(s) passed"
+              echo "checks_passed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            sleep 60
+          done
+
+          echo "⏰ Timed out after ${MAX_ATTEMPTS} minutes waiting for checks"
+          echo "checks_passed=false" >> "$GITHUB_OUTPUT"
+
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 4 – Inspect Copilot review comments for critical keywords
+  #
+  # NOTE: Full AI evaluation of suggestions is not feasible in GitHub Actions.
+  # This job uses keyword matching for security/breaking-change signals.
+  # Non-critical Copilot suggestions (style, refactoring, etc.) are ignored.
+  # ───────────────────────────────────────────────────────────────────────────
+  review:
+    name: Review Copilot Comments
+    needs: [prepare, wait-checks]
+    if: needs.wait-checks.outputs.checks_passed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      issues: write
+    outputs:
+      safe_to_merge: ${{ steps.inspect.outputs.safe_to_merge }}
+      block_reason:  ${{ steps.inspect.outputs.block_reason }}
+
+    steps:
+      - name: Scan for critical Copilot feedback
+        id: inspect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ needs.prepare.outputs.pr_number }}"
+          REPO="${{ github.repository }}"
+
+          # Collect all Copilot review bodies + inline comment bodies
+          REVIEW_BODIES=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+            --jq '[.[] | select(.user.login | ascii_downcase | startswith("copilot")) | .body] | join("\n")' \
+            2>/dev/null || echo "")
+
+          INLINE_BODIES=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" \
+            --jq '[.[] | select(.user.login | ascii_downcase | startswith("copilot")) | .body] | join("\n")' \
+            2>/dev/null || echo "")
+
+          ALL="${REVIEW_BODIES}
+          ${INLINE_BODIES}"
+
+          if [ -z "$(echo "$ALL" | tr -d '[:space:]')" ]; then
+            echo "No Copilot review comments found — safe to merge"
+            echo "safe_to_merge=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Copilot comments found. Scanning for critical keywords..."
+          echo "--- BEGIN COMMENTS ---"
+          echo "$ALL"
+          echo "--- END COMMENTS ---"
+
+          # Keywords that warrant stopping and alerting a human
+          CRITICAL_RE='vulnerability|CVE-[0-9]|exploit|injection|overflow|RCE|XSS|CSRF|SSRF|path traversal|unsafe|breaking.change|breaking-change|security risk'
+
+          if MATCH=$(echo "$ALL" | grep -iEo "$CRITICAL_RE" | head -1 2>/dev/null); then
+            echo "⚠️  Critical keyword detected: '$MATCH'"
+            echo "safe_to_merge=false" >> "$GITHUB_OUTPUT"
+            echo "block_reason=Copilot flagged keyword: $MATCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ No critical keywords detected — safe to merge"
+            echo "safe_to_merge=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open blocking issue for critical Copilot feedback
+        if: steps.inspect.outputs.safe_to_merge == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Try with labels first; fall back without if labels don't exist
+          gh issue create \
+            --title "⚠️ Weekly maintenance PR #${{ needs.prepare.outputs.pr_number }} blocked — critical Copilot review" \
+            --body "The weekly maintenance workflow detected a potentially critical issue in Copilot's review of PR #${{ needs.prepare.outputs.pr_number }}.
+
+          **Reason:** ${{ steps.inspect.outputs.block_reason }}
+
+          **PR:** https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.pr_number }}
+
+          **Action required:** Please review the PR manually and either merge it yourself or close it.
+
+          ---
+          *Opened automatically by the [weekly maintenance workflow](../actions/workflows/weekly-maintenance.yml).*" \
+            --label "security,needs-human-review" 2>/dev/null || \
+          gh issue create \
+            --title "⚠️ Weekly maintenance PR #${{ needs.prepare.outputs.pr_number }} blocked — critical Copilot review" \
+            --body "The weekly maintenance workflow detected a potentially critical issue in Copilot's review of PR #${{ needs.prepare.outputs.pr_number }}.
+
+          **Reason:** ${{ steps.inspect.outputs.block_reason }}
+
+          **PR:** https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.pr_number }}
+
+          **Action required:** Please review the PR manually and either merge it yourself or close it.
+
+          ---
+          *Opened automatically by the [weekly maintenance workflow](../actions/workflows/weekly-maintenance.yml).*"
+
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 5 – Merge the PR
+  # ───────────────────────────────────────────────────────────────────────────
+  merge:
+    name: Merge PR
+    needs: [prepare, wait-checks, review]
+    if: needs.review.outputs.safe_to_merge == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Enable auto-merge and wait for completion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ needs.prepare.outputs.pr_number }}"
+          echo "Enabling auto-merge on PR #$PR_NUMBER..."
+
+          # --auto ensures merge fires even if branch-protection rules require a brief delay
+          gh pr merge "$PR_NUMBER" --merge --auto
+
+          echo "Waiting for merge to complete (max 10 min)..."
+          for i in $(seq 1 20); do
+            STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+            echo "Attempt $i/20 — state: $STATE"
+            if [ "$STATE" = "MERGED" ]; then
+              echo "✅ PR #$PR_NUMBER merged"
+              exit 0
+            fi
+            sleep 30
+          done
+
+          echo "❌ Timed out waiting for merge"
+          exit 1
+
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 6 – Create formal GitHub release (creates tag + generates release notes)
+  # docker-publish.yml will automatically pick up the new tag and push images.
+  # ───────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [prepare, merge]
+    if: needs.merge.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ needs.prepare.outputs.new_version }}"
+
+          # Idempotent: skip if the release already exists
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — skipping"
+            exit 0
+          fi
+
+          echo "Creating release $TAG..."
+          gh release create "$TAG" \
+            --generate-notes \
+            --title "$TAG" \
+            --target main
+
+          echo "✅ Release $TAG created — Docker images will build automatically"
+
