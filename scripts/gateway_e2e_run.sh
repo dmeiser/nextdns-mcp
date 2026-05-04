@@ -6,7 +6,7 @@
 # 1. Loads configuration from .env file
 # 2. Builds the Docker image
 # 3. Imports the catalog.yaml
-# 4. Enables the NextDNS server
+# 4. Configures gateway args for legacy catalog mode (replaces 'server enable')
 # 5. Configures API key secret
 # 6. Runs all tools via run_all_tools.sh
 # 7. Cleans up gateway configuration
@@ -282,16 +282,19 @@ else
     log_success "CI mode - all configuration in catalog"
 fi
 
-# Step 4: Enable server (AFTER config is set)
+# Step 4: Configure gateway args for legacy catalog mode (AFTER config is set)
+#
+# Note: Recent versions of docker-mcp always enable the profiles feature, which makes
+# 'docker mcp server enable' an obsolete command that exits with an error.  We bypass
+# the profiles system by passing --catalog / --servers gateway args to every tool call,
+# which forces the gateway into legacy catalog mode regardless of the profiles setting.
 log_info ""
-log_info "Step 4: Enabling server..."
+log_info "Step 4: Configuring server..."
 
-if docker mcp server enable nextdns >/dev/null 2>&1; then
-    log_success "Server enabled"
-else
-    log_error "Failed to enable server"
-    exit 1
-fi
+CATALOG_NAME="nextdns-mcp"
+SERVER_NAME="nextdns"
+export NEXTDNS_GATEWAY_ARGS="--catalog=${CATALOG_NAME}.yaml --servers=${SERVER_NAME}"
+log_success "Server configured (catalog: ${CATALOG_NAME}, server: ${SERVER_NAME})"
 
 # Debug: Show API key length (not the actual key)
 log_info "API key length: ${#NEXTDNS_API_KEY} characters"
@@ -324,7 +327,7 @@ log_info "Step 5: Waiting for server readiness..."
 MAX_ATTEMPTS=30
 ATTEMPT=0
 while [ ${ATTEMPT} -lt ${MAX_ATTEMPTS} ]; do
-    if docker mcp tools ls >/dev/null 2>&1; then
+    if docker mcp tools --gateway-arg="--catalog=${CATALOG_NAME}.yaml" --gateway-arg="--servers=${SERVER_NAME}" ls >/dev/null 2>&1; then
         log_success "Server is ready"
         break
     fi
