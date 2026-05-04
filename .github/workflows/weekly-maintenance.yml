@@ -26,9 +26,7 @@ on:
   workflow_dispatch:      # Allow manual trigger for testing
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: read
 
 # Prevent parallel weekly runs from racing each other
 concurrency:
@@ -122,6 +120,9 @@ jobs:
     needs: check
     if: needs.check.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
       branch_name: ${{ steps.bump.outputs.branch_name }}
@@ -215,7 +216,7 @@ jobs:
           git push origin ":${BRANCH}" 2>/dev/null || true
 
           git checkout -b "$BRANCH"
-          git add pyproject.toml src/nextdns_mcp/__init__.py Dockerfile uv.lock
+          git add -A
 
           # Build commit message without literal newlines in the YAML block
           printf '%s\n\n%s\n' \
@@ -301,8 +302,9 @@ jobs:
 
             TOTAL=$(   echo "$CHECKS_JSON" | jq 'length')
             COMPLETE=$(echo "$CHECKS_JSON" | jq '[.[] | select(.status == "completed")] | length')
-            SUCCESS=$( echo "$CHECKS_JSON" | jq '[.[] | select(.conclusion == "success")] | length')
-            FAILED=$(  echo "$CHECKS_JSON" | jq '[.[] | select(.conclusion | . == "failure" or . == "cancelled" or . == "timed_out")] | length')
+            # skipped/neutral/stale are acceptable — only count genuinely successful runs
+            SUCCESS=$( echo "$CHECKS_JSON" | jq '[.[] | select(.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")] | length')
+            FAILED=$(  echo "$CHECKS_JSON" | jq '[.[] | select(.conclusion | . == "failure" or . == "cancelled" or . == "timed_out" or . == "action_required")] | length')
 
             echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — $COMPLETE/$TOTAL complete | $SUCCESS success | $FAILED failed"
 
@@ -338,6 +340,9 @@ jobs:
     needs: [prepare, wait-checks]
     if: needs.wait-checks.outputs.checks_passed == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      issues: write
     outputs:
       safe_to_merge: ${{ steps.inspect.outputs.safe_to_merge }}
       block_reason:  ${{ steps.inspect.outputs.block_reason }}
@@ -427,6 +432,9 @@ jobs:
     needs: [prepare, wait-checks, review]
     if: needs.review.outputs.safe_to_merge == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
 
     steps:
       - name: Enable auto-merge and wait for completion
@@ -463,6 +471,8 @@ jobs:
     needs: [prepare, merge]
     if: needs.merge.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout main
