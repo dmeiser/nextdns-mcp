@@ -497,7 +497,8 @@ jobs:
 
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Job 7 – Notify Dave on Slack regardless of the overall outcome
+  # Job 7 – Notify Dave on Slack for success outcomes only.
+  # Failures/blocks send a GitHub Actions email automatically — no Slack needed.
   # ───────────────────────────────────────────────────────────────────────────
   notify:
     name: Slack Notification
@@ -506,93 +507,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Build notification message
-        id: msg
-        run: |
-          HAS_CHANGES="${{ needs.check.outputs.has_changes }}"
-          PREPARE_RESULT="${{ needs.prepare.result }}"
-          CHECKS_PASSED="${{ needs.wait-checks.outputs.checks_passed }}"
-          SAFE_TO_MERGE="${{ needs.review.outputs.safe_to_merge }}"
-          BLOCK_REASON="${{ needs.review.outputs.block_reason }}"
-          MERGE_RESULT="${{ needs.merge.result }}"
-          RELEASE_RESULT="${{ needs.release.result }}"
-          NEW_VERSION="${{ needs.prepare.outputs.new_version }}"
-          PR_NUMBER="${{ needs.prepare.outputs.pr_number }}"
-          REPO="${{ github.repository }}"
-          DAVE="<@U01AGRUAXNV>"
-
-          if [ "$HAS_CHANGES" = "false" ]; then
-            MSG="✅ *nextdns-mcp weekly maintenance* — no updates needed this week. Nothing to release."
-            MENTION=""
-
-          elif [ "$PREPARE_RESULT" != "success" ]; then
-            MSG="❌ *nextdns-mcp weekly maintenance* — preparation failed (version bump, formatters, or unit tests). Check: https://github.com/${REPO}/actions"
-            MENTION=" $DAVE"
-
-          elif [ "$CHECKS_PASSED" = "false" ]; then
-            MSG="❌ *nextdns-mcp weekly maintenance* — CI checks failed on PR #${PR_NUMBER} for v${NEW_VERSION}. Check: https://github.com/${REPO}/pull/${PR_NUMBER}"
-            MENTION=" $DAVE"
-
-          elif [ "$SAFE_TO_MERGE" = "false" ]; then
-            MSG="⚠️ *nextdns-mcp weekly maintenance* — PR #${PR_NUMBER} (v${NEW_VERSION}) *blocked by critical Copilot review*. ${BLOCK_REASON}. A GitHub issue has been opened. https://github.com/${REPO}/pull/${PR_NUMBER}"
-            MENTION=" $DAVE"
-
-          elif [ "$MERGE_RESULT" = "success" ] && [ "$RELEASE_RESULT" = "success" ]; then
-            MSG="✅ *nextdns-mcp weekly maintenance* — *v${NEW_VERSION}* released! PR #${PR_NUMBER} merged · GitHub release created · Docker images building. https://github.com/${REPO}/releases/tag/v${NEW_VERSION}"
-            MENTION=""
-
-          elif [ "$MERGE_RESULT" = "success" ]; then
-            MSG="⚠️ *nextdns-mcp weekly maintenance* — PR #${PR_NUMBER} merged but release creation failed for v${NEW_VERSION}. Check: https://github.com/${REPO}/actions"
-            MENTION=" $DAVE"
-
-          else
-            MSG="⚠️ *nextdns-mcp weekly maintenance* — unexpected outcome for v${NEW_VERSION}. merge=${MERGE_RESULT}, release=${RELEASE_RESULT}. Check: https://github.com/${REPO}/actions"
-            MENTION=" $DAVE"
-          fi
-
-          # Write as a single line (newlines would break the output variable)
-          FULL_MSG="${MSG}${MENTION}"
-          echo "message<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$FULL_MSG"    >> "$GITHUB_OUTPUT"
-          echo "EOF"          >> "$GITHUB_OUTPUT"
-
-      - name: Send Slack notification
+      - name: Send Slack notification (success cases only)
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          HAS_CHANGES:    ${{ needs.check.outputs.has_changes }}
+          MERGE_RESULT:   ${{ needs.merge.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          NEW_VERSION:    ${{ needs.prepare.outputs.new_version }}
+          PR_NUMBER:      ${{ needs.prepare.outputs.pr_number }}
+          REPO:           ${{ github.repository }}
         run: |
-          MSG='${{ steps.msg.outputs.message }}'
-
-          if [ -z "$SLACK_WEBHOOK_URL" ]; then
-            echo "⚠️  SLACK_WEBHOOK_URL secret not configured — notification skipped"
-            echo "Message that would have been sent:"
-            echo "$MSG"
+          # Only notify on the two happy paths; all failure modes produce a
+          # GitHub Actions email already so there is no need to duplicate them.
+          if [ "$HAS_CHANGES" = "false" ]; then
+            MSG="no updates needed this week — nothing to release"
+          elif [ "$MERGE_RESULT" = "success" ] && [ "$RELEASE_RESULT" = "success" ]; then
+            MSG="v${NEW_VERSION} released! PR #${PR_NUMBER} merged, GitHub release created, Docker images building. https://github.com/${REPO}/releases/tag/v${NEW_VERSION}"
+          else
+            echo "Non-success outcome — skipping Slack (email already sent by GitHub Actions)"
             exit 0
           fi
 
-          # Use Python to build valid JSON (avoids quoting hell with special chars)
-          HTTP_CODE=$(python3 - << 'PY'
-          import json, os, sys, urllib.request
-
-          msg = os.environ.get("SLACK_MSG", "")
-          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-
-          payload = json.dumps({"text": msg}).encode()
-          req = urllib.request.Request(webhook, data=payload,
-                                       headers={"Content-Type": "application/json"})
-          try:
-              with urllib.request.urlopen(req) as r:
-                  print(r.status)
-          except Exception as e:
-              print(f"0 ({e})", file=sys.stderr)
-              sys.exit(1)
-          PY
-          )
-
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ Slack notification sent"
-          else
-            echo "⚠️  Slack returned HTTP $HTTP_CODE"
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL not configured — would have sent: nextdns-mcp: ${MSG}"
+            exit 0
           fi
-        env:
-          SLACK_MSG: ${{ steps.msg.outputs.message }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+          # Pass message via env var and use python -c one-liner to avoid JSON quoting issues
+          SLACK_MSG="nextdns-mcp: ${MSG}" python3 -c "
+          import json, os, urllib.request
+          m = os.environ['SLACK_MSG']
+          w = os.environ['SLACK_WEBHOOK_URL']
+          urllib.request.urlopen(urllib.request.Request(w, data=json.dumps({'text': m}).encode(), headers={'Content-Type': 'application/json'}))
+          print('Slack notification sent')
+          "
