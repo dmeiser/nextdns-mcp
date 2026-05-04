@@ -137,7 +137,7 @@ if [ "${ALLOW_WRITES}" = "true" ]; then
     PROFILE_NAME="E2E Test Profile ${TIMESTAMP}"
     
     # Call createProfile using key=value syntax (Docker MCP CLI format)
-    PROFILE_RESULT=$(dmcp_tools call createProfile "name=${PROFILE_NAME}" 2>&1 || echo "")
+    PROFILE_RESULT=$(mcp_tools call createProfile "name=${PROFILE_NAME}" 2>&1 || echo "")
     CREATE_EXIT_CODE=$?
     
     # Extract profile ID from response - filter out Docker MCP timing info, then parse JSON
