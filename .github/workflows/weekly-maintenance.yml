@@ -218,10 +218,9 @@ jobs:
           git add pyproject.toml src/nextdns_mcp/__init__.py Dockerfile uv.lock
 
           # Build commit message without literal newlines in the YAML block
-          printf '%s\n\n%s\n\n%s\n' \
+          printf '%s\n\n%s\n' \
             "chore: weekly maintenance — bump to v${NEW_VERSION}" \
             "Changes: ${CHANGES}" \
-            "Co-authored-by: github-actions[bot] <github-actions[bot]@users.noreply.github.com>" \
             > /tmp/commit_msg.txt
           git commit -F /tmp/commit_msg.txt
           git push origin "$BRANCH"
