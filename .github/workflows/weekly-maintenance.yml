@@ -9,18 +9,15 @@ name: Weekly Maintenance
 #   3. Run formatters (isort, black, ruff) + unit tests locally
 #   4. Push a release branch and open a PR
 #   5. Wait up to 90 min for all CI checks to pass
-#   6. Scan Copilot review comments for critical keywords; block + alert if found
+#   6. Scan Copilot review comments for critical keywords; block + open issue if found
 #   7. Auto-merge the PR
 #   8. Create the formal GitHub release (tag + generated notes)
-#   9. Notify Dave on Slack with the outcome
 #
 # What is NOT automated (requires human judgment):
 #   - Evaluating non-critical Copilot review suggestions or acting on them
 #   - Deciding whether a breaking API change from a dependency is acceptable
 #
-# Required secrets:
-#   SLACK_WEBHOOK_URL  – Incoming webhook URL for the target Slack workspace
-#                        (if absent, workflow skips Slack and logs the message)
+# Failures produce a GitHub Actions email automatically.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -495,49 +492,3 @@ jobs:
 
           echo "✅ Release $TAG created — Docker images will build automatically"
 
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # Job 7 – Notify Dave on Slack for success outcomes only.
-  # Failures/blocks send a GitHub Actions email automatically — no Slack needed.
-  # ───────────────────────────────────────────────────────────────────────────
-  notify:
-    name: Slack Notification
-    needs: [check, prepare, wait-checks, review, merge, release]
-    if: always()
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Send Slack notification (success cases only)
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          HAS_CHANGES:    ${{ needs.check.outputs.has_changes }}
-          MERGE_RESULT:   ${{ needs.merge.result }}
-          RELEASE_RESULT: ${{ needs.release.result }}
-          NEW_VERSION:    ${{ needs.prepare.outputs.new_version }}
-          PR_NUMBER:      ${{ needs.prepare.outputs.pr_number }}
-          REPO:           ${{ github.repository }}
-        run: |
-          # Only notify on the two happy paths; all failure modes produce a
-          # GitHub Actions email already so there is no need to duplicate them.
-          if [ "$HAS_CHANGES" = "false" ]; then
-            MSG="no updates needed this week — nothing to release"
-          elif [ "$MERGE_RESULT" = "success" ] && [ "$RELEASE_RESULT" = "success" ]; then
-            MSG="v${NEW_VERSION} released! PR #${PR_NUMBER} merged, GitHub release created, Docker images building. https://github.com/${REPO}/releases/tag/v${NEW_VERSION}"
-          else
-            echo "Non-success outcome — skipping Slack (email already sent by GitHub Actions)"
-            exit 0
-          fi
-
-          if [ -z "$SLACK_WEBHOOK_URL" ]; then
-            echo "SLACK_WEBHOOK_URL not configured — would have sent: nextdns-mcp: ${MSG}"
-            exit 0
-          fi
-
-          # Pass message via env var and use python -c one-liner to avoid JSON quoting issues
-          SLACK_MSG="nextdns-mcp: ${MSG}" python3 -c "
-          import json, os, urllib.request
-          m = os.environ['SLACK_MSG']
-          w = os.environ['SLACK_WEBHOOK_URL']
-          urllib.request.urlopen(urllib.request.Request(w, data=json.dumps({'text': m}).encode(), headers={'Content-Type': 'application/json'}))
-          print('Slack notification sent')
-          "
