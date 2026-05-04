@@ -102,7 +102,7 @@ log_success "Docker MCP is responding"
 
 # Parse tool names - tools ls returns an array of tool objects
 # Filter out MCP Gateway built-in tools (mcp-*, code-*) - only test NextDNS tools
-mapfile -t ALL_TOOLS < <(mcp_tools ls --format json 2>/dev/null | jq -r '.[] | .name')
+mapfile -t ALL_TOOLS < <(docker mcp tools --format json "${_MCP_GATEWAY_ARGS[@]}" ls 2>/dev/null | jq -r '.[] | .name')
 
 if [ ${#ALL_TOOLS[@]} -eq 0 ]; then
     log_error "No tools found"

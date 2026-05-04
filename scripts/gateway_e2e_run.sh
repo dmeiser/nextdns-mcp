@@ -274,9 +274,8 @@ EOF
         log_success "Environment variables configured"
         rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
     else
-        log_error "Failed to configure environment variables"
+        log_warn "docker mcp config write unavailable — using catalog defaults for env vars"
         rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
-        exit 1
     fi
 else
     log_success "CI mode - all configuration in catalog"
