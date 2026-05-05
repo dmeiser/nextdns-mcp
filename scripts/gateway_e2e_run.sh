@@ -217,6 +217,11 @@ else:
         },
     )
 
+# Strip secrets declarations so docker-mcp v0.42+ does not generate unresolvable
+# se:// fallback URIs when the Docker Desktop secrets engine is absent (CI/Linux).
+# The env: injection above is the sole source of NEXTDNS_API_KEY in this mode.
+nextdns.pop("secrets", None)
+
 with open(temp_catalog, "w", encoding="utf-8") as f:
     yaml.dump(catalog, f, default_flow_style=False, sort_keys=False)
 PY
