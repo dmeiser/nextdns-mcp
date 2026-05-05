@@ -444,8 +444,9 @@ jobs:
           PR_NUMBER="${{ needs.prepare.outputs.pr_number }}"
           echo "Enabling auto-merge on PR #$PR_NUMBER..."
 
-          # --auto ensures merge fires even if branch-protection rules require a brief delay
-          gh pr merge "$PR_NUMBER" --merge --auto
+          # Direct merge — no --auto needed because wait-checks already confirmed CI is green,
+          # and github-actions[bot] is configured as a branch-protection bypass actor.
+          gh pr merge "$PR_NUMBER" --merge
 
           echo "Waiting for merge to complete (max 10 min)..."
           for i in $(seq 1 20); do
