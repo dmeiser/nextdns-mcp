@@ -53,6 +53,7 @@ ENV_FILE="${1:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 ARTIFACTS_DIR="${PROJECT_DIR}/artifacts"
+TEMP_CATALOG=""  # Initialized early so cleanup can safely reference it
 
 # Load environment file
 if [ -z "${ENV_FILE}" ]; then
@@ -112,7 +113,7 @@ cleanup() {
             # If CI=true, or ALLOW_LIVE_WRITES is not "true", perform auto-delete (best-effort)
             if [ "${CI:-false}" = "true" ] || [ "${ALLOW_LIVE_WRITES}" != "true" ]; then
                 log_info "Auto-deleting validation profile (CI or non-writes mode)"
-                docker mcp tools --gateway-arg="--catalog=${CATALOG_NAME}.yaml" --gateway-arg="--servers=${SERVER_NAME}" call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
+                docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG:-${CATALOG_NAME:-nextdns-mcp}.yaml}" --gateway-arg="--servers=${SERVER_NAME:-nextdns}" call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
                     >/dev/null 2>&1 || log_warn "Failed to delete validation profile"
                 log_success "Validation profile deletion attempted"
             else
@@ -120,7 +121,7 @@ cleanup() {
                 echo
                 if [[ $REPLY = "yes" ]]; then
                     log_info "Deleting validation profile..."
-                    docker mcp tools --gateway-arg="--catalog=${CATALOG_NAME}.yaml" --gateway-arg="--servers=${SERVER_NAME}" call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
+                    docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG:-${CATALOG_NAME:-nextdns-mcp}.yaml}" --gateway-arg="--servers=${SERVER_NAME:-nextdns}" call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
                         >/dev/null 2>&1 || log_warn "Failed to delete validation profile"
                     log_success "Validation profile deleted"
                 else
@@ -129,6 +130,11 @@ cleanup() {
             fi
         
         rm -f "${ARTIFACTS_DIR}/validation_profile_id.txt"
+    fi
+    
+    # Cleanup injected catalog temp file (after profile deletion which may use gateway)
+    if [ -n "${TEMP_CATALOG}" ] && [ -f "${TEMP_CATALOG}" ]; then
+        rm -f "${TEMP_CATALOG}"
     fi
     
     log_success "Cleanup complete"
@@ -234,11 +240,10 @@ PY
     fi
 fi
 
-# Import catalog
+# Import catalog (also keeps the injected file available for direct-path gateway access)
 log_info "Importing catalog..."
 if docker mcp catalog import "${TEMP_CATALOG}" >/dev/null 2>&1; then
     log_success "Catalog imported"
-    rm -f "${TEMP_CATALOG}"
 else
     log_error "Failed to import catalog"
     rm -f "${TEMP_CATALOG}"
@@ -297,7 +302,9 @@ log_info "Step 4: Configuring server..."
 
 CATALOG_NAME="nextdns-mcp"
 SERVER_NAME="nextdns"
-export NEXTDNS_GATEWAY_ARGS="--catalog=${CATALOG_NAME}.yaml --servers=${SERVER_NAME}"
+# Use the absolute path of the injected catalog file so the gateway reads it directly
+# (bypasses ~/.docker/mcp/catalogs/ lookup which can fail silently in CI environments)
+export NEXTDNS_GATEWAY_ARGS="--catalog=${TEMP_CATALOG} --servers=${SERVER_NAME}"
 log_success "Server configured (catalog: ${CATALOG_NAME}, server: ${SERVER_NAME})"
 
 # Debug: Show API key length (not the actual key)
@@ -331,15 +338,19 @@ log_info "Step 5: Waiting for server readiness..."
 MAX_ATTEMPTS=30
 ATTEMPT=0
 while [ ${ATTEMPT} -lt ${MAX_ATTEMPTS} ]; do
-    if docker mcp tools --gateway-arg="--catalog=${CATALOG_NAME}.yaml" --gateway-arg="--servers=${SERVER_NAME}" ls >/dev/null 2>&1; then
-        log_success "Server is ready"
+    TOOL_COUNT=$(docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG}" --gateway-arg="--servers=${SERVER_NAME}" ls 2>/dev/null | grep -c '^ - ' || true)
+    if [ "${TOOL_COUNT}" -gt 0 ]; then
+        log_success "Server is ready (${TOOL_COUNT} tools available)"
         break
     fi
     
     ATTEMPT=$((ATTEMPT + 1))
     if [ ${ATTEMPT} -ge ${MAX_ATTEMPTS} ]; then
-        log_error "Server readiness timeout"
-        log_error "Check logs: docker mcp logs"
+        log_error "Server readiness timeout — no tools found after ${MAX_ATTEMPTS} attempts"
+        log_error "Catalog: ${TEMP_CATALOG}"
+        log_error "Debug output:"
+        docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG}" --gateway-arg="--servers=${SERVER_NAME}" ls 2>&1 | head -20 >&2 || true
+        cat "${TEMP_CATALOG}" | head -30 >&2 || true
         exit 1
     fi
     
