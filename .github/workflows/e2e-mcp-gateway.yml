@@ -57,7 +57,7 @@ jobs:
 
       - name: Build docker-mcp plugin from source
         run: |
-          # Clone the MCP Gateway repo
+          # Clone the MCP Gateway repo at latest HEAD
           git clone --depth 1 https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway
           cd /tmp/mcp-gateway
           

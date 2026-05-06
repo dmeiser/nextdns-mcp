@@ -6,7 +6,7 @@
 # 1. Loads configuration from .env file
 # 2. Builds the Docker image
 # 3. Imports the catalog.yaml
-# 4. Enables the NextDNS server
+# 4. Configures gateway args for legacy catalog mode (replaces 'server enable')
 # 5. Configures API key secret
 # 6. Runs all tools via run_all_tools.sh
 # 7. Cleans up gateway configuration
@@ -53,6 +53,7 @@ ENV_FILE="${1:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 ARTIFACTS_DIR="${PROJECT_DIR}/artifacts"
+TEMP_CATALOG=""  # Initialized early so cleanup can safely reference it
 
 # Load environment file
 if [ -z "${ENV_FILE}" ]; then
@@ -112,7 +113,7 @@ cleanup() {
             # If CI=true, or ALLOW_LIVE_WRITES is not "true", perform auto-delete (best-effort)
             if [ "${CI:-false}" = "true" ] || [ "${ALLOW_LIVE_WRITES}" != "true" ]; then
                 log_info "Auto-deleting validation profile (CI or non-writes mode)"
-                docker mcp tools call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
+                docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG:-${CATALOG_NAME:-nextdns-mcp}.yaml}" --gateway-arg="--servers=${SERVER_NAME:-nextdns}" call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
                     >/dev/null 2>&1 || log_warn "Failed to delete validation profile"
                 log_success "Validation profile deletion attempted"
             else
@@ -120,7 +121,7 @@ cleanup() {
                 echo
                 if [[ $REPLY = "yes" ]]; then
                     log_info "Deleting validation profile..."
-                    docker mcp tools call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
+                    docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG:-${CATALOG_NAME:-nextdns-mcp}.yaml}" --gateway-arg="--servers=${SERVER_NAME:-nextdns}" call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
                         >/dev/null 2>&1 || log_warn "Failed to delete validation profile"
                     log_success "Validation profile deleted"
                 else
@@ -129,6 +130,11 @@ cleanup() {
             fi
         
         rm -f "${ARTIFACTS_DIR}/validation_profile_id.txt"
+    fi
+    
+    # Cleanup injected catalog temp file (after profile deletion which may use gateway)
+    if [ -n "${TEMP_CATALOG}" ] && [ -f "${TEMP_CATALOG}" ]; then
+        rm -f "${TEMP_CATALOG}"
     fi
     
     log_success "Cleanup complete"
@@ -217,6 +223,11 @@ else:
         },
     )
 
+# Strip secrets declarations so docker-mcp v0.42+ does not generate unresolvable
+# se:// fallback URIs when the Docker Desktop secrets engine is absent (CI/Linux).
+# The env: injection above is the sole source of NEXTDNS_API_KEY in this mode.
+nextdns.pop("secrets", None)
+
 with open(temp_catalog, "w", encoding="utf-8") as f:
     yaml.dump(catalog, f, default_flow_style=False, sort_keys=False)
 PY
@@ -229,11 +240,10 @@ PY
     fi
 fi
 
-# Import catalog
+# Import catalog (also keeps the injected file available for direct-path gateway access)
 log_info "Importing catalog..."
 if docker mcp catalog import "${TEMP_CATALOG}" >/dev/null 2>&1; then
     log_success "Catalog imported"
-    rm -f "${TEMP_CATALOG}"
 else
     log_error "Failed to import catalog"
     rm -f "${TEMP_CATALOG}"
@@ -274,24 +284,28 @@ EOF
         log_success "Environment variables configured"
         rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
     else
-        log_error "Failed to configure environment variables"
+        log_warn "docker mcp config write unavailable — using catalog defaults for env vars"
         rm -f "${ARTIFACTS_DIR}/config-temp.yaml"
-        exit 1
     fi
 else
     log_success "CI mode - all configuration in catalog"
 fi
 
-# Step 4: Enable server (AFTER config is set)
+# Step 4: Configure gateway args for legacy catalog mode (AFTER config is set)
+#
+# Note: Recent versions of docker-mcp always enable the profiles feature, which makes
+# 'docker mcp server enable' an obsolete command that exits with an error.  We bypass
+# the profiles system by passing --catalog / --servers gateway args to every tool call,
+# which forces the gateway into legacy catalog mode regardless of the profiles setting.
 log_info ""
-log_info "Step 4: Enabling server..."
+log_info "Step 4: Configuring server..."
 
-if docker mcp server enable nextdns >/dev/null 2>&1; then
-    log_success "Server enabled"
-else
-    log_error "Failed to enable server"
-    exit 1
-fi
+CATALOG_NAME="nextdns-mcp"
+SERVER_NAME="nextdns"
+# Use the absolute path of the injected catalog file so the gateway reads it directly
+# (bypasses ~/.docker/mcp/catalogs/ lookup which can fail silently in CI environments)
+export NEXTDNS_GATEWAY_ARGS="--catalog=${TEMP_CATALOG} --servers=${SERVER_NAME}"
+log_success "Server configured (catalog: ${CATALOG_NAME}, server: ${SERVER_NAME})"
 
 # Debug: Show API key length (not the actual key)
 log_info "API key length: ${#NEXTDNS_API_KEY} characters"
@@ -324,15 +338,19 @@ log_info "Step 5: Waiting for server readiness..."
 MAX_ATTEMPTS=30
 ATTEMPT=0
 while [ ${ATTEMPT} -lt ${MAX_ATTEMPTS} ]; do
-    if docker mcp tools ls >/dev/null 2>&1; then
-        log_success "Server is ready"
+    TOOL_COUNT=$(docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG}" --gateway-arg="--servers=${SERVER_NAME}" ls 2>/dev/null | grep -c '^ - ' || true)
+    if [ "${TOOL_COUNT}" -gt 0 ]; then
+        log_success "Server is ready (${TOOL_COUNT} tools available)"
         break
     fi
     
     ATTEMPT=$((ATTEMPT + 1))
     if [ ${ATTEMPT} -ge ${MAX_ATTEMPTS} ]; then
-        log_error "Server readiness timeout"
-        log_error "Check logs: docker mcp logs"
+        log_error "Server readiness timeout — no tools found after ${MAX_ATTEMPTS} attempts"
+        log_error "Catalog: ${TEMP_CATALOG}"
+        log_error "Debug output:"
+        docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG}" --gateway-arg="--servers=${SERVER_NAME}" ls 2>&1 | head -20 >&2 || true
+        cat "${TEMP_CATALOG}" | head -30 >&2 || true
         exit 1
     fi
     
