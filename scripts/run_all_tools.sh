@@ -275,7 +275,7 @@ get_tool_args() {
             echo "profile_id=${PROFILE_ID}"
             ;;
         dohLookup)
-            echo "domain=example.com" "profile_id=${PROFILE_ID}" "record_type=A"
+            echo "domain=example.com" "profile_id=\"${PROFILE_ID}\"" "record_type=A"
             ;;
         listProfiles)
             echo "{}"
