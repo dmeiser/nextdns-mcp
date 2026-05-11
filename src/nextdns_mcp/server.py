@@ -29,7 +29,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 import httpx
 import mcp.types
@@ -41,11 +41,12 @@ from fastmcp.server.providers.openapi import RouteMap
 from fastmcp.server.providers.openapi.routing import DEFAULT_ROUTE_MAPPINGS
 from fastmcp.tools import ToolResult
 
-# Pydantic import for allow_extra_fields_component_fn
+# Pydantic import for allow_extra_fields_component_fn and BeforeValidator
 try:
-    from pydantic import BaseModel
+    from pydantic import BaseModel, BeforeValidator
 except ImportError:
     BaseModel = None  # type: ignore
+    BeforeValidator = None  # type: ignore
 
 from .config import (
     DNS_STATUS_CODES,
@@ -64,6 +65,18 @@ from .config import (
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+# Profile IDs from docker MCP CLI may arrive as integers when the 6-char hex ID
+# happens to contain only decimal digits (e.g., "315244"). Use BeforeValidator
+# to coerce int inputs to str while preserving None for the default-profile fallback.
+def _coerce_profile_id(v: object) -> object:
+    """Coerce non-None profile_id values to str; leave None as-is."""
+    return str(v) if v is not None else v
+
+
+_coerce_to_str = BeforeValidator(_coerce_profile_id) if BeforeValidator is not None else lambda x: x
+OptionalProfileId = Annotated[Optional[str], _coerce_to_str]
 
 
 class StripExtraFieldsMiddleware(Middleware):
@@ -555,7 +568,7 @@ async def doh_lookup(doh_url: str, domain: str, record_type: str, target_profile
         }
 
 
-async def _dohLookup_impl(domain: str, profile_id: Optional[str] = None, record_type: str = "A") -> dict[str, Any]:
+async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, record_type: str = "A") -> dict[str, Any]:
     """Implementation of DoH lookup functionality.
 
     See dohLookup() for full documentation.
@@ -582,7 +595,7 @@ async def _dohLookup_impl(domain: str, profile_id: Optional[str] = None, record_
 
 # Register the DoH lookup tool with MCP
 @mcp_server.tool()
-async def dohLookup(domain: str, profile_id: Optional[str] = None, record_type: str = "A") -> dict[str, Any]:
+async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_type: str = "A") -> dict[str, Any]:
     """Perform a DNS-over-HTTPS lookup using a NextDNS profile.
 
     This tool performs a DNS query through NextDNS's DoH endpoint, allowing you to test
