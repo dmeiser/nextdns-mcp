@@ -257,3 +257,58 @@ async def test_mock_httpx_client_fixture_usage(mock_httpx_client, mock_profile_i
         mock_client_class.return_value = mock_httpx_client
         result = await dohLookup("google.com", mock_profile_id, "A")
         assert result["Status"] == 0
+
+
+class TestOptionalProfileIdCoercion:
+    """Test OptionalProfileId coerces int profile_id to str via FastMCP TypeAdapter."""
+
+    @pytest.mark.asyncio
+    async def test_integer_profile_id_coerced_to_str(self):
+        """Numeric-only profile ID (e.g. 315244) arriving as int must be coerced to str."""
+        from fastmcp import FastMCP
+
+        from nextdns_mcp.server import OptionalProfileId
+
+        mcp = FastMCP("test", strict_input_validation=False)
+
+        @mcp.tool()
+        async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_type: str = "A") -> str:
+            return f"{profile_id!r}"
+
+        tool = await mcp.get_tool("dohLookup")
+        result = await tool.run({"domain": "example.com", "profile_id": 315244, "record_type": "A"})
+        assert result.content[0].text == "'315244'"
+
+    @pytest.mark.asyncio
+    async def test_none_profile_id_stays_none(self):
+        """None profile_id must not be coerced to the string 'None'."""
+        from fastmcp import FastMCP
+
+        from nextdns_mcp.server import OptionalProfileId
+
+        mcp = FastMCP("test", strict_input_validation=False)
+
+        @mcp.tool()
+        async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_type: str = "A") -> str:
+            return f"{profile_id!r}"
+
+        tool = await mcp.get_tool("dohLookup")
+        result = await tool.run({"domain": "example.com", "record_type": "A"})
+        assert result.content[0].text == "None"
+
+    @pytest.mark.asyncio
+    async def test_string_profile_id_unchanged(self):
+        """String profile IDs (the normal case) pass through unchanged."""
+        from fastmcp import FastMCP
+
+        from nextdns_mcp.server import OptionalProfileId
+
+        mcp = FastMCP("test", strict_input_validation=False)
+
+        @mcp.tool()
+        async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_type: str = "A") -> str:
+            return f"{profile_id!r}"
+
+        tool = await mcp.get_tool("dohLookup")
+        result = await tool.run({"domain": "example.com", "profile_id": "4faf86", "record_type": "A"})
+        assert result.content[0].text == "'4faf86'"

@@ -66,10 +66,16 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+
 # Profile IDs from docker MCP CLI may arrive as integers when the 6-char hex ID
 # happens to contain only decimal digits (e.g., "315244"). Use BeforeValidator
-# to coerce any incoming value to str before pydantic validates Optional[str].
-_coerce_to_str = BeforeValidator(str) if BeforeValidator is not None else lambda x: x
+# to coerce int inputs to str while preserving None for the default-profile fallback.
+def _coerce_profile_id(v: object) -> object:
+    """Coerce non-None profile_id values to str; leave None as-is."""
+    return str(v) if v is not None else v
+
+
+_coerce_to_str = BeforeValidator(_coerce_profile_id) if BeforeValidator is not None else lambda x: x
 OptionalProfileId = Annotated[Optional[str], _coerce_to_str]
 
 
