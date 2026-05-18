@@ -267,6 +267,9 @@ jobs:
     needs: [check, prepare]
     if: needs.prepare.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      checks: read
     outputs:
       checks_passed: ${{ steps.poll.outputs.checks_passed }}
 
