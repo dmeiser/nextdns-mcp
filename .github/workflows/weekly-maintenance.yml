@@ -27,6 +27,8 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
+  checks: read
 
 # Prevent parallel weekly runs from racing each other
 concurrency:
