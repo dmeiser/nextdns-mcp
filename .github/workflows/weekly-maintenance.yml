@@ -122,6 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      issues: write
       pull-requests: write
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
@@ -249,6 +250,7 @@ jobs:
             > /tmp/pr_body.md
 
           PR_URL=$(gh pr create \
+            --label "bump-patch" \
             --title "chore: weekly maintenance — v${CURRENT_VERSION} -> v${NEW_VERSION}" \
             --body-file /tmp/pr_body.md \
             --base main \
@@ -504,4 +506,3 @@ jobs:
             --target main
 
           echo "✅ Release $TAG created — Docker images will build automatically"
-
