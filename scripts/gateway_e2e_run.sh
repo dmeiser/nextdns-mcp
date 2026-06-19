@@ -358,6 +358,10 @@ while [ ${ATTEMPT} -lt ${MAX_ATTEMPTS} ]; do
         docker ps -a >&2 || true
         
         echo "" >&2
+        log_error "=== E2E Diagnostics: docker mcp logs ==="
+        docker mcp logs 2>&1 | head -100 >&2 || true
+        
+        echo "" >&2
         log_error "=== E2E Diagnostics: nextdns-mcp Container Logs ==="
         for container in $(docker ps -a --filter "ancestor=nextdns-mcp:latest" --format "{{.ID}}" 2>/dev/null || true); do
             log_warn "Logs for container ${container}:"
