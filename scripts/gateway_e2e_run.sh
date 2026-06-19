@@ -147,11 +147,19 @@ trap cleanup EXIT INT TERM
 log_info ""
 log_info "Step 1: Building Docker image..."
 
-cd "${PROJECT_DIR}"
 if docker build -t nextdns-mcp:latest . >/dev/null 2>&1; then
     log_success "Docker image built"
 else
     log_error "Failed to build Docker image"
+    exit 1
+fi
+
+log_info "Verifying built Docker image can run..."
+if docker run --rm nextdns-mcp:latest python -c "import nextdns_mcp; print('Import OK')" >/dev/null 2>&1; then
+    log_success "Docker image verification passed"
+else
+    log_error "Docker image failed verification! Output:"
+    docker run --rm nextdns-mcp:latest python -c "import nextdns_mcp; print('Import OK')" || true
     exit 1
 fi
 
@@ -349,7 +357,7 @@ while [ ${ATTEMPT} -lt ${MAX_ATTEMPTS} ]; do
         log_error "Server readiness timeout — no tools found after ${MAX_ATTEMPTS} attempts"
         log_error "Catalog: ${TEMP_CATALOG}"
         log_error "Debug output:"
-        docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG}" --gateway-arg="--servers=${SERVER_NAME}" ls 2>&1 | head -20 >&2 || true
+        docker mcp tools --verbose --gateway-arg="--catalog=${TEMP_CATALOG}" --gateway-arg="--servers=${SERVER_NAME}" ls 2>&1 | head -50 >&2 || true
         cat "${TEMP_CATALOG}" | head -30 >&2 || true
         
         # Additional diagnostics to locate container crash logs
