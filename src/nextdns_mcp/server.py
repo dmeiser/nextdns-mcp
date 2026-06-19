@@ -31,6 +31,9 @@ import sys
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
+# Disable FastMCP automatic update checks to prevent startup delays and hangs in offline/CI environments
+os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
+
 import httpx
 import mcp.types
 import yaml
