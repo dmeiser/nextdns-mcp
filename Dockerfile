@@ -33,7 +33,7 @@ LABEL org.opencontainers.image.description="Model Context Protocol server for Ne
 LABEL org.opencontainers.image.authors="NextDNS MCP Contributors"
 LABEL org.opencontainers.image.source="https://github.com/dmeiser/nextdns-mcp"
 LABEL org.opencontainers.image.documentation="https://github.com/dmeiser/nextdns-mcp/blob/main/README.md"
-LABEL org.opencontainers.image.version="2.0.19"
+LABEL org.opencontainers.image.version="2.0.20"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # MCP-specific labels
@@ -63,7 +63,8 @@ RUN useradd --create-home appuser
 USER appuser
 
 # Set PYTHONPATH to include /app/src so Python can find the nextdns_mcp module
-ENV PYTHONPATH=/app/src
+ENV PYTHONPATH=/app/src \
+    FASTMCP_CHECK_FOR_UPDATES=off
 
 # Command to run the application
 CMD ["python", "-m", "nextdns_mcp.server"]

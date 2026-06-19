@@ -21,6 +21,9 @@ registry:
 
     # Environment variables for configuration
     env:
+      - name: FASTMCP_CHECK_FOR_UPDATES
+        description: "Disable FastMCP PyPI update checks (off/stable/prerelease)"
+        value: "off"
       - name: NEXTDNS_DEFAULT_PROFILE
         description: "Default NextDNS profile ID to use when profile_id is omitted"
         value: ""

@@ -159,8 +159,9 @@ fi
 log_info ""
 log_info "Step 2: Preparing catalog..."
 
-# Copy catalog to temp location
-TEMP_CATALOG="${ARTIFACTS_DIR}/catalog-temp.yaml"
+# Copy catalog to temp location (must resolve within ~/.docker/mcp/catalogs/ to pass Docker MCP validation checks)
+mkdir -p "$HOME/.docker/mcp/catalogs"
+TEMP_CATALOG="$HOME/.docker/mcp/catalogs/catalog-temp.yaml"
 cp "${PROJECT_DIR}/catalog.yaml" "${TEMP_CATALOG}"
 
 # Determine whether to inject the API key directly into the catalog env section.
