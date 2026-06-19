@@ -18,7 +18,7 @@
 # - Works with both OpenAPI-imported and custom @mcp_server.tool() decorated tools
 #
 # See docs/troubleshooting.md for details.
-# ---
+# ruff: noqa: E402
 """NextDNS MCP Server - FastMCP-based implementation using OpenAPI spec.
 
 SPDX-License-Identifier: MIT
@@ -31,13 +31,17 @@ import sys
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
+from dotenv import load_dotenv
+
+# Load environment variables from .env file first
+load_dotenv()
+
 # Disable FastMCP automatic update checks to prevent startup delays and hangs in offline/CI environments
 os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
 
 import httpx
 import mcp.types
 import yaml
-from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.providers.openapi import RouteMap
@@ -63,9 +67,6 @@ from .config import (
     get_http_timeout,
     is_read_only,
 )
-
-# Load environment variables from .env file
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 
