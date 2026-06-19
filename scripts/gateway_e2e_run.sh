@@ -351,6 +351,18 @@ while [ ${ATTEMPT} -lt ${MAX_ATTEMPTS} ]; do
         log_error "Debug output:"
         docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG}" --gateway-arg="--servers=${SERVER_NAME}" ls 2>&1 | head -20 >&2 || true
         cat "${TEMP_CATALOG}" | head -30 >&2 || true
+        
+        # Additional diagnostics to locate container crash logs
+        echo "" >&2
+        log_error "=== E2E Diagnostics: Docker Containers ==="
+        docker ps -a >&2 || true
+        
+        echo "" >&2
+        log_error "=== E2E Diagnostics: nextdns-mcp Container Logs ==="
+        for container in $(docker ps -a --filter "ancestor=nextdns-mcp:latest" --format "{{.ID}}" 2>/dev/null || true); do
+            log_warn "Logs for container ${container}:"
+            docker logs "${container}" 2>&1 | head -50 >&2 || true
+        done
         exit 1
     fi
     
