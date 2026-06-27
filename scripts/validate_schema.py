@@ -6,9 +6,10 @@ Used by E2E tests to catch breaking API changes.
 
 import json
 import sys
-import yaml
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
+import yaml
 
 
 def load_openapi_spec(spec_path: str) -> Dict[str, Any]:

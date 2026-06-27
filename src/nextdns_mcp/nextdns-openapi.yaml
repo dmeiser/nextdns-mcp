@@ -104,6 +104,9 @@ components:
             cache:
               type: boolean
               description: Enable caching
+        web3:
+          type: boolean
+          description: Enable Web3 resolver
         rewrites:
           type: array
           description: DNS rewrites configuration
@@ -302,6 +305,30 @@ components:
               queries:
                 type: integer
 
+    RewriteEntry:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          enum: [A, AAAA, CNAME]
+        content:
+          type: string
+
+    RewriteEntryInput:
+      type: object
+      required: [name, content]
+      properties:
+        name:
+          type: string
+          description: Domain to rewrite
+        content:
+          type: string
+          description: Target IP or canonical name
+
     ContentListEntry:
       type: object
       properties:
@@ -373,16 +400,92 @@ components:
         type: string
       example: '2024-01-31T23:59:59Z'
 
-    Limit:
+    Cursor:
+      name: cursor
+      in: query
+      description: Pagination cursor from the previous response's `meta.pagination.cursor`
+      schema:
+        type: string
+
+    Device:
+      name: device
+      in: query
+      description: Filter by device ID, or `__UNIDENTIFIED__` for unidentified devices
+      schema:
+        type: string
+
+    Status:
+      name: status
+      in: query
+      description: Filter results by query status
+      schema:
+        type: string
+        enum: [default, blocked, allowed]
+
+    Root:
+      name: root
+      in: query
+      description: For domain analytics, return root domains instead of full hostnames
+      schema:
+        type: boolean
+
+    Raw:
+      name: raw
+      in: query
+      description: If true, return all DNS query types without deduplication or noise filtering
+      schema:
+        type: boolean
+        default: false
+
+    Interval:
+      name: interval
+      in: query
+      description: Time-series window size in seconds
+      schema:
+        type: integer
+
+    Alignment:
+      name: alignment
+      in: query
+      description: How to align tumbling windows when the time range is not an exact multiple of the interval
+      schema:
+        type: string
+        enum: [start, end]
+
+    Timezone:
+      name: timezone
+      in: query
+      description: IANA time zone name (e.g. America/New_York)
+      schema:
+        type: string
+
+    Partials:
+      name: partials
+      in: query
+      description: Whether to include partial tumbling windows at the start/end of the range
+      schema:
+        type: string
+        enum: [none, start, end, all]
+
+    AnalyticsLimit:
       name: limit
       in: query
-      description: Maximum number of results to return
+      description: Maximum analytics results to return
       schema:
         type: integer
         minimum: 1
+        maximum: 500
+        default: 10
+
+    LogsLimit:
+      name: limit
+      in: query
+      description: Maximum log entries to return
+      schema:
+        type: integer
+        minimum: 10
         maximum: 1000
         default: 100
-      example: 100
 
 paths:
   # Profile Management
@@ -709,6 +812,76 @@ paths:
         '204':
           description: Performance settings updated
 
+  # Rewrites
+  /profiles/{profile_id}/rewrites:
+    get:
+      summary: List DNS rewrites
+      description: |
+        Returns all DNS rewrite entries for a profile. Rewrites let you override the DNS response for a domain.
+      operationId: listRewrites
+      tags:
+        - Rewrites
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      responses:
+        '200':
+          description: List of rewrite entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RewriteEntry'
+
+    post:
+      summary: Add a DNS rewrite
+      description: |
+        Creates a new DNS rewrite entry. The type (A, AAAA, CNAME) is inferred from the content.
+      operationId: addRewrite
+      tags:
+        - Rewrites
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RewriteEntryInput'
+      responses:
+        '200':
+          description: Created rewrite entry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RewriteEntry'
+
+  /profiles/{profile_id}/rewrites/{entry_id}:
+    delete:
+      summary: Delete a DNS rewrite
+      description: |
+        Deletes a DNS rewrite entry by its `id` (not its domain name).
+      operationId: deleteRewrite
+      tags:
+        - Rewrites
+      parameters:
+        - $ref: '#/components/parameters/ProfileId'
+        - name: entry_id
+          in: path
+          required: true
+          description: The `id` of the rewrite entry to delete
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Rewrite deleted successfully
+
   # Analytics - Status
   /profiles/{profile_id}/analytics/status:
     get:
@@ -721,6 +894,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
       responses:
         '200':
           description: Status analytics data
@@ -740,6 +915,12 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/Interval'
+        - $ref: '#/components/parameters/Alignment'
+        - $ref: '#/components/parameters/Timezone'
+        - $ref: '#/components/parameters/Partials'
       responses:
         '200':
           description: Status analytics time-series data
@@ -760,19 +941,11 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
-        - $ref: '#/components/parameters/Limit'
-        - name: status
-          in: query
-          description: Filter by domain status
-          schema:
-            type: string
-            enum: [default, blocked, allowed]
-        - name: root
-          in: query
-          description: Group by root domain
-          schema:
-            type: boolean
-            default: false
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/AnalyticsLimit'
+        - $ref: '#/components/parameters/Status'
+        - $ref: '#/components/parameters/Root'
       responses:
         '200':
           description: Top domains analytics data
@@ -793,6 +966,9 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/AnalyticsLimit'
       responses:
         '200':
           description: Query type analytics data
@@ -812,6 +988,12 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/Interval'
+        - $ref: '#/components/parameters/Alignment'
+        - $ref: '#/components/parameters/Timezone'
+        - $ref: '#/components/parameters/Partials'
       responses:
         '200':
           description: Query type time-series data
@@ -832,6 +1014,9 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/AnalyticsLimit'
       responses:
         '200':
           description: Blocking reasons analytics data
@@ -851,6 +1036,12 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/Interval'
+        - $ref: '#/components/parameters/Alignment'
+        - $ref: '#/components/parameters/Timezone'
+        - $ref: '#/components/parameters/Partials'
       responses:
         '200':
           description: Blocking reasons time-series data
@@ -871,7 +1062,9 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
-        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/AnalyticsLimit'
       responses:
         '200':
           description: Client IP analytics data
@@ -891,6 +1084,12 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/Interval'
+        - $ref: '#/components/parameters/Alignment'
+        - $ref: '#/components/parameters/Timezone'
+        - $ref: '#/components/parameters/Partials'
       responses:
         '200':
           description: Client IP time-series data
@@ -911,6 +1110,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
       responses:
         '200':
           description: DNSSEC analytics data
@@ -930,6 +1131,12 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/Interval'
+        - $ref: '#/components/parameters/Alignment'
+        - $ref: '#/components/parameters/Timezone'
+        - $ref: '#/components/parameters/Partials'
       responses:
         '200':
           description: DNSSEC time-series data
@@ -950,6 +1157,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
       responses:
         '200':
           description: Encryption analytics data
@@ -969,6 +1178,12 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/Interval'
+        - $ref: '#/components/parameters/Alignment'
+        - $ref: '#/components/parameters/Timezone'
+        - $ref: '#/components/parameters/Partials'
       responses:
         '200':
           description: Encryption time-series data
@@ -989,6 +1204,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
       responses:
         '200':
           description: IP version analytics data
@@ -1008,6 +1225,12 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/Interval'
+        - $ref: '#/components/parameters/Alignment'
+        - $ref: '#/components/parameters/Timezone'
+        - $ref: '#/components/parameters/Partials'
       responses:
         '200':
           description: IP version time-series data
@@ -1028,6 +1251,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
       responses:
         '200':
           description: Protocol analytics data
@@ -1047,6 +1272,12 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/Interval'
+        - $ref: '#/components/parameters/Alignment'
+        - $ref: '#/components/parameters/Timezone'
+        - $ref: '#/components/parameters/Partials'
       responses:
         '200':
           description: Protocol time-series data
@@ -1067,7 +1298,9 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
-        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/AnalyticsLimit'
         - name: type
           in: query
           required: true
@@ -1094,6 +1327,12 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/Interval'
+        - $ref: '#/components/parameters/Alignment'
+        - $ref: '#/components/parameters/Timezone'
+        - $ref: '#/components/parameters/Partials'
         - name: type
           in: query
           required: true
@@ -1121,6 +1360,9 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/AnalyticsLimit'
       responses:
         '200':
           description: Device analytics data
@@ -1140,6 +1382,12 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Device'
+        - $ref: '#/components/parameters/Interval'
+        - $ref: '#/components/parameters/Alignment'
+        - $ref: '#/components/parameters/Timezone'
+        - $ref: '#/components/parameters/Partials'
       responses:
         '200':
           description: Device time-series data
@@ -2095,7 +2343,8 @@ paths:
         - $ref: '#/components/parameters/ProfileId'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
-        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/LogsLimit'
+        - $ref: '#/components/parameters/Raw'
         - name: device
           in: query
           description: Filter by device ID
@@ -2230,6 +2479,8 @@ tags:
     description: Profile management operations
   - name: Settings
     description: Profile configuration settings
+  - name: Rewrites
+    description: DNS rewrite management
   - name: Analytics
     description: DNS query analytics and statistics
   - name: Logs

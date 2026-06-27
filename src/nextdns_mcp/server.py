@@ -24,10 +24,12 @@
 SPDX-License-Identifier: MIT
 """
 
+import io
 import logging
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
@@ -40,6 +42,9 @@ load_dotenv()
 os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
 
 import httpx
+
+# Use a non-interactive matplotlib backend so plotting works in headless/CI environments
+import matplotlib
 import mcp.types
 import yaml
 from fastmcp import FastMCP
@@ -47,11 +52,16 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.providers.openapi import RouteMap
 from fastmcp.server.providers.openapi.routing import DEFAULT_ROUTE_MAPPINGS
 from fastmcp.tools import ToolResult
+from fastmcp.utilities.types import Image
+
+matplotlib.use("Agg")
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 
 # Pydantic import for allow_extra_fields_component_fn and BeforeValidator
 try:
     from pydantic import BaseModel, BeforeValidator
-except ImportError:
+except ImportError:  # pragma: no cover
     BaseModel = None  # type: ignore
     BeforeValidator = None  # type: ignore
 
@@ -637,6 +647,441 @@ async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_ty
         result = await dohLookup("google.com", "b282de", "AAAA")
     """
     return await _dohLookup_impl(domain, profile_id, record_type)
+
+
+# Metrics supported by the analytics time-series plotting tools.
+_PLOT_ANALYTICS_METRICS = frozenset(
+    {
+        "status",
+        "domains",
+        "devices",
+        "protocols",
+        "queryTypes",
+        "ipVersions",
+        "dnssec",
+        "encryption",
+        "reasons",
+        "ips",
+    }
+)
+
+
+def _extract_series_label(series: dict[str, Any], index: int) -> str:
+    """Return a human-readable label for a time-series data entry.
+
+    Series objects from NextDNS usually contain an identifying field such as
+    `name`, `status`, or `protocol` in addition to the `queries` array. This
+    helper tries common fields and falls back to a generic index label.
+    """
+    for key in ("name", "status", "protocol", "version", "id"):
+        value = series.get(key)
+        if value is not None and value != "":
+            return str(value)
+    if "validated" in series:
+        return "validated" if series["validated"] else "not_validated"
+    if "encrypted" in series:
+        return "encrypted" if series["encrypted"] else "unencrypted"
+    return f"series_{index}"
+
+
+def _parse_series_timestamp(value: str) -> datetime:
+    """Parse an ISO 8601 timestamp returned by the NextDNS API."""
+    normalized = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.strptime(normalized, "%Y-%m-%dT%H:%M:%S.%f%z")
+
+
+def _render_series_chart(
+    metric: str,
+    times: list[str],
+    series_data: list[dict[str, Any]],
+) -> bytes:
+    """Render a PNG line chart from time-series data and return the raw bytes."""
+    parsed_times = [_parse_series_timestamp(t) for t in times]
+    numeric_times = mdates.date2num(parsed_times)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for index, series in enumerate(series_data):
+        label = _extract_series_label(series, index)
+        queries = series.get("queries", [])
+        ax.plot(numeric_times, queries, label=label, marker="o", markersize=3)
+
+    ax.set_title(f"NextDNS Analytics: {metric}")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Queries")
+    ax.legend()
+    ax.tick_params(axis="x", rotation=30)
+    fig.autofmt_xdate()
+
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+async def _plot_analytics_series_impl(
+    metric: str,
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart from a NextDNS analytics time-series endpoint.
+
+    See ``plotAnalyticsSeries`` for parameter documentation.
+    """
+    if metric not in _PLOT_ANALYTICS_METRICS:
+        return {
+            "error": f"Unsupported metric: {metric}",
+            "supported_metrics": sorted(_PLOT_ANALYTICS_METRICS),
+        }
+
+    if interval < 60:
+        return {
+            "error": "interval must be at least 60 seconds",
+            "minimum_interval": 60,
+        }
+
+    target_profile = _get_target_profile(profile_id)
+    if not target_profile:
+        return {
+            "error": "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
+            "hint": "Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
+        }
+
+    params: dict[str, Any] = {
+        "from": from_time,
+        "to": to_time,
+        "interval": interval,
+        "alignment": alignment,
+        "timezone": timezone,
+        "partials": partials,
+        "limit": limit,
+    }
+
+    url = f"/profiles/{target_profile}/analytics/{metric};series"
+    logger.info(f"Plotting analytics series: {metric} for profile {target_profile}")
+
+    try:
+        response = await api_client.get(url, params=params)
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error while fetching analytics series {metric}: {e}")
+        return {"error": f"HTTP error while fetching analytics series: {e}"}
+    except Exception as e:
+        logger.error(f"Unexpected error while fetching analytics series {metric}: {e}")
+        return {"error": f"Unexpected error while fetching analytics series: {e}"}
+
+    meta = payload.get("meta", {})
+    series_meta = meta.get("series", {})
+    times = series_meta.get("times", [])
+    series_data = payload.get("data", [])
+
+    if not times or not series_data:
+        return {
+            "error": "No time-series data available to plot",
+            "metric": metric,
+            "profile_id": target_profile,
+        }
+
+    try:
+        png_bytes = _render_series_chart(metric, times, series_data)
+    except Exception as e:
+        logger.error(f"Error rendering chart for {metric}: {e}")
+        return {"error": f"Error rendering chart: {e}"}
+
+    return Image(data=png_bytes, format="png").to_image_content()
+
+
+@mcp_server.tool()
+async def plotAnalyticsSeries(
+    metric: str,
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart from a NextDNS analytics time-series endpoint.
+
+    This tool fetches time-series data from ``/profiles/{id}/analytics/{metric};series``
+    and renders a line chart with one line per series entry. It is useful for
+    visualizing query trends over time directly in MCP clients that support images.
+
+    Args:
+        metric: Analytics metric to plot. Supported values:
+            - status: query response status (default, blocked, allowed)
+            - domains: most queried domains
+            - devices: query statistics by device
+            - protocols: DNS protocol usage (DoH, DoT, DoQ, UDP, TCP)
+            - queryTypes: DNS query types (A, AAAA, CNAME, etc.)
+            - ipVersions: IPv4 vs IPv6 usage
+            - dnssec: DNSSEC validation status
+            - encryption: encrypted vs unencrypted queries
+            - reasons: why queries were blocked
+            - ips: client IP addresses
+        profile_id: NextDNS profile ID (6-character alphanumeric). If not provided,
+            uses NEXTDNS_DEFAULT_PROFILE.
+        from_time: Start of the time range (Unix timestamp or ISO 8601). Defaults to ``-1d``.
+        to_time: End of the time range (Unix timestamp or ISO 8601). Defaults to ``now``.
+        interval: Time-series window size in seconds. Must be at least 60. Defaults to 3600 (1 hour).
+        alignment: How to align tumbling windows when the range is not an exact
+            multiple of the interval. One of ``start`` or ``end``. Defaults to ``end``.
+        timezone: IANA time zone name (e.g. ``America/New_York``). Defaults to ``GMT``.
+        partials: Whether to include partial tumbling windows. One of ``none``,
+            ``start``, ``end``, or ``all``. Defaults to ``none``.
+        limit: Maximum number of series entries to return. Defaults to 10.
+
+    Returns:
+        MCP ImageContent containing a PNG line chart.
+    """
+    return await _plot_analytics_series_impl(
+        metric=metric,
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        interval=interval,
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=limit,
+    )
+
+
+@mcp_server.tool()
+async def plotAnalyticsStatus(
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart of DNS query status (default, blocked, allowed) over time."""
+    return await _plot_analytics_series_impl(
+        metric="status",
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        interval=interval,
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=limit,
+    )
+
+
+@mcp_server.tool()
+async def plotAnalyticsDomains(
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart of top queried domains over time."""
+    return await _plot_analytics_series_impl(
+        metric="domains",
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        interval=interval,
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=limit,
+    )
+
+
+@mcp_server.tool()
+async def plotAnalyticsDevices(
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart of query counts per device over time."""
+    return await _plot_analytics_series_impl(
+        metric="devices",
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        interval=interval,
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=limit,
+    )
+
+
+@mcp_server.tool()
+async def plotAnalyticsProtocols(
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart of DNS protocol usage (DoH, DoT, DoQ, UDP, TCP) over time."""
+    return await _plot_analytics_series_impl(
+        metric="protocols",
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        interval=interval,
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=limit,
+    )
+
+
+@mcp_server.tool()
+async def plotAnalyticsQueryTypes(
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart of DNS query types (A, AAAA, CNAME, etc.) over time."""
+    return await _plot_analytics_series_impl(
+        metric="queryTypes",
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        interval=interval,
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=limit,
+    )
+
+
+@mcp_server.tool()
+async def plotAnalyticsIPVersions(
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart of IPv4 vs IPv6 query usage over time."""
+    return await _plot_analytics_series_impl(
+        metric="ipVersions",
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        interval=interval,
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=limit,
+    )
+
+
+@mcp_server.tool()
+async def plotAnalyticsDNSSEC(
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart of DNSSEC validation status over time."""
+    return await _plot_analytics_series_impl(
+        metric="dnssec",
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        interval=interval,
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=limit,
+    )
+
+
+@mcp_server.tool()
+async def plotAnalyticsEncryption(
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart of encrypted vs unencrypted DNS queries over time."""
+    return await _plot_analytics_series_impl(
+        metric="encryption",
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        interval=interval,
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=limit,
+    )
+
+
+@mcp_server.tool()
+async def plotAnalyticsReasons(
+    profile_id: OptionalProfileId = None,
+    from_time: str = "-1d",
+    to_time: str = "now",
+    interval: int = 3600,
+    alignment: str = "end",
+    timezone: str = "GMT",
+    partials: str = "none",
+    limit: int = 10,
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Generate a PNG line chart of blocking reasons over time."""
+    return await _plot_analytics_series_impl(
+        metric="reasons",
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        interval=interval,
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=limit,
+    )
 
 
 def get_mcp_run_options() -> dict[str, Any]:

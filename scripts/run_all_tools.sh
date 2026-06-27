@@ -285,7 +285,7 @@ get_tool_args() {
             echo "profile_id=${PROFILE_ID}"
             ;;
         dohLookup)
-            echo "domain=example.com" "profile_id=\"${PROFILE_ID}\"" "record_type=A"
+            echo "domain=example.com" "profile_id=${PROFILE_ID}" "record_type=A"
             ;;
         listProfiles)
             echo "{}"
@@ -327,8 +327,8 @@ get_tool_args() {
             echo "profile_id=${PROFILE_ID}" "name=UpdatedTestProfile"
             ;;
         updateSettings)
-            # Note: Nested objects may not work with key=value format - skip for now
-            echo "profile_id=${PROFILE_ID}"
+            # Test the new web3 setting alongside the profile id.
+            echo "profile_id=${PROFILE_ID}" "web3=true"
             ;;
         updateBlockPageSettings)
             echo "profile_id=${PROFILE_ID}" "enabled=true"
@@ -374,6 +374,21 @@ get_tool_args() {
             ;;
         replaceParentalControlServices)
             echo "profile_id=${PROFILE_ID}" 'body=[{"id":"tiktok"}]'
+            ;;
+        listRewrites)
+            echo "profile_id=${PROFILE_ID}"
+            ;;
+        addRewrite)
+            echo "profile_id=${PROFILE_ID}" "name=test-rewrite.example.com" "content=192.0.2.1"
+            ;;
+        deleteRewrite)
+            echo "profile_id=${PROFILE_ID}" "entry_id=${REWRITE_ENTRY_ID:-test-rewrite.example.com}"
+            ;;
+        plotAnalyticsSeries)
+            echo "profile_id=${PROFILE_ID}" "metric=status"
+            ;;
+        plotAnalyticsStatus|plotAnalyticsDomains|plotAnalyticsDevices|plotAnalyticsProtocols|plotAnalyticsQueryTypes|plotAnalyticsIPVersions|plotAnalyticsDNSSEC|plotAnalyticsEncryption|plotAnalyticsReasons)
+            echo "profile_id=${PROFILE_ID}"
             ;;
         *)
             echo "{}"
@@ -433,6 +448,17 @@ for TOOL_NAME in "${TOOL_NAMES[@]}"; do
             # Ensure service exists before trying to update it
             log_info "  Pre-setup: Adding parental control service for update test"
             mcp_tools call addToParentalControlServices "profile_id=${PROFILE_ID}" "id=tiktok" >/dev/null 2>&1 || true
+            ;;
+        deleteRewrite)
+            # Create a rewrite entry so deleteRewrite has a valid entry_id to remove
+            log_info "  Pre-setup: Creating rewrite entry for delete test"
+            REWRITE_CREATE_OUTPUT=$(mcp_tools call --format json addRewrite "profile_id=${PROFILE_ID}" "name=test-delete.example.com" "content=192.0.2.2" 2>&1 || echo "")
+            REWRITE_ENTRY_ID=$(echo "${REWRITE_CREATE_OUTPUT}" | grep -E '^\{' | head -1 | jq -r '.data.id // empty' 2>/dev/null || echo "")
+            if [ -n "${REWRITE_ENTRY_ID}" ]; then
+                log_info "  Tracked rewrite entry ID for deletion: ${REWRITE_ENTRY_ID}"
+            else
+                log_warn "  Could not create rewrite entry for delete test; deleteRewrite will likely fail"
+            fi
             ;;
     esac
     
