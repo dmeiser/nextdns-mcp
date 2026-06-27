@@ -29,7 +29,7 @@ This script performs the complete E2E workflow:
 - **`run_all_tools.sh`** - Bash tool enumeration and invocation
 
 This script:
-- Enumerates all available tools from the Docker MCP Gateway (`docker mcp tools list`)
+- Enumerates all available tools from the Docker MCP Gateway (`docker mcp tools ls`)
 - Performs preflight validation to ensure tools exist before invocation
 - Executes each tool with appropriate test parameters
 - Skips write operations unless `ALLOW_LIVE_WRITES=true`
@@ -158,7 +158,7 @@ NDJSON (newline-delimited JSON) file with one entry per tool execution:
 
 For the default slim variant the file is `artifacts/tools_report_slim.jsonl`; for Alpine it is `artifacts/tools_report_alpine.jsonl`.
 
-### `validation_profile_id.txt`
+### `test_profile_id.txt`
 
 Created when a validation profile is generated. Contains the profile ID for cleanup.
 

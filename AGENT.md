@@ -32,7 +32,7 @@ This file contains repository-specific agent rules. Agents should follow these w
     - All write operations execute via Docker MCP Gateway CLI
     - Set `ALLOW_LIVE_WRITES=true` to enable write operations (default: read-only)
     - Profile cleanup is optional and user-controlled
-    - Tests produce JSONL reports in `scripts/artifacts/tools_report_slim.jsonl` (default) and `scripts/artifacts/tools_report_alpine.jsonl`
+    - Tests produce JSONL reports in `artifacts/tools_report_slim.jsonl` (default) and `artifacts/tools_report_alpine.jsonl`
 - **Gateway E2E Testing Requirements:**
   - **CRITICAL**: E2E tests MUST use Docker MCP Gateway CLI, NOT direct Python calls
   - Test script locations: `scripts/gateway_e2e_run.sh`
@@ -64,7 +64,7 @@ This file contains repository-specific agent rules. Agents should follow these w
     ./gateway_e2e_run.sh .env alpine
     ```
   - **Analyzing Results:**
-    - Check `scripts/artifacts/tools_report_slim.jsonl` (default) or `scripts/artifacts/tools_report_alpine.jsonl` for per-tool results
+    - Check `artifacts/tools_report_slim.jsonl` (default) or `artifacts/tools_report_alpine.jsonl` for per-tool results
     - Parse JSONL to identify failures: `jq 'select(.exit_code != 0)' tools_report_slim.jsonl`
     - Review stdout/stderr for error details
     - **Required: 100% pass rate** - ALL tools must pass
@@ -176,7 +176,7 @@ cd scripts
 
 **E2E Test Validation**:
 - **Required pass rate: 100%** - ALL tools must pass
-- Review `scripts/artifacts/tools_report_slim.jsonl` (default) or `scripts/artifacts/tools_report_alpine.jsonl` for detailed results
+- Review `artifacts/tools_report_slim.jsonl` (default) or `artifacts/tools_report_alpine.jsonl` for detailed results
 - NO failures are acceptable - fix Docker CLI parameter handling issues
 - If tests fail due to parameter type conversion, fix the E2E scripts to use proper JSON encoding
 - See "Gateway E2E Testing Requirements" section for safety rules
@@ -215,7 +215,7 @@ Before running E2E tests or claiming work is complete:
 - [ ] Run `uv run radon cc src/ -a` (verify grade A)
 - [ ] Run `uv run radon cc src/ -nc` (verify no functions exceed grade B)
 - [ ] Run Gateway E2E tests: `cd scripts && ./gateway_e2e_run.sh` and `cd scripts && ./gateway_e2e_run.sh .env alpine` (**100% pass rate required**)
-- [ ] Review `scripts/artifacts/tools_report_slim.jsonl` and `scripts/artifacts/tools_report_alpine.jsonl` - zero failures allowed
+- [ ] Review `artifacts/tools_report_slim.jsonl` and `artifacts/tools_report_alpine.jsonl` - zero failures allowed
 - [ ] Commit formatting changes as final commit before validation
 
 **CRITICAL**: If ANY check fails, fix the issues and restart from step 1. Continue iterating through all quality checks until every standard is met with zero failures.

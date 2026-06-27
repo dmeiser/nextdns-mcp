@@ -204,7 +204,7 @@ jobs:
       
       - name: Extract metadata for Docker (slim)
         if: matrix.variant == 'slim'
-        id: meta
+        id: meta-slim
         uses: docker/metadata-action@v5
         with:
           images: |
@@ -230,7 +230,7 @@ jobs:
       
       - name: Extract metadata for Docker (alpine)
         if: matrix.variant == 'alpine'
-        id: meta
+        id: meta-alpine
         uses: docker/metadata-action@v5
         with:
           images: |
@@ -254,15 +254,15 @@ jobs:
           context: .
           file: ./Dockerfile${{ matrix.variant == 'alpine' && '.alpine' || '' }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps[format('meta-{0}', matrix.variant)].outputs.tags }}
+          labels: ${{ steps[format('meta-{0}', matrix.variant)].outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
           build-args: |
-            BUILDTIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
-            VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
-            REVISION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
+            BUILDTIME=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.created'] }}
+            VERSION=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.version'] }}
+            REVISION=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.revision'] }}
       
       - name: Generate image summary (${{ matrix.variant }})
         run: |
@@ -290,7 +290,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Tags Applied:**" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps[format('meta-{0}', matrix.variant)].outputs.tags }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY

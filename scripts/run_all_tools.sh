@@ -9,10 +9,11 @@
 # 4. REPORT: Displays execution summary and outcomes
 #
 # Usage:
-#   ./run_all_tools.sh [allow_writes]
+#   ./run_all_tools.sh [allow_writes] [variant]
 #
 # Arguments:
 #   allow_writes - Enable write operations and profile creation (default: false)
+#   variant      - Docker image variant to test: slim or alpine (default: slim)
 #
 # Output:
 #   - Console: Colored progress output with step markers

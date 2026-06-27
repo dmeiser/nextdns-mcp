@@ -90,7 +90,7 @@ FastMCP 3.x supports array bodies natively via the `body` parameter. Array-body 
 - Commands: `docker mcp tools call <tool> <params>`
 - Creates "Validation Profile [timestamp]" for isolation
 - Requires `NEXTDNS_API_KEY` and `NEXTDNS_READABLE_PROFILES=ALL`, `NEXTDNS_WRITABLE_PROFILES=ALL`
-- Produces machine-readable JSONL reports in `scripts/artifacts/tools_report_slim.jsonl` (default) and `scripts/artifacts/tools_report_alpine.jsonl`
+- Produces machine-readable JSONL reports in `artifacts/tools_report_slim.jsonl` (default) and `artifacts/tools_report_alpine.jsonl`
 - **Required pass rate: 100%** - ALL tools must pass, no failures accepted
 - If tests fail, fix Docker CLI parameter encoding (use proper JSON format)
 
@@ -111,8 +111,8 @@ FastMCP 3.x supports array bodies natively via the `body` parameter. Array-body 
 - `src/nextdns_mcp/server.py`: 650+ lines - `AccessControlledClient`, DoH tool, server creation
 - `src/nextdns_mcp/config.py`: 322 lines - env vars, access control logic, constants
 - `scripts/gateway_e2e_run.sh`: Gateway E2E test script - comprehensive tool validation via Docker CLI
-- `scripts/artifacts/tools_report_slim.jsonl`: E2E test results for the slim variant (machine-readable)
-- `scripts/artifacts/tools_report_alpine.jsonl`: E2E test results for the Alpine variant (machine-readable)
+- `artifacts/tools_report_slim.jsonl`: E2E test results for the slim variant (machine-readable)
+- `artifacts/tools_report_alpine.jsonl`: E2E test results for the Alpine variant (machine-readable)
 - `tests/integration/test_server_init.py`: Server initialization tests (no live API)
 - `AGENT.md`: Complete quality standards and workflow rules
 
@@ -146,7 +146,7 @@ FastMCP 3.x supports array bodies natively via the `body` parameter. Array-body 
 4. Use Gateway E2E tests to validate scenarios (`cd scripts && ./gateway_e2e_run.sh`)
 
 **Debug E2E test failures**:
-1. Check `scripts/artifacts/tools_report_slim.jsonl` or `scripts/artifacts/tools_report_alpine.jsonl` for failure details
+1. Check `artifacts/tools_report_slim.jsonl` or `artifacts/tools_report_alpine.jsonl` for failure details
 2. Parse failures: `jq 'select(.exit_code != 0)' tools_report_slim.jsonl`
 3. Fix parameter type issues: encode arrays as JSON objects in `body` (e.g., `body=[{"id":"value"}]`)
 4. Ensure idempotent test data (check-before-add pattern)

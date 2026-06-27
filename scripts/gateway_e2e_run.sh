@@ -132,8 +132,8 @@ cleanup() {
     log_info ""
     
     # Cleanup validation profile if created
-    if [ -f "${ARTIFACTS_DIR}/validation_profile_id.txt" ]; then
-        VALIDATION_PROFILE=$(cat "${ARTIFACTS_DIR}/validation_profile_id.txt")
+    if [ -f "${ARTIFACTS_DIR}/test_profile_id.txt" ]; then
+        VALIDATION_PROFILE=$(cat "${ARTIFACTS_DIR}/test_profile_id.txt")
         log_info "Validation profile created: ${VALIDATION_PROFILE}"
         
             # Non-interactive cleanup for CI or when ALLOW_LIVE_WRITES is false
@@ -156,7 +156,7 @@ cleanup() {
                 fi
             fi
         
-        rm -f "${ARTIFACTS_DIR}/validation_profile_id.txt"
+        rm -f "${ARTIFACTS_DIR}/test_profile_id.txt"
     fi
     
     # Cleanup injected catalog temp file (after profile deletion which may use gateway)
