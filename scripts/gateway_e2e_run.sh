@@ -92,7 +92,12 @@ else
             ENV_FILE="${PROJECT_DIR}/${ENV_FILE}"
         fi
     fi
-    ENV_FILE="$(realpath "${ENV_FILE}")"
+    if command -v realpath >/dev/null 2>&1; then
+        ENV_FILE="$(realpath "${ENV_FILE}")"
+    else
+        # Fallback for macOS and minimal systems without realpath
+        ENV_FILE="$(cd "$(dirname "${ENV_FILE}")" && pwd)/$(basename "${ENV_FILE}")"
+    fi
 fi
 
 if [ ! -f "${ENV_FILE}" ]; then

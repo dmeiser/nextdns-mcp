@@ -3,13 +3,14 @@
 # Builder stage
 FROM python:3.14-alpine AS builder
 
-# Install build tooling for any wheels that need compilation
-RUN apk add --no-cache build-base linux-headers
+# Upgrade base packages and install build tooling for any wheels that need compilation
+RUN apk upgrade --no-cache && \
+    apk add --no-cache build-base linux-headers
 
 WORKDIR /app
 
-# Copy uv binary from official image
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Copy uv binary from official image (pinned by digest for reproducibility)
+COPY --from=ghcr.io/astral-sh/uv:0.11.24@sha256:99ea34acedc870ba4ad11a1f540a1c04267c9f30aadc465a94406f52dfda2c36 /uv /usr/local/bin/uv
 
 # Copy dependency files and source code for build
 COPY pyproject.toml uv.lock README.md ./
@@ -20,6 +21,9 @@ RUN uv sync --frozen --no-dev
 
 # Runtime stage
 FROM python:3.14-alpine
+
+# Upgrade base packages for security parity with the slim variant
+RUN apk upgrade --no-cache
 
 WORKDIR /app
 

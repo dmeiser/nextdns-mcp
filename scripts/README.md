@@ -42,6 +42,7 @@ This script:
 - Docker installed and running
 - NextDNS API key from https://my.nextdns.io/account
 - Bash (Linux/macOS)
+- [uv](https://docs.astral.sh/uv/) for patching the catalog YAML during E2E setup
 
 ### Setup
 
@@ -214,17 +215,6 @@ sudo usermod -aG docker $USER
 
 ## Advanced Usage
 
-### Running Tools with a Specific Profile
-
-The `run_all_tools.sh` script automatically discovers or creates a test profile. If you need to test against a specific profile, set `NEXTDNS_DEFAULT_PROFILE` in your `.env` file or export it before running:
-
-```bash
-export NEXTDNS_DEFAULT_PROFILE=abc123
-./scripts/run_all_tools.sh true slim
-```
-
-**Warning:** Only use test profiles! Never use production profiles with write operations enabled.
-
 ### Continuous Integration
 
 For CI/CD pipelines:
@@ -249,7 +239,7 @@ export ALLOW_LIVE_WRITES=true
 
 1. **Matches operator workflow** - Operators import catalogs and use `docker mcp` CLI in production
 2. **Verifies CLI behavior** - Tests the same command-line parsing that real users experience
-3. **Portable** - No Python/Node.js dependencies, just Docker and shell
+3. **Portable** - Just Docker, Bash, and `uv` for catalog patching; no runtime Python/Node.js dependencies for the test execution itself
 
 ### Why No HTTP API?
 

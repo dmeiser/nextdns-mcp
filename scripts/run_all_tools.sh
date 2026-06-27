@@ -53,6 +53,13 @@ log_error() {
 # Configuration
 ALLOW_WRITES="${1:-false}"
 VARIANT="${2:-slim}"
+
+# Validate variant to prevent unexpected report paths or image selections
+if [ "${VARIANT}" != "slim" ] && [ "${VARIANT}" != "alpine" ]; then
+    log_error "Invalid variant '${VARIANT}'. Must be 'slim' or 'alpine'."
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 ARTIFACTS_DIR="${PROJECT_DIR}/artifacts"
