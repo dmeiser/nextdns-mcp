@@ -169,6 +169,9 @@ if [ "${ALLOW_WRITES}" = "true" ]; then
         
         # Use the created profile for all tests
         PROFILE_ID="${CREATED_PROFILE_ID}"
+
+        # Optional: a real profile with analytics data for plotting tools
+        PLOT_PROFILE_ID="${NEXTDNS_PLOT_PROFILE:-${PROFILE_ID}}"
     else
         log_error "Failed to create test profile"
         log_error "Response: ${PROFILE_RESULT}"
@@ -206,6 +209,9 @@ else
     
     log_success "Using existing profile: ${PROFILE_ID}"
 fi
+
+# Optional: a real profile with analytics data for plotting tools
+PLOT_PROFILE_ID="${NEXTDNS_PLOT_PROFILE:-${PROFILE_ID}}"
 
 log_info "Step 2: Testing ${TOOL_COUNT} tools with profile ${PROFILE_ID}..."
 
@@ -385,10 +391,10 @@ get_tool_args() {
             echo "profile_id=${PROFILE_ID}" "entry_id=${REWRITE_ENTRY_ID:-test-rewrite.example.com}"
             ;;
         plotAnalyticsSeries)
-            echo "profile_id=${PROFILE_ID}" "metric=status"
+            echo "profile_id=${PLOT_PROFILE_ID}" "metric=status"
             ;;
         plotAnalyticsStatus|plotAnalyticsDomains|plotAnalyticsDevices|plotAnalyticsProtocols|plotAnalyticsQueryTypes|plotAnalyticsIPVersions|plotAnalyticsDNSSEC|plotAnalyticsEncryption|plotAnalyticsReasons)
-            echo "profile_id=${PROFILE_ID}"
+            echo "profile_id=${PLOT_PROFILE_ID}"
             ;;
         *)
             echo "{}"
