@@ -15,16 +15,16 @@ uv run pytest tests/integration/test_server_init.py -v
 
 ## End-to-End Testing
 
-For complete end-to-end testing with the live NextDNS API via Docker MCP Gateway, use the Gateway E2E scripts instead:
+For complete end-to-end testing with the live NextDNS API via Docker MCP Gateway, use the Gateway E2E script instead:
 
 ```bash
-# PowerShell (Windows)
-cd scripts
-.\gateway_e2e_run.ps1
-
-# Bash (Linux/macOS)
+# Default (slim) variant
 cd scripts
 ./gateway_e2e_run.sh
+
+# Alpine variant
+cd scripts
+./gateway_e2e_run.sh .env alpine
 ```
 
 See `scripts/README.md` for complete Gateway E2E testing documentation.

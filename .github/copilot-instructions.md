@@ -66,7 +66,7 @@ FastMCP 3.x supports array bodies natively via the `body` parameter. Array-body 
 3. **Unit tests**: `uv run pytest tests/unit --cov=src/nextdns_mcp` (>95% coverage, ALL pass, no file <95%)
 4. **Complexity**: `uv run radon cc src/ -a` (grade A), `radon cc src/ -nc` (no function >B)
 5. **Integration**: `uv run pytest tests/integration/test_server_init.py` (ALL pass)
-6. **Gateway E2E**: `cd scripts && ./gateway_e2e_run.{sh,ps1}` (100% pass rate REQUIRED)
+6. **Gateway E2E**: `cd scripts && ./gateway_e2e_run.sh` (100% pass rate REQUIRED)
 
 **If ANY check fails**: Fix, rerun formatters, repeat from step 1. Never skip, never ignore failing tests.
 
@@ -85,12 +85,12 @@ FastMCP 3.x supports array bodies natively via the `body` parameter. Array-body 
 - Fast, no network calls, no live API access
 - Tests server initialization logic only
 
-### Gateway E2E Tests (`scripts/gateway_e2e_run.{sh,ps1}`)
+### Gateway E2E Tests (`scripts/gateway_e2e_run.sh`)
 - **CRITICAL**: Tests ALL 76+ tools via Docker MCP Gateway CLI (production-like)
 - Commands: `docker mcp tools call <tool> <params>`
 - Creates "Validation Profile [timestamp]" for isolation
 - Requires `NEXTDNS_API_KEY` and `NEXTDNS_READABLE_PROFILES=ALL`, `NEXTDNS_WRITABLE_PROFILES=ALL`
-- Produces machine-readable JSONL report in `scripts/artifacts/tools_report.jsonl`
+- Produces machine-readable JSONL reports in `artifacts/tools_report_slim.jsonl` (default) and `artifacts/tools_report_alpine.jsonl`
 - **Required pass rate: 100%** - ALL tools must pass, no failures accepted
 - If tests fail, fix Docker CLI parameter encoding (use proper JSON format)
 
@@ -110,8 +110,9 @@ FastMCP 3.x supports array bodies natively via the `body` parameter. Array-body 
 - `src/nextdns_mcp/nextdns-openapi.yaml`: 2300+ lines, defines all API operations
 - `src/nextdns_mcp/server.py`: 650+ lines - `AccessControlledClient`, DoH tool, server creation
 - `src/nextdns_mcp/config.py`: 322 lines - env vars, access control logic, constants
-- `scripts/gateway_e2e_run.{sh,ps1}`: Gateway E2E test scripts - comprehensive tool validation via Docker CLI
-- `scripts/artifacts/tools_report.jsonl`: E2E test results (machine-readable)
+- `scripts/gateway_e2e_run.sh`: Gateway E2E test script - comprehensive tool validation via Docker CLI
+- `artifacts/tools_report_slim.jsonl`: E2E test results for the slim variant (machine-readable)
+- `artifacts/tools_report_alpine.jsonl`: E2E test results for the Alpine variant (machine-readable)
 - `tests/integration/test_server_init.py`: Server initialization tests (no live API)
 - `AGENT.md`: Complete quality standards and workflow rules
 
@@ -130,7 +131,7 @@ FastMCP 3.x supports array bodies natively via the `body` parameter. Array-body 
 1. Add to `nextdns-openapi.yaml` with unique `operationId`
 2. Server auto-generates tool on next run
 3. Add unit tests mocking the API call
-4. Run Gateway E2E tests to validate (`cd scripts && ./gateway_e2e_run.{sh,ps1}`)
+4. Run Gateway E2E tests to validate (`cd scripts && ./gateway_e2e_run.sh` and `cd scripts && ./gateway_e2e_run.sh .env alpine`)
 
 **Add custom tool** (for special logic not covered by OpenAPI):
 1. Define `_toolName_impl()` with business logic
@@ -142,11 +143,11 @@ FastMCP 3.x supports array bodies natively via the `body` parameter. Array-body 
 1. Check logs for "Read/Write access denied for profile: {id}"
 2. Verify `NEXTDNS_READABLE_PROFILES` / `NEXTDNS_WRITABLE_PROFILES` env vars
 3. Check `config.py:can_read_profile()` / `can_write_profile()` logic
-4. Use Gateway E2E tests to validate scenarios (`cd scripts && ./gateway_e2e_run.{sh,ps1}`)
+4. Use Gateway E2E tests to validate scenarios (`cd scripts && ./gateway_e2e_run.sh`)
 
 **Debug E2E test failures**:
-1. Check `scripts/artifacts/tools_report.jsonl` for failure details
-2. Parse failures: `jq 'select(.exit_code != 0)' tools_report.jsonl`
+1. Check `artifacts/tools_report_slim.jsonl` or `artifacts/tools_report_alpine.jsonl` for failure details
+2. Parse failures: `jq 'select(.exit_code != 0)' tools_report_slim.jsonl`
 3. Fix parameter type issues: encode arrays as JSON objects in `body` (e.g., `body=[{"id":"value"}]`)
 4. Ensure idempotent test data (check-before-add pattern)
 5. Verify all required parameters are passed per OpenAPI spec

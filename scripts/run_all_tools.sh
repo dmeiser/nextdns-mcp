@@ -9,14 +9,15 @@
 # 4. REPORT: Displays execution summary and outcomes
 #
 # Usage:
-#   ./run_all_tools.sh [allow_writes]
+#   ./run_all_tools.sh [allow_writes] [variant]
 #
 # Arguments:
 #   allow_writes - Enable write operations and profile creation (default: false)
+#   variant      - Docker image variant to test: slim or alpine (default: slim)
 #
 # Output:
 #   - Console: Colored progress output with step markers
-#   - File: artifacts/tools_report.jsonl (one JSON object per line per tool)
+#   - File: artifacts/tools_report_<variant>.jsonl (one JSON object per line per tool)
 #
 # Exit Codes:
 #   0 - All tools executed successfully
@@ -51,10 +52,18 @@ log_error() {
 
 # Configuration
 ALLOW_WRITES="${1:-false}"
+VARIANT="${2:-slim}"
+
+# Validate variant to prevent unexpected report paths or image selections
+if [ "${VARIANT}" != "slim" ] && [ "${VARIANT}" != "alpine" ]; then
+    log_error "Invalid variant '${VARIANT}'. Must be 'slim' or 'alpine'."
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 ARTIFACTS_DIR="${PROJECT_DIR}/artifacts"
-REPORT_FILE="${ARTIFACTS_DIR}/tools_report.jsonl"
+REPORT_FILE="${ARTIFACTS_DIR}/tools_report_${VARIANT}.jsonl"
 
 # Ensure artifacts directory exists
 mkdir -p "${ARTIFACTS_DIR}"
@@ -77,6 +86,7 @@ mcp_tools() {
 }
 
 log_info "Starting NextDNS MCP tools enumeration and execution"
+log_info "Variant: ${VARIANT}"
 log_info "Allow writes: ${ALLOW_WRITES}"
 log_info "Report file: ${REPORT_FILE}"
 

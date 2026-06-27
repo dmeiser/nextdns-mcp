@@ -50,10 +50,30 @@ log_error() {
 
 # Configuration
 ENV_FILE="${1:-}"
+VARIANT="${2:-slim}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 ARTIFACTS_DIR="${PROJECT_DIR}/artifacts"
 TEMP_CATALOG=""  # Initialized early so cleanup can safely reference it
+
+# Validate variant
+case "${VARIANT}" in
+    slim|alpine)
+        ;;
+    *)
+        log_error "Invalid variant: ${VARIANT}"
+        log_error "Usage: $0 [env_file] [slim|alpine]"
+        exit 1
+        ;;
+esac
+
+# Determine Dockerfile and image tag based on variant
+if [ "${VARIANT}" = "alpine" ]; then
+    DOCKERFILE="Dockerfile.alpine"
+else
+    DOCKERFILE="Dockerfile"
+fi
+IMAGE_TAG="nextdns-mcp:${VARIANT}"
 
 # Load environment file
 if [ -z "${ENV_FILE}" ]; then
@@ -66,7 +86,18 @@ if [ -z "${ENV_FILE}" ]; then
         exit 1
     fi
 else
-    ENV_FILE="$(realpath "${ENV_FILE}")"
+    # Resolve relative paths against the project directory first, then cwd
+    if [ ! -f "${ENV_FILE}" ] && [ ! -e "${ENV_FILE}" ]; then
+        if [ -f "${PROJECT_DIR}/${ENV_FILE}" ]; then
+            ENV_FILE="${PROJECT_DIR}/${ENV_FILE}"
+        fi
+    fi
+    if command -v realpath >/dev/null 2>&1; then
+        ENV_FILE="$(realpath "${ENV_FILE}")"
+    else
+        # Fallback for macOS and minimal systems without realpath
+        ENV_FILE="$(cd "$(dirname "${ENV_FILE}")" && pwd)/$(basename "${ENV_FILE}")"
+    fi
 fi
 
 if [ ! -f "${ENV_FILE}" ]; then
@@ -93,6 +124,7 @@ ALLOW_LIVE_WRITES="${ALLOW_LIVE_WRITES:-false}"
 
 log_info "================================"
 log_info "NextDNS MCP Gateway E2E Test"
+log_info "Variant: ${VARIANT}"
 log_info "================================"
 log_info "Allow writes: ${ALLOW_LIVE_WRITES}"
 log_info "Artifacts: ${ARTIFACTS_DIR}"
@@ -105,8 +137,8 @@ cleanup() {
     log_info ""
     
     # Cleanup validation profile if created
-    if [ -f "${ARTIFACTS_DIR}/validation_profile_id.txt" ]; then
-        VALIDATION_PROFILE=$(cat "${ARTIFACTS_DIR}/validation_profile_id.txt")
+    if [ -f "${ARTIFACTS_DIR}/test_profile_id.txt" ]; then
+        VALIDATION_PROFILE=$(cat "${ARTIFACTS_DIR}/test_profile_id.txt")
         log_info "Validation profile created: ${VALIDATION_PROFILE}"
         
             # Non-interactive cleanup for CI or when ALLOW_LIVE_WRITES is false
@@ -129,7 +161,7 @@ cleanup() {
                 fi
             fi
         
-        rm -f "${ARTIFACTS_DIR}/validation_profile_id.txt"
+        rm -f "${ARTIFACTS_DIR}/test_profile_id.txt"
     fi
     
     # Cleanup injected catalog temp file (after profile deletion which may use gateway)
@@ -145,13 +177,13 @@ trap cleanup EXIT INT TERM
 
 # Step 1: Build Docker image
 log_info ""
-log_info "Step 1: Building Docker image..."
+log_info "Step 1: Building Docker image (${VARIANT})..."
 
 cd "${PROJECT_DIR}"
-if docker build -t nextdns-mcp:latest . >/dev/null 2>&1; then
-    log_success "Docker image built"
+if docker build -f "${DOCKERFILE}" -t "${IMAGE_TAG}" . >/dev/null 2>&1; then
+    log_success "Docker image built (${IMAGE_TAG})"
 else
-    log_error "Failed to build Docker image"
+    log_error "Failed to build Docker image (${IMAGE_TAG})"
     exit 1
 fi
 
@@ -181,21 +213,20 @@ if [ "${INJECT_API_KEY}" != "true" ]; then
     fi
 fi
 
-if [ "${INJECT_API_KEY}" = "true" ]; then
-    log_info "Injecting API key into catalog env section"
-
-    # Add NEXTDNS_API_KEY to the env section of the catalog.
-    # NOTE: Keep the key out of the command line (ps-visible) and avoid brittle shell interpolation.
-    if (
-        cd "${PROJECT_DIR}" \
-        && TEMP_CATALOG="${TEMP_CATALOG}" NEXTDNS_API_KEY="${NEXTDNS_API_KEY}" uv run python3 - <<'PY'
+# Always point the temp catalog at the per-variant image built by this script.
+# Conditionally inject the API key when the Docker MCP secrets engine is unavailable.
+log_info "Patching catalog image to ${IMAGE_TAG}"
+if (
+    cd "${PROJECT_DIR}" \
+    && TEMP_CATALOG="${TEMP_CATALOG}" NEXTDNS_API_KEY="${NEXTDNS_API_KEY}" IMAGE_TAG="${IMAGE_TAG}" INJECT_API_KEY="${INJECT_API_KEY}" uv run python3 - <<'PY'
 import os
 import sys
 
 import yaml
 
 temp_catalog = os.environ["TEMP_CATALOG"]
-api_key = os.environ["NEXTDNS_API_KEY"]
+image_tag = os.environ["IMAGE_TAG"]
+inject_api_key = os.environ.get("INJECT_API_KEY") == "true"
 
 with open(temp_catalog, "r", encoding="utf-8") as f:
     catalog = yaml.safe_load(f)
@@ -205,40 +236,48 @@ nextdns = registry.get("nextdns") if isinstance(registry, dict) else None
 if not isinstance(nextdns, dict):
     sys.exit(1)
 
-env_list = nextdns.setdefault("env", [])
-if not isinstance(env_list, list):
-    sys.exit(1)
+# Point the catalog at the per-variant image built by this script
+nextdns["image"] = image_tag
 
-for env_var in env_list:
-    if isinstance(env_var, dict) and env_var.get("name") == "NEXTDNS_API_KEY":
-        env_var["value"] = api_key
-        env_var["description"] = env_var.get("description") or "NextDNS API key (injected at runtime)"
-        break
-else:
-    env_list.insert(
-        0,
-        {
-            "name": "NEXTDNS_API_KEY",
-            "value": api_key,
-            "description": "NextDNS API key (injected at runtime)",
-        },
-    )
+if inject_api_key:
+    api_key = os.environ["NEXTDNS_API_KEY"]
+    env_list = nextdns.setdefault("env", [])
+    if not isinstance(env_list, list):
+        sys.exit(1)
 
-# Strip secrets declarations so docker-mcp v0.42+ does not generate unresolvable
-# se:// fallback URIs when the Docker Desktop secrets engine is absent (CI/Linux).
-# The env: injection above is the sole source of NEXTDNS_API_KEY in this mode.
-nextdns.pop("secrets", None)
+    for env_var in env_list:
+        if isinstance(env_var, dict) and env_var.get("name") == "NEXTDNS_API_KEY":
+            env_var["value"] = api_key
+            env_var["description"] = env_var.get("description") or "NextDNS API key (injected at runtime)"
+            break
+    else:
+        env_list.insert(
+            0,
+            {
+                "name": "NEXTDNS_API_KEY",
+                "value": api_key,
+                "description": "NextDNS API key (injected at runtime)",
+            },
+        )
+
+    # Strip secrets declarations so docker-mcp v0.42+ does not generate unresolvable
+    # se:// fallback URIs when the Docker Desktop secrets engine is absent (CI/Linux).
+    # The env: injection above is the sole source of NEXTDNS_API_KEY in this mode.
+    nextdns.pop("secrets", None)
 
 with open(temp_catalog, "w", encoding="utf-8") as f:
     yaml.dump(catalog, f, default_flow_style=False, sort_keys=False)
 PY
-    ); then
-        log_success "API key injected into catalog"
+); then
+    if [ "${INJECT_API_KEY}" = "true" ]; then
+        log_success "Catalog patched and API key injected"
     else
-        log_error "Failed to inject API key into catalog"
-        rm -f "${TEMP_CATALOG}"
-        exit 1
+        log_success "Catalog patched to use ${IMAGE_TAG}"
     fi
+else
+    log_error "Failed to patch catalog"
+    rm -f "${TEMP_CATALOG}"
+    exit 1
 fi
 
 # Import catalog (also keeps the injected file available for direct-path gateway access)
@@ -362,10 +401,10 @@ done
 log_info ""
 log_info "Step 6: Running all tools..."
 
-if bash "${SCRIPT_DIR}/run_all_tools.sh" "${ALLOW_LIVE_WRITES}"; then
-    log_success "E2E test completed successfully"
+if bash "${SCRIPT_DIR}/run_all_tools.sh" "${ALLOW_LIVE_WRITES}" "${VARIANT}"; then
+    log_success "E2E test completed successfully (${VARIANT})"
     exit 0
 else
-    log_error "E2E test failed: Tool execution failed"
+    log_error "E2E test failed: Tool execution failed (${VARIANT})"
     exit 1
 fi

@@ -1,6 +1,6 @@
 [project]
 name = "nextdns-mcp"
-version = "2.0.21"
+version = "2.1.0"
 description = "NextDNS MCP Server - Model Context Protocol server for NextDNS API built with FastMCP"
 authors = [{name = "NextDNS MCP Contributors"}]
 license = {text = "MIT"}
@@ -51,6 +51,9 @@ target-version = ["py314"]
 line-length = 120
 target-version = "py314"
 
+[tool.isort]
+profile = "black"
+line_length = 120
 
 [tool.uv]
 exclude-newer = "1 week"

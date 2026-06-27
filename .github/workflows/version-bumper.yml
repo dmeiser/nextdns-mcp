@@ -78,6 +78,7 @@ jobs:
           update_file("pyproject.toml", r'^version\s*=\s*".*"', f'version = "{next_v}"', flags=re.MULTILINE)
           update_file("src/nextdns_mcp/__init__.py", r'__version__\s*=\s*["\'].*["\']', f'__version__ = "{next_v}"', flags=re.MULTILINE)
           update_file("Dockerfile", r'LABEL org\.opencontainers\.image\.version=["\'].*["\']', f'LABEL org.opencontainers.image.version="{next_v}"', flags=re.MULTILINE)
+          update_file("Dockerfile.alpine", r'LABEL org\.opencontainers\.image\.version=["\'].*["\']', f'LABEL org.opencontainers.image.version="{next_v}"', flags=re.MULTILINE)
           
           with open("next_version.txt", "w") as f:
               f.write(next_v)
@@ -90,7 +91,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml src/nextdns_mcp/__init__.py Dockerfile
+          git add pyproject.toml src/nextdns_mcp/__init__.py Dockerfile Dockerfile.alpine
           
           # Check if there are any staged changes before committing
           if git diff --cached --quiet; then
