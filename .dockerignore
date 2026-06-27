@@ -1,0 +1,43 @@
+# Git / GitHub
+.git/
+.github/
+
+# Python cache / virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Test / coverage artifacts
+tests/
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Build / local artifacts
+artifacts/
+scripts/artifacts/
+scripts/*.jsonl
+*.jsonl
+
+# Local configuration / secrets
+.env
+.env.*
+!.env.example
+
+# Documentation (not needed at runtime)
+docs/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

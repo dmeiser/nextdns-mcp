@@ -108,6 +108,16 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
 
    Note: MCP servers use stdio (standard input/output) for communication, not HTTP ports.
 
+   **Alpine variant**
+
+   An Alpine Linux image is also available. To build it locally, use `Dockerfile.alpine`:
+
+   ```bash
+   docker build -f Dockerfile.alpine -t nextdns-mcp:alpine .
+   ```
+
+   The published Alpine tags use the `-alpine` suffix (e.g. `nextdns-mcp:alpine`, `nextdns-mcp:2.0-alpine`). The `python:3.14-slim` image remains the recommended default.
+
 ### Running Locally (Development)
 
 1. Install dependencies:
@@ -139,14 +149,23 @@ This server uses a modern, declarative approach:
 
 ### Docker Tags
 
-This project publishes official Docker images with a standardized tagging policy:
+This project publishes official Docker images with a standardized tagging policy. The default image is based on `python:3.14-slim`; an Alpine Linux variant is also available and tagged with an `-alpine` suffix.
+
+#### Primary (`python:3.14-slim`) tags
 
 - `:latest`: Floating tag that tracks the most recent successful build from the `main` branch. This tag is rebuilt on changes to `main` and via scheduled rebuilds.
 - `:<major>`: Floating tag for the most recent build in a given major series (e.g., `:2`). This tag is updated whenever a new image for that major line is published and may include unreleased changes if the corresponding build comes from a branch head.
 - `:<major>.<minor>`: Floating tag for the most recent build in a given minor series (e.g., `:2.0`). Like `:<major>`, it is updated when new images are built for that series and may include unreleased changes.
 - `:<major>.<minor>.<patch>`: Tags for specific application releases (e.g., `:2.0.3`). These are intended to be immutable once published via the release workflow.
 
-All floating tags (`:latest`, `:<major>`, `:<major>.<minor>`) are rebuilt regularly to include the latest OS security updates and any application changes present in the source commit used for that build. Consumers who require strict version pinning should use the full `:<major>.<minor>.<patch>` tags.
+#### Alpine tags
+
+- `:alpine`: Floating tag for the most recent Alpine build from `main`.
+- `:<major>-alpine`: Floating tag for the most recent Alpine build in a major series (e.g., `:2-alpine`).
+- `:<major>.<minor>-alpine`: Floating tag for the most recent Alpine build in a minor series (e.g., `:2.0-alpine`).
+- `:<major>.<minor>.<patch>-alpine`: Specific Alpine release tag (e.g., `:2.0.3-alpine`).
+
+All floating tags (`:latest`, `:<major>`, `:<major>.<minor>` and their `-alpine` counterparts) are rebuilt regularly to include the latest OS security updates and any application changes present in the source commit used for that build. Consumers who require strict version pinning should use the full `:<major>.<minor>.<patch>` or `:<major>.<minor>.<patch>-alpine` tags.
 
 ## License
 

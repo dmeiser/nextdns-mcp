@@ -1,0 +1,57 @@
+# Multi-stage build for a lean Alpine final image
+
+# Builder stage
+FROM python:3.14-alpine AS builder
+
+# Install build tooling for any wheels that need compilation
+RUN apk add --no-cache build-base linux-headers
+
+WORKDIR /app
+
+# Copy uv binary from official image
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Copy dependency files and source code for build
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
+
+# Install dependencies into the project's .venv
+RUN uv sync --frozen --no-dev
+
+# Runtime stage
+FROM python:3.14-alpine
+
+WORKDIR /app
+
+# Copy installed packages from the builder stage's virtual environment
+COPY --from=builder /app/.venv/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
+
+# Copy application code
+COPY src/ /app/src/
+
+# OCI labels for Docker MCP Gateway compatibility
+LABEL org.opencontainers.image.title="NextDNS MCP Server (Alpine)"
+LABEL org.opencontainers.image.description="Model Context Protocol server for NextDNS API (Alpine variant)"
+LABEL org.opencontainers.image.authors="NextDNS MCP Contributors"
+LABEL org.opencontainers.image.source="https://github.com/dmeiser/nextdns-mcp"
+LABEL org.opencontainers.image.documentation="https://github.com/dmeiser/nextdns-mcp/blob/main/README.md"
+LABEL org.opencontainers.image.version="2.0.20"
+LABEL org.opencontainers.image.licenses="MIT"
+
+# MCP-specific labels
+LABEL com.docker.mcp.server.type="stdio"
+LABEL com.docker.mcp.server.protocol="mcp"
+LABEL com.docker.mcp.server.category="dns,api,networking"
+
+# Create and switch to a non-root user for security
+RUN adduser -D -s /sbin/nologin appuser
+USER appuser
+
+ENV PYTHONPATH=/app/src \
+    FASTMCP_CHECK_FOR_UPDATES=off
+
+# Expose port for HTTP transport mode (optional)
+EXPOSE 8000
+
+# Command to run the application
+CMD ["python", "-m", "nextdns_mcp.server"]

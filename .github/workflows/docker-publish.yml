@@ -49,8 +49,12 @@ jobs:
     secrets: inherit
 
   docker-publish:
-    name: Build and Push Docker Image
+    name: Build and Push Docker Image (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [slim, alpine]
     # Wait for e2e if it was scheduled to run
     needs: [e2e]
     # Handle the 'if' logic carefully to allow workflow_run (which skips needs) or successful needs
@@ -198,7 +202,8 @@ jobs:
           echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
           echo "major_minor=$MAJOR.$MINOR" >> "$GITHUB_OUTPUT"
       
-      - name: Extract metadata for Docker
+      - name: Extract metadata for Docker (slim)
+        if: matrix.variant == 'slim'
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -223,11 +228,31 @@ jobs:
             # Tag with the git ref (for manual identification)
             type=ref,event=tag
       
-      - name: Build and push Docker image
+      - name: Extract metadata for Docker (alpine)
+        if: matrix.variant == 'alpine'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
+            ghcr.io/${{ github.repository }}
+          tags: |
+            # Alpine floating and version tags; no SHA tag for alpine
+            type=raw,value=alpine,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.version.outputs.version }}-alpine,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.version.outputs.major }}-alpine,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}-alpine,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Semantic version tags from git tags with -alpine suffix:
+            type=semver,pattern={{version}},suffix=-alpine,enable=${{ github.event_name != 'schedule' }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-alpine,enable=${{ github.event_name != 'schedule' && !contains(github.ref, '-') }}
+            type=semver,pattern={{major}},suffix=-alpine,enable=${{ github.event_name != 'schedule' && !contains(github.ref, '-') }}
+            type=ref,event=tag,suffix=-alpine
+      
+      - name: Build and push Docker image (${{ matrix.variant }})
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile${{ matrix.variant == 'alpine' && '.alpine' || '' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -239,20 +264,28 @@ jobs:
             VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
             REVISION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
       
-      - name: Generate image summary
+      - name: Generate image summary (${{ matrix.variant }})
         run: |
-          echo "## 🐳 Docker Images Published" >> $GITHUB_STEP_SUMMARY
+          echo "## 🐳 Docker Images Published — ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Docker Hub" >> $GITHUB_STEP_SUMMARY
           echo "**Registry:** docker.io/${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp:latest" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ matrix.variant }}" = "alpine" ]; then
+            echo "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp:alpine" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp:latest" >> $GITHUB_STEP_SUMMARY
+          fi
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### GitHub Container Registry" >> $GITHUB_STEP_SUMMARY
           echo "**Registry:** ghcr.io/${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "docker pull ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ matrix.variant }}" = "alpine" ]; then
+            echo "docker pull ghcr.io/${{ github.repository }}:alpine" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "docker pull ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUMMARY
+          fi
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Tags Applied:**" >> $GITHUB_STEP_SUMMARY

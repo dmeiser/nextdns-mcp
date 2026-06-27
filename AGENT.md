@@ -21,7 +21,7 @@ This file contains repository-specific agent rules. Agents should follow these w
 - Provide a minimal health endpoint at `/health` returning 200 OK and JSON `{ "status": "ok" }`.
 - Tests: add pytest-based unit tests for new functionality and run them with `uv run pytest`.
   - See "Code Quality Standards" section below for coverage requirements and quality metrics
-- Docker: provide a `Dockerfile` that produces a small, runnable image; prefer using official `python:3.13-slim` as base.
+- Docker: provide a `Dockerfile` (primary, `python:3.14-slim`) and `Dockerfile.alpine` (Alpine variant) that produce small, runnable images.
 - Keep `TODO.md` progress indicators in sync with the current phase while executing tasks.
 - **Write Operation Safety Rules:**
   - When running Gateway E2E tests, set `NEXTDNS_WRITABLE_PROFILES=ALL` (or specific test profile ID)
@@ -32,10 +32,10 @@ This file contains repository-specific agent rules. Agents should follow these w
     - All write operations execute via Docker MCP Gateway CLI
     - Set `ALLOW_LIVE_WRITES=true` to enable write operations (default: read-only)
     - Profile cleanup is optional and user-controlled
-    - Tests produce JSONL reports in `scripts/artifacts/tools_report.jsonl`
+    - Tests produce JSONL reports in `scripts/artifacts/tools_report_slim.jsonl` (default) and `scripts/artifacts/tools_report_alpine.jsonl`
 - **Gateway E2E Testing Requirements:**
   - **CRITICAL**: E2E tests MUST use Docker MCP Gateway CLI, NOT direct Python calls
-  - Test script locations: `scripts/gateway_e2e_run.{sh,ps1}`
+  - Test script locations: `scripts/gateway_e2e_run.sh`
   - E2E tests verify all MCP tools work through the Docker MCP Gateway
   - **Test Structure:**
     1. Build Docker image with latest code
@@ -55,17 +55,17 @@ This file contains repository-specific agent rules. Agents should follow these w
     - Before major releases or production deployment
   - **Running E2E Tests:**
     ```bash
-    # PowerShell (Windows)
-    cd scripts
-    .\gateway_e2e_run.ps1
-    
-    # Bash (Linux/macOS)
+    # Default (slim) variant
     cd scripts
     ./gateway_e2e_run.sh
+
+    # Alpine variant
+    cd scripts
+    ./gateway_e2e_run.sh .env alpine
     ```
   - **Analyzing Results:**
-    - Check `scripts/artifacts/tools_report.jsonl` for per-tool results
-    - Parse JSONL to identify failures: `jq 'select(.exit_code != 0)' tools_report.jsonl`
+    - Check `scripts/artifacts/tools_report_slim.jsonl` (default) or `scripts/artifacts/tools_report_alpine.jsonl` for per-tool results
+    - Parse JSONL to identify failures: `jq 'select(.exit_code != 0)' tools_report_slim.jsonl`
     - Review stdout/stderr for error details
     - **Required: 100% pass rate** - ALL tools must pass
   - If validation fails, fix the issues and re-run until all tests pass
@@ -90,7 +90,7 @@ This file contains repository-specific agent rules. Agents should follow these w
    - See "Code Quality Standards" section for coverage requirements
    - Must achieve >95% code coverage
 
-2. **Gateway E2E Tests** (`scripts/gateway_e2e_run.{sh,ps1}`)
+2. **Gateway E2E Tests** (`scripts/gateway_e2e_run.sh`)
    - End-to-end testing via Docker MCP Gateway CLI
    - Tests actual user workflow: `docker mcp tools call <tool> <params>`
    - Verifies CLI parameter parsing, quoting, and execution
@@ -165,18 +165,18 @@ open htmlcov/index.html
 
 **Running E2E Tests**:
 ```bash
-# PowerShell
-cd scripts
-.\gateway_e2e_run.ps1
-
-# Bash
+# Default (slim) variant
 cd scripts
 ./gateway_e2e_run.sh
+
+# Alpine variant
+cd scripts
+./gateway_e2e_run.sh .env alpine
 ```
 
 **E2E Test Validation**:
 - **Required pass rate: 100%** - ALL tools must pass
-- Review `scripts/artifacts/tools_report.jsonl` for detailed results
+- Review `scripts/artifacts/tools_report_slim.jsonl` (default) or `scripts/artifacts/tools_report_alpine.jsonl` for detailed results
 - NO failures are acceptable - fix Docker CLI parameter handling issues
 - If tests fail due to parameter type conversion, fix the E2E scripts to use proper JSON encoding
 - See "Gateway E2E Testing Requirements" section for safety rules
@@ -214,8 +214,8 @@ Before running E2E tests or claiming work is complete:
 - [ ] Verify per-file coverage: all files >95% in `htmlcov/index.html`
 - [ ] Run `uv run radon cc src/ -a` (verify grade A)
 - [ ] Run `uv run radon cc src/ -nc` (verify no functions exceed grade B)
-- [ ] Run Gateway E2E tests: `cd scripts && ./gateway_e2e_run.{sh,ps1}` (**100% pass rate required**)
-- [ ] Review `scripts/artifacts/tools_report.jsonl` - zero failures allowed
+- [ ] Run Gateway E2E tests: `cd scripts && ./gateway_e2e_run.sh` and `cd scripts && ./gateway_e2e_run.sh .env alpine` (**100% pass rate required**)
+- [ ] Review `scripts/artifacts/tools_report_slim.jsonl` and `scripts/artifacts/tools_report_alpine.jsonl` - zero failures allowed
 - [ ] Commit formatting changes as final commit before validation
 
 **CRITICAL**: If ANY check fails, fix the issues and restart from step 1. Continue iterating through all quality checks until every standard is met with zero failures.
@@ -275,7 +275,7 @@ docker mcp tools call updateSettings --param '{"profile_id": "abc123", "blockPag
 ```
 
 **Action Items for 100% Pass Rate**:
-1. Ensure `run_all_tools.{sh,ps1}` passes correct parameter types per OpenAPI
+1. Ensure `run_all_tools.sh` passes correct parameter types per OpenAPI
 2. Use `body=[{"id":"value"}]` for list replacement tools
 3. Implement idempotent test data (check-before-add pattern)
 4. Verify all required parameters are passed for each tool

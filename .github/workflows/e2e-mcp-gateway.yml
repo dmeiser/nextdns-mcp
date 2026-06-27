@@ -26,6 +26,10 @@ permissions:
 jobs:
   e2e:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [slim, alpine]
     env:
       ALLOW_LIVE_WRITES: ${{ github.event.inputs.allow_live_writes || 'true' }}
       NEXTDNS_READABLE_PROFILES: 'ALL'
@@ -79,9 +83,13 @@ jobs:
           docker info
           docker ps
 
-      - name: Build NextDNS MCP Docker image
+      - name: Build NextDNS MCP Docker image (${{ matrix.variant }})
         run: |
-          docker build -t nextdns-mcp:latest .
+          if [ "${{ matrix.variant }}" = "alpine" ]; then
+            docker build -f Dockerfile.alpine -t nextdns-mcp:alpine .
+          else
+            docker build -f Dockerfile -t nextdns-mcp:slim .
+          fi
 
       - name: Create .env file for script
         env:
@@ -99,33 +107,35 @@ jobs:
           echo "nextdns.api_key=${NEXTDNS_API_KEY}" > ~/.docker/mcp/secrets.env
           echo "Secrets file created with nextdns.api_key"
 
-      - name: Run E2E validation script
+      - name: Run E2E validation script (${{ matrix.variant }})
         run: |
           chmod +x scripts/gateway_e2e_run.sh
-          scripts/gateway_e2e_run.sh
+          scripts/gateway_e2e_run.sh .env ${{ matrix.variant }}
 
-      - name: Upload test report
+      - name: Upload test report (${{ matrix.variant }})
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-test-report
-          path: artifacts/tools_report.jsonl
+          name: e2e-test-report-${{ matrix.variant }}
+          path: artifacts/tools_report_${{ matrix.variant }}.jsonl
           if-no-files-found: warn
 
-      - name: Display test summary
+      - name: Display test summary (${{ matrix.variant }})
         if: always()
+        env:
+          REPORT_FILE: artifacts/tools_report_${{ matrix.variant }}.jsonl
         run: |
-          if [ -f artifacts/tools_report.jsonl ]; then
-            echo "## E2E Test Results" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            
-            TOTAL=$(wc -l < artifacts/tools_report.jsonl)
-            PASSED=$(grep -c '"status":"OK"' artifacts/tools_report.jsonl || echo "0")
-            FAILED=$(grep -c '"status":"FAILED"' artifacts/tools_report.jsonl || echo "0")
-            SKIPPED=$(grep -c '"status":"SKIPPED"' artifacts/tools_report.jsonl || echo "0")
-            SCHEMA_VALID=$(grep -c '"schema_validation":"VALID"' artifacts/tools_report.jsonl || echo "0")
-            SCHEMA_INVALID=$(grep -c '"schema_validation":"INVALID"' artifacts/tools_report.jsonl || echo "0")
-            SCHEMA_SKIPPED=$(grep -c '"schema_validation":"SKIPPED"' artifacts/tools_report.jsonl || echo "0")
+          echo "## E2E Test Results — ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f "$REPORT_FILE" ]; then
+            TOTAL=$(wc -l < "$REPORT_FILE")
+            PASSED=$(grep -c '"status":"OK"' "$REPORT_FILE" || echo "0")
+            FAILED=$(grep -c '"status":"FAILED"' "$REPORT_FILE" || echo "0")
+            SKIPPED=$(grep -c '"status":"SKIPPED"' "$REPORT_FILE" || echo "0")
+            SCHEMA_VALID=$(grep -c '"schema_validation":"VALID"' "$REPORT_FILE" || echo "0")
+            SCHEMA_INVALID=$(grep -c '"schema_validation":"INVALID"' "$REPORT_FILE" || echo "0")
+            SCHEMA_SKIPPED=$(grep -c '"schema_validation":"SKIPPED"' "$REPORT_FILE" || echo "0")
             
             echo "- **Total Tools**: $TOTAL" >> $GITHUB_STEP_SUMMARY
             echo "- **Passed**: ✅ $PASSED" >> $GITHUB_STEP_SUMMARY
@@ -140,14 +150,14 @@ jobs:
             if [ $FAILED -gt 0 ]; then
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "### Failed Tools" >> $GITHUB_STEP_SUMMARY
-              grep '"status":"FAILED"' artifacts/tools_report.jsonl | jq -r '"\(.tool): \(.error // "Unknown error")"' >> $GITHUB_STEP_SUMMARY || echo "Could not parse failures" >> $GITHUB_STEP_SUMMARY
+              grep '"status":"FAILED"' "$REPORT_FILE" | jq -r '"\(.tool): \(.error // "Unknown error")"' >> $GITHUB_STEP_SUMMARY || echo "Could not parse failures" >> $GITHUB_STEP_SUMMARY
             fi
             
             if [ $SCHEMA_INVALID -gt 0 ]; then
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "### Schema Validation Failures" >> $GITHUB_STEP_SUMMARY
-              grep '"schema_validation":"INVALID"' artifacts/tools_report.jsonl | jq -r '"\(.tool): \(.schema_error)"' >> $GITHUB_STEP_SUMMARY || echo "Could not parse schema errors" >> $GITHUB_STEP_SUMMARY
+              grep '"schema_validation":"INVALID"' "$REPORT_FILE" | jq -r '"\(.tool): \(.schema_error)"' >> $GITHUB_STEP_SUMMARY || echo "Could not parse schema errors" >> $GITHUB_STEP_SUMMARY
             fi
           else
-            echo "❌ No test report generated" >> $GITHUB_STEP_SUMMARY
+            echo "❌ No test report generated ($REPORT_FILE)" >> $GITHUB_STEP_SUMMARY
           fi

@@ -16,7 +16,7 @@
 #
 # Output:
 #   - Console: Colored progress output with step markers
-#   - File: artifacts/tools_report.jsonl (one JSON object per line per tool)
+#   - File: artifacts/tools_report_<variant>.jsonl (one JSON object per line per tool)
 #
 # Exit Codes:
 #   0 - All tools executed successfully
@@ -51,10 +51,11 @@ log_error() {
 
 # Configuration
 ALLOW_WRITES="${1:-false}"
+VARIANT="${2:-slim}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 ARTIFACTS_DIR="${PROJECT_DIR}/artifacts"
-REPORT_FILE="${ARTIFACTS_DIR}/tools_report.jsonl"
+REPORT_FILE="${ARTIFACTS_DIR}/tools_report_${VARIANT}.jsonl"
 
 # Ensure artifacts directory exists
 mkdir -p "${ARTIFACTS_DIR}"
@@ -77,6 +78,7 @@ mcp_tools() {
 }
 
 log_info "Starting NextDNS MCP tools enumeration and execution"
+log_info "Variant: ${VARIANT}"
 log_info "Allow writes: ${ALLOW_WRITES}"
 log_info "Report file: ${REPORT_FILE}"
 
