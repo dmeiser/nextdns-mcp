@@ -57,16 +57,25 @@ For each list type — `allowlist`, `denylist`, `privacy_blocklists`, `privacy_n
 - Add an entry.
 - Remove the entry you just added.
 
+**Hints for valid test data:**
+- For `allowlist` / `denylist`, use a unique domain such as `ai-test-<timestamp>.example.com`.
+- For `privacy_blocklists`, use `nextdns-recommended`.
+- For `privacy_natives`, use a known native tracker ID such as `alexa`, `roku`, or `samsung`.
+- For `security_tlds`, use `zip`.
+- For `parental_categories`, use `gambling`.
+- For `parental_services`, use `tiktok`.
+- Only `allowlist`, `denylist`, `parental_categories`, and `parental_services` support per-entry updates.
+
 ### DNS rewrites
 - List existing rewrites for the test profile.
 - Add a test rewrite entry.
-- Delete the rewrite entry you just created.
+- Delete the rewrite entry you just created using the `id` returned by the add operation, not the domain name.
 
 ### Analytics — aggregate totals
-Query aggregate totals for every metric: `status`, `domains`, `queryTypes`, `reasons`, `ips`, `dnssec`, `encryption`, `ipVersions`, `protocols`, `devices`, and `destinations` (include a `destination_type` such as `countries` for `destinations`).
+Query aggregate totals for every metric: `status`, `domains`, `queryTypes`, `reasons`, `ips`, `dnssec`, `encryption`, `ipVersions`, `protocols`, `devices`, and `destinations`. Include a `destination_type` such as `countries` for `destinations`, and include a recent `from_time` such as `-1d`.
 
 ### Analytics — time series
-Query time-series data for every metric that supports it: `status`, `queryTypes`, `reasons`, `ips`, `dnssec`, `encryption`, `ipVersions`, `protocols`, `devices`, and `destinations` (include a `destination_type` for `destinations`). Do not request a time series for `domains`.
+Query time-series data for every metric that supports it: `status`, `queryTypes`, `reasons`, `ips`, `dnssec`, `encryption`, `ipVersions`, `protocols`, `devices`, and `destinations`. Include a `destination_type` for `destinations`, a recent `from_time` such as `-1d`, and set `series=true`. Do not request a time series for `domains`.
 
 ### DNS-over-HTTPS
 - Perform a DNS lookup for a common domain through the test profile.
