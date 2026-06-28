@@ -76,9 +76,24 @@ docker mcp tools call plotAnalytics metric=status profile_id=abc123 from_time=-1
 ```
 
 ## Windows vs POSIX quoting
-- `docker mcp tools call` expects a single JSON string argument for params.
-- Use single quotes on Bash/Zsh; on PowerShell use double quotes with escaped inner quotes.
-- For complex payloads, build the JSON in a variable or load from a file.
+
+`docker mcp tools call` accepts two argument styles:
+
+1. **`key=value` arguments** — the style used throughout this doc and the E2E scripts.
+   - Bash/Zsh: `docker mcp tools call toolName key1="value" key2=42`
+   - PowerShell: `docker mcp tools call toolName key1='value' key2=42`
+
+2. **A single JSON string argument** — legacy style still accepted by some clients.
+   - Bash/Zsh: wrap the JSON in single quotes:
+     ```bash
+     docker mcp tools call toolName '{"key1":"value","key2":42}'
+     ```
+   - PowerShell: wrap the JSON in double quotes and escape inner double quotes:
+     ```powershell
+     docker mcp tools call toolName "{`"key1`":`"value`",`"key2`":42}"
+     ```
+
+For complex payloads, build the JSON in a variable or load from a file.
 
 ## Tips
 - Set `NEXTDNS_DEFAULT_PROFILE` to omit `profile_id` for many tools.

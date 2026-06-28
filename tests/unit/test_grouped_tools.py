@@ -451,6 +451,40 @@ class TestQueryAnalytics:
             json=None,
         )
 
+    @pytest.mark.asyncio
+    async def test_optional_filters_forwarded(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.queryAnalytics(
+            "status",
+            "abc123",
+            from_time="-1d",
+            cursor="abc",
+            device="device1",
+        )
+        mock_api_client.request.assert_called_once_with(
+            "GET",
+            "/profiles/abc123/analytics/status",
+            params={"from": "-1d", "cursor": "abc", "device": "device1"},
+            json=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_domains_filters_forwarded(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.queryAnalytics(
+            "domains",
+            "abc123",
+            from_time="-1d",
+            status="blocked",
+            root="example.com",
+        )
+        mock_api_client.request.assert_called_once_with(
+            "GET",
+            "/profiles/abc123/analytics/domains",
+            params={"from": "-1d", "status": "blocked", "root": "example.com"},
+            json=None,
+        )
+
 
 class TestUsageGuidePrompt:
     """Tests for the nextdns-usage-guide MCP prompt."""

@@ -217,7 +217,6 @@ if [ "${ALLOW_LIVE_WRITES}" = "true" ]; then
     set +e
     PROFILE_RESULT=$(mcp_tools call --format json manageProfiles "operation=create" "name=${PROFILE_NAME}" 2>&1)
     CREATE_EXIT_CODE=$?
-    set -e
     CREATED_PROFILE_ID=$(echo "${PROFILE_RESULT}" | grep -E '^\{' | jq -r '.data.id // .id // empty' 2>/dev/null || echo "")
 
     if [ ${CREATE_EXIT_CODE} -eq 0 ] && [ -n "${CREATED_PROFILE_ID}" ] && [ "${CREATED_PROFILE_ID}" != "null" ]; then
@@ -348,7 +347,6 @@ execute_call() {
         set +e
         output=$(mcp_tools call --format json "${tool_name}" "${args[@]}" 2>&1)
         exit_code=$?
-        set -e
 
         if [ ${exit_code} -ne 0 ] && [ ${attempt} -lt ${max_retries} ]; then
             if echo "${output}" | grep -qiE "(Temporary failure in name resolution|network|timeout|connection|timed out|Request error:$)"; then
@@ -554,7 +552,6 @@ if [ "${ALLOW_LIVE_WRITES}" = "true" ]; then
     set +e
     REWRITE_CREATE_OUTPUT=$(mcp_tools call --format json manageRewrites operation=add "profile_id=${PROFILE_ID}" name="e2e-${TIMESTAMP}.example.com" content=192.0.2.1 2>&1)
     REWRITE_CREATE_EXIT=$?
-    set -e
     REWRITE_ENTRY_ID=$(echo "${REWRITE_CREATE_OUTPUT}" | grep -E '^\{' | jq -r '.data.id // empty' 2>/dev/null || echo "")
     if [ -n "${REWRITE_ENTRY_ID}" ]; then
         execute_call manageRewrites operation=delete "profile_id=${PROFILE_ID}" "entry_id=${REWRITE_ENTRY_ID}"
@@ -574,7 +571,6 @@ if [ -n "${CREATED_PROFILE_ID}" ]; then
     set +e
     DELETE_RESULT=$(mcp_tools call --format json manageProfiles operation=delete "profile_id=${CREATED_PROFILE_ID}" 2>&1)
     DELETE_EXIT_CODE=$?
-    set -e
 
     if [ ${DELETE_EXIT_CODE} -eq 0 ]; then
         log_success "Deleted test profile: ${CREATED_PROFILE_ID}"

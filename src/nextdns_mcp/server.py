@@ -429,7 +429,7 @@ def _coerce_json_arg(value: Any) -> Any:
     if isinstance(value, str):
         try:
             return json.loads(value)
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             return value
     return value
 
@@ -620,10 +620,18 @@ def create_mcp_server(api_client: httpx.AsyncClient) -> FastMCP:
 
     # Remove the ~80 auto-generated OpenAPI tools. The grouped CRUD tools below
     # replace them, so only the small intentional surface is exposed.
+    # FastMCP internally stores registered tools on each provider in a private
+    # ``_tools`` dict. We intentionally mutate it here as a version-pinned
+    # workaround; the project pins FastMCP so this shape is controlled.
     openapi_tool_names = get_openapi_tool_names(openapi_spec)
     for provider in mcp.providers:
         tool_registry = getattr(provider, "_tools", None)
         if not isinstance(tool_registry, dict):
+            logger.warning(
+                "Provider %s has no _tools dict; OpenAPI tool cleanup skipped. "
+                "FastMCP shape may have changed.",
+                provider,
+            )
             continue
         for tool_name in openapi_tool_names:
             tool_registry.pop(tool_name, None)
@@ -1108,12 +1116,18 @@ async def _query_analytics_impl(
     limit: Optional[int] = None,
     destination_type: Optional[str] = None,
     series: bool = False,
+    cursor: Optional[str] = None,
+    device: Optional[str] = None,
+    status: Optional[str] = None,
+    root: Optional[str] = None,
 ) -> dict[str, Any]:
     """Grouped implementation for NextDNS analytics endpoints."""
     suffix = ";series" if series else ""
     url = f"/profiles/{profile_id}/analytics/{metric}{suffix}"
 
-    params: dict[str, Any] = _build_query_params(**{"from": from_time, "to": to_time, "limit": limit})
+    params: dict[str, Any] = _build_query_params(
+        **{"from": from_time, "to": to_time, "limit": limit, "cursor": cursor, "device": device}
+    )
 
     if series:
         params.update(
@@ -1129,6 +1143,9 @@ async def _query_analytics_impl(
         if not destination_type:
             return {"error": "destination_type is required for destinations metric"}
         params["type"] = destination_type
+
+    if metric == "domains":
+        params.update(_build_query_params(status=status, root=root))
 
     return await _api_request("GET", url, params=params)
 
@@ -1190,7 +1207,7 @@ async def manageSettings(
 
     Examples:
         - get: ``manageSettings(operation="get", category="privacy", profile_id="abc123")``
-        - update: ``manageSettings(operation="update", category="privacy", profile_id="abc123", settings={"disguisedTrackers": true})``
+        - update: ``manageSettings(operation="update", category="privacy", profile_id="abc123", settings={"disguisedTrackers": True})``
     """
     return await _manage_settings_impl(operation, category, profile_id, settings)
 
@@ -1216,9 +1233,9 @@ async def manageLists(
 
     Operations:
         - ``get``: Return the current list.
-        - ``add``: Append one entry (pass ``entry`` as ``{"id": "value"}`` or just ``entry_id``).
+        - ``add``: Append one entry (pass ``entry`` as ``{"id": "value"}`` or as a plain id string).
         - ``remove``: Delete one entry by ``entry_id``.
-        - ``update``: Toggle an existing entry by ``entry_id`` (pass ``entry={"active": true|false}``).
+        - ``update``: Toggle an existing entry by ``entry_id`` (pass ``entry={"active": True|False}``).
           Only supported for ``allowlist``, ``denylist``, ``parental_categories``, and
           ``parental_services``.
         - ``replace``: Replace the entire list with ``entries`` (list of dicts).
@@ -1302,6 +1319,10 @@ async def queryAnalytics(
     limit: Optional[int] = None,
     destination_type: Optional[str] = None,
     series: bool = False,
+    cursor: Optional[str] = None,
+    device: Optional[str] = None,
+    status: Optional[str] = None,
+    root: Optional[str] = None,
 ) -> dict[str, Any]:
     """Query NextDNS analytics metrics.
 
@@ -1321,6 +1342,12 @@ async def queryAnalytics(
     Set ``series=true`` to fetch time-series data instead of aggregate totals.
     Time values can be Unix timestamps or relative strings like ``-1d``.
 
+    Optional filters:
+        - ``cursor``: Pagination cursor from a previous response.
+        - ``device``: Filter analytics to a single device id.
+        - ``status``: For the ``domains`` metric, filter by resolution status.
+        - ``root``: For the ``domains`` metric, filter to a specific root domain.
+
     Examples:
         - totals: ``queryAnalytics(metric="status", profile_id="abc123", from_time="-1d")``
         - time series: ``queryAnalytics(metric="status", profile_id="abc123", from_time="-1d", series=true)``
@@ -1338,6 +1365,10 @@ async def queryAnalytics(
         limit,
         destination_type,
         series,
+        cursor,
+        device,
+        status,
+        root,
     )
 
 
@@ -1360,7 +1391,7 @@ async def plotAnalytics(
     available.
 
     Supported metrics: ``status``, ``devices``, ``protocols``, ``queryTypes``,
-    ``ipVersions``, ``dnssec``, ``encryption``, ``reasons``.
+    ``ipVersions``, ``dnssec``, ``encryption``, ``reasons``, ``ips``.
 
     Time values can be Unix timestamps or relative strings like ``-1d``.
 
