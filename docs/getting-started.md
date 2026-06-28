@@ -70,10 +70,10 @@ docker mcp tools ls
 
 ```bash
 # List profiles (requires API key)
-docker mcp tools call listProfiles '{}'
+docker mcp tools call manageProfiles operation=list
 
-# Test DNS resolution via DoH (set default_profile first or pass --profile_id)
-docker mcp tools call dohLookup '{"domain":"google.com","record_type":"A","profile_id":"YOUR_PROFILE_ID"}'
+# Test DNS resolution via DoH (set default_profile first or pass profile_id)
+docker mcp tools call dohLookup domain=google.com record_type=A profile_id=YOUR_PROFILE_ID
 ```
 
 ## Option B: Run with Docker (without Gateway)

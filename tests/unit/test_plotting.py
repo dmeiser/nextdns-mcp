@@ -116,6 +116,12 @@ class TestPlotAnalyticsSeriesImpl:
         assert "Unsupported metric" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_domains_metric_returns_error(self, clean_env):
+        result = await server._plot_analytics_series_impl("domains")
+        assert "error" in result
+        assert "Unsupported metric" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_interval_too_small_returns_error(self, clean_env):
         result = await server._plot_analytics_series_impl("status", interval=30)
         assert "error" in result
@@ -183,32 +189,19 @@ class TestPlotAnalyticsSeriesImpl:
             assert result.type == "image"
 
 
-class TestPlotAnalyticsToolWrappers:
-    """Smoke tests for each plotting wrapper to cover the await return line."""
+class TestPlotAnalyticsToolWrapper:
+    """Smoke tests for the generic plotAnalytics wrapper."""
 
     @pytest.mark.asyncio
-    async def test_plot_analytics_series_wrapper(self, clean_env):
-        result = await server.plotAnalyticsSeries("status")
+    async def test_plot_analytics_wrapper(self, clean_env):
+        result = await server.plotAnalytics("status")
         assert "error" in result
         assert "No profile_id provided" in result["error"]
 
-    @pytest.mark.parametrize(
-        "tool_name",
-        [
-            "plotAnalyticsStatus",
-            "plotAnalyticsDomains",
-            "plotAnalyticsDevices",
-            "plotAnalyticsProtocols",
-            "plotAnalyticsQueryTypes",
-            "plotAnalyticsIPVersions",
-            "plotAnalyticsDNSSEC",
-            "plotAnalyticsEncryption",
-            "plotAnalyticsReasons",
-        ],
-    )
     @pytest.mark.asyncio
-    async def test_per_metric_wrapper(self, clean_env, tool_name):
-        tool = getattr(server, tool_name)
-        result = await tool()
+    async def test_plot_analytics_wrapper_with_default_profile(self, clean_env, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        result = await server.plotAnalytics("status")
         assert "error" in result
-        assert "No profile_id provided" in result["error"]
+        # The request fails because the api_client is not mocked; covers the wrapper path.
+        assert "HTTP error" in result["error"] or "Unexpected error" in result["error"]

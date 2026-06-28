@@ -2,51 +2,47 @@
 
 ## Status: ✅ ALL TESTS PASS
 
-**Total Tests:** 233 passed, 2 skipped  
+**Unit Tests:** 342 passed, 5 skipped  
+**E2E Tests:** 92 calls, 0 failed (both `slim` and `alpine` variants)  
 **Failed Tests:** 0  
-**Last Run:** 2026-04-12 19:05 EDT
-
-## Fixed Issues
-
-### 1. Access Control Caching Bugs (src/nextdns_mcp/config.py)
-- **Fixed missing return** in `get_readable_profiles_set()` - was computing result but not returning it
-- **Removed dead code** in `get_writable_profiles_set()` - old `if is_read_only()` block after return statement
-- **Added proper cache clearing** when environment variables change via `get_readable_profiles()` and `get_writable_profiles()`
-- **Added missing global declarations** for `_readable_profiles_cache` and `_writable_profiles_cache`
-
-### 2. Test Isolation Fixes
-- **Updated all test fixtures** to clear module-level caches between tests:
-  - `tests/unit/test_access_control.py`: `clean_env` fixture
-  - `tests/unit/test_config_profiles.py`: `patch_env` fixture  
-  - `tests/unit/test_access_controlled_client.py`: `clean_env` fixture
-- **Fixed mock logger fixture** in `tests/unit/test_config_profiles.py` to return proper Mock object
-- **Fixed test_server_additional_coverage.py** to reference renamed function `doh_lookup` instead of `_execute_doh_query`
-
-### 3. Previously Failing Tests (Now Passing)
-- `TestCanReadProfile::test_allows_only_listed_profiles` ✅
-- `TestCanReadProfile::test_writable_is_readable` ✅  
-- `TestCanWriteProfile::test_allows_only_listed_profiles` ✅
-- `test_log_access_control_all_access` ✅
-- `test_log_access_control_read_only` ✅
-- `test_log_access_control_restricted` ✅
-- `TestAccessControlledClientReadAccess::test_denies_read_when_not_permitted` ✅
-- `TestAccessControlledClientWriteAccess::test_denies_write_when_not_permitted` ✅
-- `test_execute_doh_and_doh_impl` ✅
+**Last Run:** 2026-06-27  
 
 ## Verification Commands
-```bash
-# Run full test suite
-uv run pytest tests/unit/
 
-# Run specific access control tests  
-uv run pytest tests/unit/test_access_control.py tests/unit/test_config_profiles.py tests/unit/test_access_controlled_client.py -v
+```bash
+# Run full test suite with coverage
+uv run pytest --cov=src/nextdns_mcp --cov-report=term-missing -q
+
+# Run E2E tests against both image variants
+bash scripts/gateway_e2e_run.sh .env slim
+bash scripts/gateway_e2e_run.sh .env alpine
 ```
 
-## Changes Made
-- `src/nextdns_mcp/config.py`: Fixed caching logic and returns
-- `tests/unit/test_access_control.py`: Enhanced clean_env fixture
-- `tests/unit/test_config_profiles.py`: Fixed mock_logger and enhanced patch_env fixture  
-- `tests/unit/test_access_controlled_client.py`: Enhanced clean_env fixture
-- `tests/unit/test_server_additional_coverage.py`: Updated function references
+## Recent Fixes
 
-The test suite now provides reliable isolation while preserving the performance benefits of caching in the access control module.
+### 1. Restricted `manageLists` updates (`src/nextdns_mcp/server.py`)
+- `manageLists` `update` is now rejected for list types that do not support per-entry `PATCH` (e.g., `security_tlds`, `privacy_blocklists`, `privacy_natives`).
+- Added `_LIST_UPDATEABLE_TYPES` and an explicit error response with the supported list types.
+
+### 2. Performance settings path (`src/nextdns_mcp/server.py`)
+- Fixed `_SETTINGS_PATHS["performance"]` from `performance` to `settings/performance` to match the OpenAPI spec.
+
+### 3. E2E hardening (`scripts/run_all_tools.sh`)
+- Removed `set -e` so individual tool failures no longer abort the run before the summary/cleanup.
+- Added JSON error-payload detection: calls that return `{"error": ...}` are now counted as failures even when the Docker MCP CLI exits 0.
+- Fixed setup/cleanup exit-code masking caused by `|| echo ""` always returning success.
+- Expanded read-only coverage:
+  - All 11 `queryAnalytics` aggregate metrics.
+  - All 10 supported time-series metrics.
+  - All 9 supported `plotAnalytics` metrics (skipped when no series data is available).
+- Expanded write coverage:
+  - Full `replace -> update -> remove -> add -> remove` lifecycle for every list type.
+  - Each settings category is exercised with both `get` and `update`.
+
+### 4. Schema validation for grouped tools (`scripts/validate_schema.py`)
+- Added `GROUPED_TOOL_OPERATIONS` mapping from grouped MCP tool names to the underlying OpenAPI operationIds.
+- A response is valid if it matches any expected schema for the grouped tool.
+- Synthetic `{"success": true}` responses are skipped instead of reported as invalid.
+
+### 5. Unit-test coverage (`tests/unit/test_grouped_tools.py`)
+- Added a test verifying that `manageLists` rejects `update` for unsupported list types.

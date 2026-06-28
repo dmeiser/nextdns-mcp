@@ -12,37 +12,75 @@ docker mcp tools ls
 DoH lookup
 ```bash
 # Test resolution of a domain (A record)
-docker mcp tools call dohLookup '{"domain":"google.com","record_type":"A","profile_id":"YOUR_PROFILE_ID"}'
+docker mcp tools call dohLookup domain=google.com record_type=A profile_id=YOUR_PROFILE_ID
 
 # IPv6 (AAAA)
-docker mcp tools call dohLookup '{"domain":"google.com","record_type":"AAAA","profile_id":"YOUR_PROFILE_ID"}'
+docker mcp tools call dohLookup domain=google.com record_type=AAAA profile_id=YOUR_PROFILE_ID
+```
+
+Manage profiles
+```bash
+# List all profiles
+docker mcp tools call manageProfiles operation=list
+
+# Get a single profile
+docker mcp tools call manageProfiles operation=get profile_id=abc123
 ```
 
 Get profile settings
 ```bash
-docker mcp tools call getSettings '{"profile_id":"abc123"}'
+# general settings
+docker mcp tools call manageSettings operation=get category=general profile_id=abc123
+
+# privacy, security, parental, performance, logs, blockpage
+docker mcp tools call manageSettings operation=get category=privacy profile_id=abc123
 ```
 
-Bulk replacements (array of objects)
+Update settings
 ```bash
-# Denylist
-# Bash/Zsh
-docker mcp tools call replaceDenylist '{"profile_id":"abc123","body":[{"id":"ads.example.com"},{"id":"tracker.net"}]}'
-# PowerShell (use single quotes to avoid escaping quotes)
-docker mcp tools call replaceDenylist '{"profile_id":"abc123","body":[{"id":"ads.example.com"},{"id":"tracker.net"}]}'
+docker mcp tools call manageSettings operation=update category=general profile_id=abc123 settings='{"web3":true}'
+```
 
-# Blocked TLDs
-docker mcp tools call replaceSecurityTLDs '{"profile_id":"abc123","body":[{"id":"zip"},{"id":"mov"}]}'
+Manage lists
+```bash
+# Replace a whole list
+docker mcp tools call manageLists list_type=denylist operation=replace profile_id=abc123 entries='[{"id":"ads.example.com"},{"id":"tracker.net"}]'
+
+# Add or remove individual entries
+docker mcp tools call manageLists list_type=denylist operation=add profile_id=abc123 entry='{"id":"ads.example.com"}'
+docker mcp tools call manageLists list_type=denylist operation=remove profile_id=abc123 entry_id=ads.example.com
+
+# Toggle an entry (only for allowlist, denylist, parental_categories, parental_services)
+docker mcp tools call manageLists list_type=denylist operation=update profile_id=abc123 entry_id=ads.example.com entry='{"active":true}'
+
+# Security TLDs
+docker mcp tools call manageLists list_type=security_tlds operation=replace profile_id=abc123 entries='[{"id":"zip"},{"id":"mov"}]'
+```
+
+Query analytics
+```bash
+# Aggregate totals for a metric
+docker mcp tools call queryAnalytics metric=status profile_id=abc123 from_time=-1d
+
+# Time-series data
+docker mcp tools call queryAnalytics metric=status profile_id=abc123 from_time=-1d series=true
+
+# Destinations require destination_type
+docker mcp tools call queryAnalytics metric=destinations profile_id=abc123 from_time=-1d destination_type=countries
+```
+
+Plot analytics
+```bash
+# Returns a PNG chart for supported metrics
+docker mcp tools call plotAnalytics metric=status profile_id=abc123 from_time=-1d
 ```
 
 ## Windows vs POSIX quoting
-- docker mcp tools call expects a single JSON string argument for params.
+- `docker mcp tools call` expects a single JSON string argument for params.
 - Use single quotes on Bash/Zsh; on PowerShell use double quotes with escaped inner quotes.
 - For complex payloads, build the JSON in a variable or load from a file.
 
 ## Tips
-- Set NEXTDNS_DEFAULT_PROFILE to omit profile_id for many tools.
-- Use read-only mode when exploring: set NEXTDNS_READ_ONLY=true.
-
-## AI agent E2E prompt (task-level)
-We maintain the full AI-agent E2E prompt in `scripts/ai_agent_e2e_prompt.md`.
+- Set `NEXTDNS_DEFAULT_PROFILE` to omit `profile_id` for many tools.
+- Use read-only mode when exploring: set `NEXTDNS_READ_ONLY=true`.
+- See `scripts/ai_agent_e2e_prompt.md` for a task-level prompt that exercises every grouped tool.

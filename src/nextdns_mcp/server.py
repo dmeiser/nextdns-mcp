@@ -25,13 +25,14 @@ SPDX-License-Identifier: MIT
 """
 
 import io
+import json
 import logging
 import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional, Union
 
 from dotenv import load_dotenv
 
@@ -91,6 +92,75 @@ def _coerce_profile_id(v: object) -> object:
 
 _coerce_to_str = BeforeValidator(_coerce_profile_id) if BeforeValidator is not None else lambda x: x
 OptionalProfileId = Annotated[Optional[str], _coerce_to_str]
+
+# Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
+ProfileOperation = Literal["list", "create", "get", "update", "delete"]
+SettingsCategory = Literal["general", "privacy", "security", "parental", "performance", "logs", "blockpage"]
+ListType = Literal[
+    "allowlist",
+    "denylist",
+    "privacy_blocklists",
+    "privacy_natives",
+    "security_tlds",
+    "parental_categories",
+    "parental_services",
+]
+ListOperation = Literal["get", "add", "replace", "update", "remove"]
+RewriteOperation = Literal["list", "add", "delete"]
+LogOperation = Literal["get", "clear", "download"]
+AnalyticsMetric = Literal[
+    "status",
+    "domains",
+    "queryTypes",
+    "reasons",
+    "ips",
+    "dnssec",
+    "encryption",
+    "ipVersions",
+    "protocols",
+    "devices",
+    "destinations",
+]
+PlotMetric = Literal[
+    "status",
+    "devices",
+    "protocols",
+    "queryTypes",
+    "ipVersions",
+    "dnssec",
+    "encryption",
+    "reasons",
+    "ips",
+]
+
+# List types that support per-entry PATCH updates.
+_LIST_UPDATEABLE_TYPES: set[ListType] = {
+    "allowlist",
+    "denylist",
+    "parental_categories",
+    "parental_services",
+}
+
+# Path-segment mappings for grouped CRUD tools.
+_SETTINGS_PATHS: dict[SettingsCategory, str] = {
+    "general": "settings",
+    "privacy": "privacy",
+    "security": "security",
+    "parental": "parentalControl",
+    "performance": "settings/performance",
+    "logs": "settings/logs",
+    "blockpage": "settings/blockPage",
+}
+
+_LIST_PATHS: dict[ListType, str] = {
+    "allowlist": "allowlist",
+    "denylist": "denylist",
+    "privacy_blocklists": "privacy/blocklists",
+    "privacy_natives": "privacy/natives",
+    "security_tlds": "security/tlds",
+    "parental_categories": "parentalControl/categories",
+    "parental_services": "parentalControl/services",
+}
 
 
 class StripExtraFieldsMiddleware(Middleware):
@@ -332,6 +402,56 @@ def coerce_json_types(data: Any) -> Any:
     return data
 
 
+def get_openapi_tool_names(spec: dict[str, Any]) -> set[str]:
+    """Extract operationIds from an OpenAPI spec to identify auto-generated tools."""
+    names: set[str] = set()
+    for path_item in spec.get("paths", {}).values():
+        for method, operation in path_item.items():
+            if method.lower() in ("get", "post", "put", "patch", "delete"):
+                op_id = operation.get("operationId") if isinstance(operation, dict) else None
+                if op_id:
+                    names.add(op_id)
+    return names
+
+
+def _build_query_params(**kwargs: Any) -> dict[str, Any]:
+    """Build a query-param dict, dropping None values."""
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
+def _coerce_json_arg(value: Any) -> Any:
+    """Parse a JSON string argument into its Python equivalent when applicable.
+
+    The Docker MCP CLI passes object/array parameters as strings (e.g.
+    ``'{"key": true}'``). This helper transparently converts those strings so
+    the grouped tools can accept either a JSON string or the native Python type.
+    """
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError, TypeError:
+            return value
+    return value
+
+
+async def _api_request(method: str, url: str, params: dict[str, Any] | None = None, json: Any = None) -> dict[str, Any]:
+    """Make an HTTP request through the access-controlled client and return JSON."""
+    try:
+        response = await api_client.request(method, url, params=params, json=json)
+        response.raise_for_status()
+        if response.status_code == 204 or not response.content:
+            return {"success": True}
+        return response.json()
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error in {method} {url}: {e}")
+        error_response = getattr(e, "response", None)
+        status_code = error_response.status_code if error_response is not None else None
+        return {"error": f"HTTP error: {e}", "status_code": status_code}
+    except Exception as e:
+        logger.error(f"Unexpected error in {method} {url}: {e}")
+        return {"error": f"Unexpected error: {e}"}
+
+
 def create_access_denied_response(method: str, url: str, error_msg: str, profile_id: str) -> httpx.Response:
     """Create a 403 Forbidden response for access denied scenarios.
 
@@ -498,6 +618,17 @@ def create_mcp_server(api_client: httpx.AsyncClient) -> FastMCP:
     # This allows AI clients (like OpenAI) that send extra fields to work properly
     mcp.add_middleware(StripExtraFieldsMiddleware())
 
+    # Remove the ~80 auto-generated OpenAPI tools. The grouped CRUD tools below
+    # replace them, so only the small intentional surface is exposed.
+    openapi_tool_names = get_openapi_tool_names(openapi_spec)
+    for provider in mcp.providers:
+        tool_registry = getattr(provider, "_tools", None)
+        if not isinstance(tool_registry, dict):
+            continue
+        for tool_name in openapi_tool_names:
+            tool_registry.pop(tool_name, None)
+            # Tool may have already been excluded by route mappings; ignore silently.
+
     # Add metadata about the server
     logger.info("MCP server created successfully")
     default_profile = get_default_profile()
@@ -515,7 +646,9 @@ api_client = create_nextdns_client()
 mcp_server = create_mcp_server(api_client)
 
 
-# Add custom DoH lookup tool
+# Custom MCP tools (replacing the ~80 OpenAPI-generated atomic tools)
+
+
 def _get_target_profile(profile_id: Optional[str]) -> str | None:
     """Get the target profile ID, using default if not specified."""
     if profile_id:
@@ -554,7 +687,6 @@ def _build_doh_metadata(
     return metadata
 
 
-# Add custom DoH lookup tool
 async def doh_lookup(doh_url: str, domain: str, record_type: str, target_profile: str) -> dict[str, Any]:
     """Execute DoH query and return result with metadata."""
     params = {"name": domain, "type": record_type}
@@ -607,44 +739,17 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
     return await doh_lookup(doh_url, domain, record_type_upper, target_profile)
 
 
-# Register the DoH lookup tool with MCP
 @mcp_server.tool()
 async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_type: str = "A") -> dict[str, Any]:
     """Perform a DNS-over-HTTPS lookup using a NextDNS profile.
 
-    This tool performs a DNS query through NextDNS's DoH endpoint, allowing you to test
-    how a specific profile would resolve a domain name. This is useful for:
-    - Testing if a domain is blocked by your profile settings
-    - Verifying DNS resolution behavior
-    - Debugging DNS-related issues
-    - Testing allowlist/denylist configurations
-
     Args:
         domain: The domain name to look up (e.g., "adwords.google.com")
-        profile_id: NextDNS profile ID (6-character alphanumeric). If not provided, uses NEXTDNS_DEFAULT_PROFILE
-        record_type: DNS record type to query. Common types:
-            - A: IPv4 address (default)
-            - AAAA: IPv6 address
-            - CNAME: Canonical name
-            - MX: Mail exchange
-            - TXT: Text records
-            - NS: Name servers
-            - SOA: Start of authority
-            - PTR: Pointer record
+        profile_id: NextDNS profile ID. If not provided, uses NEXTDNS_DEFAULT_PROFILE.
+        record_type: DNS record type to query (default "A").
 
     Returns:
-        dict: DNS response in JSON format containing:
-            - Status: Query status (0 = NOERROR, 2 = SERVFAIL, 3 = NXDOMAIN)
-            - Answer: List of DNS records
-            - Question: The query that was made
-            - Additional metadata
-
-    Example:
-        # Check if adwords.google.com is blocked
-        result = await dohLookup("adwords.google.com", "b282de", "A")
-
-        # Check IPv6 address
-        result = await dohLookup("google.com", "b282de", "AAAA")
+        dict: DNS response in JSON format plus a ``_metadata`` field.
     """
     return await _dohLookup_impl(domain, profile_id, record_type)
 
@@ -653,7 +758,6 @@ async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_ty
 _PLOT_ANALYTICS_METRICS = frozenset(
     {
         "status",
-        "domains",
         "devices",
         "protocols",
         "queryTypes",
@@ -667,12 +771,7 @@ _PLOT_ANALYTICS_METRICS = frozenset(
 
 
 def _extract_series_label(series: dict[str, Any], index: int) -> str:
-    """Return a human-readable label for a time-series data entry.
-
-    Series objects from NextDNS usually contain an identifying field such as
-    `name`, `status`, or `protocol` in addition to the `queries` array. This
-    helper tries common fields and falls back to a generic index label.
-    """
+    """Return a human-readable label for a time-series data entry."""
     for key in ("name", "status", "protocol", "version", "id"):
         value = series.get(key)
         if value is not None and value != "":
@@ -725,18 +824,15 @@ def _render_series_chart(
 async def _plot_analytics_series_impl(
     metric: str,
     profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
+    from_time: str | int = "-1d",
+    to_time: str | int = "now",
     interval: int = 3600,
     alignment: str = "end",
     timezone: str = "GMT",
     partials: str = "none",
     limit: int = 10,
 ) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart from a NextDNS analytics time-series endpoint.
-
-    See ``plotAnalyticsSeries`` for parameter documentation.
-    """
+    """Generate a PNG line chart from a NextDNS analytics time-series endpoint."""
     if metric not in _PLOT_ANALYTICS_METRICS:
         return {
             "error": f"Unsupported metric: {metric}",
@@ -801,50 +897,479 @@ async def _plot_analytics_series_impl(
     return Image(data=png_bytes, format="png").to_image_content()
 
 
-@mcp_server.tool()
-async def plotAnalyticsSeries(
-    metric: str,
+async def _manage_profiles_impl(
+    operation: ProfileOperation,
     profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
+    name: Optional[str] = None,
+) -> dict[str, Any]:
+    """Grouped CRUD implementation for NextDNS profiles."""
+    if operation == "list":
+        return await _api_request("GET", "/profiles")
+
+    if operation == "create":
+        if not name:
+            return {"error": "name is required for create operation"}
+        return await _api_request("POST", "/profiles", json={"name": name})
+
+    if not profile_id:
+        return {"error": "profile_id is required for this operation"}
+
+    url = f"/profiles/{profile_id}"
+    if operation == "get":
+        return await _api_request("GET", url)
+    if operation == "update":
+        if not name:
+            return {"error": "name is required for update operation"}
+        return await _api_request("PATCH", url, json={"name": name})
+    if operation == "delete":
+        return await _api_request("DELETE", url)
+
+    return {"error": f"Unsupported operation: {operation}"}
+
+
+async def _manage_settings_impl(
+    operation: Literal["get", "update"],
+    category: SettingsCategory,
+    profile_id: str,
+    settings: Optional[Union[str, dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Grouped CRUD implementation for profile settings categories."""
+    path = _SETTINGS_PATHS[category]
+    url = f"/profiles/{profile_id}/{path}"
+
+    if operation == "get":
+        return await _api_request("GET", url)
+    if operation == "update":
+        if settings is None:
+            return {"error": "settings is required for update operation"}
+        settings = _coerce_json_arg(settings)
+        if not isinstance(settings, dict):
+            return {"error": "settings must be a JSON object"}
+        return await _api_request("PATCH", url, json=settings)
+
+    return {"error": f"Unsupported operation: {operation}"}
+
+
+async def _lists_get(base_url: str) -> dict[str, Any]:
+    """Fetch the current list entries."""
+    return await _api_request("GET", base_url)
+
+
+async def _lists_add(base_url: str, entry: Optional[Union[str, dict[str, Any]]]) -> dict[str, Any]:
+    """Add a single entry to a list."""
+    if entry is None:
+        return {"error": "entry is required for add operation"}
+    entry = _coerce_json_arg(entry)
+    body = entry if isinstance(entry, dict) else {"id": entry}
+    return await _api_request("POST", base_url, json=body)
+
+
+async def _lists_replace(base_url: str, entries: Optional[Union[str, list[dict[str, Any]]]]) -> dict[str, Any]:
+    """Replace the entire list with a new set of entries."""
+    if entries is None:
+        return {"error": "entries is required for replace operation"}
+    entries = _coerce_json_arg(entries)
+    if not isinstance(entries, list):
+        return {"error": "entries must be a JSON array"}
+    return await _api_request("PUT", base_url, json=entries)
+
+
+async def _lists_update(
+    base_url: str,
+    list_type: ListType,
+    entry_id: Optional[str],
+    entry: Optional[Union[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Update a single list entry by id (only for supported list types)."""
+    if list_type not in _LIST_UPDATEABLE_TYPES:
+        return {
+            "error": f"update is not supported for list_type={list_type}",
+            "supported_list_types": sorted(_LIST_UPDATEABLE_TYPES),
+        }
+    if entry_id is None:
+        return {"error": "entry_id is required for update operation"}
+    entry = _coerce_json_arg(entry)
+    if not isinstance(entry, dict):
+        return {"error": "entry must be a dict for update operation"}
+    return await _api_request("PATCH", f"{base_url}/{entry_id}", json=entry)
+
+
+async def _lists_remove(base_url: str, entry_id: Optional[str]) -> dict[str, Any]:
+    """Remove a single list entry by id."""
+    if entry_id is None:
+        return {"error": "entry_id is required for remove operation"}
+    return await _api_request("DELETE", f"{base_url}/{entry_id}")
+
+
+async def _manage_lists_impl(
+    list_type: ListType,
+    operation: ListOperation,
+    profile_id: str,
+    entry_id: Optional[str] = None,
+    entry: Optional[Union[str, dict[str, Any]]] = None,
+    entries: Optional[Union[str, list[dict[str, Any]]]] = None,
+) -> dict[str, Any]:
+    """Grouped CRUD implementation for content/privacy/security/parental lists."""
+    path = _LIST_PATHS[list_type]
+    base_url = f"/profiles/{profile_id}/{path}"
+
+    if operation == "get":
+        return await _lists_get(base_url)
+    if operation == "add":
+        return await _lists_add(base_url, entry)
+    if operation == "replace":
+        return await _lists_replace(base_url, entries)
+    if operation == "update":
+        return await _lists_update(base_url, list_type, entry_id, entry)
+    if operation == "remove":
+        return await _lists_remove(base_url, entry_id)
+
+    return {"error": f"Unsupported operation: {operation}"}
+
+
+async def _manage_rewrites_impl(
+    operation: RewriteOperation,
+    profile_id: str,
+    name: Optional[str] = None,
+    content: Optional[str] = None,
+    entry_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Grouped CRUD implementation for DNS rewrite entries."""
+    base_url = f"/profiles/{profile_id}/rewrites"
+
+    if operation == "list":
+        return await _api_request("GET", base_url)
+
+    if operation == "add":
+        if not name or not content:
+            return {"error": "name and content are required for add operation"}
+        return await _api_request("POST", base_url, json={"name": name, "content": content})
+
+    if operation == "delete":
+        if not entry_id:
+            return {"error": "entry_id is required for delete operation"}
+        return await _api_request("DELETE", f"{base_url}/{entry_id}")
+
+    return {"error": f"Unsupported operation: {operation}"}
+
+
+async def _manage_logs_impl(
+    operation: LogOperation,
+    profile_id: str,
+    from_time: Optional[str | int] = None,
+    to_time: Optional[str | int] = None,
+    limit: Optional[int] = None,
+    user: Optional[str] = None,
+    device: Optional[str] = None,
+    format: Optional[str] = None,
+) -> dict[str, Any]:
+    """Grouped implementation for query logs (get, clear, download)."""
+    base_url = f"/profiles/{profile_id}/logs"
+
+    if operation == "get":
+        params = _build_query_params(
+            **{"from": from_time, "to": to_time, "limit": limit, "device": device, "search": user}
+        )
+        if format is not None:
+            params["raw"] = format.lower() == "raw"
+        return await _api_request("GET", base_url, params=params)
+
+    if operation == "clear":
+        return await _api_request("DELETE", base_url)
+
+    if operation == "download":
+        try:
+            response = await api_client.get(f"{base_url}/download")
+            response.raise_for_status()
+            return {
+                "content_type": response.headers.get("content-type"),
+                "size": len(response.content),
+                "data": response.text,
+            }
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error downloading logs: {e}")
+            return {"error": f"HTTP error downloading logs: {e}"}
+        except Exception as e:
+            logger.error(f"Unexpected error downloading logs: {e}")
+            return {"error": f"Unexpected error downloading logs: {e}"}
+
+    return {"error": f"Unsupported operation: {operation}"}
+
+
+async def _query_analytics_impl(
+    metric: AnalyticsMetric,
+    profile_id: str,
+    from_time: Optional[str | int] = None,
+    to_time: Optional[str | int] = None,
+    interval: Optional[int] = None,
+    alignment: Optional[str] = None,
+    timezone: Optional[str] = None,
+    partials: Optional[str] = None,
+    limit: Optional[int] = None,
+    destination_type: Optional[str] = None,
+    series: bool = False,
+) -> dict[str, Any]:
+    """Grouped implementation for NextDNS analytics endpoints."""
+    suffix = ";series" if series else ""
+    url = f"/profiles/{profile_id}/analytics/{metric}{suffix}"
+
+    params: dict[str, Any] = _build_query_params(**{"from": from_time, "to": to_time, "limit": limit})
+
+    if series:
+        params.update(
+            _build_query_params(
+                interval=interval,
+                alignment=alignment,
+                timezone=timezone,
+                partials=partials,
+            )
+        )
+
+    if metric == "destinations":
+        if not destination_type:
+            return {"error": "destination_type is required for destinations metric"}
+        params["type"] = destination_type
+
+    return await _api_request("GET", url, params=params)
+
+
+# Register the grouped MCP tools
+
+
+@mcp_server.tool()
+async def manageProfiles(
+    operation: ProfileOperation,
+    profile_id: OptionalProfileId = None,
+    name: Optional[str] = None,
+) -> dict[str, Any]:
+    """Manage NextDNS profiles.
+
+    NextDNS profiles are named configurations that contain DNS settings, blocklists,
+    analytics, and logs. Most other tools require a ``profile_id`` from this tool.
+
+    Operations:
+        - ``list``: Return all profiles the API key can access.
+        - ``create``: Create a new profile (requires ``name``).
+        - ``get``: Retrieve a single profile (requires ``profile_id``).
+        - ``update``: Rename a profile (requires ``profile_id`` and ``name``).
+        - ``delete``: Remove a profile (requires ``profile_id``).
+
+    Examples:
+        - list:  ``manageProfiles(operation="list")``
+        - create: ``manageProfiles(operation="create", name="Home Network")``
+        - get:   ``manageProfiles(operation="get", profile_id="abc123")``
+    """
+    return await _manage_profiles_impl(operation, profile_id, name)
+
+
+@mcp_server.tool()
+async def manageSettings(
+    operation: Literal["get", "update"],
+    category: SettingsCategory,
+    profile_id: str,
+    settings: Optional[Union[str, dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Manage a settings category for a NextDNS profile.
+
+    Settings categories:
+        - ``general``: Core profile settings (e.g., name, web3 blocking).
+        - ``privacy``: Privacy features such as disguised-tracker blocking and affiliate links.
+        - ``security``: Threat intelligence, Google Safe Browsing, typosquatting protection.
+        - ``parental``: Parental control enablement (safe search, YouTube restricted mode).
+        - ``performance``: ECS, cache boost, and other performance options.
+        - ``logs``: Query-logging enablement and retention.
+        - ``blockpage``: Whether to show a custom block page for blocked queries.
+
+    Operations:
+        - ``get``: Retrieve current settings for the category.
+        - ``update``: Apply new settings (requires ``settings`` payload).
+
+    The ``settings`` argument can be a Python dict or a JSON string. For ``update``,
+    first call ``get`` to see the current schema, then send only the fields you want
+    to change.
+
+    Examples:
+        - get: ``manageSettings(operation="get", category="privacy", profile_id="abc123")``
+        - update: ``manageSettings(operation="update", category="privacy", profile_id="abc123", settings={"disguisedTrackers": true})``
+    """
+    return await _manage_settings_impl(operation, category, profile_id, settings)
+
+
+@mcp_server.tool()
+async def manageLists(
+    list_type: ListType,
+    operation: ListOperation,
+    profile_id: str,
+    entry_id: Optional[str] = None,
+    entry: Optional[Union[str, dict[str, Any]]] = None,
+    entries: Optional[Union[str, list[dict[str, Any]]]] = None,
+) -> dict[str, Any]:
+    """Manage allow/deny/block lists for a NextDNS profile.
+
+    List types:
+        - ``allowlist`` / ``denylist``: Always-allow or always-block specific domains.
+        - ``privacy_blocklists``: Subscribed blocklists (e.g., ``nextdns-recommended``).
+        - ``privacy_natives``: Native tracking blockers (e.g., ``apple``, ``facebook``).
+        - ``security_tlds``: Dangerous top-level domains to block (e.g., ``zip``).
+        - ``parental_categories``: Content categories (e.g., ``gambling``, ``porn``).
+        - ``parental_services``: Specific apps/services (e.g., ``tiktok``, ``youtube``).
+
+    Operations:
+        - ``get``: Return the current list.
+        - ``add``: Append one entry (pass ``entry`` as ``{"id": "value"}`` or just ``entry_id``).
+        - ``remove``: Delete one entry by ``entry_id``.
+        - ``update``: Toggle an existing entry by ``entry_id`` (pass ``entry={"active": true|false}``).
+          Only supported for ``allowlist``, ``denylist``, ``parental_categories``, and
+          ``parental_services``.
+        - ``replace``: Replace the entire list with ``entries`` (list of dicts).
+
+    Examples:
+        - get: ``manageLists(list_type="denylist", operation="get", profile_id="abc123")``
+        - add: ``manageLists(list_type="denylist", operation="add", profile_id="abc123", entry={"id": "example.com"})``
+        - remove: ``manageLists(list_type="denylist", operation="remove", profile_id="abc123", entry_id="example.com")``
+        - replace: ``manageLists(list_type="privacy_blocklists", operation="replace", profile_id="abc123", entries=[{"id": "nextdns-recommended"}])``
+    """
+    return await _manage_lists_impl(list_type, operation, profile_id, entry_id, entry, entries)
+
+
+@mcp_server.tool()
+async def manageRewrites(
+    operation: RewriteOperation,
+    profile_id: str,
+    name: Optional[str] = None,
+    content: Optional[str] = None,
+    entry_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Manage DNS rewrite entries for a NextDNS profile.
+
+    Rewrites let you return a custom answer for a hostname. Typical uses:
+    - Point an internal hostname to a private IP.
+    - Block a domain by rewriting it to ``0.0.0.0``.
+
+    Operations:
+        - ``list``: Show existing rewrites.
+        - ``add``: Create a rewrite (requires ``name`` and ``content``).
+        - ``delete``: Remove a rewrite (requires ``entry_id`` from ``list``).
+
+    Examples:
+        - list: ``manageRewrites(operation="list", profile_id="abc123")``
+        - add: ``manageRewrites(operation="add", profile_id="abc123", name="router.home", content="192.168.1.1")``
+        - delete: ``manageRewrites(operation="delete", profile_id="abc123", entry_id="router.home")``
+    """
+    return await _manage_rewrites_impl(operation, profile_id, name, content, entry_id)
+
+
+@mcp_server.tool()
+async def manageLogs(
+    operation: LogOperation,
+    profile_id: str,
+    from_time: Optional[str | int] = None,
+    to_time: Optional[str | int] = None,
+    limit: Optional[int] = None,
+    user: Optional[str] = None,
+    device: Optional[str] = None,
+    format: Optional[str] = None,
+) -> dict[str, Any]:
+    """Manage query logs for a NextDNS profile.
+
+    Operations:
+        - ``get``: Return recent query log entries (use ``limit`` to cap results).
+        - ``clear``: Delete all stored logs for the profile.
+        - ``download``: Download retained logs as CSV. ``from_time`` and ``to_time`` are
+          ignored by the NextDNS download endpoint.
+
+    Time values can be Unix timestamps or relative strings like ``-1d`` or ``-7d``.
+    They are only used by ``get``.
+
+    Examples:
+        - get recent: ``manageLogs(operation="get", profile_id="abc123", limit=10)``
+        - download: ``manageLogs(operation="download", profile_id="abc123", from_time="-1d")``
+        - clear: ``manageLogs(operation="clear", profile_id="abc123")``
+    """
+    return await _manage_logs_impl(operation, profile_id, from_time, to_time, limit, user, device, format)
+
+
+@mcp_server.tool()
+async def queryAnalytics(
+    metric: AnalyticsMetric,
+    profile_id: str,
+    from_time: Optional[str | int] = None,
+    to_time: Optional[str | int] = None,
+    interval: Optional[int] = None,
+    alignment: Optional[str] = None,
+    timezone: Optional[str] = None,
+    partials: Optional[str] = None,
+    limit: Optional[int] = None,
+    destination_type: Optional[str] = None,
+    series: bool = False,
+) -> dict[str, Any]:
+    """Query NextDNS analytics metrics.
+
+    Metrics:
+        - ``status``: Query resolution status (default, blocked, allowed, relayed).
+        - ``devices``: Queries per device.
+        - ``protocols``: DNS transport protocol (DoH, DoT, Do53 UDP/TCP, DoQ).
+        - ``queryTypes``: DNS record types requested (A, AAAA, CNAME, etc.).
+        - ``ipVersions``: IPv4 vs IPv6 queries.
+        - ``dnssec``: DNSSEC validation results.
+        - ``encryption``: Encrypted vs unencrypted queries.
+        - ``reasons``: Why queries were blocked or allowed.
+        - ``ips``: Top source IPs.
+        - ``destinations``: Top destinations; requires ``destination_type`` such as
+          ``countries`` or ``gafam``.
+
+    Set ``series=true`` to fetch time-series data instead of aggregate totals.
+    Time values can be Unix timestamps or relative strings like ``-1d``.
+
+    Examples:
+        - totals: ``queryAnalytics(metric="status", profile_id="abc123", from_time="-1d")``
+        - time series: ``queryAnalytics(metric="status", profile_id="abc123", from_time="-1d", series=true)``
+        - destinations: ``queryAnalytics(metric="destinations", profile_id="abc123", from_time="-1d", destination_type="countries")``
+    """
+    return await _query_analytics_impl(
+        metric,
+        profile_id,
+        from_time,
+        to_time,
+        interval,
+        alignment,
+        timezone,
+        partials,
+        limit,
+        destination_type,
+        series,
+    )
+
+
+@mcp_server.tool()
+async def plotAnalytics(
+    metric: PlotMetric,
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-1d",
+    to_time: str | int = "now",
     interval: int = 3600,
     alignment: str = "end",
     timezone: str = "GMT",
     partials: str = "none",
     limit: int = 10,
 ) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart from a NextDNS analytics time-series endpoint.
+    """Generate a PNG line chart for a NextDNS analytics time-series metric.
 
-    This tool fetches time-series data from ``/profiles/{id}/analytics/{metric};series``
-    and renders a line chart with one line per series entry. It is useful for
-    visualizing query trends over time directly in MCP clients that support images.
+    Use this to visualize query trends over time. The profile should have recent
+    query history; otherwise the tool returns an error explaining that no data is
+    available.
 
-    Args:
-        metric: Analytics metric to plot. Supported values:
-            - status: query response status (default, blocked, allowed)
-            - domains: most queried domains
-            - devices: query statistics by device
-            - protocols: DNS protocol usage (DoH, DoT, DoQ, UDP, TCP)
-            - queryTypes: DNS query types (A, AAAA, CNAME, etc.)
-            - ipVersions: IPv4 vs IPv6 usage
-            - dnssec: DNSSEC validation status
-            - encryption: encrypted vs unencrypted queries
-            - reasons: why queries were blocked
-            - ips: client IP addresses
-        profile_id: NextDNS profile ID (6-character alphanumeric). If not provided,
-            uses NEXTDNS_DEFAULT_PROFILE.
-        from_time: Start of the time range (Unix timestamp or ISO 8601). Defaults to ``-1d``.
-        to_time: End of the time range (Unix timestamp or ISO 8601). Defaults to ``now``.
-        interval: Time-series window size in seconds. Must be at least 60. Defaults to 3600 (1 hour).
-        alignment: How to align tumbling windows when the range is not an exact
-            multiple of the interval. One of ``start`` or ``end``. Defaults to ``end``.
-        timezone: IANA time zone name (e.g. ``America/New_York``). Defaults to ``GMT``.
-        partials: Whether to include partial tumbling windows. One of ``none``,
-            ``start``, ``end``, or ``all``. Defaults to ``none``.
-        limit: Maximum number of series entries to return. Defaults to 10.
+    Supported metrics: ``status``, ``devices``, ``protocols``, ``queryTypes``,
+    ``ipVersions``, ``dnssec``, ``encryption``, ``reasons``.
+
+    Time values can be Unix timestamps or relative strings like ``-1d``.
+
+    Examples:
+        - ``plotAnalytics(metric="status", profile_id="abc123", from_time="-1d")``
+        - ``plotAnalytics(metric="devices", profile_id="abc123", from_time="-7d", interval=86400)``
 
     Returns:
-        MCP ImageContent containing a PNG line chart.
+        An MCP ImageContent PNG chart, or an error dict if data is unavailable.
     """
     return await _plot_analytics_series_impl(
         metric=metric,
@@ -859,229 +1384,116 @@ async def plotAnalyticsSeries(
     )
 
 
-@mcp_server.tool()
-async def plotAnalyticsStatus(
-    profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
-    interval: int = 3600,
-    alignment: str = "end",
-    timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart of DNS query status (default, blocked, allowed) over time."""
-    return await _plot_analytics_series_impl(
-        metric="status",
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        interval=interval,
-        alignment=alignment,
-        timezone=timezone,
-        partials=partials,
-        limit=limit,
-    )
+@mcp_server.prompt(
+    name="nextdns-usage-guide",
+    description="Comprehensive guide for using the NextDNS MCP server tools",
+)
+def nextdns_usage_guide() -> str:
+    """Return a detailed usage guide for the NextDNS MCP tools."""
+    return """# NextDNS MCP Server Usage Guide
 
+This MCP server exposes NextDNS through a small set of grouped tools. Each tool
+maps to a functional area of the NextDNS API.
 
-@mcp_server.tool()
-async def plotAnalyticsDomains(
-    profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
-    interval: int = 3600,
-    alignment: str = "end",
-    timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart of top queried domains over time."""
-    return await _plot_analytics_series_impl(
-        metric="domains",
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        interval=interval,
-        alignment=alignment,
-        timezone=timezone,
-        partials=partials,
-        limit=limit,
-    )
+## Core concepts
 
+- **Profile**: A named NextDNS configuration that owns settings, lists, logs,
+  analytics, and rewrites. Most tools require a `profile_id`.
+- **Default profile**: If `NEXTDNS_DEFAULT_PROFILE` is set, tools that accept an
+  optional `profile_id` will use it automatically.
+- **Access control**: The server reads `NEXTDNS_READABLE_PROFILES` and
+  `NEXTDNS_WRITABLE_PROFILES`. Reads/writes outside those profiles are rejected.
 
-@mcp_server.tool()
-async def plotAnalyticsDevices(
-    profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
-    interval: int = 3600,
-    alignment: str = "end",
-    timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart of query counts per device over time."""
-    return await _plot_analytics_series_impl(
-        metric="devices",
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        interval=interval,
-        alignment=alignment,
-        timezone=timezone,
-        partials=partials,
-        limit=limit,
-    )
+## Available tools
 
+### manageProfiles
+List, create, get, update, or delete profiles. Use this first to discover the
+`profile_id` you need for other tools.
 
-@mcp_server.tool()
-async def plotAnalyticsProtocols(
-    profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
-    interval: int = 3600,
-    alignment: str = "end",
-    timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart of DNS protocol usage (DoH, DoT, DoQ, UDP, TCP) over time."""
-    return await _plot_analytics_series_impl(
-        metric="protocols",
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        interval=interval,
-        alignment=alignment,
-        timezone=timezone,
-        partials=partials,
-        limit=limit,
-    )
+- `operation="list"`
+- `operation="create" name="My Profile"`
+- `operation="get" profile_id="abc123"`
+- `operation="update" profile_id="abc123" name="New Name"`
+- `operation="delete" profile_id="abc123"`
 
+### manageSettings
+Get or update one of the seven settings categories:
 
-@mcp_server.tool()
-async def plotAnalyticsQueryTypes(
-    profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
-    interval: int = 3600,
-    alignment: str = "end",
-    timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart of DNS query types (A, AAAA, CNAME, etc.) over time."""
-    return await _plot_analytics_series_impl(
-        metric="queryTypes",
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        interval=interval,
-        alignment=alignment,
-        timezone=timezone,
-        partials=partials,
-        limit=limit,
-    )
+- `general` — core profile options (e.g., web3 blocking)
+- `privacy` — disguised trackers, affiliate links
+- `security` — threat intelligence, Google Safe Browsing
+- `parental` — safe search, YouTube restricted mode
+- `performance` — ECS, cache boost
+- `logs` — logging enablement and retention
+- `blockpage` — custom block page toggle
 
+When updating, first call `get` to inspect the current schema, then pass only the
+fields you want to change in `settings`.
 
-@mcp_server.tool()
-async def plotAnalyticsIPVersions(
-    profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
-    interval: int = 3600,
-    alignment: str = "end",
-    timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart of IPv4 vs IPv6 query usage over time."""
-    return await _plot_analytics_series_impl(
-        metric="ipVersions",
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        interval=interval,
-        alignment=alignment,
-        timezone=timezone,
-        partials=partials,
-        limit=limit,
-    )
+### manageLists
+Manage allow/deny/block lists:
 
+- `allowlist` / `denylist` — per-domain overrides
+- `privacy_blocklists` — subscribed blocklists
+- `privacy_natives` — native tracking blockers
+- `security_tlds` — dangerous TLDs
+- `parental_categories` — content categories
+- `parental_services` — specific apps/services
 
-@mcp_server.tool()
-async def plotAnalyticsDNSSEC(
-    profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
-    interval: int = 3600,
-    alignment: str = "end",
-    timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart of DNSSEC validation status over time."""
-    return await _plot_analytics_series_impl(
-        metric="dnssec",
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        interval=interval,
-        alignment=alignment,
-        timezone=timezone,
-        partials=partials,
-        limit=limit,
-    )
+Operations: `get`, `add`, `remove`, `update`, `replace`.
 
+For `add`, pass `entry={"id": "value"}`. For `remove`/`update`, pass
+`entry_id`. For `replace`, pass `entries=[{"id": "value"}, ...]`.
 
-@mcp_server.tool()
-async def plotAnalyticsEncryption(
-    profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
-    interval: int = 3600,
-    alignment: str = "end",
-    timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart of encrypted vs unencrypted DNS queries over time."""
-    return await _plot_analytics_series_impl(
-        metric="encryption",
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        interval=interval,
-        alignment=alignment,
-        timezone=timezone,
-        partials=partials,
-        limit=limit,
-    )
+### manageRewrites
+Create custom DNS responses for a hostname:
 
+- `operation="list"`
+- `operation="add" name="router.home" content="192.168.1.1"`
+- `operation="delete" entry_id="router.home"`
 
-@mcp_server.tool()
-async def plotAnalyticsReasons(
-    profile_id: OptionalProfileId = None,
-    from_time: str = "-1d",
-    to_time: str = "now",
-    interval: int = 3600,
-    alignment: str = "end",
-    timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart of blocking reasons over time."""
-    return await _plot_analytics_series_impl(
-        metric="reasons",
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        interval=interval,
-        alignment=alignment,
-        timezone=timezone,
-        partials=partials,
-        limit=limit,
-    )
+### manageLogs
+Inspect or export query logs:
+
+- `operation="get"` — recent entries
+- `operation="clear"` — delete stored logs
+- `operation="download"` — CSV export
+
+Time values can be Unix timestamps or relative strings such as `-1d`.
+
+### queryAnalytics
+Fetch analytics for a profile. Metrics:
+
+- `status`, `devices`, `protocols`, `queryTypes`, `ipVersions`, `dnssec`,
+  `encryption`, `reasons`, `ips`, `destinations`
+
+Set `series=true` for time-series data. The `destinations` metric requires
+`destination_type` (e.g., `countries` or `gafam`).
+
+### plotAnalytics
+Generate a PNG line chart for supported metrics. Use a profile with query
+history. Returns an MCP image or an error if no data is available.
+
+### dohLookup
+Perform a DNS-over-HTTPS lookup through NextDNS:
+
+- `dohLookup(domain="example.com", profile_id="abc123", record_type="A")`
+
+## Common workflows
+
+### Block a domain
+1. `manageLists(list_type="denylist", operation="add", profile_id="abc123", entry={"id": "bad.example.com"})`
+
+### Allow a domain
+1. `manageLists(list_type="allowlist", operation="add", profile_id="abc123", entry={"id": "safe.example.com"})`
+
+### View blocked query trends
+1. `queryAnalytics(metric="status", profile_id="abc123", from_time="-1d", series=true)`
+2. `plotAnalytics(metric="status", profile_id="abc123", from_time="-1d")`
+
+### Add a DNS rewrite
+1. `manageRewrites(operation="add", profile_id="abc123", name="router.home", content="192.168.1.1")`
+"""
 
 
 def get_mcp_run_options() -> dict[str, Any]:

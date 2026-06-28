@@ -2,6 +2,11 @@
 """
 Validate JSON responses against OpenAPI schema definitions.
 Used by E2E tests to catch breaking API changes.
+
+The grouped CRUD tools collapse many OpenAPI operations into a single MCP tool,
+so validation is performed against the union of response schemas for the
+underlying operations. A response is considered valid if it matches any of the
+expected schemas for that grouped tool.
 """
 
 import json
@@ -10,6 +15,114 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
+
+
+# Mapping from grouped MCP tool names to the OpenAPI operationIds they dispatch to.
+# A response is valid if it conforms to at least one of the listed schemas.
+GROUPED_TOOL_OPERATIONS: dict[str, list[str]] = {
+    "manageProfiles": [
+        "listProfiles",
+        "createProfile",
+        "getProfile",
+        "updateProfile",
+        "deleteProfile",
+    ],
+    "manageSettings": [
+        "getSettings",
+        "updateSettings",
+        "getLogsSettings",
+        "updateLogsSettings",
+        "getBlockPageSettings",
+        "updateBlockPageSettings",
+        "getPerformanceSettings",
+        "updatePerformanceSettings",
+        "getSecuritySettings",
+        "updateSecuritySettings",
+        "getPrivacySettings",
+        "updatePrivacySettings",
+        "getParentalControlSettings",
+        "updateParentalControlSettings",
+    ],
+    "manageLists": [
+        "getDenylist",
+        "addToDenylist",
+        "replaceDenylist",
+        "updateDenylistEntry",
+        "removeFromDenylist",
+        "getAllowlist",
+        "addToAllowlist",
+        "replaceAllowlist",
+        "updateAllowlistEntry",
+        "removeFromAllowlist",
+        "getParentalControlServices",
+        "replaceParentalControlServices",
+        "addToParentalControlServices",
+        "updateParentalControlServiceEntry",
+        "removeFromParentalControlServices",
+        "getParentalControlCategories",
+        "replaceParentalControlCategories",
+        "addToParentalControlCategories",
+        "updateParentalControlCategoryEntry",
+        "removeFromParentalControlCategories",
+        "getSecurityTLDs",
+        "addSecurityTLD",
+        "replaceSecurityTLDs",
+        "removeSecurityTLD",
+        "getPrivacyBlocklists",
+        "addPrivacyBlocklist",
+        "replacePrivacyBlocklists",
+        "removePrivacyBlocklist",
+        "getPrivacyNatives",
+        "addPrivacyNative",
+        "replacePrivacyNatives",
+        "removePrivacyNative",
+    ],
+    "manageRewrites": [
+        "listRewrites",
+        "addRewrite",
+        "deleteRewrite",
+    ],
+    "manageLogs": [
+        "getLogs",
+        "clearLogs",
+        "downloadLogs",
+    ],
+    "queryAnalytics": [
+        "getAnalyticsStatus",
+        "getAnalyticsStatusSeries",
+        "getAnalyticsDomains",
+        "getAnalyticsQueryTypes",
+        "getAnalyticsQueryTypesSeries",
+        "getAnalyticsReasons",
+        "getAnalyticsReasonsSeries",
+        "getAnalyticsIPs",
+        "getAnalyticsIPsSeries",
+        "getAnalyticsDNSSEC",
+        "getAnalyticsDNSSECSeries",
+        "getAnalyticsEncryption",
+        "getAnalyticsEncryptionSeries",
+        "getAnalyticsIPVersions",
+        "getAnalyticsIPVersionsSeries",
+        "getAnalyticsProtocols",
+        "getAnalyticsProtocolsSeries",
+        "getAnalyticsDestinations",
+        "getAnalyticsDestinationsSeries",
+        "getAnalyticsDevices",
+        "getAnalyticsDevicesSeries",
+    ],
+    "plotAnalytics": [
+        "getAnalyticsStatusSeries",
+        "getAnalyticsDevicesSeries",
+        "getAnalyticsProtocolsSeries",
+        "getAnalyticsQueryTypesSeries",
+        "getAnalyticsIPVersionsSeries",
+        "getAnalyticsDNSSECSeries",
+        "getAnalyticsEncryptionSeries",
+        "getAnalyticsReasonsSeries",
+        "getAnalyticsIPsSeries",
+    ],
+    "dohLookup": [],
+}
 
 
 def load_openapi_spec(spec_path: str) -> Dict[str, Any]:
@@ -32,10 +145,14 @@ def get_operation_response_schema(spec: Dict[str, Any], operation_id: str) -> Op
                 if operation.get("operationId") == operation_id:
                     # Found the operation, extract 200 response schema
                     responses = operation.get("responses", {})
-                    success_response = responses.get("200", {})
-                    content = success_response.get("content", {})
-                    json_content = content.get("application/json", {})
-                    return json_content.get("schema")
+                    # Some operations return 200, others 201 (created)
+                    for success_code in ("200", "201"):
+                        success_response = responses.get(success_code, {})
+                        content = success_response.get("content", {})
+                        json_content = content.get("application/json", {})
+                        schema = json_content.get("schema")
+                        if schema:
+                            return schema
 
     return None
 
@@ -115,11 +232,11 @@ def validate_schema(data: Any, schema: Dict[str, Any], path: str = "$") -> list[
 def main():
     """Main entry point for schema validation."""
     if len(sys.argv) < 3:
-        print("Usage: validate_schema.py <operation_id> <json_response>", file=sys.stderr)
-        print('Example: validate_schema.py getProfile \'{"data":{"id":"abc123"}}\'', file=sys.stderr)
+        print("Usage: validate_schema.py <tool_name> <json_response>", file=sys.stderr)
+        print('Example: validate_schema.py manageProfiles \'{"data":{"id":"abc123"}}\'', file=sys.stderr)
         sys.exit(1)
 
-    operation_id = sys.argv[1]
+    tool_name = sys.argv[1]
     json_response = sys.argv[2]
 
     # Find OpenAPI spec
@@ -141,25 +258,43 @@ def main():
         print(f"ERROR: Failed to parse JSON response: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Get expected schema
-    schema = get_operation_response_schema(spec, operation_id)
-
-    if schema is None:
-        print(f"WARNING: No schema found for operation '{operation_id}'", file=sys.stderr)
+    # Synthetic 204-style success responses generated by the grouped tools do not
+    # correspond to any OpenAPI response body and are therefore not validated.
+    if response_data == {"success": True}:
         print("SKIPPED", file=sys.stdout)
         sys.exit(0)
 
-    # Validate response
-    errors = validate_schema(response_data, schema)
+    operation_ids = [tool_name]
+    if tool_name in GROUPED_TOOL_OPERATIONS:
+        operation_ids = GROUPED_TOOL_OPERATIONS[tool_name]
 
-    if errors:
-        print(f"SCHEMA_ERRORS: {len(errors)} validation error(s)", file=sys.stderr)
-        for error in errors:
-            print(f"  - {error}", file=sys.stderr)
-        sys.exit(1)
-    else:
-        print("VALID", file=sys.stdout)
+    schemas: list[tuple[str, Dict[str, Any]]] = []
+    for op_id in operation_ids:
+        schema = get_operation_response_schema(spec, op_id)
+        if schema is not None:
+            schemas.append((op_id, schema))
+
+    if not schemas:
+        print(f"WARNING: No schemas found for tool '{tool_name}'", file=sys.stderr)
+        print("SKIPPED", file=sys.stdout)
         sys.exit(0)
+
+    # Validate against each candidate schema. The response is valid if it matches
+    # at least one of the underlying operations for the grouped tool.
+    all_errors: list[str] = []
+    for op_id, schema in schemas:
+        errors = validate_schema(response_data, schema)
+        if not errors:
+            print("VALID", file=sys.stdout)
+            sys.exit(0)
+        all_errors.append(f"{op_id}:")
+        for error in errors:
+            all_errors.append(f"  - {error}")
+
+    print(f"SCHEMA_ERRORS: no matching schema for {tool_name}", file=sys.stderr)
+    for line in all_errors:
+        print(line, file=sys.stderr)
+    sys.exit(1)
 
 
 if __name__ == "__main__":

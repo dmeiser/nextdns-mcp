@@ -56,12 +56,10 @@ This file contains repository-specific agent rules. Agents should follow these w
   - **Running E2E Tests:**
     ```bash
     # Default (slim) variant
-    cd scripts
-    ./gateway_e2e_run.sh
+    bash scripts/gateway_e2e_run.sh .env slim
 
     # Alpine variant
-    cd scripts
-    ./gateway_e2e_run.sh .env alpine
+    bash scripts/gateway_e2e_run.sh .env alpine
     ```
   - **Analyzing Results:**
     - Check `artifacts/tools_report_slim.jsonl` (default) or `artifacts/tools_report_alpine.jsonl` for per-tool results
@@ -166,12 +164,10 @@ open htmlcov/index.html
 **Running E2E Tests**:
 ```bash
 # Default (slim) variant
-cd scripts
-./gateway_e2e_run.sh
+bash scripts/gateway_e2e_run.sh .env slim
 
 # Alpine variant
-cd scripts
-./gateway_e2e_run.sh .env alpine
+bash scripts/gateway_e2e_run.sh .env alpine
 ```
 
 **E2E Test Validation**:
@@ -214,7 +210,7 @@ Before running E2E tests or claiming work is complete:
 - [ ] Verify per-file coverage: all files >95% in `htmlcov/index.html`
 - [ ] Run `uv run radon cc src/ -a` (verify grade A)
 - [ ] Run `uv run radon cc src/ -nc` (verify no functions exceed grade B)
-- [ ] Run Gateway E2E tests: `cd scripts && ./gateway_e2e_run.sh` and `cd scripts && ./gateway_e2e_run.sh .env alpine` (**100% pass rate required**)
+- [ ] Run Gateway E2E tests: `bash scripts/gateway_e2e_run.sh .env slim` and `bash scripts/gateway_e2e_run.sh .env alpine` (**100% pass rate required**)
 - [ ] Review `artifacts/tools_report_slim.jsonl` and `artifacts/tools_report_alpine.jsonl` - zero failures allowed
 - [ ] Commit formatting changes as final commit before validation
 
@@ -261,27 +257,27 @@ All Gateway E2E tests must pass. If tests fail, fix the underlying issues - do n
 
 **Fixing Parameter Type Issues**:
 
-The E2E scripts pass parameters as key=value strings. This generally works because the server coerces primitive types, but **arrays and nested objects must be encoded explicitly**.
+The E2E scripts pass parameters as `key=value` strings. The server coerces primitive types, but **arrays and nested objects must be encoded explicitly**.
 
 ```bash
 # OK for simple booleans and integers (server coerces types)
-docker mcp tools call updateBlockPageSettings profile_id=abc123 enabled=true
+docker mcp tools call manageSettings operation=update category=blockpage profile_id=abc123 settings='{"enabled":true}'
 
-# REQUIRED for array bodies (FastMCP 3.x array-body support)
-docker mcp tools call replaceDenylist profile_id=abc123 'body=[{"id":"ads.example.com"}]'
+# REQUIRED for array bodies in grouped list tools
+docker mcp tools call manageLists list_type=denylist operation=replace profile_id=abc123 entries='[{"id":"ads.example.com"}]'
 
 # REQUIRED for nested objects if needed
-docker mcp tools call updateSettings --param '{"profile_id": "abc123", "blockPage": {"enabled": true}}'
+docker mcp tools call manageSettings operation=update category=general profile_id=abc123 settings='{"blockPage":{"enabled":true}}'
 ```
 
 **Action Items for 100% Pass Rate**:
-1. Ensure `run_all_tools.sh` passes correct parameter types per OpenAPI
-2. Use `body=[{"id":"value"}]` for list replacement tools
-3. Implement idempotent test data (check-before-add pattern)
-4. Verify all required parameters are passed for each tool
+1. Ensure `run_all_tools.sh` passes correct parameter types for each grouped tool
+2. Use `entries=[{"id":"value"}]` for list `replace` operations
+3. Use `entry={"id":"value"}` for list `add` operations
+4. Verify all required parameters are passed for each operation
 5. Ensure output formats match OpenAPI spec definitions
 
-**Quality Gate**: Zero failures allowed. All 76+ tools must pass E2E validation.
+**Quality Gate**: Zero failures allowed. All grouped tools must pass E2E validation.
 
 ### 7. Quality Tools Configuration
 

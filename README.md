@@ -8,18 +8,18 @@ This project provides an MCP server that exposes NextDNS API operations as tools
 
 ## Features
 
-- **70+ NextDNS operations** exposed as MCP tools
+- **Domain-grouped CRUD tools** exposing the full NextDNS API surface through ~8 high-level tools
 - **Profile Management**: Full CRUD operations - create, read, update, and delete profiles
 - **Profile Access Control**: Fine-grained read/write restrictions per profile, with read-only mode support
 - **DNS-over-HTTPS Testing**: Perform DoH lookups to test DNS resolution through profiles
-- **Settings Configuration**: Comprehensive settings management including logs, block page, and performance
-- **Logs**: Query log retrieval and clearing
-- **Analytics**: Comprehensive DNS query analytics and statistics (11 endpoints)
-- **Content Lists**: Manage denylist, allowlist, and parental control
+- **Settings Configuration**: Comprehensive grouped settings management including logs, block page, and performance
+- **Logs**: Query log retrieval, download, and clearing
+- **Analytics**: Comprehensive DNS query analytics and statistics, including time-series and plotting
+- **Content Lists**: Manage denylist, allowlist, privacy blocklists, native tracking, security TLDs, and parental control
 - **Security**: Complete security settings and TLD blocking configuration
 - **Privacy**: Privacy settings, blocklists, and native tracking protection management
 - **Parental Control**: Settings management with safe search and YouTube restrictions
-- **OpenAPI-Generated**: Server automatically generated from [nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml)
+- **OpenAPI-backed**: Tool behaviors are driven by [nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml)
 - **Docker MCP Gateway**: Full integration with Docker's MCP Gateway for secure, isolated deployment
 - **Docker Support**: Containerized deployment with proper OCI labels
 - **Safety Mechanisms**: Write operation protections and validation
@@ -135,8 +135,8 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
 This server uses a modern, declarative approach:
 
 1. **OpenAPI Specification** ([nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml)): Complete NextDNS API documentation
-2. **FastMCP Generation**: Server automatically generated using `FastMCP.from_openapi()`
-3. **HTTP Client**: Authenticated `httpx.AsyncClient` for NextDNS API calls
+2. **FastMCP Foundation**: Server initialized using `FastMCP.from_openapi()`, with atomic tools removed and replaced by grouped CRUD tools
+3. **HTTP Client**: Authenticated `httpx.AsyncClient` with profile-level access control for NextDNS API calls
 4. **MCP Protocol**: Tools, resources, and prompts exposed via Model Context Protocol
 
 ### Key Components
