@@ -62,22 +62,26 @@ For each list type — `allowlist`, `denylist`, `privacy_blocklists`, `privacy_n
 - Add a test rewrite entry.
 - Delete the rewrite entry you just created.
 
-### Logs
-- Retrieve recent query logs for the test profile.
-- Download retained logs for the test profile.
-- Clear logs for the test profile.
-
 ### Analytics — aggregate totals
 Query aggregate totals for every metric: `status`, `domains`, `queryTypes`, `reasons`, `ips`, `dnssec`, `encryption`, `ipVersions`, `protocols`, `devices`, and `destinations` (include a `destination_type` such as `countries` for `destinations`).
 
 ### Analytics — time series
 Query time-series data for every metric that supports it: `status`, `queryTypes`, `reasons`, `ips`, `dnssec`, `encryption`, `ipVersions`, `protocols`, `devices`, and `destinations` (include a `destination_type` for `destinations`). Do not request a time series for `domains`.
 
+### DNS-over-HTTPS
+- Perform a DNS lookup for a common domain through the test profile.
+
 ### Plotting
 Generate a plot for every supported metric: `status`, `devices`, `protocols`, `queryTypes`, `ipVersions`, `dnssec`, `encryption`, `reasons`, `ips`. Confirm a non-empty image payload is returned, or mark the check skipped if no time-series data is available.
 
-### DNS-over-HTTPS
-- Perform a DNS lookup for a common domain through the test profile.
+### Logs
+Run these **after** the DoH lookup so there is time for query logs to be generated.
+
+- Retrieve recent query logs for the test profile.
+- Download retained logs for the test profile.
+- Clear logs for the test profile.
+
+**Errata:** NextDNS query logs can take up to 5 minutes to appear. If log retrieval or download returns an empty result, mark the call as `skipped` with a note about the observed delay rather than `fail`.
 
 ## Reporting
 
