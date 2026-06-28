@@ -4,13 +4,13 @@ Use this prompt with your AI agent to validate the NextDNS MCP server (tools are
 
 ---
 
-You are a validation agent for the NextDNS MCP server. Your job is to exercise the server's capabilities, record whether each operation passes or fails, and report the results. **Do not troubleshoot or attempt to fix failures.** If a call fails, capture the error, mark it as failed, and move on.
+You are a validation agent for the NextDNS MCP server. Your job is to exercise the server's full surface, record whether each operation passes or fails, and report the results. **Do not troubleshoot or attempt to fix failures.** If a call fails, capture the error, mark it as failed, and move on.
 
 ## Goal
 
-Validate the full surface of the NextDNS MCP server by performing realistic read and write operations against a dedicated test profile. Cover profile management, all settings categories, all content/security/parental lists, DNS rewrites, query logs, analytics (aggregate and time-series), plotting, and DNS-over-HTTPS lookups.
+Validate every grouped-tool operation against a dedicated test profile, covering profile management, all settings categories, all content/security/parental lists, DNS rewrites, query logs, every analytics metric (aggregate and time-series), every supported plot metric, and DNS-over-HTTPS lookups.
 
-Use the available NextDNS MCP tools to accomplish the tasks below. Prefer using grouped CRUD tools where they exist.
+Use the available NextDNS MCP tools to accomplish the tasks below. Prefer the grouped CRUD tools (`manageProfiles`, `manageSettings`, `manageLists`, `manageRewrites`, `manageLogs`, `queryAnalytics`, `plotAnalytics`) and the custom `dohLookup` tool.
 
 ## Optional plot profile
 
@@ -32,36 +32,49 @@ If the user provides a profile with analytics data below, use it for plotting an
 1. Verify you can access the MCP tools.
 2. Create a SQL table `tool_calls (tool_name TEXT, status TEXT, notes TEXT)` before making any tool calls.
 
-## Validation tasks
+## Operation checklist
 
-### Profile lifecycle
-- Create a test profile and retrieve it.
+For every item below, make at least one tool call and record the result. Skip an item only if the server explicitly reports that the operation is unsupported for the target resource.
+
+### Profile management
+- List all profiles.
+- Create the test profile.
+- Get the test profile.
 - Update the test profile's name.
 - Delete the test profile during cleanup.
 
 ### Settings
-- Read every settings category for the test profile.
-- Update at least one field in every settings category (for example, toggle a boolean option).
+For each category — `general`, `privacy`, `security`, `parental`, `performance`, `logs`, `blockpage` — perform both of the following:
+- Read the current settings.
+- Update at least one field in the category.
 
 ### Lists
-- Read every list type for the test profile.
-- For each list type, perform the full set of supported write operations: add entries, update entries where supported, replace the whole list, and remove entries.
+For each list type — `allowlist`, `denylist`, `privacy_blocklists`, `privacy_natives`, `security_tlds`, `parental_categories`, `parental_services` — perform all supported operations:
+- Read the current list.
+- Replace the entire list with one or more test entries.
+- Update an entry, if the list type supports per-entry updates.
+- Remove an entry.
+- Add an entry.
+- Remove the entry you just added.
 
 ### DNS rewrites
-- Create a DNS rewrite entry for the test profile, then delete it.
+- List existing rewrites for the test profile.
+- Add a test rewrite entry.
+- Delete the rewrite entry you just created.
 
 ### Logs
 - Retrieve recent query logs for the test profile.
-- Download retained logs.
+- Download retained logs for the test profile.
 - Clear logs for the test profile.
 
-### Analytics
-- Query every available analytics metric as aggregate totals.
-- Query time-series data for the metrics that support it.
-- If querying destinations, include the appropriate destination type.
+### Analytics — aggregate totals
+Query aggregate totals for every metric: `status`, `domains`, `queryTypes`, `reasons`, `ips`, `dnssec`, `encryption`, `ipVersions`, `protocols`, `devices`, and `destinations` (include a `destination_type` such as `countries` for `destinations`).
+
+### Analytics — time series
+Query time-series data for every metric that supports it: `status`, `queryTypes`, `reasons`, `ips`, `dnssec`, `encryption`, `ipVersions`, `protocols`, `devices`, and `destinations` (include a `destination_type` for `destinations`). Do not request a time series for `domains`.
 
 ### Plotting
-- Generate plots for every supported analytics metric. Confirm a non-empty image payload is returned, or mark the check skipped if no time-series data is available.
+Generate a plot for every supported metric: `status`, `devices`, `protocols`, `queryTypes`, `ipVersions`, `dnssec`, `encryption`, `reasons`, `ips`. Confirm a non-empty image payload is returned, or mark the check skipped if no time-series data is available.
 
 ### DNS-over-HTTPS
 - Perform a DNS lookup for a common domain through the test profile.
