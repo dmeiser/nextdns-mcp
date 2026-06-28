@@ -94,12 +94,14 @@ jobs:
       - name: Create .env file for script
         env:
           NEXTDNS_API_KEY: ${{ secrets.NEXTDNS_API_KEY }}
+          NEXTDNS_PLOT_PROFILE: ${{ secrets.NEXTDNS_PLOT_PROFILE }}
         run: |
           cat > .env <<EOF
           NEXTDNS_API_KEY=${NEXTDNS_API_KEY}
           ALLOW_LIVE_WRITES=${ALLOW_LIVE_WRITES}
           NEXTDNS_READABLE_PROFILES=${NEXTDNS_READABLE_PROFILES}
           NEXTDNS_WRITABLE_PROFILES=${NEXTDNS_WRITABLE_PROFILES}
+          NEXTDNS_PLOT_PROFILE=${NEXTDNS_PLOT_PROFILE}
           EOF
           
           # Create secrets file for docker-mcp (file-based secrets instead of Desktop API)
