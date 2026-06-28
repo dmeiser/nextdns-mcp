@@ -415,8 +415,9 @@ def get_openapi_tool_names(spec: dict[str, Any]) -> set[str]:
 
 
 def _build_query_params(**kwargs: Any) -> dict[str, Any]:
-    """Build a query-param dict, dropping None values."""
-    return {k: v for k, v in kwargs.items() if v is not None}
+    """Build a query-param dict, dropping None values and normalizing booleans."""
+    params = {k: v for k, v in kwargs.items() if v is not None}
+    return {k: ("true" if v else "false") if isinstance(v, bool) else v for k, v in params.items()}
 
 
 def _coerce_json_arg(value: Any) -> Any:
@@ -1079,7 +1080,7 @@ async def _manage_logs_impl(
             **{"from": from_time, "to": to_time, "limit": limit, "device": device, "search": user}
         )
         if format is not None:
-            params["raw"] = format.lower() == "raw"
+            params["raw"] = "true" if format.lower() == "raw" else "false"
         return await _api_request("GET", base_url, params=params)
 
     if operation == "clear":
@@ -1119,7 +1120,7 @@ async def _query_analytics_impl(
     cursor: Optional[str] = None,
     device: Optional[str] = None,
     status: Optional[str] = None,
-    root: Optional[str] = None,
+    root: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Grouped implementation for NextDNS analytics endpoints."""
     suffix = ";series" if series else ""
@@ -1322,7 +1323,7 @@ async def queryAnalytics(
     cursor: Optional[str] = None,
     device: Optional[str] = None,
     status: Optional[str] = None,
-    root: Optional[str] = None,
+    root: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Query NextDNS analytics metrics.
 
@@ -1346,7 +1347,7 @@ async def queryAnalytics(
         - ``cursor``: Pagination cursor from a previous response.
         - ``device``: Filter analytics to a single device id.
         - ``status``: For the ``domains`` metric, filter by resolution status.
-        - ``root``: For the ``domains`` metric, filter to a specific root domain.
+        - ``root``: For the ``domains`` metric, group results by root domain (boolean).
 
     Examples:
         - totals: ``queryAnalytics(metric="status", profile_id="abc123", from_time="-1d")``

@@ -981,7 +981,7 @@ dev = [
 requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=25.9.0" },
     { name = "coverage", marker = "extra == 'dev'" },
-    { name = "fastmcp", specifier = ">=3.0.1" },
+    { name = "fastmcp", specifier = "==3.4.2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "matplotlib", specifier = ">=3.10.0" },

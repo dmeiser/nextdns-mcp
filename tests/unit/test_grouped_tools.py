@@ -372,7 +372,7 @@ class TestManageLogs:
         mock_api_client.request.assert_called_once_with(
             "GET",
             "/profiles/abc123/logs",
-            params={"from": "1", "to": "2", "limit": 10, "device": "d", "search": "x", "raw": True},
+            params={"from": "1", "to": "2", "limit": 10, "device": "d", "search": "x", "raw": "true"},
             json=None,
         )
 
@@ -476,12 +476,12 @@ class TestQueryAnalytics:
             "abc123",
             from_time="-1d",
             status="blocked",
-            root="example.com",
+            root=True,
         )
         mock_api_client.request.assert_called_once_with(
             "GET",
             "/profiles/abc123/analytics/domains",
-            params={"from": "-1d", "status": "blocked", "root": "example.com"},
+            params={"from": "-1d", "status": "blocked", "root": "true"},
             json=None,
         )
 
