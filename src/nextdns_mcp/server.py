@@ -24,6 +24,7 @@
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -421,17 +422,21 @@ def _build_query_params(**kwargs: Any) -> dict[str, Any]:
 
 
 def _coerce_json_arg(value: Any) -> Any:
-    """Parse a JSON string argument into its Python equivalent when applicable.
+    """Parse a JSON object/array string argument into its Python equivalent.
 
     The Docker MCP CLI passes object/array parameters as strings (e.g.
     ``'{"key": true}'``). This helper transparently converts those strings so
     the grouped tools can accept either a JSON string or the native Python type.
+    Primitive strings (entry IDs, domains, etc.) are left unchanged to avoid
+    silently coercing values like ``"true"`` or ``"123"`` into non-string types.
     """
     if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            return value
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                return value
     return value
 
 
@@ -898,7 +903,7 @@ async def _plot_analytics_series_impl(
         }
 
     try:
-        png_bytes = _render_series_chart(metric, times, series_data)
+        png_bytes = await asyncio.to_thread(_render_series_chart, metric, times, series_data)
     except Exception as e:
         logger.error(f"Error rendering chart for {metric}: {e}")
         return {"error": f"Error rendering chart: {e}"}
@@ -1070,17 +1075,15 @@ async def _manage_logs_impl(
     limit: Optional[int] = None,
     user: Optional[str] = None,
     device: Optional[str] = None,
-    format: Optional[str] = None,
+    raw: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Grouped implementation for query logs (get, clear, download)."""
     base_url = f"/profiles/{profile_id}/logs"
 
     if operation == "get":
         params = _build_query_params(
-            **{"from": from_time, "to": to_time, "limit": limit, "device": device, "search": user}
+            **{"from": from_time, "to": to_time, "limit": limit, "device": device, "search": user, "raw": raw}
         )
-        if format is not None:
-            params["raw"] = "true" if format.lower() == "raw" else "false"
         return await _api_request("GET", base_url, params=params)
 
     if operation == "clear":
@@ -1286,12 +1289,13 @@ async def manageLogs(
     limit: Optional[int] = None,
     user: Optional[str] = None,
     device: Optional[str] = None,
-    format: Optional[str] = None,
+    raw: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Manage query logs for a NextDNS profile.
 
     Operations:
         - ``get``: Return recent query log entries (use ``limit`` to cap results).
+          Set ``raw=true`` to bypass deduplication/noise filtering.
         - ``clear``: Delete all stored logs for the profile.
         - ``download``: Download retained logs as CSV. ``from_time`` and ``to_time`` are
           ignored by the NextDNS download endpoint.
@@ -1301,10 +1305,11 @@ async def manageLogs(
 
     Examples:
         - get recent: ``manageLogs(operation="get", profile_id="abc123", limit=10)``
+        - get raw logs: ``manageLogs(operation="get", profile_id="abc123", raw=true)``
         - download: ``manageLogs(operation="download", profile_id="abc123", from_time="-1d")``
         - clear: ``manageLogs(operation="clear", profile_id="abc123")``
     """
-    return await _manage_logs_impl(operation, profile_id, from_time, to_time, limit, user, device, format)
+    return await _manage_logs_impl(operation, profile_id, from_time, to_time, limit, user, device, raw)
 
 
 @mcp_server.tool()
@@ -1487,7 +1492,7 @@ Create custom DNS responses for a hostname:
 ### manageLogs
 Inspect or export query logs:
 
-- `operation="get"` — recent entries
+- `operation="get"` — recent entries (set `raw=true` for unfiltered logs)
 - `operation="clear"` — delete stored logs
 - `operation="download"` — CSV export
 

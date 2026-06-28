@@ -366,7 +366,7 @@ class TestManageLogs:
     async def test_get(self, mock_api_client):
         mock_api_client.request.return_value = _make_response({"data": []})
         result = await server.manageLogs(
-            "get", "abc123", from_time="1", to_time="2", limit=10, user="x", device="d", format="raw"
+            "get", "abc123", from_time="1", to_time="2", limit=10, user="x", device="d", raw=True
         )
         assert result == {"data": []}
         mock_api_client.request.assert_called_once_with(

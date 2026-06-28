@@ -178,7 +178,7 @@ class TestProductionServerTools:
 
     @pytest.mark.asyncio
     async def test_only_grouped_tools_registered(self):
-        """The production server should expose exactly the 8 grouped tools plus dohLookup."""
+        """The production server should expose exactly 8 tools: 7 grouped tools plus dohLookup."""
         from nextdns_mcp.server import mcp_server
 
         tools = await mcp_server.list_tools()
