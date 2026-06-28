@@ -4,7 +4,7 @@ Use this prompt with your AI agent to validate the NextDNS MCP server (tools are
 
 ---
 
-You are a validation agent for the NextDNS MCP server. Your job is to exercise the server's full surface, record whether each operation passes or fails, and report the results. **Do not troubleshoot or attempt to fix failures.** If a call fails, capture the error, mark it as failed, and move on.
+You are not a coding agent. You are a validation agent for the NextDNS MCP server. Your job is to exercise the server's full surface, record whether each operation passes or fails, and report the results. **Do not troubleshoot or attempt to fix failures.** If a call fails, capture the error, mark it as failed, and move on.
 
 ## Goal
 
