@@ -7,6 +7,13 @@ Use this prompt with your AI agent to validate the NextDNS MCP server (tools are
 You are an AI agent validating the NextDNS MCP server via direct MCP tool access.
 Follow these instructions exactly, report all results, and do not skip steps.
 
+## Plotting profile placeholder
+The user should provide a real profile with analytics data below. All `plotAnalytics*` tools and analytics time-series queries should target this profile so the responses contain data to display.
+
+- **Plot profile ID**: `MCP_PLOT_PROFILE_ID = __PLACEHOLDER_PLOT_PROFILE_ID__`
+
+If `MCP_PLOT_PROFILE_ID` is not provided, fall back to `MCP_PROFILE_ID` or the first available profile.
+
 ## Goals
 1) Verify read-only tools work.
 2) If `ALLOW_LIVE_WRITES=true`, verify write tools work using a dedicated test profile.
@@ -17,6 +24,7 @@ Follow these instructions exactly, report all results, and do not skip steps.
 - Do not modify code.
 - Use the `profile_id` provided or create a new one named `AI E2E Test Profile [timestamp]`.
 - Never delete real user profiles; only delete the test profile you created.
+- For plotting and analytics time-series tools, always use `MCP_PLOT_PROFILE_ID` when it is available.
 
 ## Preflight
 1) Verify authentication and tool access:
@@ -48,11 +56,13 @@ Follow these instructions exactly, report all results, and do not skip steps.
 - Verify privacy blocklists and native tracking writes by adding entries and replacing the lists.
 - Verify security TLD writes by adding an entry and replacing the list.
 - Verify parental control writes by adding a category/service and replacing the lists.
+- Verify DNS rewrites by listing, adding, and deleting a rewrite entry.
 
 ## Guardrails for tool usage
 - Use MCP tools directly with named arguments (e.g., `profile_id=...`).
 - For list replacement operations, pass array bodies as JSON objects: `body=[{"id":"value"}]`.
 - Prefer task completion over tool enumeration, but ensure each task uses the correct tool(s) to validate behavior.
+- For plotting tools, use a recent time window such as `from_time=-1d` or `from_time=-30d` and target `MCP_PLOT_PROFILE_ID`.
 
 ## Task-level execution plan (mirrors `run_all_tools.sh`)
 Perform the following tasks in order. Each task should invoke the specific tool(s) required to validate behavior. Ensure **all tools** are exercised at least once in this flow.
@@ -71,16 +81,17 @@ Perform the following tasks in order. Each task should invoke the specific tool(
 
 ### 4) Settings validation
 - Retrieve general settings, logs settings, block page settings, performance settings.
-- If writes are enabled, update each of the settings groups with minimal valid changes.
+- If writes are enabled, update each of the settings groups with minimal valid changes, including toggling the `web3` setting via `updateSettings`.
 
 ### 5) Logs validation
 - Retrieve logs and download logs for a recent time window (use `from` and `limit`).
 - If writes are enabled, clear logs.
 
-### 6) Analytics validation (base + time-series)
-- Query all analytics base endpoints for a recent time window.
-- Query all analytics time-series endpoints for a recent time window.
+### 6) Analytics validation (base + time-series + plotting)
+- Query all analytics base endpoints for a recent time window using the plotting profile.
+- Query all analytics time-series endpoints for a recent time window using the plotting profile.
 - Use a valid destination `type` (e.g., `countries`) where required.
+- Call each plotting tool (`plotAnalyticsStatus`, `plotAnalyticsDomains`, `plotAnalyticsDevices`, `plotAnalyticsProtocols`, `plotAnalyticsQueryTypes`, `plotAnalyticsIPVersions`, `plotAnalyticsDNSSEC`, `plotAnalyticsEncryption`, `plotAnalyticsReasons`, and `plotAnalyticsSeries`) using the plotting profile and a recent time window.
 
 ### 7) Content lists — allowlist & denylist
 - Retrieve allowlist and denylist.
@@ -98,6 +109,11 @@ Perform the following tasks in order. Each task should invoke the specific tool(
 - Retrieve parental control settings, services, and categories.
 - If writes are enabled: update parental control settings; add, update, remove, and replace services and categories.
    - Use a known valid category ID such as `porn` (the API rejects `adult`).
+
+### 11) DNS rewrites (only if `ALLOW_LIVE_WRITES=true`)
+- List existing rewrites.
+- Add a rewrite entry.
+- Delete the rewrite entry that was just added.
 
 ## Cleanup
 - If you created the profile in this run, delete it.
