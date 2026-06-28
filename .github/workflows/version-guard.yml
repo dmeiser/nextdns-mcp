@@ -108,6 +108,12 @@ jobs:
               match = re.search(r'LABEL org\.opencontainers\.image\.version=["\']([^"\']+)["\']', content)
               return match.group(1) if match else None
 
+          def get_docker_alpine_v(root):
+              p = Path(root) / "Dockerfile.alpine"
+              content = p.read_text()
+              match = re.search(r'LABEL org\.opencontainers\.image\.version=["\']([^"\']+)["\']', content)
+              return match.group(1) if match else None
+
           def normalize_version(v: str):
               """
               Extract (major, minor, patch) as integers from a version string.
@@ -130,6 +136,7 @@ jobs:
               pr_py = get_pyproject_v("pr")
               pr_init = get_init_v("pr")
               pr_docker = get_docker_v("pr")
+              pr_docker_alpine = get_docker_alpine_v("pr")
           except Exception as e:
               print(f"❌ Error extracting versions: {e}")
               sys.exit(1)
@@ -138,6 +145,7 @@ jobs:
           print(f"PR pyproject.toml: {pr_py}")
           print(f"PR __init__.py: {pr_init}")
           print(f"PR Dockerfile: {pr_docker}")
+          print(f"PR Dockerfile.alpine: {pr_docker_alpine}")
 
           errors = []
           if not is_greater(pr_py, main_v):
@@ -148,6 +156,9 @@ jobs:
           
           if pr_py != pr_docker:
               errors.append(f"Mismatch: pyproject.toml ({pr_py}) != Dockerfile ({pr_docker})")
+
+          if pr_py != pr_docker_alpine:
+              errors.append(f"Mismatch: pyproject.toml ({pr_py}) != Dockerfile.alpine ({pr_docker_alpine})")
 
           if errors:
               print("\n🚨 Version Guard Failed:")
