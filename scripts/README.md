@@ -149,9 +149,9 @@ NDJSON (newline-delimited JSON) file with one entry per tool execution:
 
 ```json
 {
-  "tool": "getProfile",
+  "tool": "manageProfiles",
   "status": "OK",
-  "args": "profile_id=abc123",
+  "args": "operation=get profile_id=abc123",
   "duration": "12s",
   "timestamp": "2025-10-31T12:34:56Z"
 }

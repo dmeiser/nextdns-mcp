@@ -68,7 +68,7 @@ Notes
 docker mcp tools ls
 
 # Call a tool
-docker mcp tools call listProfiles
+docker mcp tools call manageProfiles operation=list
 ```
 
 ## Example calls
@@ -77,12 +77,12 @@ docker mcp tools call listProfiles
 # DoH lookup (uses default profile if set)
 docker mcp tools call dohLookup domain=example.com record_type=A profile_id=YOUR_PROFILE_ID
 
-# Get profile settings
-docker mcp tools call getSettings profile_id=abc123
+# Get general profile settings
+docker mcp tools call manageSettings operation=get category=general profile_id=abc123
 
 # Add individual entries to denylist/allowlist
-docker mcp tools call addToDenylist profile_id=abc123 id=ads.example.com
-docker mcp tools call addToDenylist profile_id=abc123 id=tracker.net
+docker mcp tools call manageLists list_type=denylist operation=add profile_id=abc123 entry='{"id":"ads.example.com"}'
+docker mcp tools call manageLists list_type=denylist operation=add profile_id=abc123 entry='{"id":"tracker.net"}'
 ```
 
 ## Troubleshooting

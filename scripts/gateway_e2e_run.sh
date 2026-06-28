@@ -145,7 +145,7 @@ cleanup() {
             # If CI=true, or ALLOW_LIVE_WRITES is not "true", perform auto-delete (best-effort)
             if [ "${CI:-false}" = "true" ] || [ "${ALLOW_LIVE_WRITES}" != "true" ]; then
                 log_info "Auto-deleting validation profile (CI or non-writes mode)"
-                docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG:-${CATALOG_NAME:-nextdns-mcp}.yaml}" --gateway-arg="--servers=${SERVER_NAME:-nextdns}" call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
+                docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG:-${CATALOG_NAME:-nextdns-mcp}.yaml}" --gateway-arg="--servers=${SERVER_NAME:-nextdns}" call manageProfiles "operation=delete" "profile_id=${VALIDATION_PROFILE}" \
                     >/dev/null 2>&1 || log_warn "Failed to delete validation profile"
                 log_success "Validation profile deletion attempted"
             else
@@ -153,7 +153,7 @@ cleanup() {
                 echo
                 if [[ $REPLY = "yes" ]]; then
                     log_info "Deleting validation profile..."
-                    docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG:-${CATALOG_NAME:-nextdns-mcp}.yaml}" --gateway-arg="--servers=${SERVER_NAME:-nextdns}" call deleteProfile "profile_id=${VALIDATION_PROFILE}" \
+                    docker mcp tools --gateway-arg="--catalog=${TEMP_CATALOG:-${CATALOG_NAME:-nextdns-mcp}.yaml}" --gateway-arg="--servers=${SERVER_NAME:-nextdns}" call manageProfiles "operation=delete" "profile_id=${VALIDATION_PROFILE}" \
                         >/dev/null 2>&1 || log_warn "Failed to delete validation profile"
                     log_success "Validation profile deleted"
                 else

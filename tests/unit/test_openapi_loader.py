@@ -171,3 +171,51 @@ class TestLoadOpenApiSpec:
                 assert "paths" in result
         finally:
             temp_spec.unlink(missing_ok=True)
+
+
+class TestProductionServerTools:
+    """Test that the production MCP server exposes only the grouped tools."""
+
+    @pytest.mark.asyncio
+    async def test_only_grouped_tools_registered(self):
+        """The production server should expose exactly 8 tools: 7 grouped tools plus dohLookup."""
+        from nextdns_mcp.server import mcp_server
+
+        tools = await mcp_server.list_tools()
+        tool_names = {tool.name for tool in tools}
+
+        expected = {
+            "dohLookup",
+            "manageProfiles",
+            "manageSettings",
+            "manageLists",
+            "manageRewrites",
+            "manageLogs",
+            "queryAnalytics",
+            "plotAnalytics",
+        }
+
+        assert tool_names == expected, f"Unexpected tools registered: {tool_names ^ expected}"
+
+    @pytest.mark.asyncio
+    async def test_openapi_atomic_tools_removed(self):
+        """Atomic OpenAPI-generated tools should not be exposed."""
+        from nextdns_mcp.server import mcp_server
+
+        tools = await mcp_server.list_tools()
+        tool_names = {tool.name for tool in tools}
+
+        atomic_tools = {
+            "listProfiles",
+            "createProfile",
+            "getProfile",
+            "updateProfile",
+            "deleteProfile",
+            "getSettings",
+            "updateSettings",
+            "getAllowlist",
+            "addToAllowlist",
+            "replaceAllowlist",
+        }
+
+        assert not (tool_names & atomic_tools), f"Atomic tools still registered: {tool_names & atomic_tools}"

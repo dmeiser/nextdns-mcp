@@ -23,7 +23,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 | NEXTDNS_WRITABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for writes; special value "ALL" allows writes to all profiles; empty/unset denies all writes; ignored if NEXTDNS_READ_ONLY=true |
 
 Notes
-- Global tools bypass per-profile checks: listProfiles and dohLookup.
+- Global tools bypass per-profile checks: `manageProfiles(operation="list")` and `dohLookup`.
 - "Write implies read": profiles allowed for writes are automatically considered readable.
 
 ## Examples

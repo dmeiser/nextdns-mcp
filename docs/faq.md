@@ -1,7 +1,7 @@
 # FAQ
 
 ## How do I find my profile_id?
-Run `docker mcp tools call listProfiles '{}'` and copy the `id` of the desired profile.
+Run `docker mcp tools call manageProfiles operation=list` and copy the `id` of the desired profile.
 
 ## Can I use the tools without specifying profile_id?
 Set `NEXTDNS_DEFAULT_PROFILE` to a profile ID; tools that accept `profile_id` will use it when omitted.
@@ -10,7 +10,7 @@ Set `NEXTDNS_DEFAULT_PROFILE` to a profile ID; tools that accept `profile_id` wi
 Set `NEXTDNS_READ_ONLY=true`.
 
 ## Which tools work without per-profile access?
-`listProfiles` and `dohLookup` are globally allowed and bypass per-profile checks.
+`manageProfiles(operation="list")` and `dohLookup` are globally allowed and bypass per-profile checks.
 
 ## Where do I get logs and analytics?
-Use the `getLogs` and the `getAnalytics*` tools; real-time log streaming (SSE) and the download endpoint are not exposed as tools.
+Use `manageLogs` and `queryAnalytics`; real-time log streaming (SSE) is not exposed as a tool. `manageLogs(operation="download")` provides CSV export of retained logs.

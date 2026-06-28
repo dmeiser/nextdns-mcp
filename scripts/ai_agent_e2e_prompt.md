@@ -4,106 +4,96 @@ Use this prompt with your AI agent to validate the NextDNS MCP server (tools are
 
 ---
 
-You are an AI agent validating the NextDNS MCP server via direct MCP tool access.
-Follow these instructions exactly, report all results, and do not skip steps.
+You are not a coding agent. You are a validation agent for the NextDNS MCP server. Your job is to exercise the server's full surface, record whether each operation passes or fails, and report the results. **Do not troubleshoot or attempt to fix failures.** If a call fails, capture the error, mark it as failed, and move on.
 
-## Goals
-1) Verify read-only tools work.
-2) If `ALLOW_LIVE_WRITES=true`, verify write tools work using a dedicated test profile.
-3) Record any failures with full command output.
+## Goal
+
+Validate every grouped-tool operation against a dedicated test profile, covering profile management, all settings categories, all content/security/parental lists, DNS rewrites, query logs, every analytics metric (aggregate and time-series), every supported plot metric, and DNS-over-HTTPS lookups.
+
+Use the available NextDNS MCP tools to accomplish the tasks below. Prefer the grouped CRUD tools (`manageProfiles`, `manageSettings`, `manageLists`, `manageRewrites`, `manageLogs`, `queryAnalytics`, `plotAnalytics`) and the custom `dohLookup` tool.
+
+## Optional plot profile
+
+If the user provides a profile with analytics data below, use it for plotting and time-series analytics. Otherwise, attempt those checks against the test profile and skip them if no data is available.
+
+- **Plot profile ID**: `<PLOT_PROFILE_ID>`
 
 ## Constraints
-- Use the MCP tools.
-- Do not modify code.
-- Use the `profile_id` provided or create a new one named `AI E2E Test Profile [timestamp]`.
-- Never delete real user profiles; only delete the test profile you created.
+
+- Do not modify code or server configuration.
+- Create a new test profile named `AI E2E Test Profile [timestamp]` for this run. (`[timestamp]` can be a number; do not include literal brackets.)
+- Perform all write operations against the test profile only.
+- Never delete or modify real user profiles.
+- If a call fails, record the failure with full error details and continue.
+- Clean up by deleting the test profile you created.
 
 ## Preflight
-1) Verify authentication and tool access:
-   - If `authRequired`, stop and report.
-2) Create a SQL table tool_calls (tool_name TEXT, status TEXT, notes TEXT) before making any tool calls.
 
+1. Verify you can access the MCP tools.
+2. Create a SQL table `tool_calls (tool_name TEXT, status TEXT, notes TEXT)` before making any tool calls.
 
-## Profile setup
-3) If `MCP_PROFILE_ID` is provided, use it.
-4) If not provided and `ALLOW_LIVE_WRITES=true`:
-   - Create a profile named `"AI E2E Test Profile [timestamp]"`.
-   - Extract `profile_id` from the response.
-5) If `ALLOW_LIVE_WRITES` is not provided or `ALLOW_LIVE_WRITES=false`:
-   - Use the first profile from `listProfiles`.
-   - Treat the environment as read-only and do not perform any write operations.
+## Operation checklist
 
-## Read-only checks (always run)
-- Verify the profile is retrievable and returns valid metadata for `PROFILE_ID`.
-- Verify general settings can be retrieved for `PROFILE_ID`.
-- Verify content lists can be retrieved (allowlist, denylist) for `PROFILE_ID`.
-- Verify privacy lists can be retrieved (blocklists, native tracking) for `PROFILE_ID`.
-- Verify security lists can be retrieved (TLDs) for `PROFILE_ID`.
-- Verify parental control lists and settings are retrievable (categories, services, settings) for `PROFILE_ID`.
-- Verify logs, block page, and performance settings are retrievable for `PROFILE_ID`.
+For every item below, make at least one tool call and record the result. Skip an item only if the server explicitly reports that the operation is unsupported for the target resource.
 
-## Write checks (only if `ALLOW_LIVE_WRITES=true`)
-- Verify allowlist write operations by adding an entry and replacing the list.
-- Verify denylist write operations by adding an entry and replacing the list.
-- Verify privacy blocklists and native tracking writes by adding entries and replacing the lists.
-- Verify security TLD writes by adding an entry and replacing the list.
-- Verify parental control writes by adding a category/service and replacing the lists.
+### Profile management
+- List all profiles.
+- Create the test profile.
+- Get the test profile.
+- Update the test profile's name.
+- Delete the test profile during cleanup.
 
-## Guardrails for tool usage
-- Use MCP tools directly with named arguments (e.g., `profile_id=...`).
-- For list replacement operations, pass array bodies as JSON objects: `body=[{"id":"value"}]`.
-- Prefer task completion over tool enumeration, but ensure each task uses the correct tool(s) to validate behavior.
+### Settings
+For each category — `general`, `privacy`, `security`, `parental`, `performance`, `logs`, `blockpage` — perform both of the following:
+- Read the current settings.
+- Update at least one field in the category.
 
-## Task-level execution plan (mirrors `run_all_tools.sh`)
-Perform the following tasks in order. Each task should invoke the specific tool(s) required to validate behavior. Ensure **all tools** are exercised at least once in this flow.
+### Lists
+For each list type — `allowlist`, `denylist`, `privacy_blocklists`, `privacy_natives`, `security_tlds`, `parental_categories`, `parental_services` — perform all supported operations:
+- Read the current list.
+- Replace the entire list with one or more test entries.
+- Update an entry, if the list type supports per-entry updates.
+- Remove an entry.
+- Add an entry.
+- Remove the entry you just added.
 
-### 1) Preflight and discovery
-- Confirm the tool registry is reachable and enumerate available tools.
-- Confirm authentication by listing profiles.
+**Hints for valid test data:**
+- For `allowlist` / `denylist`, use a unique domain such as `ai-test-<timestamp>.example.com`.
+- For `privacy_blocklists`, use `nextdns-recommended`.
+- For `privacy_natives`, use a known native tracker ID such as `alexa`, `roku`, or `samsung`.
+- For `security_tlds`, use `zip`.
+- For `parental_categories`, use `gambling`.
+- For `parental_services`, use `tiktok`.
+- Only `allowlist`, `denylist`, `parental_categories`, and `parental_services` support per-entry updates.
 
-### 2) Profile management
-- If writes are enabled, create a dedicated test profile and track its `profile_id`.
-- If writes are disabled, select an existing profile for read-only checks.
-- Validate `getProfile` and `updateProfile` (writes only) using the selected profile.
+### DNS rewrites
+- List existing rewrites for the test profile.
+- Add a test rewrite entry.
+- Delete the rewrite entry you just created using the `id` returned by the add operation, not the domain name.
 
-### 3) DNS testing
-- Perform a DoH lookup for a known domain and valid record type using the selected profile.
+### Analytics — aggregate totals
+Query aggregate totals for every metric: `status`, `domains`, `queryTypes`, `reasons`, `ips`, `dnssec`, `encryption`, `ipVersions`, `protocols`, `devices`, and `destinations`. Include a `destination_type` such as `countries` for `destinations`, and include a recent `from_time` such as `-1d`.
 
-### 4) Settings validation
-- Retrieve general settings, logs settings, block page settings, performance settings.
-- If writes are enabled, update each of the settings groups with minimal valid changes.
+### Analytics — time series
+Query time-series data for every metric that supports it: `status`, `queryTypes`, `reasons`, `ips`, `dnssec`, `encryption`, `ipVersions`, `protocols`, `devices`, and `destinations`. Include a `destination_type` for `destinations`, a recent `from_time` such as `-1d`, and set `series=true`. Do not request a time series for `domains`.
 
-### 5) Logs validation
-- Retrieve logs and download logs for a recent time window (use `from` and `limit`).
-- If writes are enabled, clear logs.
+### DNS-over-HTTPS
+- Perform a DNS lookup for a common domain through the test profile.
 
-### 6) Analytics validation (base + time-series)
-- Query all analytics base endpoints for a recent time window.
-- Query all analytics time-series endpoints for a recent time window.
-- Use a valid destination `type` (e.g., `countries`) where required.
+### Plotting
+Generate a plot for every supported metric: `status`, `devices`, `protocols`, `queryTypes`, `ipVersions`, `dnssec`, `encryption`, `reasons`, `ips`. Confirm a non-empty image payload is returned, or mark the check skipped if no time-series data is available.
 
-### 7) Content lists — allowlist & denylist
-- Retrieve allowlist and denylist.
-- If writes are enabled: add an entry, update an entry, remove an entry, and replace the entire list for each list.
+### Logs
+Run these **after** the DoH lookup so there is time for query logs to be generated.
 
-### 8) Security lists and settings
-- Retrieve security settings and TLDs.
-- If writes are enabled: update security settings; add, remove, and replace security TLDs.
+- Retrieve recent query logs for the test profile.
+- Download retained logs for the test profile.
+- Clear logs for the test profile.
 
-### 9) Privacy lists and settings
-- Retrieve privacy settings, blocklists, and native tracking lists.
-- If writes are enabled: update privacy settings; add, remove, and replace blocklists and native tracking lists.
-
-### 10) Parental control lists and settings
-- Retrieve parental control settings, services, and categories.
-- If writes are enabled: update parental control settings; add, update, remove, and replace services and categories.
-   - Use a known valid category ID such as `porn` (the API rejects `adult`).
-
-## Cleanup
-- If you created the profile in this run, delete it.
+**Errata:** NextDNS query logs can take up to 5 minutes to appear. If log retrieval or download returns an empty result, mark the call as `skipped` with a note about the observed delay rather than `fail`.
 
 ## Reporting
-- Use the SQL tool to create a `tool_calls (tool_name TEXT, status TEXT, notes TEXT) table before making any tool calls, and insert a row for every call as you make it.
-- For each tool call, record: tool name, status (pass/fail), and a brief note on the output.
-- If a call fails, include full error details in the notes column and in the final report.
-- In the final report, list every tool name exercised exactly once (deduplicated), sorted alphabetically, with its status — derived from `SELECT DISTINCT tool_name ...` on the SQL table. Never estimate counts from memory.
+
+- Insert one row into `tool_calls` for every tool call you make, with the tool name, status (`pass` / `fail` / `skipped`), and a brief note.
+- For failures, include the full error in the notes.
+- In the final report, list every tool name exercised exactly once (deduplicated), sorted alphabetically, with its status. Derive this from `SELECT DISTINCT tool_name ...` on the SQL table. Never estimate counts from memory.

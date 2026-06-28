@@ -12,4 +12,4 @@ Reduce risk when operating on real NextDNS profiles.
 - Bulk PUT endpoints replace the entire list (denylist, allowlist, etc.); export/record current values first.
 
 ## Scope of global tools
-- `listProfiles` and `dohLookup` bypass per-profile access checks; they are safe to use for discovery and testing.
+- `manageProfiles(operation="list")` and `dohLookup` bypass per-profile access checks; they are safe to use for discovery and testing.
