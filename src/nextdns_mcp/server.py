@@ -435,7 +435,7 @@ def _coerce_json_arg(value: Any) -> Any:
         if stripped.startswith(("{", "[")):
             try:
                 return json.loads(value)
-            except (json.JSONDecodeError, TypeError):
+            except json.JSONDecodeError, TypeError:
                 return value
     return value
 
@@ -634,8 +634,7 @@ def create_mcp_server(api_client: httpx.AsyncClient) -> FastMCP:
         tool_registry = getattr(provider, "_tools", None)
         if not isinstance(tool_registry, dict):
             logger.warning(
-                "Provider %s has no _tools dict; OpenAPI tool cleanup skipped. "
-                "FastMCP shape may have changed.",
+                "Provider %s has no _tools dict; OpenAPI tool cleanup skipped. " "FastMCP shape may have changed.",
                 provider,
             )
             continue

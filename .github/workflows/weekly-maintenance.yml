@@ -171,6 +171,10 @@ jobs:
                r'LABEL org\.opencontainers\.image\.version=["\'][^"\']*["\']',
                f'LABEL org.opencontainers.image.version="{new_v}"',
                0),
+              ("Dockerfile.alpine",
+               r'LABEL org\.opencontainers\.image\.version=["\'][^"\']*["\']',
+               f'LABEL org.opencontainers.image.version="{new_v}"',
+               0),
           ]
 
           for path, pattern, replacement, flags in UPDATES:
