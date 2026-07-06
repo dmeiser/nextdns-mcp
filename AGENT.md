@@ -74,6 +74,10 @@ This file contains repository-specific agent rules. Agents should follow these w
   - Phase 2: Use `fastmcp.from_openapi()` to generate the MCP server from the OpenAPI spec
   - All NextDNS API endpoints should be documented in the OpenAPI spec before server generation
   - The fastmcp library will handle MCP protocol implementation, routing, and tool registration
+- **Array-body Endpoints (FastMCP 3.x):**
+  - FastMCP 3.x supports array bodies natively via the `body` parameter.
+  - Use `body=[{"id":"value"}]` for list replacement tools (e.g., `replaceDenylist`, `replaceAllowlist`).
+  - Do not use legacy `update*` custom tools (they no longer exist).
 - When in doubt, ask the repo owner for permission before making large design changes.
 - API Key: Ensure that a valid API key is not in any files that will be committed to git.
 
@@ -107,14 +111,14 @@ All code changes must meet the following quality metrics before work is consider
 
 **CRITICAL**: Code formatting and type checking must be the **final step** before validation:
 
-1. Run `isort` to organize imports:
+1. Run `ruff` to check and fix lint issues:
    ```bash
-   uv run isort src/ tests/
+   uv run ruff check --fix src/ tests/
    ```
 
-2. Run `black` to format code:
+2. Run `ruff format` to format code:
    ```bash
-   uv run black src/ tests/
+   uv run ruff format src/ tests/
    ```
 
 3. Run `mypy` for type checking:
@@ -125,7 +129,7 @@ All code changes must meet the following quality metrics before work is consider
 **Workflow Order**:
 - Make code changes
 - Write/update tests
-- Run formatters: `isort` → `black`
+- Run formatters: `ruff check --fix` → `ruff format`
 - Run type checker: `mypy` (fix any errors)
 - Run tests and validation
 - **If any code changes are needed after validation, repeat the formatting steps**
@@ -203,8 +207,8 @@ bash scripts/gateway_e2e_run.sh .env alpine
 
 Before running E2E tests or claiming work is complete:
 
-- [ ] Run `uv run isort src/ tests/`
-- [ ] Run `uv run black src/ tests/`
+- [ ] Run `uv run ruff check --fix src/ tests/`
+- [ ] Run `uv run ruff format src/ tests/`
 - [ ] Run `uv run mypy src/` (0 errors)
 - [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (100% coverage, **ALL tests pass**)
 - [ ] Verify per-file coverage: all files 100% in `htmlcov/index.html`
