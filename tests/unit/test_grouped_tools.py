@@ -185,6 +185,14 @@ class TestManageSettings:
         mock_api_client.request.assert_called_once_with("GET", f"/profiles/abc123/{path}", params=None, json=None)
 
     @pytest.mark.asyncio
+    async def test_profile_id_coerced_from_int(self, mock_api_client):
+        """All-numeric profile IDs sent as integers are coerced to strings."""
+        mock_api_client.request.return_value = _make_response({"enabled": True})
+        result = await server.manageSettings("get", "general", 315244)
+        assert result == {"enabled": True}
+        mock_api_client.request.assert_called_once_with("GET", "/profiles/315244/settings", params=None, json=None)
+
+    @pytest.mark.asyncio
     async def test_update(self, mock_api_client):
         mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
         result = await server.manageSettings("update", "general", "abc123", settings={"web3": True})

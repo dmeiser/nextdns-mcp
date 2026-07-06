@@ -55,7 +55,7 @@ def test_coerce_json_arg_invalid_json_returns_value():
 
 
 class DummyTool:
-    parameters: dict[str, object] = {"properties": {"keep": {}}}
+    parameters: dict[str, object] = {"properties": {"keep": {"type": "boolean"}}}
 
 
 class DummyToolManager:
@@ -94,10 +94,24 @@ async def _dummy_call_next(context):
 async def test_strip_extra_fields_middleware_basic_and_exception():
     mw = server.StripExtraFieldsMiddleware()
 
-    # Normal operation: known property 'keep' retained, unknown removed, types coerced
+    # Normal operation: known property 'keep' retained, unknown removed, bool coerced
     context = DummyContext("tool", {"keep": "true", "drop": "x"})
     result = await mw.on_call_tool(context, _dummy_call_next)
     assert result == {"keep": True}
+
+    # String-typed identifier-like values must not be coerced
+    class StringDummyTool:
+        parameters: dict[str, object] = {"properties": {"profile_id": {"type": "string"}}}
+
+    class StringToolManager:
+        async def get_tool(self, name):
+            return StringDummyTool()
+
+    string_context = DummyContext("tool", {})
+    string_context.fastmcp_context.fastmcp = SimpleNamespace(get_tool=StringToolManager().get_tool)
+    string_context.message.arguments = {"profile_id": "315244"}
+    result = await mw.on_call_tool(string_context, _dummy_call_next)
+    assert result == {"profile_id": "315244"}
 
     # Exception handling in get_tool: should proceed and return original args
     context_exc = DummyContext("tool", {"keep": "true"}, raise_exc=True)
@@ -239,12 +253,15 @@ def test_use_all_fixtures(
     assert isinstance(mock_profiles_response, dict)
 
 
-def test_coerce_value_float_exception_and_collections(monkeypatch):
+def test_coerce_value_schema_aware_and_collections(monkeypatch):
     mw = server.StripExtraFieldsMiddleware()
 
-    # Dict and list should recurse
-    assert mw._coerce_value({"a": "true", "b": "2"}) == {"a": True, "b": 2}
-    assert mw._coerce_value(["1", "2.2"]) == [1, 2.2]
+    # Dict and list values are recursed without schema context, so strings stay strings
+    assert mw._coerce_value({"a": "true", "b": "2"}) == {"a": "true", "b": "2"}
+    assert mw._coerce_value(["1", "2.2"]) == ["1", "2.2"]
+
+    # With an array-of-numbers schema, list items are coerced
+    assert mw._coerce_value(["1", "2.2"], {"type": "array", "items": {"type": "number"}}) == [1, 2.2]
 
     # Simulate float() raising ValueError to hit the except branch
     import builtins
@@ -257,13 +274,16 @@ def test_coerce_value_float_exception_and_collections(monkeypatch):
     monkeypatch.setattr(builtins, "float", bad_float)
     try:
         # '1.23' matches the digit check and would attempt float()
-        assert mw._coerce_value("1.23") == "1.23"
+        assert mw._coerce_value("1.23", {"type": "number"}) == "1.23"
     finally:
         monkeypatch.setattr(builtins, "float", real_float)
 
-    # Boolean false and negative integer cases
-    assert mw._coerce_value("false") is False
-    assert mw._coerce_value("-5") == -5
+    # Boolean false and negative integer cases with matching schemas
+    assert mw._coerce_value("false", {"type": "boolean"}) is False
+    assert mw._coerce_value("-5", {"type": "integer"}) == -5
+
+    # Identifier-like strings are not coerced when schema expects a string
+    assert mw._coerce_value("315244", {"type": "string"}) == "315244"
 
     # Non-string non-dict/list returns unchanged
     assert mw._coerce_value(10) == 10

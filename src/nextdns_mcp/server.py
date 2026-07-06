@@ -96,6 +96,7 @@ def _coerce_profile_id(v: object) -> object:
 
 _coerce_to_str = BeforeValidator(_coerce_profile_id) if BeforeValidator is not None else lambda x: x
 OptionalProfileId = Annotated[Optional[str], _coerce_to_str]
+ProfileId = Annotated[str, _coerce_to_str]
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ProfileOperation = Literal["list", "create", "get", "update", "delete"]
@@ -182,33 +183,68 @@ class StripExtraFieldsMiddleware(Middleware):
         will have arguments filtered and coerced to {"domain": "example.com", "enabled": true}
     """
 
-    def _coerce_string_value(self, s: str) -> Any:
-        """Coerce a string to bool, int, float, or return original string.
+    def _get_schema_property_types(self, prop_schema: dict[str, Any]) -> set[str]:
+        """Extract JSON Schema type(s) from a property schema.
 
-        Separated into its own helper to reduce method complexity for radon.
+        Handles ``type`` (string or list) and ``anyOf``/``oneOf`` subschemas.
+        """
+        types: set[str] = set()
+        if not isinstance(prop_schema, dict):
+            return types
+
+        type_value = prop_schema.get("type")
+        if isinstance(type_value, str):
+            types.add(type_value)
+        elif isinstance(type_value, list):
+            types.update(type_value)
+
+        for sub_key in ("anyOf", "oneOf"):
+            for subschema in prop_schema.get(sub_key, []):
+                if isinstance(subschema, dict):
+                    sub_type = subschema.get("type")
+                    if isinstance(sub_type, str):
+                        types.add(sub_type)
+                    elif isinstance(sub_type, list):
+                        types.update(sub_type)
+
+        return types
+
+    def _coerce_string_value(self, s: str, schema_types: set[str]) -> Any:
+        """Coerce a string based on the expected JSON Schema types.
+
+        Only coerces to bool, int, or float when the schema explicitly expects
+        that type. Identifier-like strings (e.g. profile IDs, entry IDs) declared
+        as ``string`` are left untouched.
         """
         sl = s.lower()
-        if sl == "true":
-            return True
-        if sl == "false":
-            return False
-        if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+        if "boolean" in schema_types and sl in ("true", "false"):
+            return sl == "true"
+        if "integer" in schema_types and (s.isdigit() or (s.startswith("-") and s[1:].isdigit())):
             return int(s)
-        if s.replace(".", "", 1).replace("-", "", 1).isdigit():
+        if "number" in schema_types and s.replace(".", "", 1).replace("-", "", 1).isdigit():
             try:
                 return float(s)
             except ValueError:
                 return s
         return s
 
-    def _coerce_value(self, value: Any) -> Any:
-        """Coerce a value (recursing into dicts/lists) or delegate string coercion."""
+    def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
+        """Coerce a value using its property schema.
+
+        Top-level values are coerced according to the declared schema. Nested
+        dict/list values are recursed without schema context to avoid coercing
+        identifier-like strings inside opaque objects.
+        """
+        if prop_schema is None:
+            prop_schema = {}
         if isinstance(value, str):
-            return self._coerce_string_value(value)
-        if isinstance(value, dict):
-            return {k: self._coerce_value(v) for k, v in value.items()}
+            schema_types = self._get_schema_property_types(prop_schema)
+            return self._coerce_string_value(value, schema_types)
         if isinstance(value, list):
-            return [self._coerce_value(item) for item in value]
+            items_schema = prop_schema.get("items") if isinstance(prop_schema, dict) else None
+            return [self._coerce_value(item, items_schema) for item in value]
+        if isinstance(value, dict):
+            return {k: self._coerce_value(v, None) for k, v in value.items()}
         return value
 
     async def on_call_tool(
@@ -239,8 +275,9 @@ class StripExtraFieldsMiddleware(Middleware):
                 if stripped_keys:
                     logger.debug(f"Tool '{tool_name}': Stripped unknown fields: {stripped_keys}")
 
-                # Coerce string values to proper types (bool, int, float)
-                coerced_args = {k: self._coerce_value(v) for k, v in filtered_args.items()}
+                # Coerce string values to proper types based on the parameter schema
+                properties = tool.parameters.get("properties", {})
+                coerced_args = {k: self._coerce_value(v, properties.get(k)) for k, v in filtered_args.items()}
                 if coerced_args != filtered_args:
                     logger.debug(f"Tool '{tool_name}': Coerced types in arguments")
 
@@ -1011,7 +1048,7 @@ async def _manage_profiles_impl(
 async def _manage_settings_impl(
     operation: Literal["get", "update"],
     category: SettingsCategory,
-    profile_id: str,
+    profile_id: ProfileId,
     settings: Optional[Union[str, dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for profile settings categories."""
@@ -1089,7 +1126,7 @@ async def _lists_remove(base_url: str, entry_id: Optional[str]) -> dict[str, Any
 async def _manage_lists_impl(
     list_type: ListType,
     operation: ListOperation,
-    profile_id: str,
+    profile_id: ProfileId,
     entry_id: Optional[str] = None,
     entry: Optional[Union[str, dict[str, Any]]] = None,
     entries: Optional[Union[str, list[dict[str, Any]]]] = None,
@@ -1123,7 +1160,7 @@ async def _manage_lists_impl(
 
 async def _manage_rewrites_impl(
     operation: RewriteOperation,
-    profile_id: str,
+    profile_id: ProfileId,
     name: Optional[str] = None,
     content: Optional[str] = None,
     entry_id: Optional[str] = None,
@@ -1158,7 +1195,7 @@ async def _manage_rewrites_impl(
 
 async def _manage_logs_impl(
     operation: LogOperation,
-    profile_id: str,
+    profile_id: ProfileId,
     from_time: Optional[str | int] = None,
     to_time: Optional[str | int] = None,
     limit: Optional[int] = None,
@@ -1203,7 +1240,7 @@ async def _manage_logs_impl(
 
 async def _query_analytics_impl(
     metric: AnalyticsMetric,
-    profile_id: str,
+    profile_id: ProfileId,
     from_time: Optional[str | int] = None,
     to_time: Optional[str | int] = None,
     interval: Optional[int] = None,
@@ -1284,7 +1321,7 @@ async def manageProfiles(
 async def manageSettings(
     operation: Literal["get", "update"],
     category: SettingsCategory,
-    profile_id: str,
+    profile_id: ProfileId,
     settings: Optional[Union[str, dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Manage a settings category for a NextDNS profile.
@@ -1317,7 +1354,7 @@ async def manageSettings(
 async def manageLists(
     list_type: ListType,
     operation: ListOperation,
-    profile_id: str,
+    profile_id: ProfileId,
     entry_id: Optional[str] = None,
     entry: Optional[Union[str, dict[str, Any]]] = None,
     entries: Optional[Union[str, list[dict[str, Any]]]] = None,
@@ -1353,7 +1390,7 @@ async def manageLists(
 @mcp_server.tool()
 async def manageRewrites(
     operation: RewriteOperation,
-    profile_id: str,
+    profile_id: ProfileId,
     name: Optional[str] = None,
     content: Optional[str] = None,
     entry_id: Optional[str] = None,
@@ -1380,7 +1417,7 @@ async def manageRewrites(
 @mcp_server.tool()
 async def manageLogs(
     operation: LogOperation,
-    profile_id: str,
+    profile_id: ProfileId,
     from_time: Optional[str | int] = None,
     to_time: Optional[str | int] = None,
     limit: Optional[int] = None,
@@ -1412,7 +1449,7 @@ async def manageLogs(
 @mcp_server.tool()
 async def queryAnalytics(
     metric: AnalyticsMetric,
-    profile_id: str,
+    profile_id: ProfileId,
     from_time: Optional[str | int] = None,
     to_time: Optional[str | int] = None,
     interval: Optional[int] = None,

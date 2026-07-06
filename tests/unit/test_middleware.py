@@ -155,6 +155,35 @@ class TestStripExtraFieldsMiddleware:
                 "record_type": "A",
             }
 
+    def test_get_schema_property_types_handles_various_schemas(self, middleware):
+        """Test extraction of schema types from property schemas."""
+        assert middleware._get_schema_property_types({"type": "boolean"}) == {"boolean"}
+        assert middleware._get_schema_property_types({"type": ["boolean", "null"]}) == {
+            "boolean",
+            "null",
+        }
+        assert middleware._get_schema_property_types({"anyOf": [{"type": "integer"}, {"type": "null"}]}) == {
+            "integer",
+            "null",
+        }
+        assert middleware._get_schema_property_types({"oneOf": [{"type": ["number", "null"]}]}) == {"number", "null"}
+        assert middleware._get_schema_property_types("not-a-dict") == set()
+        assert middleware._get_schema_property_types({}) == set()
+
+    def test_coerce_string_value_respects_schema(self, middleware):
+        """Test that string coercion only happens for expected schema types."""
+        assert middleware._coerce_string_value("true", {"boolean"}) is True
+        assert middleware._coerce_string_value("42", {"integer"}) == 42
+        assert middleware._coerce_string_value("3.14", {"number"}) == 3.14
+        assert middleware._coerce_string_value("315244", {"string"}) == "315244"
+        assert middleware._coerce_string_value("true", {"string"}) == "true"
+        assert middleware._coerce_string_value("42", {"string"}) == "42"
+
+    def test_coerce_value_schema_aware_for_lists(self, middleware):
+        """Test array items are coerced when items schema is provided."""
+        result = middleware._coerce_value(["true", "false"], {"type": "array", "items": {"type": "boolean"}})
+        assert result == [True, False]
+
 
 class TestAllowExtraFieldsComponentFn:
     """Tests for the allow_extra_fields_component_fn function."""
