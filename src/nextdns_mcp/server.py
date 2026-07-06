@@ -333,9 +333,9 @@ SAFE_PROFILE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 SAFE_ENTRY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 
 
-def is_safe_profile_id(value: str) -> bool:
+def is_safe_profile_id(value: str | int) -> bool:
     """Return True if value is a safe profile_id segment."""
-    return bool(SAFE_PROFILE_ID_PATTERN.match(value))
+    return bool(SAFE_PROFILE_ID_PATTERN.match(str(value)))
 
 
 def is_safe_entry_id(value: str) -> bool:
@@ -998,7 +998,7 @@ async def _plot_analytics_series_impl(
     return Image(data=png_bytes, format="png").to_image_content()
 
 
-def _validate_profile_id(profile_id: str) -> dict[str, Any] | None:
+def _validate_profile_id(profile_id: str | int) -> dict[str, Any] | None:
     """Return an error dict if profile_id is not a safe identifier."""
     if not is_safe_profile_id(profile_id):
         return {"error": f"Invalid profile_id format: {profile_id}"}
