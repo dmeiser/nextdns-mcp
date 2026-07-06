@@ -1240,7 +1240,11 @@ async def _manage_logs_impl(
             error_response = getattr(e, "response", None)
             status_code = error_response.status_code if error_response is not None else None
             body = error_response.text if error_response is not None else None
-            raise RuntimeError(f"HTTP error {status_code} while downloading logs: {e} (response: {body})") from e
+            return {
+                "error": f"HTTP error {status_code} while downloading logs: {e}",
+                "response_body": body,
+                "status_code": status_code,
+            }
         except Exception as e:
             logger.error(f"Unexpected error downloading logs: {e}")
             raise RuntimeError(f"Unexpected error while downloading logs: {e}") from e

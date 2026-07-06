@@ -412,8 +412,9 @@ class TestManageLogs:
     @pytest.mark.asyncio
     async def test_download_http_error(self, mock_api_client):
         mock_api_client.get.side_effect = httpx.HTTPError("boom")
-        with pytest.raises(RuntimeError, match="HTTP error"):
-            await server.manageLogs("download", "abc123")
+        result = await server.manageLogs("download", "abc123")
+        assert "error" in result
+        assert "HTTP error" in result["error"]
 
     @pytest.mark.asyncio
     async def test_download_unexpected_error(self, mock_api_client):
