@@ -81,6 +81,7 @@ from .config import (
     get_readable_profiles_set,
     get_writable_profiles_set,
     is_read_only,
+    validate_configuration,
 )
 
 logger = logging.getLogger(__name__)
@@ -1710,4 +1711,5 @@ if __name__ == "__main__":  # pragma: no cover
     logger.info("Starting NextDNS MCP Server...")
     logger.info(f"  Base URL: {NEXTDNS_BASE_URL}")
     logger.info(f"  Timeout: {get_http_timeout()}s")
+    validate_configuration()
     mcp_server.run(**get_mcp_run_options())
