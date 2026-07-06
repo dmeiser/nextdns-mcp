@@ -175,15 +175,92 @@ def validate_field_type(value: Any, expected_type: str) -> bool:
     return isinstance(value, expected_python_type)
 
 
+def _resolve_json_pointer(spec: Dict[str, Any], pointer: str) -> Any:
+    """Resolve a local JSON pointer (e.g. '#/components/schemas/Foo') in the spec."""
+    if not pointer.startswith("#/"):
+        return None
+    parts = pointer[2:].split("/")
+    target: Any = spec
+    for part in parts:
+        if isinstance(target, dict):
+            target = target.get(part)
+        else:
+            return None
+    return target
+
+
+def resolve_schema(spec: Optional[Dict[str, Any]], schema: Any, _seen: Optional[set[str]] = None) -> Any:
+    """Recursively resolve ``$ref`` pointers and nested schema references.
+
+    Returns a schema dict with all local references expanded. Cyclic references
+    are broken by returning an empty dict for the repeated reference.
+    """
+    if _seen is None:
+        _seen = set()
+    if not isinstance(schema, dict):
+        return schema
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        if ref in _seen:
+            # Cycle guard: avoid infinite recursion on self-referential schemas.
+            return {}
+        _seen.add(ref)
+        target = _resolve_json_pointer(spec, ref) if spec else None
+        if target is None:
+            return {}
+        return resolve_schema(spec, target, _seen)
+    resolved: Dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "properties" and isinstance(value, dict):
+            resolved[key] = {k: resolve_schema(spec, v, _seen) for k, v in value.items()}
+        elif key == "items":
+            resolved[key] = resolve_schema(spec, value, _seen)
+        elif key in ("allOf", "anyOf", "oneOf") and isinstance(value, list):
+            resolved[key] = [resolve_schema(spec, item, _seen) for item in value]
+        else:
+            resolved[key] = value
+    return resolved
+
+
 def validate_schema(data: Any, schema: Dict[str, Any], path: str = "$") -> list[str]:
     """
-    Recursively validate data against OpenAPI schema.
+    Recursively validate data against an OpenAPI schema.
 
+    ``$ref`` pointers must already be resolved with ``resolve_schema``.
     Returns a list of validation error messages.
     """
     errors = []
 
     if schema is None:
+        return errors
+
+    if not isinstance(schema, dict):
+        return errors
+
+    # Handle composed schemas
+    if "allOf" in schema:
+        for i, sub_schema in enumerate(schema["allOf"]):
+            sub_errors = validate_schema(data, sub_schema, f"{path}.allOf[{i}]")
+            errors.extend(sub_errors)
+        if errors:
+            return errors
+
+    if "anyOf" in schema:
+        for i, sub_schema in enumerate(schema["anyOf"]):
+            sub_errors = validate_schema(data, sub_schema, f"{path}.anyOf[{i}]")
+            if not sub_errors:
+                return []
+        errors.append(f"{path}: expected anyOf schema to match")
+        return errors
+
+    if "oneOf" in schema:
+        matches = 0
+        for sub_schema in schema["oneOf"]:
+            sub_errors = validate_schema(data, sub_schema, path)
+            if not sub_errors:
+                matches += 1
+        if matches != 1:
+            errors.append(f"{path}: expected exactly one oneOf schema to match, got {matches}")
         return errors
 
     schema_type = schema.get("type")
@@ -283,7 +360,8 @@ def main():
     # at least one of the underlying operations for the grouped tool.
     all_errors: list[str] = []
     for op_id, schema in schemas:
-        errors = validate_schema(response_data, schema)
+        resolved_schema = resolve_schema(spec, schema)
+        errors = validate_schema(response_data, resolved_schema)
         if not errors:
             print("VALID", file=sys.stdout)
             sys.exit(0)
