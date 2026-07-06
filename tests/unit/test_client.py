@@ -88,8 +88,8 @@ class TestCreateNextdnsClient:
         # Check timeout is set (exact type depends on httpx version)
         assert client.timeout is not None
 
-    def test_create_client_follows_redirects(self, monkeypatch, mock_api_key):
-        """Test that client is configured to follow redirects."""
+    def test_create_client_does_not_follow_redirects(self, monkeypatch, mock_api_key):
+        """Test that client does not follow redirects to avoid leaking the API key."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
         import sys
@@ -101,7 +101,7 @@ class TestCreateNextdnsClient:
 
         client = create_nextdns_client()
 
-        assert client.follow_redirects is True
+        assert client.follow_redirects is False
 
     def test_create_client_uses_custom_timeout(self, monkeypatch, mock_api_key):
         """Test that client uses custom timeout from environment."""

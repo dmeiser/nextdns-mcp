@@ -144,9 +144,13 @@ def get_readable_profiles_set() -> set[str] | None:
     readable = get_readable_profiles()  # Get from env
     writable = get_writable_profiles()  # Get from env
 
-    # If readable is None (unset), deny all
-    if readable is None:
+    # Both unset = deny all
+    if readable is None and writable is None:
         return None
+
+    # Readable unset but writable set: writable profiles are implicitly readable
+    if readable is None:
+        return writable
 
     # If readable is empty set (ALL), allow all
     if not readable:

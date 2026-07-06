@@ -6,6 +6,16 @@ import pytest
 from nextdns_mcp import server
 
 
+@pytest.fixture(autouse=True)
+def allow_doh_read_access(monkeypatch):
+    """Allow all DoH lookups by bypassing the can_read_profile gate.
+
+    Patches the function's global namespace directly so the bypass survives
+    module reloads performed by other tests.
+    """
+    monkeypatch.setitem(server._dohLookup_impl.__globals__, "can_read_profile", lambda _profile_id: True)
+
+
 def test_coerce_helpers():
     # bool
     assert server._coerce_string_to_bool("true") is True

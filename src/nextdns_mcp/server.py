@@ -29,6 +29,7 @@ import io
 import json
 import logging
 import os
+import posixpath
 import re
 import sys
 from datetime import datetime
@@ -77,6 +78,8 @@ from .config import (
     get_api_key,
     get_default_profile,
     get_http_timeout,
+    get_readable_profiles_set,
+    get_writable_profiles_set,
     is_read_only,
 )
 
@@ -287,6 +290,27 @@ def build_route_mappings() -> list[RouteMap]:
     return [*EXCLUDED_ROUTES, *DEFAULT_ROUTE_MAPPINGS]
 
 
+# Safe identifier patterns to prevent path traversal and ACL bypass.
+SAFE_PROFILE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+SAFE_ENTRY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.\-]+$")
+
+
+def is_safe_profile_id(value: str) -> bool:
+    """Return True if value is a safe profile_id segment."""
+    return bool(SAFE_PROFILE_ID_PATTERN.match(value))
+
+
+def is_safe_entry_id(value: str) -> bool:
+    """Return True if value is a safe entry_id segment (allows domain-like IDs).
+
+    Rejects path separators and parent-directory sequences that could be used
+    for path traversal when the ID is embedded in a URL path.
+    """
+    if not value or "/" in value or "\\" in value or ".." in value:
+        return False
+    return bool(SAFE_ENTRY_ID_PATTERN.match(value))
+
+
 def extract_profile_id_from_url(url: str) -> Optional[str]:
     """Extract profile_id from a URL path.
 
@@ -294,12 +318,22 @@ def extract_profile_id_from_url(url: str) -> Optional[str]:
         url: The URL path (e.g., "/profiles/abc123/settings")
 
     Returns:
-        The profile_id if found, None otherwise
+        The profile_id if found and safe, None otherwise
     """
+    # Reject any path containing parent-directory references defensively.
+    # This blocks traversal payloads such as /profiles/allowed123/../../profiles/denied456
+    # before normalization.
+    if ".." in url:
+        return None
+
+    # Normalize the path so that equivalent paths are treated consistently.
+    normalized = posixpath.normpath(url)
     # Match /profiles/{profile_id}/... pattern
-    match = re.match(r"^/?profiles/([^/]+)(?:/|$)", url)
+    match = re.match(r"^/?profiles/([^/]+)(?:/|$)", normalized)
     if match:
-        return match.group(1)
+        profile_id = match.group(1)
+        if is_safe_profile_id(profile_id):
+            return profile_id
     return None
 
 
@@ -561,7 +595,7 @@ def create_nextdns_client() -> httpx.AsyncClient:
         base_url=NEXTDNS_BASE_URL,
         headers=clean_headers,
         timeout=get_http_timeout(),
-        follow_redirects=True,
+        follow_redirects=False,
     )
 
 
@@ -739,6 +773,12 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
             "hint": "Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
         }
 
+    if not is_safe_profile_id(target_profile):
+        return {"error": f"Invalid profile_id format: {target_profile}"}
+
+    if not can_read_profile(target_profile):
+        return {"error": f"Read access denied for profile: {target_profile}"}
+
     is_valid, record_type_upper = _validate_record_type(record_type)
     if not is_valid:
         logger.warning(f"Invalid DNS record type requested: {record_type}")
@@ -865,6 +905,10 @@ async def _plot_analytics_series_impl(
             "hint": "Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
         }
 
+    error = _validate_profile_id(target_profile)
+    if error:
+        return error
+
     params: dict[str, Any] = {
         "from": from_time,
         "to": to_time,
@@ -910,6 +954,20 @@ async def _plot_analytics_series_impl(
     return Image(data=png_bytes, format="png").to_image_content()
 
 
+def _validate_profile_id(profile_id: str) -> dict[str, Any] | None:
+    """Return an error dict if profile_id is not a safe identifier."""
+    if not is_safe_profile_id(profile_id):
+        return {"error": f"Invalid profile_id format: {profile_id}"}
+    return None
+
+
+def _validate_entry_id(entry_id: str) -> dict[str, Any] | None:
+    """Return an error dict if entry_id is not a safe identifier."""
+    if not is_safe_entry_id(entry_id):
+        return {"error": f"Invalid entry_id format: {entry_id}"}
+    return None
+
+
 async def _manage_profiles_impl(
     operation: ProfileOperation,
     profile_id: OptionalProfileId = None,
@@ -917,15 +975,25 @@ async def _manage_profiles_impl(
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for NextDNS profiles."""
     if operation == "list":
+        if get_readable_profiles_set() is None:
+            return {"error": "Read access denied: no profiles are readable"}
         return await _api_request("GET", "/profiles")
 
     if operation == "create":
+        if is_read_only():
+            return {"error": "Write operation denied: server is in read-only mode"}
+        if get_writable_profiles_set() is None:
+            return {"error": "Write access denied: no profiles are writable"}
         if not name:
             return {"error": "name is required for create operation"}
         return await _api_request("POST", "/profiles", json={"name": name})
 
     if not profile_id:
         return {"error": "profile_id is required for this operation"}
+
+    error = _validate_profile_id(profile_id)
+    if error:
+        return error
 
     url = f"/profiles/{profile_id}"
     if operation == "get":
@@ -947,6 +1015,10 @@ async def _manage_settings_impl(
     settings: Optional[Union[str, dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for profile settings categories."""
+    error = _validate_profile_id(profile_id)
+    if error:
+        return error
+
     path = _SETTINGS_PATHS[category]
     url = f"/profiles/{profile_id}/{path}"
 
@@ -1023,6 +1095,15 @@ async def _manage_lists_impl(
     entries: Optional[Union[str, list[dict[str, Any]]]] = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for content/privacy/security/parental lists."""
+    error = _validate_profile_id(profile_id)
+    if error:
+        return error
+
+    if entry_id is not None:
+        error = _validate_entry_id(entry_id)
+        if error:
+            return error
+
     path = _LIST_PATHS[list_type]
     base_url = f"/profiles/{profile_id}/{path}"
 
@@ -1048,6 +1129,15 @@ async def _manage_rewrites_impl(
     entry_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for DNS rewrite entries."""
+    error = _validate_profile_id(profile_id)
+    if error:
+        return error
+
+    if entry_id is not None:
+        error = _validate_entry_id(entry_id)
+        if error:
+            return error
+
     base_url = f"/profiles/{profile_id}/rewrites"
 
     if operation == "list":
@@ -1077,6 +1167,10 @@ async def _manage_logs_impl(
     raw: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Grouped implementation for query logs (get, clear, download)."""
+    error = _validate_profile_id(profile_id)
+    if error:
+        return error
+
     base_url = f"/profiles/{profile_id}/logs"
 
     if operation == "get":
@@ -1125,6 +1219,10 @@ async def _query_analytics_impl(
     root: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Grouped implementation for NextDNS analytics endpoints."""
+    error = _validate_profile_id(profile_id)
+    if error:
+        return error
+
     suffix = ";series" if series else ""
     url = f"/profiles/{profile_id}/analytics/{metric}{suffix}"
 

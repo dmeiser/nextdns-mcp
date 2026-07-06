@@ -16,6 +16,13 @@ def mock_api_client(monkeypatch):
     return client
 
 
+@pytest.fixture(autouse=True)
+def open_profile_access(monkeypatch):
+    """Allow all profile read/write access for grouped-tool tests."""
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+
+
 def _make_response(json_data=None, status_code=200, content=None):
     """Build a mock httpx.Response."""
     response = MagicMock()
@@ -484,6 +491,109 @@ class TestQueryAnalytics:
             params={"from": "-1d", "status": "blocked", "root": "true"},
             json=None,
         )
+
+
+class TestManageProfilesAccessAndValidation:
+    """Tests for manageProfiles access control and ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_list_denied_when_no_readable_profiles(self, mock_api_client, monkeypatch):
+        monkeypatch.setattr(server, "get_readable_profiles_set", lambda: None)
+        result = await server.manageProfiles("list")
+        assert "error" in result
+        assert "no profiles are readable" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_create_denied_when_no_writable_profiles(self, mock_api_client, monkeypatch):
+        monkeypatch.setattr(server, "get_writable_profiles_set", lambda: None)
+        result = await server.manageProfiles("create", name="Test")
+        assert "error" in result
+        assert "no profiles are writable" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_create_denied_in_read_only_mode(self, mock_api_client, monkeypatch):
+        monkeypatch.setattr(server, "is_read_only", lambda: True)
+        result = await server.manageProfiles("create", name="Test")
+        assert "error" in result
+        assert "read-only" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_get_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.manageProfiles("get", profile_id="abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+
+class TestManageSettingsValidation:
+    """Tests for manageSettings ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_get_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.manageSettings("get", "general", "abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+
+class TestManageListsValidation:
+    """Tests for manageLists ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_get_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.manageLists("allowlist", "get", "abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_remove_rejects_invalid_entry_id(self, mock_api_client):
+        result = await server.manageLists("allowlist", "remove", "abc123", entry_id="../settings")
+        assert "error" in result
+        assert "Invalid entry_id format" in result["error"]
+
+
+class TestManageRewritesValidation:
+    """Tests for manageRewrites ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_list_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.manageRewrites("list", "abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_delete_rejects_invalid_entry_id(self, mock_api_client):
+        result = await server.manageRewrites("delete", "abc123", entry_id="../settings")
+        assert "error" in result
+        assert "Invalid entry_id format" in result["error"]
+
+
+class TestManageLogsValidation:
+    """Tests for manageLogs ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_get_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.manageLogs("get", "abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+
+class TestQueryAnalyticsValidation:
+    """Tests for queryAnalytics ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_base_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.queryAnalytics("status", "abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+
+class TestPlotAnalyticsValidation:
+    """Tests for plotAnalytics ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.plotAnalytics("status", profile_id="abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
 
 
 class TestUsageGuidePrompt:

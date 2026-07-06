@@ -25,6 +25,16 @@ def clean_env(monkeypatch):
     return monkeypatch.setenv
 
 
+@pytest.fixture(autouse=True)
+def allow_doh_read_access(monkeypatch):
+    """Allow all DoH lookups by bypassing the can_read_profile gate.
+
+    Patches the function's global namespace directly so the bypass survives
+    module reloads performed by other tests.
+    """
+    monkeypatch.setitem(_dohLookup_impl.__globals__, "can_read_profile", lambda _profile_id: True)
+
+
 class TestLoadOpenAPISpec:
     """Tests for load_openapi_spec function."""
 

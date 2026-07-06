@@ -8,6 +8,16 @@ import pytest
 from nextdns_mcp.server import _dohLookup_impl as dohLookup
 
 
+@pytest.fixture(autouse=True)
+def allow_doh_read_access(monkeypatch):
+    """Allow all DoH lookups by bypassing the can_read_profile gate.
+
+    Patches the function's global namespace directly so the bypass survives
+    module reloads performed by other tests.
+    """
+    monkeypatch.setitem(dohLookup.__globals__, "can_read_profile", lambda _profile_id: True)
+
+
 @pytest.fixture
 def mock_httpx_client():
     """Mock httpx.AsyncClient for DoH tests."""
@@ -27,6 +37,21 @@ def mock_httpx_client():
 
 class TestDohLookup:
     """Test the dohLookup custom tool."""
+
+    @pytest.mark.asyncio
+    async def test_doh_lookup_denies_unreadable_profile(self, mock_profile_id, monkeypatch):
+        """Test that dohLookup respects read access controls."""
+        monkeypatch.setitem(dohLookup.__globals__, "can_read_profile", lambda _profile_id: False)
+        result = await dohLookup("example.com", mock_profile_id, "A")
+        assert "error" in result
+        assert "Read access denied" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_doh_lookup_rejects_invalid_profile_id(self, monkeypatch):
+        """Test that dohLookup rejects unsafe profile IDs."""
+        result = await dohLookup("example.com", "abc/def", "A")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
 
     @pytest.mark.asyncio
     async def test_doh_lookup_basic_query(self, mock_profile_id):
@@ -67,6 +92,9 @@ class TestDohLookup:
         import nextdns_mcp.server
 
         importlib.reload(nextdns_mcp.server)
+
+        # Re-apply access bypass after module reload.
+        monkeypatch.setattr(nextdns_mcp.server, "can_read_profile", lambda _profile_id: True)
 
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
