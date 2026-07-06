@@ -204,11 +204,10 @@ def resolve_schema(spec: Optional[Dict[str, Any]], schema: Any, _seen: Optional[
         if ref in _seen:
             # Cycle guard: avoid infinite recursion on self-referential schemas.
             return {}
-        _seen.add(ref)
         target = _resolve_json_pointer(spec, ref) if spec else None
         if target is None:
             return {}
-        return resolve_schema(spec, target, _seen)
+        return resolve_schema(spec, target, _seen | {ref})
     resolved: Dict[str, Any] = {}
     for key, value in schema.items():
         if key == "properties" and isinstance(value, dict):

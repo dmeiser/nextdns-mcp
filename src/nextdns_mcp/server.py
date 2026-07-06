@@ -507,7 +507,7 @@ def _coerce_json_arg(value: Any) -> Any:
         if stripped.startswith(("{", "[")):
             try:
                 return json.loads(value)
-            except json.JSONDecodeError, TypeError:
+            except (json.JSONDecodeError, TypeError):
                 return value
     return value
 
