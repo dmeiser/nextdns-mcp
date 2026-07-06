@@ -523,10 +523,11 @@ async def _api_request(method: str, url: str, params: dict[str, Any] | None = No
         logger.error(f"HTTP error in {method} {url}: {e}")
         error_response = getattr(e, "response", None)
         status_code = error_response.status_code if error_response is not None else None
-        return {"error": f"HTTP error: {e}", "status_code": status_code}
+        body = error_response.text if error_response is not None else None
+        raise RuntimeError(f"HTTP error {status_code} in {method} {url}: {e} (response: {body})") from e
     except Exception as e:
         logger.error(f"Unexpected error in {method} {url}: {e}")
-        return {"error": f"Unexpected error: {e}"}
+        raise RuntimeError(f"Unexpected error in {method} {url}: {e}") from e
 
 
 def create_access_denied_response(method: str, url: str, error_msg: str, profile_id: str) -> httpx.Response:
@@ -965,10 +966,15 @@ async def _plot_analytics_series_impl(
         payload = response.json()
     except httpx.HTTPError as e:
         logger.error(f"HTTP error while fetching analytics series {metric}: {e}")
-        return {"error": f"HTTP error while fetching analytics series: {e}"}
+        error_response = getattr(e, "response", None)
+        status_code = error_response.status_code if error_response is not None else None
+        body = error_response.text if error_response is not None else None
+        raise RuntimeError(
+            f"HTTP error {status_code} while fetching analytics series {metric}: {e} (response: {body})"
+        ) from e
     except Exception as e:
         logger.error(f"Unexpected error while fetching analytics series {metric}: {e}")
-        return {"error": f"Unexpected error while fetching analytics series: {e}"}
+        raise RuntimeError(f"Unexpected error while fetching analytics series {metric}: {e}") from e
 
     meta = payload.get("meta", {})
     series_meta = meta.get("series", {})
@@ -1230,10 +1236,13 @@ async def _manage_logs_impl(
             }
         except httpx.HTTPError as e:
             logger.error(f"HTTP error downloading logs: {e}")
-            return {"error": f"HTTP error downloading logs: {e}"}
+            error_response = getattr(e, "response", None)
+            status_code = error_response.status_code if error_response is not None else None
+            body = error_response.text if error_response is not None else None
+            raise RuntimeError(f"HTTP error {status_code} while downloading logs: {e} (response: {body})") from e
         except Exception as e:
             logger.error(f"Unexpected error downloading logs: {e}")
-            return {"error": f"Unexpected error downloading logs: {e}"}
+            raise RuntimeError(f"Unexpected error while downloading logs: {e}") from e
 
     return {"error": f"Unsupported operation: {operation}"}
 
@@ -1259,6 +1268,9 @@ async def _query_analytics_impl(
     error = _validate_profile_id(profile_id)
     if error:
         return error
+
+    if series and metric == "domains":
+        raise ValueError("series=true is not supported for the 'domains' metric")
 
     suffix = ";series" if series else ""
     url = f"/profiles/{profile_id}/analytics/{metric}{suffix}"
@@ -1481,6 +1493,7 @@ async def queryAnalytics(
 
     Set ``series=true`` to fetch time-series data instead of aggregate totals.
     Time values can be Unix timestamps or relative strings like ``-1d``.
+    Note: ``series=true`` is not supported when ``metric="domains"``.
 
     Optional filters:
         - ``cursor``: Pagination cursor from a previous response.

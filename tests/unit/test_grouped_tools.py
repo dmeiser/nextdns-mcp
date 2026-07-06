@@ -73,16 +73,16 @@ class TestApiRequest:
         exc = httpx.HTTPError("boom")
         exc.response = MagicMock()
         exc.response.status_code = 500
+        exc.response.text = "internal server error"
         mock_api_client.request.side_effect = exc
-        result = await server._api_request("GET", "/profiles")
-        assert "error" in result
-        assert result["status_code"] == 500
+        with pytest.raises(RuntimeError, match="HTTP error 500"):
+            await server._api_request("GET", "/profiles")
 
     @pytest.mark.asyncio
     async def test_unexpected_error(self, mock_api_client):
         mock_api_client.request.side_effect = RuntimeError("unexpected")
-        result = await server._api_request("GET", "/profiles")
-        assert "error" in result
+        with pytest.raises(RuntimeError, match="Unexpected error"):
+            await server._api_request("GET", "/profiles")
 
 
 class TestGetOpenapiToolNames:
@@ -412,14 +412,14 @@ class TestManageLogs:
     @pytest.mark.asyncio
     async def test_download_http_error(self, mock_api_client):
         mock_api_client.get.side_effect = httpx.HTTPError("boom")
-        result = await server.manageLogs("download", "abc123")
-        assert "error" in result
+        with pytest.raises(RuntimeError, match="HTTP error"):
+            await server.manageLogs("download", "abc123")
 
     @pytest.mark.asyncio
     async def test_download_unexpected_error(self, mock_api_client):
         mock_api_client.get.side_effect = RuntimeError("boom")
-        result = await server.manageLogs("download", "abc123")
-        assert "error" in result
+        with pytest.raises(RuntimeError, match="Unexpected error"):
+            await server.manageLogs("download", "abc123")
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
@@ -499,6 +499,11 @@ class TestQueryAnalytics:
             params={"from": "-1d", "status": "blocked", "root": "true"},
             json=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_domains_series_rejected(self, mock_api_client):
+        with pytest.raises(ValueError, match="series=true is not supported"):
+            await server.queryAnalytics("domains", "abc123", series=True)
 
 
 class TestManageProfilesAccessAndValidation:
