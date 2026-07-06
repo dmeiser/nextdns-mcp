@@ -408,6 +408,9 @@ class TestManageLogs:
         result = await server.manageLogs("download", "abc123")
         assert result["content_type"] == "text/csv"
         assert result["size"] == 8
+        mock_api_client.get.assert_called_once_with(
+            "/profiles/abc123/logs/download", follow_redirects=True
+        )
 
     @pytest.mark.asyncio
     async def test_download_http_error(self, mock_api_client):

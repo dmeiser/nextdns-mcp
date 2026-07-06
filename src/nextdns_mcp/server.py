@@ -1228,7 +1228,7 @@ async def _manage_logs_impl(
 
     if operation == "download":
         try:
-            response = await api_client.get(f"{base_url}/download")
+            response = await api_client.get(f"{base_url}/download", follow_redirects=True)
             response.raise_for_status()
             return {
                 "content_type": response.headers.get("content-type"),
