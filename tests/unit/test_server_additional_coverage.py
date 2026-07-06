@@ -38,6 +38,12 @@ def test_coerce_helpers():
     assert server.coerce_json_types(123) == 123
 
 
+def test_coerce_json_arg_invalid_json_returns_value():
+    # String that looks like JSON but fails to parse should be returned as-is.
+    assert server._coerce_json_arg('{"broken": ') == '{"broken": '
+    assert server._coerce_json_arg("[1, 2, ") == "[1, 2, "
+
+
 class DummyTool:
     parameters: dict[str, object] = {"properties": {"keep": {}}}
 

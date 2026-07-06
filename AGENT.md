@@ -86,7 +86,7 @@ This file contains repository-specific agent rules. Agents should follow these w
    - Test individual functions and modules
    - Run frequently during development
    - See "Code Quality Standards" section for coverage requirements
-   - Must achieve >95% code coverage
+   - Must achieve 100% code coverage
 
 2. **Gateway E2E Tests** (`scripts/gateway_e2e_run.sh`)
    - End-to-end testing via Docker MCP Gateway CLI
@@ -137,9 +137,9 @@ The last commits before a successful validation run MUST be formatting/type-chec
 **CRITICAL**: All unit tests must pass with 100% success rate. Failing tests are NEVER acceptable.
 
 **Minimum Coverage Standards**:
-- **Project-wide**: >95% code coverage
-- **Per-file**: No single file may have <95% coverage
-- **Exceptions**: Only for truly untestable code (e.g., `if __name__ == "__main__"`, module-level `sys.exit()`)
+- **Project-wide**: 100% code coverage
+- **Per-file**: No single file may have <100% coverage
+- **Exceptions**: Only for truly untestable code (e.g., `if __name__ == "__main__"`, module-level `sys.exit()`). Every exception must be covered by an explicit `# pragma: no cover` with a comment explaining why.
 
 **Running Coverage**:
 ```bash
@@ -153,7 +153,7 @@ open htmlcov/index.html
 **Coverage Validation**:
 - Check overall percentage in terminal output
 - Review HTML report for per-file coverage
-- Ensure no file falls below 95%
+- Ensure no file falls below 100%
 - Document any intentional gaps with inline comments explaining why they're untestable
 - **All tests must pass** - zero failures, zero errors
 
@@ -206,8 +206,8 @@ Before running E2E tests or claiming work is complete:
 - [ ] Run `uv run isort src/ tests/`
 - [ ] Run `uv run black src/ tests/`
 - [ ] Run `uv run mypy src/` (0 errors)
-- [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (>95% coverage, **ALL tests pass**)
-- [ ] Verify per-file coverage: all files >95% in `htmlcov/index.html`
+- [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (100% coverage, **ALL tests pass**)
+- [ ] Verify per-file coverage: all files 100% in `htmlcov/index.html`
 - [ ] Run `uv run radon cc src/ -a` (verify grade A)
 - [ ] Run `uv run radon cc src/ -nc` (verify no functions exceed grade B)
 - [ ] Run Gateway E2E tests: `bash scripts/gateway_e2e_run.sh .env slim` and `bash scripts/gateway_e2e_run.sh .env alpine` (**100% pass rate required**)
@@ -319,7 +319,7 @@ docker mcp tools call manageSettings operation=update category=general profile_i
    - Debug and fix the failing test or code
    - **NEVER ignore, skip, or comment out failing tests**
    - Restart quality checks from step 1 after fixes
-4. **Coverage <95%**: Add missing test cases, remove dead code, or document why code is untestable, then restart quality checks
+4. **Coverage <100%**: Add missing test cases, remove dead code, or document why code is untestable with `# pragma: no cover`, then restart quality checks
 5. **Complexity >B**: Refactor function into smaller units, extract methods, simplify logic, then restart quality checks
 
 **Iteration Loop**:

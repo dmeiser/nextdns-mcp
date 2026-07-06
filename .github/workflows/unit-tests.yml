@@ -63,22 +63,22 @@ jobs:
           echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
           echo "Overall Coverage: $COVERAGE%"
           
-          # Check if overall coverage is above 95%
+          # Check if overall coverage is 100%
           if [ -z "$COVERAGE" ]; then
             echo "❌ Could not extract coverage percentage"
             exit 1
           fi
-          
-          if ! awk "BEGIN {exit !($COVERAGE >= 95)}"; then
-            echo "❌ Overall coverage $COVERAGE% is below 95% threshold"
+
+          if ! awk "BEGIN {exit !($COVERAGE >= 100)}"; then
+            echo "❌ Overall coverage $COVERAGE% is below 100% threshold"
             exit 1
           fi
-          
-          echo "✅ Overall coverage: $COVERAGE% (≥95% required)"
-          
-          # Check per-file coverage (no file below 93%)
+
+          echo "✅ Overall coverage: $COVERAGE% (100% required)"
+
+          # Check per-file coverage (no file below 100%)
           echo "Checking per-file coverage..."
-          MIN_FILE_COVERAGE=93
+          MIN_FILE_COVERAGE=100
           FAILED_FILES=""
           
           while IFS= read -r line; do
@@ -115,7 +115,7 @@ jobs:
           fi
           
           echo ""
-          echo "✅ All files have coverage ≥$MIN_FILE_COVERAGE%"
+          echo "✅ All files have coverage $MIN_FILE_COVERAGE%"
           echo "✅ All unit tests passed!"
 
       - name: Generate coverage report
@@ -144,8 +144,8 @@ jobs:
             COVERAGE="${{ steps.tests.outputs.coverage }}"
             
             echo "- **Tests**: ✅ $TOTAL_TESTS passed" >> $GITHUB_STEP_SUMMARY
-            echo "- **Overall Coverage**: $COVERAGE% (≥95% required)" >> $GITHUB_STEP_SUMMARY
-            echo "- **Per-File Coverage**: All files ≥93%" >> $GITHUB_STEP_SUMMARY
+            echo "- **Overall Coverage**: $COVERAGE% (100% required)" >> $GITHUB_STEP_SUMMARY
+            echo "- **Per-File Coverage**: All files 100%" >> $GITHUB_STEP_SUMMARY
             
             if [ -n "${{ steps.tests.outputs.failed_files }}" ]; then
               echo "" >> $GITHUB_STEP_SUMMARY

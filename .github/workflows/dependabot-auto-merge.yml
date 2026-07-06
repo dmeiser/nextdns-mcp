@@ -130,7 +130,7 @@ jobs:
           gh pr review "$PR_NUMBER" --repo ${{ github.repository }} --approve \
             --body "✅ Auto-approved: All workflows passed
           
-          - Unit Tests: ✅ Passed (≥95% overall coverage, all files ≥93%)
+          - Unit Tests: ✅ Passed (100% overall coverage, all files 100%)
           - E2E Tests: ✅ Passed (100% of tools tested)
           - CodeQL: ✅ Passed"
           
