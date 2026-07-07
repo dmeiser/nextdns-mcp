@@ -30,7 +30,7 @@ class TestServerInitialization:
 
         try:
             # Mock the Path to point to our temp spec
-            with patch("nextdns_mcp.server.Path") as mock_path:
+            with patch("nextdns_mcp.openapi.Path") as mock_path:
                 mock_spec_path = temp_spec
                 mock_parent = Mock()
                 mock_parent.__truediv__ = Mock(return_value=mock_spec_path)
@@ -96,7 +96,7 @@ class TestCreateMcpServer:
             temp_spec = Path(f.name)
 
         try:
-            with patch("nextdns_mcp.server.Path") as mock_path:
+            with patch("nextdns_mcp.openapi.Path") as mock_path:
                 mock_spec_path = temp_spec
                 mock_parent = Mock()
                 mock_parent.__truediv__ = Mock(return_value=mock_spec_path)
@@ -131,7 +131,7 @@ class TestCreateMcpServer:
             temp_spec = Path(f.name)
 
         try:
-            with patch("nextdns_mcp.server.Path") as mock_path:
+            with patch("nextdns_mcp.openapi.Path") as mock_path:
                 mock_spec_path = temp_spec
                 mock_parent = Mock()
                 mock_parent.__truediv__ = Mock(return_value=mock_spec_path)
@@ -169,7 +169,7 @@ class TestCreateMcpServer:
             temp_spec = Path(f.name)
 
         try:
-            with patch("nextdns_mcp.server.Path") as mock_path:
+            with patch("nextdns_mcp.openapi.Path") as mock_path:
                 mock_spec_path = temp_spec
                 mock_parent = Mock()
                 mock_parent.__truediv__ = Mock(return_value=mock_spec_path)
@@ -204,7 +204,7 @@ class TestCreateMcpServer:
             temp_spec = Path(f.name)
 
         try:
-            with patch("nextdns_mcp.server.Path") as mock_path:
+            with patch("nextdns_mcp.openapi.Path") as mock_path:
                 mock_spec_path = temp_spec
                 mock_parent = Mock()
                 mock_parent.__truediv__ = Mock(return_value=mock_spec_path)

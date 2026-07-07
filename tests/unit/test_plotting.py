@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from nextdns_mcp import client as client_module
 from nextdns_mcp import server
 
 
@@ -87,7 +88,7 @@ class TestRenderSeriesChart:
 def mock_api_client(monkeypatch):
     """Patch the module-level api_client.get used by plotting helpers."""
     client = AsyncMock()
-    monkeypatch.setattr(server, "api_client", client)
+    monkeypatch.setattr(client_module, "api_client", client)
     return client
 
 

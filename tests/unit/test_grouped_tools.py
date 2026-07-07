@@ -5,14 +5,16 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from nextdns_mcp import client as client_module
 from nextdns_mcp import server
+from nextdns_mcp.tools import profiles as profiles_module
 
 
 @pytest.fixture
 def mock_api_client(monkeypatch):
     """Replace the module-level api_client with a mock."""
     client = AsyncMock()
-    monkeypatch.setattr(server, "api_client", client)
+    monkeypatch.setattr(client_module, "api_client", client)
     return client
 
 
@@ -515,21 +517,21 @@ class TestManageProfilesAccessAndValidation:
 
     @pytest.mark.asyncio
     async def test_list_denied_when_no_readable_profiles(self, mock_api_client, monkeypatch):
-        monkeypatch.setattr(server, "get_readable_profiles_set", lambda: None)
+        monkeypatch.setattr(profiles_module, "get_readable_profiles_set", lambda: None)
         result = await server.manageProfiles("list")
         assert "error" in result
         assert "no profiles are readable" in result["error"].lower()
 
     @pytest.mark.asyncio
     async def test_create_denied_when_no_writable_profiles(self, mock_api_client, monkeypatch):
-        monkeypatch.setattr(server, "get_writable_profiles_set", lambda: None)
+        monkeypatch.setattr(profiles_module, "get_writable_profiles_set", lambda: None)
         result = await server.manageProfiles("create", name="Test")
         assert "error" in result
         assert "no profiles are writable" in result["error"].lower()
 
     @pytest.mark.asyncio
     async def test_create_denied_in_read_only_mode(self, mock_api_client, monkeypatch):
-        monkeypatch.setattr(server, "is_read_only", lambda: True)
+        monkeypatch.setattr(profiles_module, "is_read_only", lambda: True)
         result = await server.manageProfiles("create", name="Test")
         assert "error" in result
         assert "read-only" in result["error"].lower()
