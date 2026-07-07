@@ -3,7 +3,19 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from nextdns_mcp import client as client_module
 from nextdns_mcp import server
+from nextdns_mcp.tools import doh as doh_module
+
+
+@pytest.fixture(autouse=True)
+def allow_doh_read_access(monkeypatch):
+    """Allow all DoH lookups by bypassing the can_read_profile gate.
+
+    Patches the function's global namespace directly so the bypass survives
+    module reloads performed by other tests.
+    """
+    monkeypatch.setitem(server._dohLookup_impl.__globals__, "can_read_profile", lambda _profile_id: True)
 
 
 def test_coerce_helpers():
@@ -38,8 +50,14 @@ def test_coerce_helpers():
     assert server.coerce_json_types(123) == 123
 
 
+def test_coerce_json_arg_invalid_json_returns_value():
+    # String that looks like JSON but fails to parse should be returned as-is.
+    assert server._coerce_json_arg('{"broken": ') == '{"broken": '
+    assert server._coerce_json_arg("[1, 2, ") == "[1, 2, "
+
+
 class DummyTool:
-    parameters: dict[str, object] = {"properties": {"keep": {}}}
+    parameters: dict[str, object] = {"properties": {"keep": {"type": "boolean"}}}
 
 
 class DummyToolManager:
@@ -78,10 +96,24 @@ async def _dummy_call_next(context):
 async def test_strip_extra_fields_middleware_basic_and_exception():
     mw = server.StripExtraFieldsMiddleware()
 
-    # Normal operation: known property 'keep' retained, unknown removed, types coerced
+    # Normal operation: known property 'keep' retained, unknown removed, bool coerced
     context = DummyContext("tool", {"keep": "true", "drop": "x"})
     result = await mw.on_call_tool(context, _dummy_call_next)
     assert result == {"keep": True}
+
+    # String-typed identifier-like values must not be coerced
+    class StringDummyTool:
+        parameters: dict[str, object] = {"properties": {"profile_id": {"type": "string"}}}
+
+    class StringToolManager:
+        async def get_tool(self, name):
+            return StringDummyTool()
+
+    string_context = DummyContext("tool", {})
+    string_context.fastmcp_context.fastmcp = SimpleNamespace(get_tool=StringToolManager().get_tool)
+    string_context.message.arguments = {"profile_id": "315244"}
+    result = await mw.on_call_tool(string_context, _dummy_call_next)
+    assert result == {"profile_id": "315244"}
 
     # Exception handling in get_tool: should proceed and return original args
     context_exc = DummyContext("tool", {"keep": "true"}, raise_exc=True)
@@ -100,8 +132,8 @@ def test_access_control_client_checks(monkeypatch):
     client = server.AccessControlledClient()
 
     # Deny write, read-only true
-    monkeypatch.setattr(server, "can_write_profile", lambda _id: False)
-    monkeypatch.setattr(server, "is_read_only", lambda: True)
+    monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
+    monkeypatch.setattr(client_module, "is_read_only", lambda: True)
 
     r = client._check_write_access("abc", "PUT", "/profiles/abc")
     assert isinstance(r, httpx.Response)
@@ -109,7 +141,7 @@ def test_access_control_client_checks(monkeypatch):
     assert "read-only" in r.json()["error"].lower()
 
     # Deny read
-    monkeypatch.setattr(server, "can_read_profile", lambda _id: False)
+    monkeypatch.setattr(client_module, "can_read_profile", lambda _id: False)
     r2 = client._check_read_access("abc", "GET", "/profiles/abc")
     assert r2.status_code == 403
 
@@ -124,11 +156,11 @@ async def test_coerce_json_body_and_request(monkeypatch):
     assert kwargs["json"] == {"a": True, "b": 2}
 
     # Test request returns early when access denied
-    monkeypatch.setattr(server, "extract_profile_id_from_url", lambda url: "abc")
-    monkeypatch.setattr(server, "can_write_profile", lambda _id: False)
-    monkeypatch.setattr(server, "is_read_only", lambda: False)
+    monkeypatch.setattr(client_module, "extract_profile_id_from_url", lambda url: "abc")
+    monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
+    monkeypatch.setattr(client_module, "is_read_only", lambda: False)
     # allow reads for this test
-    monkeypatch.setattr(server, "can_read_profile", lambda _id: True)
+    monkeypatch.setattr(client_module, "can_read_profile", lambda _id: True)
 
     async def fake_super_request(self, method, url, **kwargs):
         return httpx.Response(200, json={"ok": True})
@@ -166,19 +198,19 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
         async def get(self, doh_url, params=None, headers=None):
             return DummyResponse({**mock_doh_response})
 
-    monkeypatch.setattr(server.httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(doh_module.httpx, "AsyncClient", DummyClient)
 
     # doh_lookup success
     res = await server.doh_lookup("https://dns.nextdns.io/abc/dns-query", "google.com", "A", "abc")
     assert "_metadata" in res
 
     # _dohLookup_impl: no default profile
-    monkeypatch.setattr(server, "get_default_profile", lambda: None)
+    monkeypatch.setattr(doh_module, "get_default_profile", lambda: None)
     r = await server._dohLookup_impl("example.com")
     assert "error" in r and "No profile_id" in r["error"]
 
     # invalid record type
-    monkeypatch.setattr(server, "get_default_profile", lambda: "abc")
+    monkeypatch.setattr(doh_module, "get_default_profile", lambda: "abc")
     r2 = await server._dohLookup_impl("example.com", record_type="INVALID")
     assert "error" in r2 and "Invalid record type" in r2["error"]
 
@@ -186,7 +218,7 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     async def fake_exec(doh_url, domain, record_type, profile):
         return {"ok": True}
 
-    monkeypatch.setattr(server, "doh_lookup", fake_exec)
+    monkeypatch.setattr(doh_module, "doh_lookup", fake_exec)
     r3 = await server._dohLookup_impl("example.com")
     assert r3 == {"ok": True}
 
@@ -223,12 +255,15 @@ def test_use_all_fixtures(
     assert isinstance(mock_profiles_response, dict)
 
 
-def test_coerce_value_float_exception_and_collections(monkeypatch):
+def test_coerce_value_schema_aware_and_collections(monkeypatch):
     mw = server.StripExtraFieldsMiddleware()
 
-    # Dict and list should recurse
-    assert mw._coerce_value({"a": "true", "b": "2"}) == {"a": True, "b": 2}
-    assert mw._coerce_value(["1", "2.2"]) == [1, 2.2]
+    # Dict and list values are recursed without schema context, so strings stay strings
+    assert mw._coerce_value({"a": "true", "b": "2"}) == {"a": "true", "b": "2"}
+    assert mw._coerce_value(["1", "2.2"]) == ["1", "2.2"]
+
+    # With an array-of-numbers schema, list items are coerced
+    assert mw._coerce_value(["1", "2.2"], {"type": "array", "items": {"type": "number"}}) == [1, 2.2]
 
     # Simulate float() raising ValueError to hit the except branch
     import builtins
@@ -241,13 +276,16 @@ def test_coerce_value_float_exception_and_collections(monkeypatch):
     monkeypatch.setattr(builtins, "float", bad_float)
     try:
         # '1.23' matches the digit check and would attempt float()
-        assert mw._coerce_value("1.23") == "1.23"
+        assert mw._coerce_value("1.23", {"type": "number"}) == "1.23"
     finally:
         monkeypatch.setattr(builtins, "float", real_float)
 
-    # Boolean false and negative integer cases
-    assert mw._coerce_value("false") is False
-    assert mw._coerce_value("-5") == -5
+    # Boolean false and negative integer cases with matching schemas
+    assert mw._coerce_value("false", {"type": "boolean"}) is False
+    assert mw._coerce_value("-5", {"type": "integer"}) == -5
+
+    # Identifier-like strings are not coerced when schema expects a string
+    assert mw._coerce_value("315244", {"type": "string"}) == "315244"
 
     # Non-string non-dict/list returns unchanged
     assert mw._coerce_value(10) == 10

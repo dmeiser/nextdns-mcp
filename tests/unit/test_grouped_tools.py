@@ -5,15 +5,24 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from nextdns_mcp import client as client_module
 from nextdns_mcp import server
+from nextdns_mcp.tools import profiles as profiles_module
 
 
 @pytest.fixture
 def mock_api_client(monkeypatch):
     """Replace the module-level api_client with a mock."""
     client = AsyncMock()
-    monkeypatch.setattr(server, "api_client", client)
+    monkeypatch.setattr(client_module, "api_client", client)
     return client
+
+
+@pytest.fixture(autouse=True)
+def open_profile_access(monkeypatch):
+    """Allow all profile read/write access for grouped-tool tests."""
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
 
 def _make_response(json_data=None, status_code=200, content=None):
@@ -66,16 +75,16 @@ class TestApiRequest:
         exc = httpx.HTTPError("boom")
         exc.response = MagicMock()
         exc.response.status_code = 500
+        exc.response.text = "internal server error"
         mock_api_client.request.side_effect = exc
-        result = await server._api_request("GET", "/profiles")
-        assert "error" in result
-        assert result["status_code"] == 500
+        with pytest.raises(RuntimeError, match="HTTP error 500"):
+            await server._api_request("GET", "/profiles")
 
     @pytest.mark.asyncio
     async def test_unexpected_error(self, mock_api_client):
         mock_api_client.request.side_effect = RuntimeError("unexpected")
-        result = await server._api_request("GET", "/profiles")
-        assert "error" in result
+        with pytest.raises(RuntimeError, match="Unexpected error"):
+            await server._api_request("GET", "/profiles")
 
 
 class TestGetOpenapiToolNames:
@@ -176,6 +185,14 @@ class TestManageSettings:
         assert result == {"enabled": True}
         path = server._SETTINGS_PATHS[category]
         mock_api_client.request.assert_called_once_with("GET", f"/profiles/abc123/{path}", params=None, json=None)
+
+    @pytest.mark.asyncio
+    async def test_profile_id_coerced_from_int(self, mock_api_client):
+        """All-numeric profile IDs sent as integers are coerced to strings."""
+        mock_api_client.request.return_value = _make_response({"enabled": True})
+        result = await server.manageSettings("get", "general", 315244)
+        assert result == {"enabled": True}
+        mock_api_client.request.assert_called_once_with("GET", "/profiles/315244/settings", params=None, json=None)
 
     @pytest.mark.asyncio
     async def test_update(self, mock_api_client):
@@ -393,18 +410,22 @@ class TestManageLogs:
         result = await server.manageLogs("download", "abc123")
         assert result["content_type"] == "text/csv"
         assert result["size"] == 8
+        mock_api_client.get.assert_called_once_with(
+            "/profiles/abc123/logs/download", follow_redirects=True
+        )
 
     @pytest.mark.asyncio
     async def test_download_http_error(self, mock_api_client):
         mock_api_client.get.side_effect = httpx.HTTPError("boom")
         result = await server.manageLogs("download", "abc123")
         assert "error" in result
+        assert "HTTP error" in result["error"]
 
     @pytest.mark.asyncio
     async def test_download_unexpected_error(self, mock_api_client):
         mock_api_client.get.side_effect = RuntimeError("boom")
-        result = await server.manageLogs("download", "abc123")
-        assert "error" in result
+        with pytest.raises(RuntimeError, match="Unexpected error"):
+            await server.manageLogs("download", "abc123")
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
@@ -484,6 +505,114 @@ class TestQueryAnalytics:
             params={"from": "-1d", "status": "blocked", "root": "true"},
             json=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_domains_series_rejected(self, mock_api_client):
+        with pytest.raises(ValueError, match="series=true is not supported"):
+            await server.queryAnalytics("domains", "abc123", series=True)
+
+
+class TestManageProfilesAccessAndValidation:
+    """Tests for manageProfiles access control and ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_list_denied_when_no_readable_profiles(self, mock_api_client, monkeypatch):
+        monkeypatch.setattr(profiles_module, "get_readable_profiles_set", lambda: None)
+        result = await server.manageProfiles("list")
+        assert "error" in result
+        assert "no profiles are readable" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_create_denied_when_no_writable_profiles(self, mock_api_client, monkeypatch):
+        monkeypatch.setattr(profiles_module, "get_writable_profiles_set", lambda: None)
+        result = await server.manageProfiles("create", name="Test")
+        assert "error" in result
+        assert "no profiles are writable" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_create_denied_in_read_only_mode(self, mock_api_client, monkeypatch):
+        monkeypatch.setattr(profiles_module, "is_read_only", lambda: True)
+        result = await server.manageProfiles("create", name="Test")
+        assert "error" in result
+        assert "read-only" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_get_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.manageProfiles("get", profile_id="abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+
+class TestManageSettingsValidation:
+    """Tests for manageSettings ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_get_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.manageSettings("get", "general", "abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+
+class TestManageListsValidation:
+    """Tests for manageLists ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_get_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.manageLists("allowlist", "get", "abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_remove_rejects_invalid_entry_id(self, mock_api_client):
+        result = await server.manageLists("allowlist", "remove", "abc123", entry_id="../settings")
+        assert "error" in result
+        assert "Invalid entry_id format" in result["error"]
+
+
+class TestManageRewritesValidation:
+    """Tests for manageRewrites ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_list_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.manageRewrites("list", "abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_delete_rejects_invalid_entry_id(self, mock_api_client):
+        result = await server.manageRewrites("delete", "abc123", entry_id="../settings")
+        assert "error" in result
+        assert "Invalid entry_id format" in result["error"]
+
+
+class TestManageLogsValidation:
+    """Tests for manageLogs ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_get_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.manageLogs("get", "abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+
+class TestQueryAnalyticsValidation:
+    """Tests for queryAnalytics ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_base_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.queryAnalytics("status", "abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
+
+
+class TestPlotAnalyticsValidation:
+    """Tests for plotAnalytics ID validation."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_profile_id(self, mock_api_client):
+        result = await server.plotAnalytics("status", profile_id="abc/def")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
 
 
 class TestUsageGuidePrompt:

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import BaseModel
 
-from nextdns_mcp.server import StripExtraFieldsMiddleware, allow_extra_fields_component_fn
+from nextdns_mcp.openapi import StripExtraFieldsMiddleware, allow_extra_fields_component_fn
 
 
 class TestStripExtraFieldsMiddleware:
@@ -143,7 +143,7 @@ class TestStripExtraFieldsMiddleware:
         """Test that stripped fields are logged at debug level."""
         call_next = AsyncMock(return_value=MagicMock())
 
-        with patch("nextdns_mcp.server.logger"):
+        with patch("nextdns_mcp.openapi.logger"):
             await middleware.on_call_tool(mock_context, call_next)
 
             # Verify call_next was called (middleware completed successfully)
@@ -154,6 +154,35 @@ class TestStripExtraFieldsMiddleware:
                 "domain": "example.com",
                 "record_type": "A",
             }
+
+    def test_get_schema_property_types_handles_various_schemas(self, middleware):
+        """Test extraction of schema types from property schemas."""
+        assert middleware._get_schema_property_types({"type": "boolean"}) == {"boolean"}
+        assert middleware._get_schema_property_types({"type": ["boolean", "null"]}) == {
+            "boolean",
+            "null",
+        }
+        assert middleware._get_schema_property_types({"anyOf": [{"type": "integer"}, {"type": "null"}]}) == {
+            "integer",
+            "null",
+        }
+        assert middleware._get_schema_property_types({"oneOf": [{"type": ["number", "null"]}]}) == {"number", "null"}
+        assert middleware._get_schema_property_types("not-a-dict") == set()
+        assert middleware._get_schema_property_types({}) == set()
+
+    def test_coerce_string_value_respects_schema(self, middleware):
+        """Test that string coercion only happens for expected schema types."""
+        assert middleware._coerce_string_value("true", {"boolean"}) is True
+        assert middleware._coerce_string_value("42", {"integer"}) == 42
+        assert middleware._coerce_string_value("3.14", {"number"}) == 3.14
+        assert middleware._coerce_string_value("315244", {"string"}) == "315244"
+        assert middleware._coerce_string_value("true", {"string"}) == "true"
+        assert middleware._coerce_string_value("42", {"string"}) == "42"
+
+    def test_coerce_value_schema_aware_for_lists(self, middleware):
+        """Test array items are coerced when items schema is provided."""
+        result = middleware._coerce_value(["true", "false"], {"type": "array", "items": {"type": "boolean"}})
+        assert result == [True, False]
 
 
 class TestAllowExtraFieldsComponentFn:
@@ -240,8 +269,8 @@ class TestAllowExtraFieldsComponentFn:
             __config__ = OldConfig
 
         # Make it look like a BaseModel subclass by patching isinstance check
-        with patch("nextdns_mcp.server.isinstance", side_effect=lambda obj, cls: True):
-            with patch("nextdns_mcp.server.issubclass", side_effect=lambda obj, cls: True):
+        with patch("nextdns_mcp.openapi.isinstance", side_effect=lambda obj, cls: True):
+            with patch("nextdns_mcp.openapi.issubclass", side_effect=lambda obj, cls: True):
                 # This is tricky - the function checks isinstance(component, type)
                 # and issubclass(component, BaseModel), but we're mocking those
                 pass

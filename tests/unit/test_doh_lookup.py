@@ -5,7 +5,17 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 import pytest
 
-from nextdns_mcp.server import _dohLookup_impl as dohLookup
+from nextdns_mcp.tools.doh import _dohLookup_impl as dohLookup
+
+
+@pytest.fixture(autouse=True)
+def allow_doh_read_access(monkeypatch):
+    """Allow all DoH lookups by bypassing the can_read_profile gate.
+
+    Patches the function's global namespace directly so the bypass survives
+    module reloads performed by other tests.
+    """
+    monkeypatch.setitem(dohLookup.__globals__, "can_read_profile", lambda _profile_id: True)
 
 
 @pytest.fixture
@@ -27,6 +37,21 @@ def mock_httpx_client():
 
 class TestDohLookup:
     """Test the dohLookup custom tool."""
+
+    @pytest.mark.asyncio
+    async def test_doh_lookup_denies_unreadable_profile(self, mock_profile_id, monkeypatch):
+        """Test that dohLookup respects read access controls."""
+        monkeypatch.setitem(dohLookup.__globals__, "can_read_profile", lambda _profile_id: False)
+        result = await dohLookup("example.com", mock_profile_id, "A")
+        assert "error" in result
+        assert "Read access denied" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_doh_lookup_rejects_invalid_profile_id(self, monkeypatch):
+        """Test that dohLookup rejects unsafe profile IDs."""
+        result = await dohLookup("example.com", "abc/def", "A")
+        assert "error" in result
+        assert "Invalid profile_id format" in result["error"]
 
     @pytest.mark.asyncio
     async def test_doh_lookup_basic_query(self, mock_profile_id):
@@ -64,9 +89,12 @@ class TestDohLookup:
 
         import importlib
 
-        import nextdns_mcp.server
+        import nextdns_mcp.tools.doh
 
-        importlib.reload(nextdns_mcp.server)
+        importlib.reload(nextdns_mcp.tools.doh)
+
+        # Re-apply access bypass after module reload.
+        monkeypatch.setattr(nextdns_mcp.tools.doh, "can_read_profile", lambda _profile_id: True)
 
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
@@ -81,7 +109,7 @@ class TestDohLookup:
             mock_client_class.return_value = mock_client
 
             # Use the reloaded module's function
-            result = await nextdns_mcp.server._dohLookup_impl("example.com")
+            result = await nextdns_mcp.tools.doh._dohLookup_impl("example.com")
 
             assert "_metadata" in result
             assert result["_metadata"]["profile_id"] == test_profile
@@ -172,8 +200,8 @@ class TestDohLookup:
     @pytest.mark.asyncio
     async def test_doh_lookup_http_error(self, mock_profile_id):
         """Test error handling for HTTP errors."""
-        # Patch at the server module level where httpx is imported
-        with patch("nextdns_mcp.server.httpx.AsyncClient") as mock_client_class:
+        # Patch at the doh tool module level where httpx is imported
+        with patch("nextdns_mcp.tools.doh.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.get.side_effect = httpx.HTTPError("Connection failed")
             mock_client.__aenter__.return_value = mock_client
@@ -194,8 +222,8 @@ class TestDohLookup:
     @pytest.mark.asyncio
     async def test_doh_lookup_generic_exception(self, mock_profile_id):
         """Test error handling for unexpected exceptions."""
-        # Patch at the server module level where httpx is imported
-        with patch("nextdns_mcp.server.httpx.AsyncClient") as mock_client_class:
+        # Patch at the doh tool module level where httpx is imported
+        with patch("nextdns_mcp.tools.doh.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.get.side_effect = Exception("Unexpected error")
             mock_client.__aenter__.return_value = mock_client

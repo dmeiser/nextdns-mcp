@@ -11,7 +11,12 @@ from nextdns_mcp.config import (
     get_writable_profiles,
     parse_profile_list,
 )
-from nextdns_mcp.server import extract_profile_id_from_url, is_write_operation
+from nextdns_mcp.server import (
+    extract_profile_id_from_url,
+    is_safe_entry_id,
+    is_safe_profile_id,
+    is_write_operation,
+)
 
 
 @pytest.fixture
@@ -180,6 +185,12 @@ class TestCanReadProfile:
         assert can_read_profile("ghi789") is True  # In writable list (write implies read)
         assert can_read_profile("xyz999") is False  # Not in either list
 
+    def test_writable_implies_readable_when_readable_unset(self, clean_env):
+        """Test that writable profiles are readable when readable is unset."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+        assert can_read_profile("abc123") is True
+        assert can_read_profile("xyz999") is False
+
 
 class TestCanWriteProfile:
     """Test the can_write_profile function."""
@@ -272,3 +283,37 @@ class TestIsWriteOperation:
         """Test that DELETE is a write operation."""
         assert is_write_operation("DELETE") is True
         assert is_write_operation("delete") is True
+
+
+class TestSafeIdValidation:
+    """Test safe identifier validation helpers."""
+
+    def test_is_safe_profile_id_accepts_alphanumeric(self):
+        assert is_safe_profile_id("abc123") is True
+        assert is_safe_profile_id("test-profile_1") is True
+
+    def test_is_safe_profile_id_rejects_path_traversal(self):
+        assert is_safe_profile_id("abc/../def") is False
+        assert is_safe_profile_id("abc/def") is False
+        assert is_safe_profile_id("") is False
+
+    def test_is_safe_entry_id_allows_domains(self):
+        assert is_safe_entry_id("example.com") is True
+        assert is_safe_entry_id("nextdns-recommended") is True
+
+    def test_is_safe_entry_id_rejects_path_traversal(self):
+        assert is_safe_entry_id("../settings") is False
+        assert is_safe_entry_id("foo/bar") is False
+        assert is_safe_entry_id("") is False
+
+
+class TestExtractProfileIdFromUrlValidation:
+    """Test that extract_profile_id_from_url rejects unsafe IDs."""
+
+    def test_returns_none_for_path_traversal_profile_id(self):
+        result = extract_profile_id_from_url("/profiles/allowed123/../../profiles/denied456/settings")
+        assert result is None
+
+    def test_returns_none_for_invalid_profile_id_characters(self):
+        result = extract_profile_id_from_url("/profiles/abc.def/settings")
+        assert result is None

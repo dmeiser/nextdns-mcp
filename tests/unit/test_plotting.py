@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from nextdns_mcp import client as client_module
 from nextdns_mcp import server
 
 
@@ -87,7 +88,7 @@ class TestRenderSeriesChart:
 def mock_api_client(monkeypatch):
     """Patch the module-level api_client.get used by plotting helpers."""
     client = AsyncMock()
-    monkeypatch.setattr(server, "api_client", client)
+    monkeypatch.setattr(client_module, "api_client", client)
     return client
 
 
@@ -134,20 +135,18 @@ class TestPlotAnalyticsSeriesImpl:
         assert "No profile_id provided" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_http_error_returns_error(self, clean_env, mock_api_client, monkeypatch):
+    async def test_http_error_raises(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         mock_api_client.get.side_effect = httpx.HTTPError("boom")
-        result = await server._plot_analytics_series_impl("status")
-        assert "error" in result
-        assert "HTTP error" in result["error"]
+        with pytest.raises(RuntimeError, match="HTTP error"):
+            await server._plot_analytics_series_impl("status")
 
     @pytest.mark.asyncio
-    async def test_unexpected_error_returns_error(self, clean_env, mock_api_client, monkeypatch):
+    async def test_unexpected_error_raises(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         mock_api_client.get.side_effect = RuntimeError("unexpected")
-        result = await server._plot_analytics_series_impl("status")
-        assert "error" in result
-        assert "Unexpected error" in result["error"]
+        with pytest.raises(RuntimeError, match="Unexpected error"):
+            await server._plot_analytics_series_impl("status")
 
     @pytest.mark.asyncio
     async def test_empty_data_returns_error(self, clean_env, mock_api_client, monkeypatch):
@@ -199,9 +198,8 @@ class TestPlotAnalyticsToolWrapper:
         assert "No profile_id provided" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_plot_analytics_wrapper_with_default_profile(self, clean_env, monkeypatch):
+    async def test_plot_analytics_wrapper_with_default_profile(self, clean_env, monkeypatch, mock_api_client):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        result = await server.plotAnalytics("status")
-        assert "error" in result
-        # The request fails because the api_client is not mocked; covers the wrapper path.
-        assert "HTTP error" in result["error"] or "Unexpected error" in result["error"]
+        mock_api_client.get.side_effect = httpx.HTTPError("boom")
+        with pytest.raises(RuntimeError, match="HTTP error"):
+            await server.plotAnalytics("status")

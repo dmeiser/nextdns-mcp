@@ -25,7 +25,7 @@ class TestLoadOpenApiSpec:
 
         try:
             # Mock __file__ to point to temp location
-            with patch("nextdns_mcp.server.Path") as mock_path:
+            with patch("nextdns_mcp.openapi.Path") as mock_path:
                 # Make Path(__file__).parent return the temp directory
                 mock_path.return_value.parent = temp_spec.parent
                 mock_parent = Mock()
@@ -48,7 +48,7 @@ class TestLoadOpenApiSpec:
         """Ensure custom route mappings exclude unsupported OpenAPI operations."""
 
         # Use the real OpenAPI spec and configuration to ensure tool generation works correctly
-        from nextdns_mcp.server import allow_extra_fields_component_fn, build_route_mappings, load_openapi_spec
+        from nextdns_mcp.openapi import allow_extra_fields_component_fn, build_route_mappings, load_openapi_spec
 
         spec = load_openapi_spec()
 
@@ -78,7 +78,7 @@ class TestLoadOpenApiSpec:
         """Test error handling when OpenAPI spec file is missing."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
-        with patch("nextdns_mcp.server.Path") as mock_path:
+        with patch("nextdns_mcp.openapi.Path") as mock_path:
             # Mock the path to not exist
             mock_spec_path = Mock()
             mock_spec_path.exists.return_value = False
@@ -106,7 +106,7 @@ class TestLoadOpenApiSpec:
             temp_spec = Path(f.name)
 
         try:
-            with patch("nextdns_mcp.server.Path") as mock_path:
+            with patch("nextdns_mcp.openapi.Path") as mock_path:
                 mock_spec_path = temp_spec
                 mock_parent = Mock()
                 mock_parent.__truediv__ = Mock(return_value=mock_spec_path)
@@ -133,7 +133,7 @@ class TestLoadOpenApiSpec:
             temp_spec = Path(f.name)
 
         try:
-            with patch("nextdns_mcp.server.Path") as mock_path:
+            with patch("nextdns_mcp.openapi.Path") as mock_path:
                 mock_spec_path = temp_spec
                 mock_parent = Mock()
                 mock_parent.__truediv__ = Mock(return_value=mock_spec_path)
@@ -156,7 +156,7 @@ class TestLoadOpenApiSpec:
             temp_spec = Path(f.name)
 
         try:
-            with patch("nextdns_mcp.server.Path") as mock_path:
+            with patch("nextdns_mcp.openapi.Path") as mock_path:
                 mock_spec_path = temp_spec
                 mock_parent = Mock()
                 mock_parent.__truediv__ = Mock(return_value=mock_spec_path)
@@ -219,3 +219,18 @@ class TestProductionServerTools:
         }
 
         assert not (tool_names & atomic_tools), f"Atomic tools still registered: {tool_names & atomic_tools}"
+
+    def test_create_mcp_server_logs_default_profile(self, mock_api_key, monkeypatch, caplog):
+        """create_mcp_server logs the default profile when one is configured."""
+        import logging
+
+        caplog.set_level(logging.INFO)
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+
+        from nextdns_mcp.server import create_mcp_server
+        from nextdns_mcp.client import create_nextdns_client
+
+        create_mcp_server(create_nextdns_client())
+
+        assert "Default profile: abc123" in caplog.text
