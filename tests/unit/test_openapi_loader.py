@@ -219,3 +219,18 @@ class TestProductionServerTools:
         }
 
         assert not (tool_names & atomic_tools), f"Atomic tools still registered: {tool_names & atomic_tools}"
+
+    def test_create_mcp_server_logs_default_profile(self, mock_api_key, monkeypatch, caplog):
+        """create_mcp_server logs the default profile when one is configured."""
+        import logging
+
+        caplog.set_level(logging.INFO)
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+
+        from nextdns_mcp.server import create_mcp_server
+        from nextdns_mcp.client import create_nextdns_client
+
+        create_mcp_server(create_nextdns_client())
+
+        assert "Default profile: abc123" in caplog.text
