@@ -3,7 +3,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from nextdns_mcp import client as client_module
 from nextdns_mcp import server
+from nextdns_mcp.tools import doh as doh_module
 
 
 @pytest.fixture(autouse=True)
@@ -130,8 +132,8 @@ def test_access_control_client_checks(monkeypatch):
     client = server.AccessControlledClient()
 
     # Deny write, read-only true
-    monkeypatch.setattr(server, "can_write_profile", lambda _id: False)
-    monkeypatch.setattr(server, "is_read_only", lambda: True)
+    monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
+    monkeypatch.setattr(client_module, "is_read_only", lambda: True)
 
     r = client._check_write_access("abc", "PUT", "/profiles/abc")
     assert isinstance(r, httpx.Response)
@@ -139,7 +141,7 @@ def test_access_control_client_checks(monkeypatch):
     assert "read-only" in r.json()["error"].lower()
 
     # Deny read
-    monkeypatch.setattr(server, "can_read_profile", lambda _id: False)
+    monkeypatch.setattr(client_module, "can_read_profile", lambda _id: False)
     r2 = client._check_read_access("abc", "GET", "/profiles/abc")
     assert r2.status_code == 403
 
@@ -154,11 +156,11 @@ async def test_coerce_json_body_and_request(monkeypatch):
     assert kwargs["json"] == {"a": True, "b": 2}
 
     # Test request returns early when access denied
-    monkeypatch.setattr(server, "extract_profile_id_from_url", lambda url: "abc")
-    monkeypatch.setattr(server, "can_write_profile", lambda _id: False)
-    monkeypatch.setattr(server, "is_read_only", lambda: False)
+    monkeypatch.setattr(client_module, "extract_profile_id_from_url", lambda url: "abc")
+    monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
+    monkeypatch.setattr(client_module, "is_read_only", lambda: False)
     # allow reads for this test
-    monkeypatch.setattr(server, "can_read_profile", lambda _id: True)
+    monkeypatch.setattr(client_module, "can_read_profile", lambda _id: True)
 
     async def fake_super_request(self, method, url, **kwargs):
         return httpx.Response(200, json={"ok": True})
@@ -196,19 +198,19 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
         async def get(self, doh_url, params=None, headers=None):
             return DummyResponse({**mock_doh_response})
 
-    monkeypatch.setattr(server.httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(doh_module.httpx, "AsyncClient", DummyClient)
 
     # doh_lookup success
     res = await server.doh_lookup("https://dns.nextdns.io/abc/dns-query", "google.com", "A", "abc")
     assert "_metadata" in res
 
     # _dohLookup_impl: no default profile
-    monkeypatch.setattr(server, "get_default_profile", lambda: None)
+    monkeypatch.setattr(doh_module, "get_default_profile", lambda: None)
     r = await server._dohLookup_impl("example.com")
     assert "error" in r and "No profile_id" in r["error"]
 
     # invalid record type
-    monkeypatch.setattr(server, "get_default_profile", lambda: "abc")
+    monkeypatch.setattr(doh_module, "get_default_profile", lambda: "abc")
     r2 = await server._dohLookup_impl("example.com", record_type="INVALID")
     assert "error" in r2 and "Invalid record type" in r2["error"]
 
@@ -216,7 +218,7 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     async def fake_exec(doh_url, domain, record_type, profile):
         return {"ok": True}
 
-    monkeypatch.setattr(server, "doh_lookup", fake_exec)
+    monkeypatch.setattr(doh_module, "doh_lookup", fake_exec)
     r3 = await server._dohLookup_impl("example.com")
     assert r3 == {"ok": True}
 

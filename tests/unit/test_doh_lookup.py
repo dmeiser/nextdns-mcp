@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 import pytest
 
-from nextdns_mcp.server import _dohLookup_impl as dohLookup
+from nextdns_mcp.tools.doh import _dohLookup_impl as dohLookup
 
 
 @pytest.fixture(autouse=True)
@@ -89,12 +89,12 @@ class TestDohLookup:
 
         import importlib
 
-        import nextdns_mcp.server
+        import nextdns_mcp.tools.doh
 
-        importlib.reload(nextdns_mcp.server)
+        importlib.reload(nextdns_mcp.tools.doh)
 
         # Re-apply access bypass after module reload.
-        monkeypatch.setattr(nextdns_mcp.server, "can_read_profile", lambda _profile_id: True)
+        monkeypatch.setattr(nextdns_mcp.tools.doh, "can_read_profile", lambda _profile_id: True)
 
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
@@ -109,7 +109,7 @@ class TestDohLookup:
             mock_client_class.return_value = mock_client
 
             # Use the reloaded module's function
-            result = await nextdns_mcp.server._dohLookup_impl("example.com")
+            result = await nextdns_mcp.tools.doh._dohLookup_impl("example.com")
 
             assert "_metadata" in result
             assert result["_metadata"]["profile_id"] == test_profile
@@ -200,8 +200,8 @@ class TestDohLookup:
     @pytest.mark.asyncio
     async def test_doh_lookup_http_error(self, mock_profile_id):
         """Test error handling for HTTP errors."""
-        # Patch at the server module level where httpx is imported
-        with patch("nextdns_mcp.server.httpx.AsyncClient") as mock_client_class:
+        # Patch at the doh tool module level where httpx is imported
+        with patch("nextdns_mcp.tools.doh.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.get.side_effect = httpx.HTTPError("Connection failed")
             mock_client.__aenter__.return_value = mock_client
@@ -222,8 +222,8 @@ class TestDohLookup:
     @pytest.mark.asyncio
     async def test_doh_lookup_generic_exception(self, mock_profile_id):
         """Test error handling for unexpected exceptions."""
-        # Patch at the server module level where httpx is imported
-        with patch("nextdns_mcp.server.httpx.AsyncClient") as mock_client_class:
+        # Patch at the doh tool module level where httpx is imported
+        with patch("nextdns_mcp.tools.doh.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.get.side_effect = Exception("Unexpected error")
             mock_client.__aenter__.return_value = mock_client
