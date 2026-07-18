@@ -6,10 +6,10 @@ SPDX-License-Identifier: MIT
 from .analytics import AnalyticsMetric, _query_analytics_impl, queryAnalytics
 from .doh import _build_doh_metadata, _dohLookup_impl, _get_target_profile, _validate_record_type, doh_lookup, dohLookup
 from .lists import (
-    ListOperation,
-    ListType,
     _LIST_PATHS,
     _LIST_UPDATEABLE_TYPES,
+    ListOperation,
+    ListType,
     _lists_add,
     _lists_get,
     _lists_remove,
@@ -20,17 +20,17 @@ from .lists import (
 )
 from .logs import LogOperation, _manage_logs_impl, manageLogs
 from .plots import (
-    PlotMetric,
     _PLOT_ANALYTICS_METRICS,
+    PlotMetric,
     _extract_series_label,
     _parse_series_timestamp,
-    _render_series_chart,
     _plot_analytics_series_impl,
+    _render_series_chart,
     plotAnalytics,
 )
 from .profiles import ProfileOperation, _manage_profiles_impl, manageProfiles
 from .rewrites import RewriteOperation, _manage_rewrites_impl, manageRewrites
-from .settings import SettingsCategory, _SETTINGS_PATHS, _manage_settings_impl, manageSettings
+from .settings import _SETTINGS_PATHS, SettingsCategory, _manage_settings_impl, manageSettings
 
 __all__ = [
     "AnalyticsMetric",

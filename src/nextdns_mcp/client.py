@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import httpx
 
+from .coercion import coerce_json_types
 from .config import (
     NEXTDNS_BASE_URL,
     can_read_profile,
@@ -18,7 +19,6 @@ from .config import (
     get_http_timeout,
     is_read_only,
 )
-from .coercion import coerce_json_types
 
 logger = logging.getLogger(__name__)
 

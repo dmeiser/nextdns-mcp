@@ -106,9 +106,9 @@ def test_log_api_key_error(mock_module):
     ]
 
     for expected_call in calls:
-        assert expected_call in mock_module.logger.critical.mock_calls, (
-            f"Missing expected critical log: {expected_call}"
-        )
+        assert (
+            expected_call in mock_module.logger.critical.mock_calls
+        ), f"Missing expected critical log: {expected_call}"
 
 
 def test_get_api_key_returns_value(mock_module):
@@ -178,9 +178,9 @@ def test_validate_configuration_exits_on_missing_api_key(mock_module):
     ]
 
     for expected_call in calls:
-        assert expected_call in mock_module.logger.critical.mock_calls, (
-            f"Missing expected critical log: {expected_call}"
-        )
+        assert (
+            expected_call in mock_module.logger.critical.mock_calls
+        ), f"Missing expected critical log: {expected_call}"
 
 
 def test_validate_configuration_logs_settings(mock_module):
@@ -215,8 +215,8 @@ def test_validate_configuration_logs_settings(mock_module):
     ]
 
     for expected_call in expected_calls:
-        assert expected_call in mock_module.logger.critical.mock_calls, (
-            f"Missing expected critical log: {expected_call}"
-        )
+        assert (
+            expected_call in mock_module.logger.critical.mock_calls
+        ), f"Missing expected critical log: {expected_call}"
 
     assert mock_module.logger.critical.call_count == 4

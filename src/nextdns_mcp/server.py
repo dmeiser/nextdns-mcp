@@ -114,7 +114,6 @@ from .client import (  # noqa: F401
     extract_profile_id_from_url,
     is_write_operation,
 )
-from .config import get_api_key  # noqa: F401
 from .coercion import (  # noqa: F401
     OptionalProfileId,
     ProfileId,
@@ -129,6 +128,7 @@ from .coercion import (  # noqa: F401
     _try_parse_float,
     coerce_json_types,
 )
+from .config import get_api_key  # noqa: F401
 from .openapi import (  # noqa: F401
     StripExtraFieldsMiddleware,
     allow_extra_fields_component_fn,
@@ -145,10 +145,10 @@ from .tools.doh import (  # noqa: F401
     doh_lookup,
 )
 from .tools.lists import (  # noqa: F401
-    ListOperation,
-    ListType,
     _LIST_PATHS,
     _LIST_UPDATEABLE_TYPES,
+    ListOperation,
+    ListType,
     _lists_add,
     _lists_get,
     _lists_remove,
@@ -158,8 +158,8 @@ from .tools.lists import (  # noqa: F401
 )
 from .tools.logs import LogOperation, _manage_logs_impl  # noqa: F401
 from .tools.plots import (  # noqa: F401
-    PlotMetric,
     _PLOT_ANALYTICS_METRICS,
+    PlotMetric,
     _extract_series_label,
     _parse_series_timestamp,
     _plot_analytics_series_impl,
@@ -167,7 +167,7 @@ from .tools.plots import (  # noqa: F401
 )
 from .tools.profiles import ProfileOperation, _manage_profiles_impl  # noqa: F401
 from .tools.rewrites import RewriteOperation, _manage_rewrites_impl  # noqa: F401
-from .tools.settings import SettingsCategory, _SETTINGS_PATHS, _manage_settings_impl  # noqa: F401
+from .tools.settings import _SETTINGS_PATHS, SettingsCategory, _manage_settings_impl  # noqa: F401
 from .utils import (  # noqa: F401
     SAFE_ENTRY_ID_PATTERN,
     SAFE_PROFILE_ID_PATTERN,

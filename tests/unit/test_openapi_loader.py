@@ -228,8 +228,8 @@ class TestProductionServerTools:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
 
-        from nextdns_mcp.server import create_mcp_server
         from nextdns_mcp.client import create_nextdns_client
+        from nextdns_mcp.server import create_mcp_server
 
         create_mcp_server(create_nextdns_client())
 
