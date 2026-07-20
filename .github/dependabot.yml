@@ -5,12 +5,15 @@
 
 version: 2
 updates:
-updates:
   # --- Python (uv) ---
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
+    # Only propose versions at least 7 days old, matching the uv
+    # `exclude-newer` cooldown in pyproject.toml.
+    cooldown:
+      default-days: 7
     allow:
       - dependency-type: "all"
     commit-message:
