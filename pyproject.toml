@@ -57,4 +57,7 @@ profile = "black"
 line_length = 120
 
 [tool.uv]
-exclude-newer = "2026-07-06T23:59:59Z"
+# Rolling 7-day dependency cooldown: ignore releases published within the
+# last 7 days so the community can vet them first. Matches the Dependabot
+# `cooldown` in .github/dependabot.yml.
+exclude-newer = "1 week"
