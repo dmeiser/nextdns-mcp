@@ -123,7 +123,7 @@ class TestDohLookup:
         # This test is skipped because the module-level NEXTDNS_DEFAULT_PROFILE constant
         # is bound at import time and can't be reliably mocked. The error handling logic
         # for missing profile is simple validation code (lines 189-193 in server.py).
-        # pragma: no cover
+        pass  # noqa: PIE790  # pragma: no cover
 
     @pytest.mark.asyncio
     async def test_doh_lookup_invalid_record_type(self, mock_profile_id):

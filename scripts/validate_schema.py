@@ -142,15 +142,15 @@ def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> di
         for method, operation in path_item.items():
             if method in ["get", "post", "put", "patch", "delete"] and operation.get("operationId") == operation_id:
                 # Found the operation, extract 200 response schema
-                    responses = operation.get("responses", {})
-                    # Some operations return 200, others 201 (created)
-                    for success_code in ("200", "201"):
-                        success_response = responses.get(success_code, {})
-                        content = success_response.get("content", {})
-                        json_content = content.get("application/json", {})
-                        schema = json_content.get("schema")
-                        if schema:
-                            return schema
+                responses = operation.get("responses", {})
+                # Some operations return 200, others 201 (created)
+                for success_code in ("200", "201"):
+                    success_response = responses.get(success_code, {})
+                    content = success_response.get("content", {})
+                    json_content = content.get("application/json", {})
+                    schema = json_content.get("schema")
+                    if schema:
+                        return schema
 
     return None
 
