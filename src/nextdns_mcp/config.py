@@ -9,7 +9,6 @@ SPDX-License-Identifier: MIT
 import logging
 import os
 import sys
-from typing import Optional
 
 from fastmcp.server.providers.openapi import MCPType, RouteMap
 
@@ -30,8 +29,8 @@ NEXTDNS_BASE_URL = "https://api.nextdns.io"
 ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
 
 # Cached profile access sets (populated after validation)
-_readable_profiles_cache: Optional[set[str] | None] = None
-_writable_profiles_cache: Optional[set[str] | None] = None
+_readable_profiles_cache: set[str] | None = None
+_writable_profiles_cache: set[str] | None = None
 
 # Operations that bypass profile access control
 GLOBALLY_ALLOWED_OPERATIONS = {
@@ -40,7 +39,7 @@ GLOBALLY_ALLOWED_OPERATIONS = {
 }
 
 
-def get_api_key() -> Optional[str]:
+def get_api_key() -> str | None:
     """Get API key from environment."""
     key = os.getenv("NEXTDNS_API_KEY")
     if key:
@@ -55,7 +54,7 @@ def get_api_key() -> Optional[str]:
                 return f.read().strip()
         except FileNotFoundError:
             logger.error(f"API key file not found: {key_file}")
-        except Exception as e:
+        except (OSError, UnicodeDecodeError) as e:
             logger.error(f"Failed to read API key file: {e}")
 
     return None
@@ -66,7 +65,7 @@ def get_http_timeout() -> float:
     return float(os.getenv("NEXTDNS_HTTP_TIMEOUT", "30"))
 
 
-def get_default_profile() -> Optional[str]:
+def get_default_profile() -> str | None:
     """Get default profile from environment."""
     return os.getenv("NEXTDNS_DEFAULT_PROFILE")
 

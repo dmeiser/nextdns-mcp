@@ -3,7 +3,7 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from ..coercion import ProfileId
 from ..utils import _api_request, _validate_entry_id, _validate_profile_id
@@ -15,9 +15,9 @@ RewriteOperation = Literal["list", "add", "delete"]
 async def _manage_rewrites_impl(
     operation: RewriteOperation,
     profile_id: ProfileId,
-    name: Optional[str] = None,
-    content: Optional[str] = None,
-    entry_id: Optional[str] = None,
+    name: str | None = None,
+    content: str | None = None,
+    entry_id: str | None = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for DNS rewrite entries."""
     error = _validate_profile_id(profile_id)
@@ -50,9 +50,9 @@ async def _manage_rewrites_impl(
 async def manageRewrites(
     operation: RewriteOperation,
     profile_id: ProfileId,
-    name: Optional[str] = None,
-    content: Optional[str] = None,
-    entry_id: Optional[str] = None,
+    name: str | None = None,
+    content: str | None = None,
+    entry_id: str | None = None,
 ) -> dict[str, Any]:
     """Manage DNS rewrite entries for a NextDNS profile.
 

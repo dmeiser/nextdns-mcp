@@ -33,6 +33,10 @@ from .rewrites import RewriteOperation, _manage_rewrites_impl, manageRewrites
 from .settings import _SETTINGS_PATHS, SettingsCategory, _manage_settings_impl, manageSettings
 
 __all__ = [
+    "_LIST_PATHS",
+    "_LIST_UPDATEABLE_TYPES",
+    "_PLOT_ANALYTICS_METRICS",
+    "_SETTINGS_PATHS",
     "AnalyticsMetric",
     "ListOperation",
     "ListType",
@@ -41,10 +45,6 @@ __all__ = [
     "ProfileOperation",
     "RewriteOperation",
     "SettingsCategory",
-    "_LIST_PATHS",
-    "_LIST_UPDATEABLE_TYPES",
-    "_PLOT_ANALYTICS_METRICS",
-    "_SETTINGS_PATHS",
     "_build_doh_metadata",
     "_dohLookup_impl",
     "_extract_series_label",
@@ -64,8 +64,8 @@ __all__ = [
     "_query_analytics_impl",
     "_render_series_chart",
     "_validate_record_type",
-    "doh_lookup",
     "dohLookup",
+    "doh_lookup",
     "manageLists",
     "manageLogs",
     "manageProfiles",

@@ -157,7 +157,7 @@ class StripExtraFieldsMiddleware(Middleware):
 
                 # Update the arguments in place
                 context.message.arguments = coerced_args
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 # If we can't get the tool schema, proceed with original arguments
                 # This should rarely happen, but we don't want to break the flow
                 logger.warning(f"Could not filter arguments for tool '{tool_name}': {e}")
@@ -231,7 +231,7 @@ def allow_extra_fields_component_fn(component, *args, **kwargs):
         # Pydantic v1 (legacy compatibility)
         elif hasattr(component, "__config__"):  # pragma: no cover
 
-            class Config(getattr(component, "__config__")):  # pragma: no cover
+            class Config(component.__config__):  # pragma: no cover
                 extra = "ignore"  # pragma: no cover
 
             component.__config__ = Config  # pragma: no cover

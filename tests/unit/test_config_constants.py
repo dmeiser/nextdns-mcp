@@ -13,7 +13,7 @@ def test_dns_status_codes_contain_required_codes():
     assert 5 in DNS_STATUS_CODES  # REFUSED
 
     # Verify descriptions are present
-    for code, desc in DNS_STATUS_CODES.items():
+    for desc in DNS_STATUS_CODES.values():
         assert isinstance(desc, str)
         assert desc.strip()  # Not empty string
 

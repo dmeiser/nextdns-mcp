@@ -18,7 +18,6 @@
 # - Works with both OpenAPI-imported and custom @mcp_server.tool() decorated tools
 #
 # See docs/troubleshooting.md for details.
-# ruff: noqa: E402
 """NextDNS MCP Server - FastMCP-based implementation using OpenAPI spec.
 
 SPDX-License-Identifier: MIT

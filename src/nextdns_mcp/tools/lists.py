@@ -3,7 +3,7 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
 from ..utils import _api_request, _validate_entry_id, _validate_profile_id
@@ -45,7 +45,7 @@ async def _lists_get(base_url: str) -> dict[str, Any]:
     return await _api_request("GET", base_url)
 
 
-async def _lists_add(base_url: str, entry: Optional[Union[str, dict[str, Any]]]) -> dict[str, Any]:
+async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[str, Any]:
     """Add a single entry to a list."""
     if entry is None:
         return {"error": "entry is required for add operation"}
@@ -54,7 +54,7 @@ async def _lists_add(base_url: str, entry: Optional[Union[str, dict[str, Any]]])
     return await _api_request("POST", base_url, json=body)
 
 
-async def _lists_replace(base_url: str, entries: Optional[Union[str, list[dict[str, Any]]]]) -> dict[str, Any]:
+async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | None) -> dict[str, Any]:
     """Replace the entire list with a new set of entries."""
     if entries is None:
         return {"error": "entries is required for replace operation"}
@@ -67,8 +67,8 @@ async def _lists_replace(base_url: str, entries: Optional[Union[str, list[dict[s
 async def _lists_update(
     base_url: str,
     list_type: ListType,
-    entry_id: Optional[str],
-    entry: Optional[Union[str, dict[str, Any]]],
+    entry_id: str | None,
+    entry: str | dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Update a single list entry by id (only for supported list types)."""
     if list_type not in _LIST_UPDATEABLE_TYPES:
@@ -84,7 +84,7 @@ async def _lists_update(
     return await _api_request("PATCH", f"{base_url}/{entry_id}", json=entry)
 
 
-async def _lists_remove(base_url: str, entry_id: Optional[str]) -> dict[str, Any]:
+async def _lists_remove(base_url: str, entry_id: str | None) -> dict[str, Any]:
     """Remove a single list entry by id."""
     if entry_id is None:
         return {"error": "entry_id is required for remove operation"}
@@ -95,9 +95,9 @@ async def _manage_lists_impl(
     list_type: ListType,
     operation: ListOperation,
     profile_id: ProfileId,
-    entry_id: Optional[str] = None,
-    entry: Optional[Union[str, dict[str, Any]]] = None,
-    entries: Optional[Union[str, list[dict[str, Any]]]] = None,
+    entry_id: str | None = None,
+    entry: str | dict[str, Any] | None = None,
+    entries: str | list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for content/privacy/security/parental lists."""
     error = _validate_profile_id(profile_id)
@@ -130,9 +130,9 @@ async def manageLists(
     list_type: ListType,
     operation: ListOperation,
     profile_id: ProfileId,
-    entry_id: Optional[str] = None,
-    entry: Optional[Union[str, dict[str, Any]]] = None,
-    entries: Optional[Union[str, list[dict[str, Any]]]] = None,
+    entry_id: str | None = None,
+    entry: str | dict[str, Any] | None = None,
+    entries: str | list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Manage allow/deny/block lists for a NextDNS profile.
 

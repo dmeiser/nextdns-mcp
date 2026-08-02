@@ -69,11 +69,11 @@ async def doh_lookup(doh_url: str, domain: str, record_type: str, target_profile
             if result.get("Status") is not None:
                 logger.debug(f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}")
             return result
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         error_type = "HTTP error" if isinstance(e, httpx.HTTPError) else "Unexpected error"
-        logger.error(f"{error_type} during DoH lookup for {domain}: {str(e)}")
+        logger.error(f"{error_type} during DoH lookup for {domain}: {e!s}")
         return {
-            "error": f"{error_type} during DoH lookup: {str(e)}",
+            "error": f"{error_type} during DoH lookup: {e!s}",
             "profile_id": target_profile,
             "domain": domain,
             "type": record_type,

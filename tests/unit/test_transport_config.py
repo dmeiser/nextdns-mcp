@@ -54,6 +54,5 @@ def test_custom_host_and_port():
 
 def test_invalid_port_raises_error():
     """Verify invalid port value raises ValueError."""
-    with patch.dict(os.environ, {"MCP_PORT": "invalid"}):
-        with pytest.raises(ValueError):
-            int(os.getenv("MCP_PORT", "8000"))
+    with patch.dict(os.environ, {"MCP_PORT": "invalid"}), pytest.raises(ValueError):
+        int(os.getenv("MCP_PORT", "8000"))

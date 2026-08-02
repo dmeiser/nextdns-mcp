@@ -27,7 +27,7 @@ class TestCreateNextdnsClient:
         """Test that client has correct base URL."""
         # This test is skipped because module reloading doesn't work reliably in pytest.
         # The base URL constant is already tested in test_base_url_is_correct.
-        pass  # pragma: no cover
+        pass  # noqa: PIE790  # pragma: no cover
 
     def test_create_client_has_api_key_header(self, monkeypatch, mock_api_key):
         """Test that X-Api-Key header is set as a static header during client creation."""

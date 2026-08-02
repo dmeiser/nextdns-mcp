@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 import logging
 import posixpath
 import re
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _SAFE_PROFILE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
-def extract_profile_id_from_url(url: str) -> Optional[str]:
+def extract_profile_id_from_url(url: str) -> str | None:
     """Extract profile_id from a URL path.
 
     Args:

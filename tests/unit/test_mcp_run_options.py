@@ -67,9 +67,11 @@ class TestGetMcpRunOptions:
 
     def test_invalid_port_raises_value_error(self):
         """Test that invalid port value raises ValueError."""
-        with patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "invalid"}):
-            with pytest.raises(ValueError):
-                get_mcp_run_options()
+        with (
+            patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "invalid"}),
+            pytest.raises(ValueError),
+        ):
+            get_mcp_run_options()
 
     def test_options_can_be_unpacked_to_mcp_run(self):
         """Test that returned dict can be unpacked with **kwargs."""
@@ -78,5 +80,5 @@ class TestGetMcpRunOptions:
             # Simulate mcp.run(**options) - just verify dict structure
             assert isinstance(options, dict)
             # Verify all keys are valid Python identifiers (can be used as kwargs)
-            for key in options.keys():
+            for key in options:
                 assert key.isidentifier(), f"Key '{key}' is not a valid identifier"
