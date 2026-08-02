@@ -54,7 +54,7 @@ def get_api_key() -> str | None:
                 return f.read().strip()
         except FileNotFoundError:
             logger.error(f"API key file not found: {key_file}")
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             logger.error(f"Failed to read API key file: {e}")
 
     return None

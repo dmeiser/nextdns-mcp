@@ -74,14 +74,14 @@ class TestServerInitialization:
         """Test that NEXTDNS_DEFAULT_PROFILE is optional."""
         # This test is skipped because the module is already loaded with specific
         # environment variables, and reloading doesn't work reliably in pytest.
-        # pragma: no cover
+        pass  # noqa: PIE790  # pragma: no cover
 
     @pytest.mark.skip(reason="Module-level initialization prevents testing different env configs")
     def test_server_can_set_default_profile(self, monkeypatch, mock_api_key, mock_profile_id):
         """Test that default profile can be set."""
         # This test is skipped because the module is already loaded with specific
         # environment variables, and reloading doesn't work reliably in pytest.
-        # pragma: no cover
+        pass  # noqa: PIE790  # pragma: no cover
 
 
 class TestCreateMcpServer:
