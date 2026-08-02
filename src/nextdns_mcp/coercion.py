@@ -3,13 +3,12 @@
 #
 # Docker MCP CLI passes values as strings (e.g. "true" instead of true). The
 # helpers here coerce those strings to proper Python types.
-# ruff: noqa: E402
 """Type coercion utilities for NextDNS MCP Server.
 
 SPDX-License-Identifier: MIT
 """
 
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 # Pydantic import for allow_extra_fields_component_fn and BeforeValidator
 try:
@@ -27,7 +26,7 @@ def _coerce_profile_id(v: object) -> object:
 
 
 _coerce_to_str = BeforeValidator(_coerce_profile_id) if BeforeValidator is not None else lambda x: x
-OptionalProfileId = Annotated[Optional[str], _coerce_to_str]
+OptionalProfileId = Annotated[str | None, _coerce_to_str]
 ProfileId = Annotated[str, _coerce_to_str]
 
 

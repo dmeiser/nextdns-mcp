@@ -31,7 +31,7 @@ def patch_env(monkeypatch):
 
 def test_profile_access_defaults(patch_env):
     """Test default profile access (deny all when not specified)."""
-    import nextdns_mcp.config as config
+    from nextdns_mcp import config
 
     assert not config.can_read_profile("any-profile")  # Deny all by default
     assert not config.can_write_profile("any-profile")  # Deny all by default
@@ -42,7 +42,7 @@ def test_profile_access_all(patch_env):
     patch_env("NEXTDNS_READABLE_PROFILES", "ALL")
     patch_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
-    import nextdns_mcp.config as config
+    from nextdns_mcp import config
 
     assert config.can_read_profile("any-profile")  # Allow all
     assert config.can_write_profile("any-profile")  # Allow all
@@ -55,7 +55,7 @@ def test_readable_profiles_restricted(patch_env):
     patch_env("NEXTDNS_WRITABLE_PROFILES", "profile3")
 
     # Import after environment is set
-    import nextdns_mcp.config as config
+    from nextdns_mcp import config
 
     # Can read specified profiles
     assert config.can_read_profile("profile1")
@@ -78,7 +78,7 @@ def test_writable_profiles_restricted(patch_env):
     patch_env("NEXTDNS_READABLE_PROFILES", "profile1,profile2")
     patch_env("NEXTDNS_WRITABLE_PROFILES", "profile1,profile2")
 
-    import nextdns_mcp.config as config
+    from nextdns_mcp import config
 
     # Test write permissions
     assert config.can_write_profile("profile1")
@@ -101,7 +101,7 @@ def test_readable_profiles_include_writable(patch_env):
     patch_env("NEXTDNS_WRITABLE_PROFILES", "profile2,profile3")
 
     # Import after environment is set
-    import nextdns_mcp.config as config
+    from nextdns_mcp import config
 
     # Direct readable profiles
     assert config.can_read_profile("profile1")
@@ -127,7 +127,7 @@ def test_read_only_mode_blocks_writes(patch_env):
     patch_env("NEXTDNS_READABLE_PROFILES", "profile1,profile2")
     patch_env("NEXTDNS_WRITABLE_PROFILES", "profile1,profile2")
 
-    import nextdns_mcp.config as config
+    from nextdns_mcp import config
 
     # Verify reads still work
     assert config.can_read_profile("profile1")
@@ -149,7 +149,7 @@ def test_log_access_control_all_access(mock_logger, patch_env):
     patch_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
     with patch("nextdns_mcp.config.logger", mock_logger):
-        import nextdns_mcp.config as config
+        from nextdns_mcp import config
 
         config._log_access_control_settings()
 
@@ -162,7 +162,7 @@ def test_log_access_control_read_only(mock_logger, patch_env):
     """Test logging in read-only mode."""
     patch_env("NEXTDNS_READ_ONLY", "true")
     with patch("nextdns_mcp.config.logger", mock_logger):
-        import nextdns_mcp.config as config
+        from nextdns_mcp import config
 
         config._log_access_control_settings()
 
@@ -177,7 +177,7 @@ def test_log_access_control_restricted(mock_logger, patch_env):
     patch_env("NEXTDNS_WRITABLE_PROFILES", "profile2")
 
     with patch("nextdns_mcp.config.logger", mock_logger):
-        import nextdns_mcp.config as config
+        from nextdns_mcp import config
 
         config._log_access_control_settings()
 

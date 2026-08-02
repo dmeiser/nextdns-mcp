@@ -1,8 +1,8 @@
 """Pytest configuration and fixtures for NextDNS MCP Server tests."""
 
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 from unittest.mock import patch
 
 import pytest
@@ -53,7 +53,7 @@ def set_env_api_key(monkeypatch, mock_api_key: str) -> str:
 
 
 @pytest.fixture
-def temp_api_key_file(mock_api_key: str) -> Generator[Path, None, None]:
+def temp_api_key_file(mock_api_key: str) -> Generator[Path]:
     """Create a temporary file with an API key."""
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
         f.write(mock_api_key)
@@ -85,7 +85,7 @@ def mock_openapi_spec() -> dict:
 
 
 @pytest.fixture
-def temp_openapi_file(mock_openapi_spec: dict) -> Generator[Path, None, None]:
+def temp_openapi_file(mock_openapi_spec: dict) -> Generator[Path]:
     """Create a temporary OpenAPI spec file."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         yaml.dump(mock_openapi_spec, f)

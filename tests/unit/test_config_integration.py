@@ -25,7 +25,7 @@ def test_validate_configuration_calls_sys_exit(clean_env):
     if "nextdns_mcp.config" in sys.modules:
         del sys.modules["nextdns_mcp.config"]
 
-    import nextdns_mcp.config as config
+    import nextdns_mcp.config as config  # noqa: PLR0402
 
     # Mock sys.exit to capture the call
     with patch.object(sys, "exit") as mock_exit:
@@ -44,7 +44,7 @@ def test_log_api_key_error_calls_logger(clean_env):
     # Mock logger to capture calls
     from unittest.mock import Mock
 
-    import nextdns_mcp.config as config
+    import nextdns_mcp.config as config  # noqa: PLR0402
 
     mock_logger = Mock(spec=logging.Logger)
 
@@ -69,7 +69,7 @@ def test_validate_configuration_logs_access_control(clean_env):
     # Mock logger and sys.exit
     from unittest.mock import Mock
 
-    import nextdns_mcp.config as config
+    import nextdns_mcp.config as config  # noqa: PLR0402
 
     mock_logger = Mock(spec=logging.Logger)
 

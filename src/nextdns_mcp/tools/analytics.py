@@ -3,7 +3,7 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from ..coercion import ProfileId
 from ..utils import _api_request, _build_query_params, _validate_profile_id
@@ -27,19 +27,19 @@ AnalyticsMetric = Literal[
 async def _query_analytics_impl(
     metric: AnalyticsMetric,
     profile_id: ProfileId,
-    from_time: Optional[str | int] = None,
-    to_time: Optional[str | int] = None,
-    interval: Optional[int] = None,
-    alignment: Optional[str] = None,
-    timezone: Optional[str] = None,
-    partials: Optional[str] = None,
-    limit: Optional[int] = None,
-    destination_type: Optional[str] = None,
+    from_time: str | int | None = None,
+    to_time: str | int | None = None,
+    interval: int | None = None,
+    alignment: str | None = None,
+    timezone: str | None = None,
+    partials: str | None = None,
+    limit: int | None = None,
+    destination_type: str | None = None,
     series: bool = False,
-    cursor: Optional[str] = None,
-    device: Optional[str] = None,
-    status: Optional[str] = None,
-    root: Optional[bool] = None,
+    cursor: str | None = None,
+    device: str | None = None,
+    status: str | None = None,
+    root: bool | None = None,
 ) -> dict[str, Any]:
     """Grouped implementation for NextDNS analytics endpoints."""
     error = _validate_profile_id(profile_id)
@@ -80,19 +80,19 @@ async def _query_analytics_impl(
 async def queryAnalytics(
     metric: AnalyticsMetric,
     profile_id: ProfileId,
-    from_time: Optional[str | int] = None,
-    to_time: Optional[str | int] = None,
-    interval: Optional[int] = None,
-    alignment: Optional[str] = None,
-    timezone: Optional[str] = None,
-    partials: Optional[str] = None,
-    limit: Optional[int] = None,
-    destination_type: Optional[str] = None,
+    from_time: str | int | None = None,
+    to_time: str | int | None = None,
+    interval: int | None = None,
+    alignment: str | None = None,
+    timezone: str | None = None,
+    partials: str | None = None,
+    limit: int | None = None,
+    destination_type: str | None = None,
     series: bool = False,
-    cursor: Optional[str] = None,
-    device: Optional[str] = None,
-    status: Optional[str] = None,
-    root: Optional[bool] = None,
+    cursor: str | None = None,
+    device: str | None = None,
+    status: str | None = None,
+    root: bool | None = None,
 ) -> dict[str, Any]:
     """Query NextDNS analytics metrics.
 

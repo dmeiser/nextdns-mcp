@@ -269,11 +269,13 @@ class TestAllowExtraFieldsComponentFn:
             __config__ = OldConfig
 
         # Make it look like a BaseModel subclass by patching isinstance check
-        with patch("nextdns_mcp.openapi.isinstance", side_effect=lambda obj, cls: True):
-            with patch("nextdns_mcp.openapi.issubclass", side_effect=lambda obj, cls: True):
-                # This is tricky - the function checks isinstance(component, type)
-                # and issubclass(component, BaseModel), but we're mocking those
-                pass
+        with (
+            patch("nextdns_mcp.openapi.isinstance", side_effect=lambda obj, cls: True),
+            patch("nextdns_mcp.openapi.issubclass", side_effect=lambda obj, cls: True),
+        ):
+            # This is tricky - the function checks isinstance(component, type)
+            # and issubclass(component, BaseModel), but we're mocking those
+            pass
 
         # Alternative: directly test the v1 branch behavior is correct
         # by verifying our v2 model gets the right config applied

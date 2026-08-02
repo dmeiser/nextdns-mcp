@@ -31,7 +31,7 @@ def mock_nextdns_config():
                     return f.read().strip()
             except FileNotFoundError:
                 module.logger.error(f"API key file not found: {key_file}")
-            except Exception as e:
+            except OSError as e:
                 module.logger.error(f"Failed to read API key file: {e}")
 
         return None

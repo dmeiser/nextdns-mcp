@@ -12,10 +12,9 @@ expected schemas for that grouped tool.
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import yaml
-
 
 # Mapping from grouped MCP tool names to the OpenAPI operationIds they dispatch to.
 # A response is valid if it conforms to at least one of the listed schemas.
@@ -125,13 +124,13 @@ GROUPED_TOOL_OPERATIONS: dict[str, list[str]] = {
 }
 
 
-def load_openapi_spec(spec_path: str) -> Dict[str, Any]:
+def load_openapi_spec(spec_path: str) -> dict[str, Any]:
     """Load and parse OpenAPI specification."""
     with open(spec_path, "r") as f:
         return yaml.safe_load(f)
 
 
-def get_operation_response_schema(spec: Dict[str, Any], operation_id: str) -> Optional[Dict[str, Any]]:
+def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> dict[str, Any] | None:
     """
     Extract the 200 response schema for a given operationId.
 
@@ -139,11 +138,10 @@ def get_operation_response_schema(spec: Dict[str, Any], operation_id: str) -> Op
     """
     # Search through all paths and operations
     paths = spec.get("paths", {})
-    for path, path_item in paths.items():
+    for path_item in paths.values():
         for method, operation in path_item.items():
-            if method in ["get", "post", "put", "patch", "delete"]:
-                if operation.get("operationId") == operation_id:
-                    # Found the operation, extract 200 response schema
+            if method in ["get", "post", "put", "patch", "delete"] and operation.get("operationId") == operation_id:
+                # Found the operation, extract 200 response schema
                     responses = operation.get("responses", {})
                     # Some operations return 200, others 201 (created)
                     for success_code in ("200", "201"):
@@ -175,7 +173,7 @@ def validate_field_type(value: Any, expected_type: str) -> bool:
     return isinstance(value, expected_python_type)
 
 
-def _resolve_json_pointer(spec: Dict[str, Any], pointer: str) -> Any:
+def _resolve_json_pointer(spec: dict[str, Any], pointer: str) -> Any:
     """Resolve a local JSON pointer (e.g. '#/components/schemas/Foo') in the spec."""
     if not pointer.startswith("#/"):
         return None
@@ -189,7 +187,7 @@ def _resolve_json_pointer(spec: Dict[str, Any], pointer: str) -> Any:
     return target
 
 
-def resolve_schema(spec: Optional[Dict[str, Any]], schema: Any, _seen: Optional[set[str]] = None) -> Any:
+def resolve_schema(spec: dict[str, Any] | None, schema: Any, _seen: set[str] | None = None) -> Any:
     """Recursively resolve ``$ref`` pointers and nested schema references.
 
     Returns a schema dict with all local references expanded. Cyclic references
@@ -208,7 +206,7 @@ def resolve_schema(spec: Optional[Dict[str, Any]], schema: Any, _seen: Optional[
         if target is None:
             return {}
         return resolve_schema(spec, target, _seen | {ref})
-    resolved: Dict[str, Any] = {}
+    resolved: dict[str, Any] = {}
     for key, value in schema.items():
         if key == "properties" and isinstance(value, dict):
             resolved[key] = {k: resolve_schema(spec, v, _seen) for k, v in value.items()}
@@ -221,7 +219,7 @@ def resolve_schema(spec: Optional[Dict[str, Any]], schema: Any, _seen: Optional[
     return resolved
 
 
-def validate_schema(data: Any, schema: Dict[str, Any], path: str = "$") -> list[str]:
+def validate_schema(data: Any, schema: dict[str, Any], path: str = "$") -> list[str]:
     """
     Recursively validate data against an OpenAPI schema.
 
@@ -344,7 +342,7 @@ def main():
     if tool_name in GROUPED_TOOL_OPERATIONS:
         operation_ids = GROUPED_TOOL_OPERATIONS[tool_name]
 
-    schemas: list[tuple[str, Dict[str, Any]]] = []
+    schemas: list[tuple[str, dict[str, Any]]] = []
     for op_id in operation_ids:
         schema = get_operation_response_schema(spec, op_id)
         if schema is not None:

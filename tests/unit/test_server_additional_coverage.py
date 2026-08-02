@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import ClassVar
 
 import httpx
 import pytest
@@ -57,7 +58,7 @@ def test_coerce_json_arg_invalid_json_returns_value():
 
 
 class DummyTool:
-    parameters: dict[str, object] = {"properties": {"keep": {"type": "boolean"}}}
+    parameters: ClassVar[dict[str, object]] = {"properties": {"keep": {"type": "boolean"}}}
 
 
 class DummyToolManager:
@@ -103,7 +104,7 @@ async def test_strip_extra_fields_middleware_basic_and_exception():
 
     # String-typed identifier-like values must not be coerced
     class StringDummyTool:
-        parameters: dict[str, object] = {"properties": {"profile_id": {"type": "string"}}}
+        parameters: ClassVar[dict[str, object]] = {"properties": {"profile_id": {"type": "string"}}}
 
     class StringToolManager:
         async def get_tool(self, name):

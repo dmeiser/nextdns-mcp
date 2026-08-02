@@ -3,7 +3,7 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from ..coercion import OptionalProfileId
 from ..config import get_readable_profiles_set, get_writable_profiles_set, is_read_only
@@ -16,7 +16,7 @@ ProfileOperation = Literal["list", "create", "get", "update", "delete"]
 async def _manage_profiles_impl(
     operation: ProfileOperation,
     profile_id: OptionalProfileId = None,
-    name: Optional[str] = None,
+    name: str | None = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for NextDNS profiles."""
     if operation == "list":
@@ -56,7 +56,7 @@ async def _manage_profiles_impl(
 async def manageProfiles(
     operation: ProfileOperation,
     profile_id: OptionalProfileId = None,
-    name: Optional[str] = None,
+    name: str | None = None,
 ) -> dict[str, Any]:
     """Manage NextDNS profiles.
 

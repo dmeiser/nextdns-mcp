@@ -3,7 +3,7 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
 from ..utils import _api_request, _validate_profile_id
@@ -27,7 +27,7 @@ async def _manage_settings_impl(
     operation: Literal["get", "update"],
     category: SettingsCategory,
     profile_id: ProfileId,
-    settings: Optional[Union[str, dict[str, Any]]] = None,
+    settings: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for profile settings categories."""
     error = _validate_profile_id(profile_id)
@@ -54,7 +54,7 @@ async def manageSettings(
     operation: Literal["get", "update"],
     category: SettingsCategory,
     profile_id: ProfileId,
-    settings: Optional[Union[str, dict[str, Any]]] = None,
+    settings: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Manage a settings category for a NextDNS profile.
 

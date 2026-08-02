@@ -183,7 +183,7 @@ async def _plot_analytics_series_impl(
 
     try:
         png_bytes = await asyncio.to_thread(_render_series_chart, metric, times, series_data)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.error(f"Error rendering chart for {metric}: {e}")
         return {"error": f"Error rendering chart: {e}"}
 

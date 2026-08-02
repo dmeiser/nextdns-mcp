@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT
 """
 
 import logging
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import httpx
 
@@ -21,12 +21,12 @@ LogOperation = Literal["get", "clear", "download"]
 async def _manage_logs_impl(
     operation: LogOperation,
     profile_id: ProfileId,
-    from_time: Optional[str | int] = None,
-    to_time: Optional[str | int] = None,
-    limit: Optional[int] = None,
-    user: Optional[str] = None,
-    device: Optional[str] = None,
-    raw: Optional[bool] = None,
+    from_time: str | int | None = None,
+    to_time: str | int | None = None,
+    limit: int | None = None,
+    user: str | None = None,
+    device: str | None = None,
+    raw: bool | None = None,
 ) -> dict[str, Any]:
     """Grouped implementation for query logs (get, clear, download)."""
     error = _validate_profile_id(profile_id)
@@ -73,12 +73,12 @@ async def _manage_logs_impl(
 async def manageLogs(
     operation: LogOperation,
     profile_id: ProfileId,
-    from_time: Optional[str | int] = None,
-    to_time: Optional[str | int] = None,
-    limit: Optional[int] = None,
-    user: Optional[str] = None,
-    device: Optional[str] = None,
-    raw: Optional[bool] = None,
+    from_time: str | int | None = None,
+    to_time: str | int | None = None,
+    limit: int | None = None,
+    user: str | None = None,
+    device: str | None = None,
+    raw: bool | None = None,
 ) -> dict[str, Any]:
     """Manage query logs for a NextDNS profile.
 
