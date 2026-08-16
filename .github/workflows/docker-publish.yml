@@ -33,6 +33,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  quality:
+    name: Run Quality Checks
+    if: github.event_name != 'workflow_run'
+    uses: ./.github/workflows/unit-tests.yml
+
+  e2e:
+    name: Run E2E Tests
+    if: github.event_name != 'workflow_run'
+    needs: quality
+    uses: ./.github/workflows/e2e-mcp-gateway.yml
+    secrets: inherit
+
   docker-publish:
     name: Build and Push Docker Image (${{ matrix.variant }})
     runs-on: ubuntu-latest
@@ -40,15 +52,17 @@ jobs:
       fail-fast: false
       matrix:
         variant: [slim, alpine]
+    needs: [e2e]
     if: |
+      always() &&
+      !contains(github.event.workflow_run.head_commit.message || '', '[skip-docker]') &&
       (
-        github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.head_branch == 'main' &&
-        !contains(github.event.workflow_run.head_commit.message || '', '[skip-docker]')
-      ) ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule'
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') ||
+        (
+          (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
+          needs.e2e.result == 'success'
+        )
+      )
 
     steps:
       - name: Wait for all required workflows to complete
@@ -198,14 +212,16 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
             ghcr.io/${{ github.repository }}
           tags: |
-            # Tag with 'latest' for main branch or schedule (stable releases/nightly)
-            type=raw,value=latest,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Floating 'latest' tag for main merges, scheduled, and manual rebuilds
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Nightly tag for scheduled base-image rebuilds
+            type=raw,value=nightly,enable=${{ github.event_name == 'schedule' }}
             # Commit SHA tag used to identify the tested image
             type=raw,value=${{ steps.sha.outputs.short }}
-            # Version tags are published when a commit lands on main or on intentional rebuilds
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
-            type=raw,value=${{ steps.version.outputs.major }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-            type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Immutable version tags are only published for main merges and intentional rebuilds
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.version.outputs.major }},enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
 
       - name: Extract metadata for Docker (alpine)
         if: matrix.variant == 'alpine'
@@ -216,13 +232,16 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
             ghcr.io/${{ github.repository }}
           tags: |
-            # Alpine floating and version tags
-            type=raw,value=alpine,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Floating 'alpine' tag for main merges, scheduled, and manual rebuilds
+            type=raw,value=alpine,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Nightly tag for scheduled Alpine base-image rebuilds
+            type=raw,value=nightly-alpine,enable=${{ github.event_name == 'schedule' }}
             # Commit SHA tag used to identify the tested Alpine image
             type=raw,value=${{ steps.sha.outputs.short }}-alpine
-            type=raw,value=${{ steps.version.outputs.version }}-alpine,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
-            type=raw,value=${{ steps.version.outputs.major }}-alpine,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-            type=raw,value=${{ steps.version.outputs.major_minor }}-alpine,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Immutable version tags are only published for main merges and intentional rebuilds
+            type=raw,value=${{ steps.version.outputs.version }}-alpine,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.version.outputs.major }}-alpine,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}-alpine,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
 
       - name: Download image artifact from E2E run
         if: github.event_name == 'workflow_run'
