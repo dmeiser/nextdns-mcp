@@ -1,7 +1,11 @@
 name: Dependabot Auto-Merge
 
 on:
-  pull_request:
+  # Use pull_request_target so Dependabot PRs run in the base repository context with a
+  # writable GITHUB_TOKEN. This workflow does NOT check out or execute any PR code; it
+  # only queries workflow-run statuses and calls the GitHub PR API (review + auto-merge),
+  # which is the documented safe pattern for pull_request_target.
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 permissions:
