@@ -91,6 +91,20 @@ jobs:
             docker build -f Dockerfile -t nextdns-mcp:slim .
           fi
 
+      # Persist the image so the release pipeline can publish it without rebuilding.
+      # E2E builds a single-platform (linux/amd64) image for local testing.
+      - name: Save Docker image (${{ matrix.variant }}) for release reuse
+        run: |
+          docker save -o /tmp/nextdns-mcp-${{ matrix.variant }}.tar nextdns-mcp:${{ matrix.variant }}
+
+      - name: Upload Docker image artifact (${{ matrix.variant }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ matrix.variant }}-${{ github.sha }}
+          path: /tmp/nextdns-mcp-${{ matrix.variant }}.tar
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Create .env file for script
         env:
           NEXTDNS_API_KEY: ${{ secrets.NEXTDNS_API_KEY }}

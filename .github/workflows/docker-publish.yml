@@ -1,23 +1,21 @@
 name: Build and Push Docker Image
 
 on:
-  # Trigger after successful test workflows on main branch
+  # Trigger after E2E MCP Gateway completes on main. The E2E workflow already built
+  # and uploaded the image as an artifact; this workflow downloads, tags, and pushes it
+  # without rebuilding or re-running E2E. A later step verifies Unit Tests also passed.
   workflow_run:
-    workflows: ["Unit Tests", "E2E MCP Gateway"]
+    workflows: ["E2E MCP Gateway"]
     types:
       - completed
     branches:
       - main
-  
-  # Trigger on version tags (v1.0.0, v2.0.0, etc.)
-  push:
-    tags:
-      - 'v*.*.*'           # Stable releases: v1.0.0
-      - 'v*.*.*-alpha.*'   # Alpha releases: v1.0.0-alpha.1
-      - 'v*.*.*-beta.*'    # Beta releases: v1.0.0-beta.1
-      - 'v*.*.*-rc.*'      # Release candidates: v1.0.0-rc.1
-  
-  # Allow manual trigger
+
+  # Version tags are published by the workflow_run path above (when a commit lands on
+  # main), so there is no separate tag-push trigger. That avoids a race where a tag
+  # created by auto-release could be processed before the short-SHA image was pushed.
+
+  # Allow manual rebuild
   workflow_dispatch:
 
   # Nightly build for base image security updates
@@ -27,6 +25,7 @@ on:
 permissions:
   contents: read
   packages: write  # Required to push to ghcr.io
+  actions: read    # Required to download artifacts from the E2E workflow run
 
 # Prevent duplicate runs for the same commit
 concurrency:
@@ -34,20 +33,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  quality:
-    name: Run Quality Checks
-    # Only run this if we are NOT triggered by a workflow_run (because those already passed quality)
-    if: github.event_name != 'workflow_run'
-    uses: ./.github/workflows/unit-tests.yml
-
-  e2e:
-    name: Run E2E Tests
-    # Only run this if we are NOT triggered by a workflow_run
-    if: github.event_name != 'workflow_run'
-    needs: quality
-    uses: ./.github/workflows/e2e-mcp-gateway.yml
-    secrets: inherit
-
   docker-publish:
     name: Build and Push Docker Image (${{ matrix.variant }})
     runs-on: ubuntu-latest
@@ -55,38 +40,34 @@ jobs:
       fail-fast: false
       matrix:
         variant: [slim, alpine]
-    # Wait for e2e if it was scheduled to run
-    needs: [e2e]
-    # Handle the 'if' logic carefully to allow workflow_run (which skips needs) or successful needs
     if: |
-      always() &&
-      !contains(github.event.workflow_run.head_commit.message, '[skip-docker]') &&
       (
-        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') ||
-        (
-          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
-          needs.e2e.result == 'success'
-        )
-      )
-    
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        !contains(github.event.workflow_run.head_commit.message || '', '[skip-docker]')
+      ) ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
+
     steps:
       - name: Wait for all required workflows to complete
-        if: ${{ github.event_name == 'workflow_run' }}
+        if: github.event_name == 'workflow_run'
         uses: actions/github-script@v7
         with:
           script: |
             const requiredWorkflows = ['Unit Tests', 'E2E MCP Gateway'];
             const currentWorkflow = context.payload.workflow_run.name;
             const headSha = context.payload.workflow_run.head_sha;
-            
+
             console.log(`Triggered by: ${currentWorkflow}`);
             console.log(`Checking SHA: ${headSha}`);
-            
+
             // Wait for ALL required workflows to complete successfully
             let allComplete = false;
             let attempts = 0;
             const maxAttempts = 60; // 30 minutes (30 seconds * 60)
-            
+
             while (!allComplete && attempts < maxAttempts) {
               const { data: workflowRuns } = await github.rest.actions.listWorkflowRunsForRepo({
                 owner: context.repo.owner,
@@ -94,7 +75,7 @@ jobs:
                 head_sha: headSha,
                 per_page: 100
               });
-              
+
               const workflowStatus = {};
               for (const workflow of requiredWorkflows) {
                 const run = workflowRuns.workflow_runs.find(r => r.name === workflow);
@@ -105,56 +86,58 @@ jobs:
                   };
                 }
               }
-              
+
               console.log('Workflow status:', JSON.stringify(workflowStatus, null, 2));
-              
+
               // Check if all required workflows are complete and successful
               allComplete = requiredWorkflows.every(workflow => {
                 const status = workflowStatus[workflow];
                 return status && status.status === 'completed' && status.conclusion === 'success';
               });
-              
+
               if (!allComplete) {
                 // Check for failures
                 const hasFailure = requiredWorkflows.some(workflow => {
                   const status = workflowStatus[workflow];
                   return status && status.status === 'completed' && status.conclusion !== 'success';
                 });
-                
+
                 if (hasFailure) {
                   core.setFailed('One or more required workflows failed');
                   return;
                 }
-                
+
                 console.log(`Waiting for workflows to complete... (attempt ${attempts + 1}/${maxAttempts})`);
                 await new Promise(resolve => setTimeout(resolve, 30000)); // Wait 30 seconds
                 attempts++;
               }
             }
-            
+
             if (!allComplete) {
               core.setFailed('Timeout waiting for required workflows to complete');
               return;
             }
-            
+
             console.log('✅ All required workflows completed successfully');
-      
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           # For workflow_run events, checkout the commit that triggered the workflow
           # For schedule events, checkout main (stable release code)
           ref: ${{ github.event.workflow_run.head_sha || (github.event_name == 'schedule' && 'main') || github.sha }}
-      
+
       - name: Set up Docker Buildx
+        # Only needed when we are intentionally rebuilding from source
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
         uses: docker/setup-buildx-action@v3
-      
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -165,29 +148,29 @@ jobs:
       - name: Extract project version
         id: version
         run: |
-          VERSION=$(python - << 'PY'
+          VERSION=$(python3 - << 'PY'
           import pathlib
           import sys
           import tomllib
-          
+
           path = pathlib.Path("pyproject.toml")
           if not path.is_file():
               print("Error: pyproject.toml not found", file=sys.stderr)
               raise SystemExit(1)
-          
+
           with path.open("rb") as f:
               data = tomllib.load(f)
-          
+
           try:
               version = data["project"]["version"]
           except KeyError:
               print("Error: 'project.version' not found in pyproject.toml", file=sys.stderr)
               raise SystemExit(1)
-          
+
           if not isinstance(version, str) or not version.strip():
               print("Error: 'project.version' is empty or not a string", file=sys.stderr)
               raise SystemExit(1)
-          
+
           print(version.strip())
           PY
           )
@@ -196,12 +179,16 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          
+
           MAJOR=$(echo "$VERSION" | cut -d. -f1)
           MINOR=$(echo "$VERSION" | cut -d. -f2)
           echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
           echo "major_minor=$MAJOR.$MINOR" >> "$GITHUB_OUTPUT"
-      
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata for Docker (slim)
         if: matrix.variant == 'slim'
         id: meta-slim
@@ -213,21 +200,13 @@ jobs:
           tags: |
             # Tag with 'latest' for main branch or schedule (stable releases/nightly)
             type=raw,value=latest,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-            # Tag with commit SHA
-            type=sha,prefix=,format=short
-            # Exact version tag for workflow_run (new commit on main) or manual dispatch only (NOT for schedule)
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
+            # Commit SHA tag used to identify the tested image
+            type=raw,value=${{ steps.sha.outputs.short }}
+            # Version tags are published when a commit lands on main or on intentional rebuilds
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
             type=raw,value=${{ steps.version.outputs.major }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-            # Semantic version tags from git tags:
-            # - Stable releases (v1.0.0) -> 1.0.0, 1.0, 1
-            # - Pre-releases (v1.0.0-rc.1) -> 1.0.0-rc.1 only
-            type=semver,pattern={{version}},enable=${{ github.event_name != 'schedule' }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name != 'schedule' && !contains(github.ref, '-') }}
-            type=semver,pattern={{major}},enable=${{ github.event_name != 'schedule' && !contains(github.ref, '-') }}
-            # Tag with the git ref (for manual identification)
-            type=ref,event=tag
-      
+
       - name: Extract metadata for Docker (alpine)
         if: matrix.variant == 'alpine'
         id: meta-alpine
@@ -237,18 +216,32 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
             ghcr.io/${{ github.repository }}
           tags: |
-            # Alpine floating and version tags; no SHA tag for alpine
+            # Alpine floating and version tags
             type=raw,value=alpine,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-            type=raw,value=${{ steps.version.outputs.version }}-alpine,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
+            # Commit SHA tag used to identify the tested Alpine image
+            type=raw,value=${{ steps.sha.outputs.short }}-alpine
+            type=raw,value=${{ steps.version.outputs.version }}-alpine,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
             type=raw,value=${{ steps.version.outputs.major }}-alpine,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             type=raw,value=${{ steps.version.outputs.major_minor }}-alpine,enable=${{ (github.ref_type == 'branch' && github.ref_name == 'main') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-            # Semantic version tags from git tags with -alpine suffix:
-            type=semver,pattern={{version}},suffix=-alpine,enable=${{ github.event_name != 'schedule' }}
-            type=semver,pattern={{major}}.{{minor}},suffix=-alpine,enable=${{ github.event_name != 'schedule' && !contains(github.ref, '-') }}
-            type=semver,pattern={{major}},suffix=-alpine,enable=${{ github.event_name != 'schedule' && !contains(github.ref, '-') }}
-            type=ref,event=tag,suffix=-alpine
-      
-      - name: Build and push Docker image (${{ matrix.variant }})
+
+      - name: Download image artifact from E2E run
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ matrix.variant }}-${{ github.event.workflow_run.head_sha }}
+          path: /tmp/image
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Load image from artifact
+        if: github.event_name == 'workflow_run'
+        run: |
+          docker load -i /tmp/image/nextdns-mcp-${{ matrix.variant }}.tar
+          docker images | grep nextdns-mcp
+
+      - name: Build and push fresh image
+        # Intentional rebuild path for manual triggers and nightly schedule
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -263,8 +256,32 @@ jobs:
             BUILDTIME=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.created'] }}
             VERSION=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.version'] }}
             REVISION=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.revision'] }}
-      
+
+      - name: Tag and push image
+        # Reuse the image that was already built by the E2E run
+        if: github.event_name == 'workflow_run'
+        env:
+          SOURCE_IMAGE: nextdns-mcp:${{ matrix.variant }}
+        run: |
+          echo "Publishing from $SOURCE_IMAGE"
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            docker tag "$SOURCE_IMAGE" "$tag"
+            docker push "$tag"
+          done <<< "${{ steps[format('meta-{0}', matrix.variant)].outputs.tags }}"
+
+      - name: Determine published platforms
+        if: always()
+        id: platforms
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "list=linux/amd64, linux/arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=linux/amd64 (reused from the E2E artifact; arm64 is only published by workflow_dispatch/schedule rebuilds)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate image summary (${{ matrix.variant }})
+        if: always()
         run: |
           echo "## 🐳 Docker Images Published — ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -293,4 +310,4 @@ jobs:
           echo "${{ steps[format('meta-{0}', matrix.variant)].outputs.tags }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** ${{ steps.platforms.outputs.list }}" >> $GITHUB_STEP_SUMMARY
