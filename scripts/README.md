@@ -35,44 +35,82 @@ This script:
 - Skips write operations unless `ALLOW_LIVE_WRITES=true`
 - Produces machine-readable JSONL reports in `artifacts/tools_report_<variant>.jsonl`
 
-### Deterministic AI-E2E Harness
+### LLM-Driven, API-Verified E2E Harness
 
-- **`ai_e2e_harness.py`** - Python, deterministic, API-verified E2E harness
+- **`ai_e2e_harness.py`** - Python. An *LLM* is the actor; the script measures.
+- **`ai_e2e_common.py`** - Python. The shared, pure (network-free) helpers used
+  by the harness and its unit tests (result model, the server-surface constant
+  tables, and the REST read-back helpers).
+- **`pi_mcp_bridge_extension.ts`** - a template `pi` extension that registers
+  the NextDNS MCP server's grouped tools and proxies each call to a live
+  `mcp_server` over stdio. The harness renders it (with a per-run config blob)
+  and attaches it to the actor.
 
-This is the deterministic replacement for the LLM-driven checklist in
-`ai_agent_e2e_prompt.md`. It drives the **actual** `mcp_server` over the real
-MCP tool surface via an in-process `fastmcp.Client` and, after **every** write,
-independently verifies the resulting state with a *separate* HTTP client that
-talks to the NextDNS REST API directly (the two sides never share code).
+The intent, per the design ruling: this script is used *in association with an
+LLM so that the LLM does the tool calling and the script measures the result
+and reports*. So the harness has two deliberately separate halves:
+
+1. **The actor is an LLM coding harness.** By default it is [`pi`](https://pi.dev)
+   driven in non-interactive mode (`pi -p "<task>"`). The harness sends a task
+   prompt into `pi` with the NextDNS MCP server's 8 grouped tools attached (via
+   the generated bridge extension, so the LLM's reachable surface is exactly the
+   NextDNS tool surface). The LLM decides which tool to call, with which
+   arguments, and in which order, against the **live** server. The script never
+   drives the MCP tools itself.
+2. **The script measures.** After the LLM finishes, the harness talks to the
+   NextDNS REST API directly with the API key — independently of the MCP path —
+   and verifies what the LLM *actually did*: that it provisioned and deleted the
+   test profile, and that the settings / list / rewrite endpoints it touched are
+   healthy. It also measures **tool coverage** (which of the 8 grouped tools the
+   LLM exercised and whether any call failed). Each measurement is a
+   `passed` / `skipped` / `failed` check in a JSONL report with a PASS/FAIL
+   verdict. A tool the LLM never touched is reported as `skipped`, not `failed`.
 
 Characteristics:
-- **Covers the full checklist** — profiles, all 7 settings categories, all 7
-  list types (with per-entry update where supported), the 3 rewrite record
-  types, logs, analytics (aggregate totals + time series for every metric),
-  the 9 plot metrics, and `dohLookup`.
-- **Deterministic verdicts** — each operation is a fixed, ordered step with an
-  explicit `passed` / `skipped` / `failed` outcome and a JSONL report.
+- **LLM in the tool-calling seat** — actions originate from the model, not the
+  script; the script only hands the task and measures the outcome.
+- **Explicit, overridable actor configuration** — the actor command is named and
+  can be overridden three ways (see Usage). `pi` is the default.
 - **Environment-gated** — without `NEXTDNS_API_KEY` it prints a clean `SKIP`
   report and exits 0 (no network contact).
-- **Safe** — provisions its own isolated profile (named `AI E2E Test Profile
-  <timestamp>-<tag>`), narrows the writable ACL to that profile, and always
-  cleans up (removes rewrites/list values it added, then deletes the profile
-  and verifies the deletion via REST).
-- **Clean skips** — server-reported `unsupported`, freshly provisioned
-  profiles with no analytics/plot data, and log lag are reported as `skipped`
-  with a reason rather than failures.
+- **Measures the LLM, not the script** — coverage + REST state read-back + a
+  profile-deletion check give a faithful verdict on whether the LLM actually did
+  the work.
 
 Usage:
 
 ```bash
+# Default actor: pi (its configured default provider/model), in-tree MCP server.
 NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py
-NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --only lists,rewrites
-uv run python scripts/ai_e2e_harness.py            # -> SKIP (no key)
+
+# Override just the actor command line (pi is still the default, but pin a model):
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py \
+    --actor-cmd "pi --provider kimi-coding --model kimi-for-coding"
+
+# Full control via a JSON config file (command / provider / model / prompt / server):
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --config my_actor.json
+
+# No key -> clean SKIP report, exit 0 (no network contact).
+uv run python scripts/ai_e2e_harness.py
+```
+
+`my_actor.json` (all keys optional; `pi` defaults are used for anything unset):
+
+```json
+{
+  "command": ["pi"],
+  "provider": "kimi-coding",
+  "model": "kimi-for-coding",
+  "prompt": "optional: fully override the built-in task prompt",
+  "timeout_s": 600,
+  "server": { "command": "/path/to/python", "args": ["-m", "nextdns_mcp.server"],
+              "cwd": "/path/to/repo", "env": { "NEXTDNS_READABLE_PROFILES": "ALL" } }
+}
 ```
 
 The JSONL report defaults to `artifacts/ai_e2e_report.jsonl` (`--report` to
 override, `--report -` for stdout). Pure helpers are unit-tested in
-`tests/unit/test_ai_e2e_harness.py`.
+`tests/unit/test_ai_e2e_harness.py` (loaded from `ai_e2e_common.py`).
 
 ## Quick Start
 

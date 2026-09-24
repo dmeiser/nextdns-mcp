@@ -9,6 +9,7 @@ SPDX-License-Identifier: MIT
 """
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -439,3 +440,267 @@ class TestEnvAndRender:
         # every path is a real REST sub-resource (except /settings which is "general")
         assert h.SETTINGS_CATEGORIES["general"]["path"] == "/settings"
         assert h.SETTINGS_CATEGORIES["blockpage"]["path"] == "/settings/blockPage"
+
+
+# =========================================================================== #
+# LLM actor: pi event parsing
+# =========================================================================== #
+
+
+class TestParsePiEvents:
+    def test_parsers_tool_calls_and_final_text(self, h):
+        import json
+
+        lines = [
+            json.dumps({"type": "session", "id": "x"}),
+            json.dumps({"type": "agent_start"}),
+            json.dumps(
+                {
+                    "type": "tool_execution_start",
+                    "toolCallId": "1",
+                    "toolName": "manageProfiles",
+                    "args": {"operation": "list"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": "1",
+                    "toolName": "manageProfiles",
+                    "result": {"content": [{"type": "text", "text": "ok"}]},
+                    "isError": False,
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_execution_start",
+                    "toolCallId": "2",
+                    "toolName": "manageSettings",
+                    "args": {"operation": "update"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": "2",
+                    "toolName": "manageSettings",
+                    "result": {"content": [{"type": "text", "text": "boom"}]},
+                    "isError": True,
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "message_end",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "All done."}]},
+                }
+            ),
+        ]
+        calls, final = h.parse_pi_events(lines)
+        assert len(calls) == 2
+        assert calls[0].name == "manageProfiles" and calls[0].ok and calls[0].args == {"operation": "list"}
+        assert calls[1].name == "manageSettings" and not calls[1].ok
+        assert calls[1].result_text == "boom"
+        assert final == "All done."
+
+    def test_ignores_non_event_and_bad_json_lines(self, h):
+        import json
+
+        lines = [
+            "",
+            "not json",
+            json.dumps({"type": "turn_end"}),
+            json.dumps(
+                {
+                    "type": "tool_execution_end",
+                    "toolCallId": "9",
+                    "toolName": "dohLookup",
+                    "result": {"content": []},
+                    "isError": False,
+                }
+            ),
+        ]
+        calls, _ = h.parse_pi_events(lines)
+        assert len(calls) == 1 and calls[0].name == "dohLookup"
+        # a tool_execution_end without a matching start still records a call
+        assert calls[0].args == {}
+
+    def test_empty_stream(self, h):
+        calls, final = h.parse_pi_events([])
+        assert calls == [] and final == ""
+
+
+# =========================================================================== #
+# LLM actor: config + argv
+# =========================================================================== #
+
+
+class TestActorConfig:
+    def test_as_argv_from_list_and_string(self, h):
+        assert h._as_argv(["pi", "--model", "x"]) == ["pi", "--model", "x"]
+        assert h._as_argv("pi --provider p --model m") == ["pi", "--provider", "p", "--model", "m"]
+        assert h._as_argv(None) == ["pi"]
+        assert h._as_argv("") == ["pi"]
+
+    def test_defaults_and_server_env(self, h, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.delenv("NEXTDNS_API_BASE", raising=False)
+        monkeypatch.delenv("NEXTDNS_E2E_ACTOR_CMD", raising=False)
+        monkeypatch.delenv("NEXTDNS_MCP_PYTHON", raising=False)
+        cfg = h.ActorConfig.load(None)
+        assert cfg.command == ["pi"]
+        assert cfg.provider == "" and cfg.model == ""
+        assert cfg.server["env"]["NEXTDNS_API_KEY"] == "sk-test"
+        # API base defaults to the real endpoint when unset
+        assert cfg.server["env"]["NEXTDNS_API_BASE"] == h.API_BASE
+        assert cfg.server["args"] == ["-m", "nextdns_mcp.server"]
+
+    def test_env_overrides_command_and_server(self, h, monkeypatch):
+        monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+        monkeypatch.setenv("NEXTDNS_E2E_ACTOR_CMD", "claude --print")
+        monkeypatch.setenv("NEXTDNS_MCP_PYTHON", "/usr/bin/python3.14")
+        monkeypatch.setenv("NEXTDNS_MCP_ARGS", "-m nextdns_mcp.server")
+        cfg = h.ActorConfig.load(None)
+        assert cfg.command == ["claude", "--print"]
+        assert cfg.server["command"] == "/usr/bin/python3.14"
+        assert cfg.server["args"] == ["-m", "nextdns_mcp.server"]
+
+    def test_json_config_layers_over_defaults(self, h, monkeypatch, tmp_path):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        cfg_file = tmp_path / "actor.json"
+        cfg_file.write_text(
+            json.dumps(
+                {
+                    "command": ["pi"],
+                    "provider": "kimi-coding",
+                    "model": "kimi-for-coding",
+                    "timeout_s": 120,
+                    "server": {"command": "/bin/x", "args": ["-m", "y"], "env": {"FOO": "bar"}},
+                }
+            )
+        )
+        cfg = h.ActorConfig.load(str(cfg_file))
+        assert cfg.provider == "kimi-coding" and cfg.model == "kimi-for-coding"
+        assert cfg.timeout_s == 120
+        assert cfg.server["command"] == "/bin/x" and cfg.server["args"] == ["-m", "y"]
+        assert cfg.server["env"]["FOO"] == "bar"
+        assert cfg.server["env"]["NEXTDNS_API_KEY"] == "sk-test"  # merged, not dropped
+
+    def test_argv_with_placeholders(self, h, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        cfg = h.ActorConfig.load(None)
+        cfg.provider = "prov"
+        cfg.model = "mdl"
+        argv = cfg.argv_with_placeholders("/tmp/ext.ts", "DO THE TASK")
+        assert argv[0] == "pi"
+        assert "--provider" in argv and "prov" in argv
+        assert "--model" in argv and "mdl" in argv
+        assert "--mode" in argv and "json" in argv
+        assert "--no-builtin-tools" in argv
+        assert "--tools" in argv and ",".join(h.ALLOWED_TOOLS) in argv
+        assert "-e" in argv and "/tmp/ext.ts" in argv
+        assert "-p" in argv and "DO THE TASK" in argv
+
+    def test_build_task_prompt_embeds_profile_and_tools(self, h):
+        p = h.build_task_prompt("AI E2E Test Profile 123")
+        assert "AI E2E Test Profile 123" in p
+        assert "manageProfiles" in p and "dohLookup" in p
+        assert "DELETE the test profile" in p
+
+
+class TestExtensionGeneration:
+    def test_write_extension_renders_config(self, h, tmp_path):
+        import json as _json
+
+        cfg = h.ActorConfig.load(None)
+        cfg.server = {"command": "/bin/py", "args": ["-m", "nextdns_mcp.server"], "cwd": "/", "env": {"K": "v"}}
+        out = h.write_extension(cfg, tmp_path)
+        text = out.read_text(encoding="utf-8")
+        assert "__NEXTDNS_MCP_BRIDGE_CONFIG_JSON__" not in text
+        # the config blob is embedded and parseable
+        import re
+
+        m = re.search(r"const CONFIG = (.*);", text)
+        assert m is not None
+        blob = _json.loads(m.group(1))
+        assert blob["server"]["command"] == "/bin/py"
+        assert blob["tools"] == list(h.ALLOWED_TOOLS)
+        assert blob["timeout_ms"] > 0
+
+
+# =========================================================================== #
+# LLM actor: measurement checks
+# =========================================================================== #
+
+
+def _run_with(*calls):
+    import ai_e2e_harness as hh
+
+    r = hh.ActorRun(ok=True, exit_code=0, tool_calls=list(calls))
+    return r
+
+
+class TestCoverageAndMeasure:
+    def test_coverage_passed_when_tool_ok(self, h):
+        import ai_e2e_harness as hh
+
+        run = _run_with(hh.ToolCall(name="dohLookup", args={}))
+        r = h._coverage_check(run, "dohLookup")
+        assert r.status == "passed"
+
+    def test_coverage_failed_when_all_calls_error(self, h):
+        import ai_e2e_harness as hh
+
+        run = _run_with(hh.ToolCall(name="dohLookup", args={}, is_error=True, result_text="403 forbidden"))
+        r = h._coverage_check(run, "dohLookup")
+        assert r.status == "failed" and "403 forbidden" in r.error
+
+    def test_coverage_skipped_when_tool_absent(self, h):
+
+        run = _run_with()
+        r = h._coverage_check(run, "plotAnalytics")
+        assert r.status == "skipped"
+
+    def test_settings_calls_maps_successful_updates(self, h):
+        import ai_e2e_harness as hh
+
+        run = _run_with(
+            hh.ToolCall(name="manageSettings", args={"operation": "update", "category": "general"}),
+            hh.ToolCall(name="manageSettings", args={"operation": "get", "category": "privacy"}),
+            hh.ToolCall(name="manageSettings", args={"operation": "update", "category": "security"}, is_error=True),
+        )
+        hit = h._settings_calls(run)
+        assert hit["general"] is True
+        assert hit["privacy"] is False  # read-only, not an update
+        assert hit["security"] is False  # errored
+
+    def test_measure_analytics_counts_metrics(self, h):
+        import ai_e2e_harness as hh
+
+        run = _run_with(
+            hh.ToolCall(name="queryAnalytics", args={"metric": "status"}),
+            hh.ToolCall(name="queryAnalytics", args={"metric": "queryTypes"}),
+        )
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        h._measure_analytics(run, rep)
+        assert len(rep.results) == 1 and rep.results[0].status == "passed"
+        assert set(rep.results[0].mcp_request["metrics"]) == {"status", "queryTypes"}
+
+    def test_measure_logs_lists_operations(self, h):
+        import ai_e2e_harness as hh
+
+        run = _run_with(
+            hh.ToolCall(name="manageLogs", args={"operation": "get"}),
+            hh.ToolCall(name="manageLogs", args={"operation": "clear"}),
+        )
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        h._measure_logs(run, rep)
+        assert rep.results[0].status == "passed"
+        assert set(rep.results[0].mcp_request["operations"]) == {"get", "clear"}
+
+    def test_measure_actor_run_failed_when_no_calls(self, h):
+        import ai_e2e_harness as hh
+
+        run = hh.ActorRun(ok=True, exit_code=0, tool_calls=[])  # ran but made no calls
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        h._measure_actor_run(run, rep)
+        assert rep.results[0].status == "failed"
