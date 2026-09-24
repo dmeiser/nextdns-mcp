@@ -35,6 +35,45 @@ This script:
 - Skips write operations unless `ALLOW_LIVE_WRITES=true`
 - Produces machine-readable JSONL reports in `artifacts/tools_report_<variant>.jsonl`
 
+### Deterministic AI-E2E Harness
+
+- **`ai_e2e_harness.py`** - Python, deterministic, API-verified E2E harness
+
+This is the deterministic replacement for the LLM-driven checklist in
+`ai_agent_e2e_prompt.md`. It drives the **actual** `mcp_server` over the real
+MCP tool surface via an in-process `fastmcp.Client` and, after **every** write,
+independently verifies the resulting state with a *separate* HTTP client that
+talks to the NextDNS REST API directly (the two sides never share code).
+
+Characteristics:
+- **Covers the full checklist** — profiles, all 7 settings categories, all 7
+  list types (with per-entry update where supported), the 3 rewrite record
+  types, logs, analytics (aggregate totals + time series for every metric),
+  the 9 plot metrics, and `dohLookup`.
+- **Deterministic verdicts** — each operation is a fixed, ordered step with an
+  explicit `passed` / `skipped` / `failed` outcome and a JSONL report.
+- **Environment-gated** — without `NEXTDNS_API_KEY` it prints a clean `SKIP`
+  report and exits 0 (no network contact).
+- **Safe** — provisions its own isolated profile (named `AI E2E Test Profile
+  <timestamp>-<tag>`), narrows the writable ACL to that profile, and always
+  cleans up (removes rewrites/list values it added, then deletes the profile
+  and verifies the deletion via REST).
+- **Clean skips** — server-reported `unsupported`, freshly provisioned
+  profiles with no analytics/plot data, and log lag are reported as `skipped`
+  with a reason rather than failures.
+
+Usage:
+
+```bash
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --only lists,rewrites
+uv run python scripts/ai_e2e_harness.py            # -> SKIP (no key)
+```
+
+The JSONL report defaults to `artifacts/ai_e2e_report.jsonl` (`--report` to
+override, `--report -` for stdout). Pure helpers are unit-tested in
+`tests/unit/test_ai_e2e_harness.py`.
+
 ## Quick Start
 
 ### Prerequisites
