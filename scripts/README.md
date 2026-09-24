@@ -35,78 +35,132 @@ This script:
 - Skips write operations unless `ALLOW_LIVE_WRITES=true`
 - Produces machine-readable JSONL reports in `artifacts/tools_report_<variant>.jsonl`
 
-### LLM-Driven, API-Verified E2E Harness
+### MCP-Native, API-Verified E2E Harness
 
-- **`ai_e2e_harness.py`** - Python. An *LLM* is the actor; the script measures.
+- **`ai_e2e_harness.py`** - Python. An *MCP-native LLM harness* is the actor;
+  the script measures.
 - **`ai_e2e_common.py`** - Python. The shared, pure (network-free) helpers used
   by the harness and its unit tests (result model, the server-surface constant
   tables, and the REST read-back helpers).
-- **`pi_mcp_bridge_extension.ts`** - a template `pi` extension that registers
-  the NextDNS MCP server's grouped tools and proxies each call to a live
-  `mcp_server` over stdio. The harness renders it (with a per-run config blob)
-  and attaches it to the actor.
 
-The intent, per the design ruling: this script is used *in association with an
-LLM so that the LLM does the tool calling and the script measures the result
-and reports*. So the harness has two deliberately separate halves:
+The intent, per the design ruling: the LLM actor must connect to the MCP server
+*natively* (stdio) and do the tool calling itself — a harness without MCP
+support cannot be the driver. The script therefore has two deliberately
+separate halves:
 
-1. **The actor is an LLM coding harness.** By default it is [`pi`](https://pi.dev)
-   driven in non-interactive mode (`pi -p "<task>"`). The harness sends a task
-   prompt into `pi` with the NextDNS MCP server's 8 grouped tools attached (via
-   the generated bridge extension, so the LLM's reachable surface is exactly the
-   NextDNS tool surface). The LLM decides which tool to call, with which
+1. **The actor is an MCP-native harness.** The default is
+   [opencode](https://opencode.ai) run in non-interactive mode
+   (`opencode run --standalone --format json "<task>"`), which has built-in MCP
+   support. The harness writes an `opencode.json` into the actor's working
+   directory declaring the in-tree MCP server as a *local* stdio server
+   (`<python> -m nextdns_mcp.server`, with `NEXTDNS_API_KEY` in its
+   environment); opencode launches that process over stdio and exposes its 8
+   grouped tools to the model. The model decides which tool to call, with which
    arguments, and in which order, against the **live** server. The script never
-   drives the MCP tools itself.
-2. **The script measures.** After the LLM finishes, the harness talks to the
+   drives the MCP tools itself and the actor never acts through a REST
+   side-channel — MCP over stdio is the only actor path.
+2. **The script measures.** After the harness exits, the harness talks to the
    NextDNS REST API directly with the API key — independently of the MCP path —
-   and verifies what the LLM *actually did*: that it provisioned and deleted the
-   test profile, and that the settings / list / rewrite endpoints it touched are
-   healthy. It also measures **tool coverage** (which of the 8 grouped tools the
-   LLM exercised and whether any call failed). Each measurement is a
+   and verifies the *resulting state* against the fixed targets embedded in the
+   task: the test profile was provisioned **and renamed**, every settings
+   category holds the target values, every list type contains the target entry,
+   and the target rewrite record exists. It also records **tool coverage**
+   (which of the 8 grouped tools appeared in the harness's event stream; a
+   best-effort, non-verdicting signal, reported `skipped` when unobserved).
+   The harness then owns cleanup: it deletes the test profile via REST and
+   verifies the deletion (404 + absent-by-name read-back). Each measurement is a
    `passed` / `skipped` / `failed` check in a JSONL report with a PASS/FAIL
-   verdict. A tool the LLM never touched is reported as `skipped`, not `failed`.
+   verdict.
+
+The harness is a **configurable command template**: `opencode` is the
+documented default, but any harness that mounts the MCP server can substitute
+it. The command is a template with placeholders (see below), and a run can be
+fully described by a JSON config file.
 
 Characteristics:
-- **LLM in the tool-calling seat** — actions originate from the model, not the
-  script; the script only hands the task and measures the outcome.
-- **Explicit, overridable actor configuration** — the actor command is named and
-  can be overridden three ways (see Usage). `pi` is the default.
+- **MCP-native actor** — the harness process connects to the MCP server over
+  stdio and the LLM does the tool calling; no REST side-channel on the actor
+  path, no bridging shim.
+- **Configurable harness** — opencode by default; override the command line or
+  supply a JSON config. The MCP server (argv, cwd, env) is also configurable.
+- **Deterministic, harness-agnostic measurement** — the verdict is REST state
+  read-back of the task's fixed targets, so it holds for *any* actor harness.
+- **Harness-owned cleanup** — the actor is told not to delete the profile; the
+  measuring half deletes it and verifies the deletion.
 - **Environment-gated** — without `NEXTDNS_API_KEY` it prints a clean `SKIP`
   report and exits 0 (no network contact).
-- **Measures the LLM, not the script** — coverage + REST state read-back + a
-  profile-deletion check give a faithful verdict on whether the LLM actually did
-  the work.
 
 Usage:
 
 ```bash
-# Default actor: pi (its configured default provider/model), in-tree MCP server.
+# Default actor: opencode (its configured default model), in-tree MCP server.
 NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py
 
-# Override just the actor command line (pi is still the default, but pin a model):
+# Pin a model (fills the {model} placeholder in the default command template):
 NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py \
-    --actor-cmd "pi --provider kimi-coding --model kimi-for-coding"
+    --model ollama-cloud/kimi-k2.7-code
 
-# Full control via a JSON config file (command / provider / model / prompt / server):
-NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --config my_actor.json
+# Substitute any MCP-capable harness with a command template:
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py \
+    --harness-cmd "opencode run --standalone --format json --model ollama-cloud/kimi-k2.7-code {prompt}"
+
+# Full control via a JSON config file:
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --config my_run.json
 
 # No key -> clean SKIP report, exit 0 (no network contact).
 uv run python scripts/ai_e2e_harness.py
 ```
 
-`my_actor.json` (all keys optional; `pi` defaults are used for anything unset):
+`my_run.json` (all keys optional; the opencode defaults are used for anything
+unset):
 
 ```json
 {
-  "command": ["pi"],
-  "provider": "kimi-coding",
-  "model": "kimi-for-coding",
+  "command": ["opencode", "run", "--standalone", "--format", "json",
+              "--model", "{model}", "{prompt}"],
+  "model": "ollama-cloud/kimi-k2.7-code",
   "prompt": "optional: fully override the built-in task prompt",
+  "workdir": "/tmp/nextdns-e2e-run",
   "timeout_s": 600,
   "server": { "command": "/path/to/python", "args": ["-m", "nextdns_mcp.server"],
               "cwd": "/path/to/repo", "env": { "NEXTDNS_READABLE_PROFILES": "ALL" } }
 }
 ```
+
+**Command template placeholders.** `{prompt}` — the task prompt; `{model}` —
+the model (`--model` flag / `model` config key; an empty value drops a trailing
+`--model`-style flag pair); `{workdir}` — the directory the harness is launched
+in; `{config_file}` — the generated `opencode.json` path; `{server_command}` /
+`{server_env}` — the MCP server argv/env. A substituted harness must mount the
+MCP server itself — that is what makes it MCP-native.
+
+**Example: a second harness (Claude Code).** Claude Code is MCP-capable and
+loads its MCP servers from a `--mcp-config` JSON file in its own
+`mcpServers` schema. Mount the same in-tree server and hand it the task:
+
+```jsonc
+// claude_mcp.json  (Claude Code's mcpServers schema)
+{
+  "mcpServers": {
+    "nextdns": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "nextdns_mcp.server"],
+      "cwd": "/path/to/repo",
+      "env": { "PYTHONPATH": "/path/to/repo/src", "NEXTDNS_API_KEY": "..." }
+    }
+  }
+}
+```
+
+```bash
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py \
+  --harness-cmd "claude -p --output-format stream-json --permission-mode bypassPermissions --mcp-config /path/to/claude_mcp.json {prompt}"
+```
+
+The measuring half is harness-agnostic: it does not parse the harness's event
+stream for the verdict, only for coverage, so any substitution with MCP support
+works unchanged.
 
 The JSONL report defaults to `artifacts/ai_e2e_report.jsonl` (`--report` to
 override, `--report -` for stdout). Pure helpers are unit-tested in
@@ -191,6 +245,18 @@ All scripts use environment variables loaded from `.env` files:
 | `NEXTDNS_READABLE_PROFILES` | Profiles allowed for reads | ALL | No |
 | `NEXTDNS_WRITABLE_PROFILES` | Profiles allowed for writes | ALL | No |
 | `NEXTDNS_READ_ONLY` | Enable read-only mode | false | No |
+
+### E2E Harness Environment
+
+`ai_e2e_harness.py` additionally honors:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `NEXTDNS_E2E_HARNESS_CMD` | Override the actor harness command (shell-ish string) | the opencode default template |
+| `NEXTDNS_E2E_MODEL` | Model for the `{model}` placeholder | the harness's configured default |
+| `NEXTDNS_MCP_PYTHON` | Python used to launch the MCP server | the running interpreter |
+| `NEXTDNS_MCP_ARGS` | Args for the MCP server (space-separated) | `-m nextdns_mcp.server` |
+| `NEXTDNS_MCP_CWD` | Working directory for the MCP server | the repo root |
 
 ## Safety Features
 
