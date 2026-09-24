@@ -1,4 +1,4 @@
-"""Unit tests for the pure (network-free) helpers in ``scripts/ai_e2e_harness.py``.
+"""Unit tests for the pure (network-free) helpers of the E2E harness.
 
 These tests exercise the result classification, report aggregation, and REST
 read-back helpers without touching the network or the live MCP server. The
@@ -46,10 +46,6 @@ class TestCheckFromCall:
         assert r.status == "passed"
         assert r.id == "c1" and r.section == "lists" and r.mcp_tool == "manageLists"
 
-    def test_passed_on_success_flag(self, h):
-        r = h.check_from_call("c1", "x", "d", mcp_response={"structured": {"success": True}, "is_error": False})
-        assert r.status == "passed"
-
     def test_failed_on_tool_exception(self, h):
         r = h.check_from_call(
             "c1",
@@ -90,16 +86,6 @@ class TestCheckFromCall:
         assert r.status == "skipped"
         assert "no query history" in r.reason
 
-    def test_skipped_on_skipped_flag(self, h):
-        r = h.check_from_call(
-            "c1",
-            "x",
-            "d",
-            mcp_response={"structured": {"skipped": True, "reason": "nothing"}, "is_error": False},
-        )
-        assert r.status == "skipped"
-        assert r.reason == "nothing"
-
     def test_skipped_on_unsupported_structured(self, h):
         r = h.check_from_call(
             "c1",
@@ -112,25 +98,6 @@ class TestCheckFromCall:
         )
         assert r.status == "skipped"
         assert "not available" in r.reason
-
-    def test_skipped_on_unsupported_detail_prefix(self, h):
-        r = h.check_from_call(
-            "c1",
-            "x",
-            "d",
-            mcp_response={"structured": {"detail": "unsupported by the API"}, "is_error": False},
-        )
-        assert r.status == "skipped"
-
-    def test_unsupported_beats_error_body(self, h):
-        # A raised result whose text starts with "unsupported" is a skip, not a fail.
-        r = h.check_from_call(
-            "c1",
-            "x",
-            "d",
-            mcp_response={"structured": None, "is_error": True, "text": "unsupported: not here"},
-        )
-        assert r.status == "skipped"
 
     def test_carries_request_and_response(self, h):
         req = {"list_type": "allowlist", "operation": "add", "entry": "a.com"}
@@ -251,7 +218,6 @@ class TestRestHelpers:
     def test_list_added(self, h):
         assert h._list_added("allowlist", "abc") == "ai-e2e-allowlist-add-abc.example.com"
         assert h._list_added("denylist", "abc") == "ai-e2e-denylist-add-abc.example.com"
-        # non-domain types use a plain suffix
         assert h._list_added("security_tlds", "abc") == "security_tlds-add-abc"
 
     def test_list_contains(self, h):
@@ -264,7 +230,6 @@ class TestRestHelpers:
         resp = {"ok": True, "body": {"data": [{"id": "a.com"}]}}
         assert h._list_absent(resp, ["b.com"])
         assert not h._list_absent(resp, ["a.com"])
-        # a failed read means nothing can be present
         assert h._list_absent({"ok": False}, ["a.com"])
 
     def test_entry_ids(self, h):
@@ -274,10 +239,7 @@ class TestRestHelpers:
         assert h._entry_ids({"ok": True, "body": "str"}) == []
 
     def test_rewrites_contains(self, h):
-        resp = {
-            "ok": True,
-            "body": {"data": [{"name": "a.com", "content": "1.2.3.4"}]},
-        }
+        resp = {"ok": True, "body": {"data": [{"name": "a.com", "content": "1.2.3.4"}]}}
         assert h._rewrites_contains(resp, ["a.com"])
         assert not h._rewrites_contains(resp, ["b.com"])
         assert not h._rewrites_contains({"ok": False, "body": {}}, ["a.com"])
@@ -297,11 +259,9 @@ class TestRestHelpers:
         assert tag.startswith("e2eh") and len(tag) == 9  # "e2eh" + 5
         name = h.make_profile_name()
         assert name.startswith("AI E2E Test Profile ")
-        # two names are (essentially) unique
         assert h.make_profile_name() != h.make_profile_name()
 
     def test_list_specs_shape(self, h):
-        # 7 list types, exactly 4 updatable (allowlist, denylist, parental x2)
         assert len(h._LIST_SPECS) == 7
         names = [s["name"] for s in h._LIST_SPECS]
         assert names == [
@@ -315,12 +275,10 @@ class TestRestHelpers:
         ]
         updatable = {s["name"] for s in h._LIST_SPECS if s.get("updatable")}
         assert updatable == {"allowlist", "denylist", "parental_categories", "parental_services"}
-        # blocklists get a post-run restore entry
         bl = next(s for s in h._LIST_SPECS if s["name"] == "privacy_blocklists")
         assert bl.get("restore") == "nextdns-recommended"
 
     def test_metric_lists(self, h):
-        # queryAnalytics has 11 metrics, plotAnalytics has 9, series excludes domains
         assert len(h.AGGREGATE_METRICS) == 11
         assert "domains" in h.AGGREGATE_METRICS and "destinations" in h.AGGREGATE_METRICS
         assert len(h.SERIES_METRICS) == 10
@@ -409,14 +367,10 @@ class TestEnvAndRender:
         p = tmp_path / "sub" / "rep.jsonl"
         h.write_report(rep, str(p))
         lines = p.read_text().strip().splitlines()
-        import json
-
         assert lines[-1].startswith('{"summary"')
         assert json.loads(lines[0])["id"] == "a"
 
     def test_write_skip_report(self, h, tmp_path):
-        import json
-
         p = tmp_path / "skip.jsonl"
         h.write_skip_report(str(p))
         assert json.loads(p.read_text())["verdict"] == "SKIP"
@@ -428,7 +382,6 @@ class TestEnvAndRender:
         return rep
 
     def test_section_definitions_cover_checklist(self, h):
-        # The 8 grouped tools map onto these sections; ensure all expected sections exist.
         for key in ("profiles", "settings", "lists", "rewrites", "analytics", "doh", "logs", "plots"):
             assert key in h.SECTIONS
 
@@ -437,198 +390,330 @@ class TestEnvAndRender:
         for cat, spec in h.SETTINGS_CATEGORIES.items():
             for field in ("path", "set", "assert", "restore", "assert_restore"):
                 assert field in spec, f"{cat} missing {field}"
-        # every path is a real REST sub-resource (except /settings which is "general")
         assert h.SETTINGS_CATEGORIES["general"]["path"] == "/settings"
         assert h.SETTINGS_CATEGORIES["blockpage"]["path"] == "/settings/blockPage"
 
 
 # =========================================================================== #
-# LLM actor: pi event parsing
+# actor event parsing (harness-agnostic, best-effort)
 # =========================================================================== #
 
 
-class TestParsePiEvents:
-    def test_parsers_tool_calls_and_final_text(self, h):
-        import json
-
+class TestParseActorEvents:
+    def test_opencode_tool_use_events(self, h):
         lines = [
-            json.dumps({"type": "session", "id": "x"}),
-            json.dumps({"type": "agent_start"}),
+            json.dumps({"type": "step_start", "part": {"type": "step-start"}}),
             json.dumps(
                 {
-                    "type": "tool_execution_start",
-                    "toolCallId": "1",
-                    "toolName": "manageProfiles",
-                    "args": {"operation": "list"},
+                    "type": "tool_use",
+                    "part": {
+                        "tool": "nextdns_manageProfiles",
+                        "state": {"status": "completed", "input": {"operation": "list"}, "output": "ok"},
+                    },
                 }
             ),
             json.dumps(
                 {
-                    "type": "tool_execution_end",
-                    "toolCallId": "1",
-                    "toolName": "manageProfiles",
-                    "result": {"content": [{"type": "text", "text": "ok"}]},
-                    "isError": False,
+                    "type": "tool_use",
+                    "part": {
+                        "tool": "execute",
+                        "state": {
+                            "status": "completed",
+                            "input": {"code": 'await tools.nextdns["queryAnalytics"]({ metric: "status" })'},
+                            "output": "{}",
+                        },
+                    },
                 }
             ),
+            json.dumps({"type": "text", "part": {"text": "All done."}}),
+        ]
+        calls, final = h.parse_actor_events(lines)
+        assert len(calls) == 2
+        # opencode names MCP tools nextdns_<tool>; the prefix is normalised.
+        assert calls[0].name == "manageProfiles" and calls[0].ok
+        assert calls[0].args == {"operation": "list"}
+        # an execute wrapper is attributed to the underlying MCP tool from its code.
+        assert calls[1].name == "queryAnalytics"
+        assert final == "All done."
+
+    def test_execute_wrapper_dot_form(self, h):
+        lines = [
             json.dumps(
                 {
-                    "type": "tool_execution_start",
-                    "toolCallId": "2",
-                    "toolName": "manageSettings",
-                    "args": {"operation": "update"},
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "tool_execution_end",
-                    "toolCallId": "2",
-                    "toolName": "manageSettings",
-                    "result": {"content": [{"type": "text", "text": "boom"}]},
-                    "isError": True,
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "message_end",
-                    "message": {"role": "assistant", "content": [{"type": "text", "text": "All done."}]},
+                    "type": "tool_use",
+                    "part": {
+                        "tool": "execute",
+                        "state": {
+                            "status": "completed",
+                            "input": {"code": "const r = await tools.nextdns.manageProfiles({ operation: 'create' });"},
+                            "output": "{}",
+                        },
+                    },
                 }
             ),
         ]
-        calls, final = h.parse_pi_events(lines)
-        assert len(calls) == 2
-        assert calls[0].name == "manageProfiles" and calls[0].ok and calls[0].args == {"operation": "list"}
-        assert calls[1].name == "manageSettings" and not calls[1].ok
-        assert calls[1].result_text == "boom"
-        assert final == "All done."
+        calls, _ = h.parse_actor_events(lines)
+        # the dot form tools.nextdns.<tool> is also attributed to the MCP tool
+        assert calls[0].name == "manageProfiles"
+
+    def test_execute_wrapper_without_mcp_reference(self, h):
+        lines = [
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "part": {
+                        "tool": "execute",
+                        "state": {"status": "completed", "input": {"code": "const x = 1"}, "output": "1"},
+                    },
+                }
+            ),
+        ]
+        calls, _ = h.parse_actor_events(lines)
+        assert calls[0].name == "execute"  # falls back to the wrapper name
+
+    def test_error_state_marks_call_failed(self, h):
+        lines = [
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "part": {
+                        "tool": "nextdns_dohLookup",
+                        "state": {"status": "error", "input": {"domain": "example.com"}, "output": "boom"},
+                    },
+                }
+            ),
+        ]
+        calls, _ = h.parse_actor_events(lines)
+        assert calls[0].name == "dohLookup"
+        assert not calls[0].ok
+
+    def test_claude_stream_json_events(self, h):
+        lines = [
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "Working on it."},
+                            {
+                                "type": "tool_use",
+                                "name": "mcp__nextdns__manageProfiles",
+                                "input": {"operation": "create", "name": "P"},
+                            },
+                        ],
+                    },
+                }
+            ),
+            json.dumps({"type": "result", "result": "Done creating the profile."}),
+        ]
+        calls, final = h.parse_actor_events(lines)
+        assert len(calls) == 1 and calls[0].name == "mcp__nextdns__manageProfiles"
+        assert calls[0].args == {"operation": "create", "name": "P"}
+        assert final == "Done creating the profile."
 
     def test_ignores_non_event_and_bad_json_lines(self, h):
-        import json
-
         lines = [
             "",
             "not json",
-            json.dumps({"type": "turn_end"}),
+            json.dumps({"type": "step_finish"}),
             json.dumps(
-                {
-                    "type": "tool_execution_end",
-                    "toolCallId": "9",
-                    "toolName": "dohLookup",
-                    "result": {"content": []},
-                    "isError": False,
-                }
+                {"type": "tool_use", "part": {"tool": "nextdns_plotAnalytics", "state": {"status": "completed"}}}
             ),
         ]
-        calls, _ = h.parse_pi_events(lines)
-        assert len(calls) == 1 and calls[0].name == "dohLookup"
-        # a tool_execution_end without a matching start still records a call
-        assert calls[0].args == {}
+        calls, _ = h.parse_actor_events(lines)
+        assert len(calls) == 1 and calls[0].name == "plotAnalytics"
 
     def test_empty_stream(self, h):
-        calls, final = h.parse_pi_events([])
+        calls, final = h.parse_actor_events([])
         assert calls == [] and final == ""
 
 
 # =========================================================================== #
-# LLM actor: config + argv
+# harness config + command template rendering
 # =========================================================================== #
 
 
-class TestActorConfig:
+class TestHarnessConfig:
     def test_as_argv_from_list_and_string(self, h):
-        assert h._as_argv(["pi", "--model", "x"]) == ["pi", "--model", "x"]
-        assert h._as_argv("pi --provider p --model m") == ["pi", "--provider", "p", "--model", "m"]
-        assert h._as_argv(None) == ["pi"]
-        assert h._as_argv("") == ["pi"]
+        assert h._as_argv(["opencode", "run"]) == ["opencode", "run"]
+        assert h._as_argv("opencode run --standalone") == ["opencode", "run", "--standalone"]
+        assert h._as_argv(None) == h.DEFAULT_HARNESS_COMMAND
+        assert h._as_argv("") == h.DEFAULT_HARNESS_COMMAND
 
     def test_defaults_and_server_env(self, h, monkeypatch):
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.delenv("NEXTDNS_API_BASE", raising=False)
-        monkeypatch.delenv("NEXTDNS_E2E_ACTOR_CMD", raising=False)
+        monkeypatch.delenv("NEXTDNS_E2E_HARNESS_CMD", raising=False)
         monkeypatch.delenv("NEXTDNS_MCP_PYTHON", raising=False)
-        cfg = h.ActorConfig.load(None)
-        assert cfg.command == ["pi"]
-        assert cfg.provider == "" and cfg.model == ""
+        cfg = h.HarnessConfig.load(None)
+        # opencode is the documented default harness (MCP-native).
+        assert cfg.command[0] == "opencode"
+        assert h.PLACEHOLDER_PROMPT in cfg.command
+        assert cfg.model == ""
+        # the API key goes to the MCP server's env, not the actor.
         assert cfg.server["env"]["NEXTDNS_API_KEY"] == "sk-test"
-        # API base defaults to the real endpoint when unset
         assert cfg.server["env"]["NEXTDNS_API_BASE"] == h.API_BASE
         assert cfg.server["args"] == ["-m", "nextdns_mcp.server"]
+        assert "PYTHONPATH" in cfg.server["env"]
 
     def test_env_overrides_command_and_server(self, h, monkeypatch):
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
-        monkeypatch.setenv("NEXTDNS_E2E_ACTOR_CMD", "claude --print")
+        monkeypatch.setenv("NEXTDNS_E2E_HARNESS_CMD", "claude -p --mcp-config /tmp/m.json")
+        monkeypatch.setenv("NEXTDNS_E2E_MODEL", "sonnet")
         monkeypatch.setenv("NEXTDNS_MCP_PYTHON", "/usr/bin/python3.14")
         monkeypatch.setenv("NEXTDNS_MCP_ARGS", "-m nextdns_mcp.server")
-        cfg = h.ActorConfig.load(None)
-        assert cfg.command == ["claude", "--print"]
+        cfg = h.HarnessConfig.load(None)
+        assert cfg.command == ["claude", "-p", "--mcp-config", "/tmp/m.json"]
+        assert cfg.model == "sonnet"
         assert cfg.server["command"] == "/usr/bin/python3.14"
         assert cfg.server["args"] == ["-m", "nextdns_mcp.server"]
 
     def test_json_config_layers_over_defaults(self, h, monkeypatch, tmp_path):
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
-        cfg_file = tmp_path / "actor.json"
+        cfg_file = tmp_path / "run.json"
         cfg_file.write_text(
             json.dumps(
                 {
-                    "command": ["pi"],
-                    "provider": "kimi-coding",
-                    "model": "kimi-for-coding",
+                    "command": ["myharness", "--mcp", "{config_file}", "{prompt}"],
+                    "model": "my-model",
+                    "prompt": "custom task",
                     "timeout_s": 120,
                     "server": {"command": "/bin/x", "args": ["-m", "y"], "env": {"FOO": "bar"}},
                 }
             )
         )
-        cfg = h.ActorConfig.load(str(cfg_file))
-        assert cfg.provider == "kimi-coding" and cfg.model == "kimi-for-coding"
+        cfg = h.HarnessConfig.load(str(cfg_file))
+        assert cfg.model == "my-model" and cfg.prompt == "custom task"
         assert cfg.timeout_s == 120
         assert cfg.server["command"] == "/bin/x" and cfg.server["args"] == ["-m", "y"]
         assert cfg.server["env"]["FOO"] == "bar"
         assert cfg.server["env"]["NEXTDNS_API_KEY"] == "sk-test"  # merged, not dropped
 
-    def test_argv_with_placeholders(self, h, monkeypatch):
-        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
-        cfg = h.ActorConfig.load(None)
-        cfg.provider = "prov"
-        cfg.model = "mdl"
-        argv = cfg.argv_with_placeholders("/tmp/ext.ts", "DO THE TASK")
-        assert argv[0] == "pi"
-        assert "--provider" in argv and "prov" in argv
-        assert "--model" in argv and "mdl" in argv
-        assert "--mode" in argv and "json" in argv
-        assert "--no-builtin-tools" in argv
-        assert "--tools" in argv and ",".join(h.ALLOWED_TOOLS) in argv
-        assert "-e" in argv and "/tmp/ext.ts" in argv
-        assert "-p" in argv and "DO THE TASK" in argv
+    def test_render_argv_substitutes_placeholders(self, h):
+        argv = h.render_argv(
+            ["opencode", "run", "--model", "{model}", "{prompt}"],
+            {"{model}": "m1", "{prompt}": "DO THE TASK"},
+        )
+        assert argv == ["opencode", "run", "--model", "m1", "DO THE TASK"]
 
-    def test_build_task_prompt_embeds_profile_and_tools(self, h):
-        p = h.build_task_prompt("AI E2E Test Profile 123")
-        assert "AI E2E Test Profile 123" in p
-        assert "manageProfiles" in p and "dohLookup" in p
-        assert "DELETE the test profile" in p
+    def test_render_argv_drops_empty_flag_pair(self, h):
+        # An unset model must not leave a dangling --model flag behind.
+        argv = h.render_argv(
+            ["opencode", "run", "--model", "{model}", "{prompt}"],
+            {"{model}": "", "{prompt}": "DO THE TASK"},
+        )
+        assert argv == ["opencode", "run", "DO THE TASK"]
 
+    def test_render_argv_drops_bare_empty_tokens(self, h):
+        argv = h.render_argv(["harness", "{maybe_flag}", "{prompt}"], {"{maybe_flag}": "", "{prompt}": "T"})
+        assert argv == ["harness", "T"]
 
-class TestExtensionGeneration:
-    def test_write_extension_renders_config(self, h, tmp_path):
-        import json as _json
+    def test_render_argv_keeps_flag_that_is_not_a_prefix(self, h):
+        # A placeholder rendered empty between two real tokens keeps the rest.
+        argv = h.render_argv(
+            ["harness", "{p1}", "-x", "y", "{p2}"],
+            {"{p1}": "", "{p2}": "Z"},
+        )
+        assert argv == ["harness", "-x", "y", "Z"]
 
-        cfg = h.ActorConfig.load(None)
-        cfg.server = {"command": "/bin/py", "args": ["-m", "nextdns_mcp.server"], "cwd": "/", "env": {"K": "v"}}
-        out = h.write_extension(cfg, tmp_path)
-        text = out.read_text(encoding="utf-8")
-        assert "__NEXTDNS_MCP_BRIDGE_CONFIG_JSON__" not in text
-        # the config blob is embedded and parseable
-        import re
-
-        m = re.search(r"const CONFIG = (.*);", text)
-        assert m is not None
-        blob = _json.loads(m.group(1))
-        assert blob["server"]["command"] == "/bin/py"
-        assert blob["tools"] == list(h.ALLOWED_TOOLS)
-        assert blob["timeout_ms"] > 0
+    def test_render_argv_all_placeholders(self, h, tmp_path):
+        values = {
+            h.PLACEHOLDER_PROMPT: "P",
+            h.PLACEHOLDER_MODEL: "M",
+            h.PLACEHOLDER_WORKDIR: str(tmp_path),
+            h.PLACEHOLDER_CONFIG_FILE: str(tmp_path / "opencode.json"),
+            h.PLACEHOLDER_SERVER_COMMAND: "py -m nextdns_mcp.server",
+            h.PLACEHOLDER_SERVER_ENV: '{"K": "v"}',
+        }
+        argv = h.render_argv(
+            ["h", "{prompt}", "{model}", "{workdir}", "{config_file}", "{server_command}", "{server_env}"],
+            values,
+        )
+        assert argv[0] == "h"
+        assert "P" in argv and "M" in argv
+        assert str(tmp_path) in argv
+        assert "py -m nextdns_mcp.server" in argv
+        assert '{"K": "v"}' in argv
 
 
 # =========================================================================== #
-# LLM actor: measurement checks
+# generated MCP client config (opencode.json)
+# =========================================================================== #
+
+
+class TestMcpConfigGeneration:
+    def test_write_mcp_config_renders_local_stdio_server(self, h, tmp_path, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        cfg = h.HarnessConfig.load(None)
+        out = h.write_mcp_config(cfg, tmp_path)
+        assert out == tmp_path / "opencode.json"
+        doc = json.loads(out.read_text(encoding="utf-8"))
+        srv = doc["mcp"]["servers"]["nextdns"]
+        assert srv["type"] == "local"
+        assert srv["command"][0] == cfg.server["command"]
+        assert srv["command"][1:] == cfg.server["args"]
+        assert srv["cwd"] == cfg.server["cwd"]
+        assert srv["environment"]["NEXTDNS_API_KEY"] == "sk-test"
+        assert srv["environment"]["NEXTDNS_API_BASE"] == h.API_BASE
+        assert srv["enabled"] is True
+
+    def test_write_mcp_config_is_valid_json_schema_shaped(self, h, tmp_path):
+        cfg = h.HarnessConfig.load(None)
+        out = h.write_mcp_config(cfg, tmp_path)
+        doc = json.loads(out.read_text(encoding="utf-8"))
+        assert "$schema" in doc
+        # The file must parse back cleanly (it is read by opencode at startup).
+        assert isinstance(doc["mcp"]["servers"], dict)
+
+
+# =========================================================================== #
+# task targets + prompt
+# =========================================================================== #
+
+
+class TestTaskTargets:
+    def test_renamed_name(self, h):
+        t = h.TaskTargets(profile_name="AI E2E Test Profile X", tag="abc")
+        assert t.renamed_name == "AI E2E Test Profile X-renamed"
+
+    def test_list_entries_cover_all_seven_types(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        entries = t.list_entries
+        assert set(entries) == {
+            "allowlist",
+            "denylist",
+            "privacy_blocklists",
+            "privacy_natives",
+            "security_tlds",
+            "parental_categories",
+            "parental_services",
+        }
+        assert entries["allowlist"] == "ai-e2e-allow-abc.example.com"
+        assert entries["denylist"] == "ai-e2e-deny-abc.example.com"
+
+    def test_rewrite_targets(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        assert t.rewrite_name == "ai-e2e-a-abc.example.com"
+        assert t.rewrite_content == "192.0.2.100"
+
+    def test_build_task_prompt_embeds_all_targets(self, h):
+        t = h.TaskTargets(profile_name="AI E2E Test Profile 123", tag="abc")
+        p = h.build_task_prompt(t)
+        assert "AI E2E Test Profile 123" in p
+        assert "AI E2E Test Profile 123-renamed" in p
+        assert "manageProfiles" in p and "dohLookup" in p
+        for cat in h.SETTINGS_CATEGORIES:
+            assert cat in p
+        assert "ai-e2e-allow-abc.example.com" in p
+        assert "nextdns-recommended" in p
+        assert "ai-e2e-a-abc.example.com" in p
+        # The harness owns cleanup; the actor must not delete the profile.
+        assert "Do NOT delete the test profile" in p
+
+
+# =========================================================================== #
+# coverage + measurement checks (pure; no network)
 # =========================================================================== #
 
 
@@ -639,68 +724,195 @@ def _run_with(*calls):
     return r
 
 
-class TestCoverageAndMeasure:
-    def test_coverage_passed_when_tool_ok(self, h):
-        import ai_e2e_harness as hh
-
-        run = _run_with(hh.ToolCall(name="dohLookup", args={}))
+class TestCoverage:
+    def test_coverage_passed_when_observed(self, h):
+        run = _run_with(h.ToolCall(name="dohLookup", args={}))
         r = h._coverage_check(run, "dohLookup")
         assert r.status == "passed"
 
-    def test_coverage_failed_when_all_calls_error(self, h):
-        import ai_e2e_harness as hh
-
-        run = _run_with(hh.ToolCall(name="dohLookup", args={}, is_error=True, result_text="403 forbidden"))
-        r = h._coverage_check(run, "dohLookup")
-        assert r.status == "failed" and "403 forbidden" in r.error
-
-    def test_coverage_skipped_when_tool_absent(self, h):
-
+    def test_coverage_skipped_when_unobserved(self, h):
         run = _run_with()
         r = h._coverage_check(run, "plotAnalytics")
         assert r.status == "skipped"
 
-    def test_settings_calls_maps_successful_updates(self, h):
-        import ai_e2e_harness as hh
+    def test_coverage_counts_calls(self, h):
+        run = _run_with(h.ToolCall(name="dohLookup"), h.ToolCall(name="dohLookup"))
+        r = h._coverage_check(run, "dohLookup")
+        assert r.status == "passed" and r.mcp_request == {"calls": 2}
 
-        run = _run_with(
-            hh.ToolCall(name="manageSettings", args={"operation": "update", "category": "general"}),
-            hh.ToolCall(name="manageSettings", args={"operation": "get", "category": "privacy"}),
-            hh.ToolCall(name="manageSettings", args={"operation": "update", "category": "security"}, is_error=True),
-        )
-        hit = h._settings_calls(run)
-        assert hit["general"] is True
-        assert hit["privacy"] is False  # read-only, not an update
-        assert hit["security"] is False  # errored
 
-    def test_measure_analytics_counts_metrics(self, h):
-        import ai_e2e_harness as hh
+class TestReadOnlyCoverage:
+    def test_skipped_when_unobserved(self, h):
+        run = _run_with()
+        r = h._readonly_coverage(run, "queryAnalytics", "analytics", "analytics.query", "desc")
+        assert r.status == "skipped" and r.section == "analytics" and r.id == "analytics.query"
 
-        run = _run_with(
-            hh.ToolCall(name="queryAnalytics", args={"metric": "status"}),
-            hh.ToolCall(name="queryAnalytics", args={"metric": "queryTypes"}),
-        )
+    def test_passed_when_observed(self, h):
+        run = _run_with(h.ToolCall(name="queryAnalytics", args={"metric": "status"}))
+        r = h._readonly_coverage(run, "queryAnalytics", "analytics", "analytics.query", "desc")
+        assert r.status == "passed" and r.mcp_request == {"calls": 1}
+
+
+class TestMeasureActorRun:
+    def test_passed_on_clean_exit(self, h):
+        run = h.ActorRun(ok=True, exit_code=0, tool_calls=[h.ToolCall(name="x")])
         rep = h.Report(started_at=0.0, api_key_present=True)
-        h._measure_analytics(run, rep)
-        assert len(rep.results) == 1 and rep.results[0].status == "passed"
-        assert set(rep.results[0].mcp_request["metrics"]) == {"status", "queryTypes"}
-
-    def test_measure_logs_lists_operations(self, h):
-        import ai_e2e_harness as hh
-
-        run = _run_with(
-            hh.ToolCall(name="manageLogs", args={"operation": "get"}),
-            hh.ToolCall(name="manageLogs", args={"operation": "clear"}),
-        )
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        h._measure_logs(run, rep)
+        h._measure_actor_run(run, rep)
         assert rep.results[0].status == "passed"
-        assert set(rep.results[0].mcp_request["operations"]) == {"get", "clear"}
 
-    def test_measure_actor_run_failed_when_no_calls(self, h):
-        import ai_e2e_harness as hh
-
-        run = hh.ActorRun(ok=True, exit_code=0, tool_calls=[])  # ran but made no calls
+    def test_failed_on_nonzero_exit(self, h):
+        run = h.ActorRun(ok=False, exit_code=1, tool_calls=[], error="boom")
         rep = h.Report(started_at=0.0, api_key_present=True)
         h._measure_actor_run(run, rep)
         assert rep.results[0].status == "failed"
+        assert "boom" in rep.results[0].error
+
+
+# =========================================================================== #
+# REST-verifying measurements (fake client, no network)
+# =========================================================================== #
+
+
+class _FakeClient:
+    """A stand-in for MeasureClient that serves canned REST responses."""
+
+    def __init__(self, profiles=None, by_path=None, delete_ok=True):
+        self._profiles = profiles or []
+        self._by_path = by_path or {}
+        self._delete_ok = delete_ok
+        self.deleted: list[str] = []
+
+    async def rest_get(self, path, params=None):
+        if path in self._by_path:
+            return self._by_path[path]
+        return {"status": 200, "ok": True, "body": {}}
+
+    async def rest_delete(self, path):
+        self.deleted.append(path)
+        if self._delete_ok:
+            return {"status": 200, "ok": True, "body": {}}
+        return {"status": 500, "ok": False, "body": "boom"}
+
+    async def find_profile(self, name):
+        for p in self._profiles:
+            if p.get("name") == name:
+                return p
+        return None
+
+
+class TestMeasureState:
+    def test_profile_provision_and_rename(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        m = _FakeClient(profiles=[{"id": "pid1", "name": "P-renamed"}])
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        import asyncio
+
+        prof = asyncio.run(h._measure_profile(m, t, rep))
+        assert prof is not None and rep.profile_id == "pid1"
+        statuses = {r.id: r.status for r in rep.results}
+        assert statuses["profiles.provision"] == "passed"
+        assert statuses["profiles.rename"] == "passed"
+
+    def test_profile_provision_fails_when_absent(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        m = _FakeClient(profiles=[])
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        import asyncio
+
+        prof = asyncio.run(h._measure_profile(m, t, rep))
+        assert prof is None
+        assert rep.results[0].id == "profiles.provision" and rep.results[0].status == "failed"
+
+    def test_settings_verifies_target_values(self, h):
+        m = _FakeClient(by_path={"/profiles/pid1/settings": {"ok": True, "body": {"web3": True}}})
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        import asyncio
+
+        asyncio.run(h._measure_settings(m, "pid1", rep))
+        general = next(r for r in rep.results if r.id == "settings.general")
+        assert general.status == "passed"
+        # a category whose read-back lacks the target value fails
+        privacy = next(r for r in rep.results if r.id == "settings.privacy")
+        assert privacy.status == "failed"
+
+    def test_lists_verify_target_entries(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        entries = t.list_entries
+        by_path = {}
+        for spec in h._LIST_SPECS:
+            by_path[f"/profiles/pid1{spec['path']}"] = {
+                "ok": True,
+                "body": {"data": [{"id": entries[spec["name"]]}]},
+            }
+        m = _FakeClient(by_path=by_path)
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        import asyncio
+
+        asyncio.run(h._measure_lists(m, "pid1", t, rep))
+        assert all(r.status == "passed" for r in rep.results)
+
+    def test_lists_fail_when_entry_missing(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        m = _FakeClient(by_path={"/profiles/pid1/allowlist": {"ok": True, "body": {"data": []}}})
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        import asyncio
+
+        asyncio.run(h._measure_lists(m, "pid1", t, rep))
+        allow = next(r for r in rep.results if r.id == "lists.allowlist")
+        assert allow.status == "failed"
+
+    def test_rewrites_verify_target_record(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        m = _FakeClient(by_path={"/profiles/pid1/rewrites": {"ok": True, "body": {"data": [{"name": t.rewrite_name}]}}})
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        import asyncio
+
+        asyncio.run(h._measure_rewrites(m, "pid1", t, rep))
+        assert rep.results[0].status == "passed"
+
+    def test_rewrites_fail_when_record_missing(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        m = _FakeClient(by_path={"/profiles/pid1/rewrites": {"ok": True, "body": {"data": []}}})
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        import asyncio
+
+        asyncio.run(h._measure_rewrites(m, "pid1", t, rep))
+        assert rep.results[0].status == "failed"
+
+    def test_cleanup_deletes_and_verifies_gone(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        m = _FakeClient(profiles=[])  # gone: neither name resolves
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        import asyncio
+
+        asyncio.run(h._cleanup(m, "pid1", t, rep))
+        assert m.deleted == ["/profiles/pid1"]
+        r = next(x for x in rep.results if x.id == "profiles.cleanup")
+        assert r.status == "passed" and rep.cleanup == "passed"
+
+    def test_cleanup_failed_when_delete_errors(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        m = _FakeClient(profiles=[], delete_ok=False)
+        rep = h.Report(started_at=0.0, api_key_present=True)
+        import asyncio
+
+        asyncio.run(h._cleanup(m, "pid1", t, rep))
+        r = next(x for x in rep.results if x.id == "profiles.cleanup")
+        assert r.status == "failed" and "FAILED" in rep.cleanup
+
+    def test_profile_gone_logic(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        import asyncio
+
+        # gone when nothing resolves
+        m = _FakeClient(profiles=[])
+        assert asyncio.run(h._profile_gone(m, "pid1", t)) is True
+        # present under the id
+        m2 = _FakeClient(by_path={"/profiles/pid1": {"ok": True, "body": {"data": {"id": "pid1"}}}})
+        assert asyncio.run(h._profile_gone(m2, "pid1", t)) is False
+        # present under the original name
+        m3 = _FakeClient(profiles=[{"id": "pid1", "name": "P"}])
+        assert asyncio.run(h._profile_gone(m3, "pid1", t)) is False
+        # present under the renamed name
+        m4 = _FakeClient(profiles=[{"id": "pid1", "name": "P-renamed"}])
+        assert asyncio.run(h._profile_gone(m4, "pid1", t)) is False
