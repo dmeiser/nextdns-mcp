@@ -1,60 +1,67 @@
 #!/usr/bin/env python3
-"""Deterministic, API-verified E2E harness for the NextDNS MCP server.
+"""LLM-driven, API-verified E2E harness for the NextDNS MCP server.
 
 SPDX-License-Identifier: MIT
 
-This script is the deterministic replacement for the LLM-driven prompt in
-``ai_agent_e2e_prompt.md``. It drives the *actual* MCP server (``mcp_server``)
-over the real MCP tool surface via an in-process ``fastmcp.Client`` and, after
-every write operation, independently verifies the resulting server state using
-a *separate* HTTP client that talks to the NextDNS REST API directly. The MCP
-tool surface and the verification path therefore never share code, which keeps
-the two sides of each check independent.
+This script is the E2E validation harness for the NextDNS MCP server. It has a
+deliberate two-halves shape:
 
-The server exposes eight grouped tools: ``manageProfiles``, ``manageSettings``,
-``manageLists``, ``manageRewrites``, ``manageLogs``, ``queryAnalytics``,
-``plotAnalytics`` and ``dohLookup``. The harness exercises the full operation
-checklist in a fixed order:
+* **The actor is an LLM.** The script sends a task prompt into an AI coding
+  harness — ``pi`` by default — that has the NextDNS MCP server's tools
+  attached. The LLM does the tool calling against the *live* server: it decides
+  which grouped tool to call, with which arguments, and in which order. The
+  script does **not** drive the MCP tools itself; it only puts the LLM in the
+  seat and hands it the task.
+* **The script measures.** After the LLM finishes, the script verifies what the
+  LLM *actually did* by talking to the NextDNS REST API directly with the API
+  key — independently of the MCP path. It checks the resulting server state
+  (profile provisioning/cleanup, settings/list/rewrite mutations) and measures
+  tool-coverage (which of the 8 grouped tools the LLM exercised and how), then
+  reports a PASS/FAIL/SKIP verdict with a JSONL report.
 
-    profiles -> settings (7 categories) -> lists (7 types) -> rewrites (3 types)
-            -> analytics (aggregate + series) -> dohLookup -> logs -> plots (9)
+How the LLM gets the tools
+--------------------------
+``pi`` has no built-in MCP client, so the harness generates a small ``pi``
+extension (from ``scripts/pi_mcp_bridge_extension.ts``) that registers the
+server's grouped tools and proxies each call to a live ``mcp_server``
+subprocess over stdio (the MCP stdio transport). The harness launches the actor
+with only those tools enabled (``--no-builtin-tools --tools <8 tools>``), so the
+LLM's reachable surface is exactly the NextDNS MCP tool surface.
 
-Design goals
-------------
-* **Deterministic verdicts** — every operation is a fixed, ordered step with an
-  explicit ``passed`` / ``skipped`` / ``failed`` outcome. There is no LLM.
-* **API-verified writes** — every mutation is re-read through the raw REST API.
-* **Environment-gated** — without ``NEXTDNS_API_KEY`` it prints a clean ``SKIP``
-  report and exits 0 without contacting the network.
-* **Safe** — provisions its *own* isolated profile (``AI E2E Test Profile
-  <timestamp>-<tag>``), narrows the writable ACL to that profile, and always
-  cleans up (removes rewrites / list entries it added, then deletes the profile
-  and verifies the deletion via REST).
-* **Clean skips** — server-reported ``unsupported``, a freshly provisioned
-  profile with no analytics/plot data, and the NextDNS log-generation delay are
-  reported as ``skipped`` with a reason rather than failures.
+Configuration
+-------------
+The actor command is explicit and overridable:
+
+* ``--config PATH`` — a JSON file describing the actor. It names ``command``
+  (argv, default ``["pi"]``), ``provider`` / ``model``, ``prompt`` (optional
+  override of the built-in task), and ``server`` (the MCP server argv + env).
+* ``--actor-cmd "pi --provider kimi-coding --model kimi-for-coding"`` —
+  shorthand to override just the actor command line.
+* Environment: ``NEXTDNS_API_KEY`` (required for a live run), ``NEXTDNS_API_BASE``,
+  ``NEXTDNS_MCP_PYTHON`` / ``NEXTDNS_MCP_ARGS`` / ``NEXTDNS_MCP_CWD`` (how the MCP
+  server is launched by the bridge; defaults to the in-tree package via
+  ``<repo>/.venv/bin/python -m nextdns_mcp.server``).
 
 Usage::
 
     NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py
-    NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --only lists,rewrites
+    NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --config my_actor.json
+    NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --actor-cmd "pi --model X"
     uv run python scripts/ai_e2e_harness.py            # -> SKIP (no key)
 
-The JSONL report is written to ``artifacts/ai_e2e_report.jsonl`` by default
-(``--report`` to override, ``-`` for stdout).
+The JSONL report defaults to ``artifacts/ai_e2e_report.jsonl`` (``--report`` to
+override, ``-`` for stdout).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import json
-import logging
 import os
-import random
-import string
+import shutil
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,427 +74,449 @@ from typing import Any, Self
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
+# The pure helpers live in a sibling module (shared with the unit tests).
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fastmcp import Client
+import ai_e2e_common as common
 
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("ai_e2e_harness")
+# Re-export the pure model, constants, and helpers so existing imports and the
+# README keep working against this module (they now live in ``ai_e2e_common``).
+API_BASE = common.API_BASE
+SECTIONS = common.SECTIONS
+SETTINGS_CATEGORIES = common.SETTINGS_CATEGORIES
+AGGREGATE_METRICS = common.AGGREGATE_METRICS
+SERIES_METRICS = common.SERIES_METRICS
+PLOT_METRICS = common.PLOT_METRICS
+MCP_TOOLS = common.MCP_TOOLS
+_LIST_SPECS = common._LIST_SPECS
+CheckResult = common.CheckResult
+Report = common.Report
+check_from_call = common.check_from_call
+# Private helpers (re-exported for the unit tests, which import by file path).
+_extract_tool_error = common._extract_tool_error
+_structured = common._structured
+_is_error_body = common._is_error_body
+_error_body_text = common._error_body_text
+_is_skip = common._is_skip
+_is_not_supported = common._is_not_supported
+_skip_reason = common._skip_reason
+_not_supported_reason = common._not_supported_reason
+_is_raised_error = common._is_raised_error
+_raised_error_text = common._raised_error_text
+_resp_status = common._resp_status
+_verify_settings_assert = common._verify_settings_assert
+_list_values = common._list_values
+_list_added = common._list_added
+_list_contains = common._list_contains
+_list_absent = common._list_absent
+_entry_ids = common._entry_ids
+_rewrites_contains = common._rewrites_contains
+_analytics_has_data = common._analytics_has_data
+_random_tag = common._random_tag
+make_profile_name = common.make_profile_name
 
 
 # =========================================================================== #
-# Constants
+# Actor configuration
 # =========================================================================== #
 
-API_BASE = os.environ.get("NEXTDNS_API_BASE", "https://api.nextdns.io").rstrip("/")
+DEFAULT_ACTOR_COMMAND = ["pi"]
+DEFAULT_PROVIDER = ""  # empty => let pi use its configured default
+DEFAULT_MODEL = ""  # empty => let pi use its configured default
 
-# Checklist coverage, grouped into run sections. A section maps 1:1 onto an
-# entry of the prompt's test checklist.
-SECTIONS: dict[str, str] = {
-    "profiles": "profile create/list/get/update/delete",
-    "settings": "7 settings categories (read + update + REST verify)",
-    "lists": "7 list types (get/replace/add/update/remove + REST verify)",
-    "rewrites": "3 rewrite record types (add/delete + REST verify)",
-    "analytics": "aggregate + series for every analytics metric",
-    "doh": "dohLookup DNS resolution via the test profile",
-    "logs": "get / download / clear query logs",
-    "plots": "9 plot-analytics metrics (PNG image)",
+# The 8 grouped tools the actor is allowed to use (its entire reachable surface).
+ALLOWED_TOOLS = list(common.MCP_TOOLS)
+
+# Default way to launch the in-tree MCP server (overridden by config/env).
+# Uses the running interpreter (``sys.executable``) plus a PYTHONPATH pointing at
+# the in-tree package, so it works no matter how the harness itself was launched
+# (``uv run python scripts/...`` from the repo root). The server must import the
+# uninstalled in-tree package, so PYTHONPATH is set here rather than relying on
+# an editable install.
+DEFAULT_SERVER = {
+    "command": sys.executable,
+    "args": ["-m", "nextdns_mcp.server"],
+    "cwd": str(_REPO_ROOT),
+    "env": {"PYTHONPATH": str(_REPO_ROOT / "src")},
 }
 
-# Settings categories -> REST path, "set" payload, expected read-back, "restore"
-# payload, and expected read-back after restore. The read-back assertion is
-# tolerant: it passes if every listed field is present (nested or top-level)
-# with the expected value.
-SETTINGS_CATEGORIES: dict[str, dict[str, Any]] = {
-    "general": {
-        "path": "/settings",
-        "set": {"web3": True},
-        "assert": {"web3": True},
-        "restore": {"web3": False},
-        "assert_restore": {"web3": False},
-    },
-    "privacy": {
-        "path": "/privacy",
-        "set": {"disguisedTrackers": True, "allowAffiliate": False},
-        "assert": {"disguisedTrackers": True, "allowAffiliate": False},
-        "restore": {"disguisedTrackers": False},
-        "assert_restore": {"disguisedTrackers": False},
-    },
-    "security": {
-        "path": "/security",
-        "set": {"threatIntelligenceFeeds": True, "googleSafeBrowsing": True},
-        "assert": {"threatIntelligenceFeeds": True, "googleSafeBrowsing": True},
-        "restore": {"threatIntelligenceFeeds": False, "googleSafeBrowsing": False},
-        "assert_restore": {"threatIntelligenceFeeds": False, "googleSafeBrowsing": False},
-    },
-    "parental": {
-        "path": "/parentalControl",
-        "set": {"safeSearch": True, "youtubeRestrictedMode": True},
-        "assert": {"safeSearch": True, "youtubeRestrictedMode": True},
-        "restore": {"safeSearch": False, "youtubeRestrictedMode": False},
-        "assert_restore": {"safeSearch": False, "youtubeRestrictedMode": False},
-    },
-    "performance": {
-        "path": "/settings/performance",
-        "set": {"ecs": True, "cacheBoost": True},
-        "assert": {"ecs": True, "cacheBoost": True},
-        "restore": {"ecs": False, "cacheBoost": False},
-        "assert_restore": {"ecs": False, "cacheBoost": False},
-    },
-    "logs": {
-        "path": "/settings/logs",
-        "set": {"enabled": True, "retention": 7},
-        "assert": {"enabled": True},
-        "restore": {"enabled": False},
-        "assert_restore": {"enabled": False},
-    },
-    "blockpage": {
-        "path": "/settings/blockPage",
-        "set": {"enabled": False},
-        "assert": {"enabled": False},
-        "restore": {"enabled": True},  # restore the default (block page on)
-        "assert_restore": {"enabled": True},
-    },
-}
 
-# Analytics metrics (mirrors queryAnalytics' literal).
-AGGREGATE_METRICS = [
-    "status",
-    "domains",
-    "queryTypes",
-    "reasons",
-    "ips",
-    "dnssec",
-    "encryption",
-    "ipVersions",
-    "protocols",
-    "devices",
-    "destinations",
-]
-SERIES_METRICS = [m for m in AGGREGATE_METRICS if m != "domains"]  # no series for domains
-PLOT_METRICS = [
-    "status",
-    "devices",
-    "protocols",
-    "queryTypes",
-    "ipVersions",
-    "dnssec",
-    "encryption",
-    "reasons",
-    "ips",
-]
+@dataclass
+class ActorConfig:
+    """Explicit, overridable description of the LLM actor."""
 
-# List types: REST path segment + per-entry update support + optional post-run
-# "restore" entry (so a fresh profile is left in a sane state).
-_LIST_SPECS: list[dict[str, Any]] = [
-    {"name": "allowlist", "path": "/allowlist", "updatable": True},
-    {"name": "denylist", "path": "/denylist", "updatable": True},
-    {"name": "privacy_blocklists", "path": "/privacy/blocklists", "updatable": False, "restore": "nextdns-recommended"},
-    {"name": "privacy_natives", "path": "/privacy/natives", "updatable": False},
-    {"name": "security_tlds", "path": "/security/tlds", "updatable": False},
-    {"name": "parental_categories", "path": "/parentalControl/categories", "updatable": True},
-    {"name": "parental_services", "path": "/parentalControl/services", "updatable": True},
-]
+    command: list[str] = field(default_factory=lambda: list(DEFAULT_ACTOR_COMMAND))
+    provider: str = DEFAULT_PROVIDER
+    model: str = DEFAULT_MODEL
+    prompt: str = ""  # empty => use the built-in task prompt
+    server: dict[str, Any] = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_SERVER)))
+    timeout_s: float = 600.0
+    workdir: str = str(_REPO_ROOT)
+
+    @classmethod
+    def load(cls, path: str | None) -> ActorConfig:
+        """Build an ActorConfig from a JSON file (if given) layered over env."""
+        cfg = cls()
+        if path:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            if "command" in data:
+                cfg.command = _as_argv(data["command"])
+            if "provider" in data:
+                cfg.provider = str(data["provider"])
+            if "model" in data:
+                cfg.model = str(data["model"])
+            if "prompt" in data:
+                cfg.prompt = str(data["prompt"])
+            if "timeout_s" in data:
+                cfg.timeout_s = float(data["timeout_s"])
+            if "workdir" in data:
+                cfg.workdir = str(data["workdir"])
+            if isinstance(data.get("server"), dict):
+                srv = data["server"]
+                if "command" in srv:
+                    cfg.server["command"] = str(srv["command"])
+                if "args" in srv:
+                    cfg.server["args"] = [str(a) for a in srv["args"]]
+                if "cwd" in srv:
+                    cfg.server["cwd"] = str(srv["cwd"])
+                if "env" in srv and isinstance(srv["env"], dict):
+                    cfg.server["env"] = {str(k): str(v) for k, v in srv["env"].items()}
+        # Environment overrides (explicit and documented).
+        if cmd := os.environ.get("NEXTDNS_E2E_ACTOR_CMD"):
+            cfg.command = _as_argv(cmd)
+        if env_provider := os.environ.get("NEXTDNS_E2E_PROVIDER"):
+            cfg.provider = env_provider
+        if env_model := os.environ.get("NEXTDNS_E2E_MODEL"):
+            cfg.model = env_model
+        if srv_python := os.environ.get("NEXTDNS_MCP_PYTHON"):
+            cfg.server["command"] = srv_python
+        if srv_args := os.environ.get("NEXTDNS_MCP_ARGS"):
+            cfg.server["args"] = srv_args.split()
+        if srv_cwd := os.environ.get("NEXTDNS_MCP_CWD"):
+            cfg.server["cwd"] = srv_cwd
+        # The API key (and its base) are passed to the server via its env.
+        cfg.server["env"] = dict(cfg.server["env"])
+        if key := os.environ.get("NEXTDNS_API_KEY"):
+            cfg.server["env"].setdefault("NEXTDNS_API_KEY", key)
+        cfg.server["env"].setdefault("NEXTDNS_API_BASE", common.API_BASE)
+        return cfg
+
+    def argv_with_placeholders(self, extension_path: str, prompt: str) -> list[str]:
+        """The full actor argv with the generated extension and task prompt applied."""
+        argv = list(self.command)
+        if self.provider:
+            argv += ["--provider", self.provider]
+        if self.model:
+            argv += ["--model", self.model]
+        argv += [
+            "--mode",
+            "json",
+            "--no-builtin-tools",
+            "--tools",
+            ",".join(ALLOWED_TOOLS),
+            "--no-session",
+            "-e",
+            extension_path,
+            "--no-approve",
+            "-p",
+            prompt,
+        ]
+        return argv
 
 
-def _random_tag(n: int = 6) -> str:
-    """Return a short random alphanumeric tag for unique resource names."""
-    return "e2eh" + "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
+def _as_argv(value: Any) -> list[str]:
+    """Accept either a JSON array or a shell-ish string and return an argv list."""
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    if isinstance(value, str) and value.strip():
+        # Split on whitespace (quotes are passed through; the harness launches
+        # via argv, not a shell, so this is for convenience/documentation only).
+        return value.split()
+    return list(DEFAULT_ACTOR_COMMAND)
 
 
-def make_profile_name() -> str:
-    """A unique, identifiable test profile name (per the prompt's convention)."""
-    return f"AI E2E Test Profile {time.strftime('%Y%m%d%H%M%S')}-{_random_tag(4)}"
+def default_server_for(config: ActorConfig) -> dict[str, Any]:
+    return config.server
 
 
 # =========================================================================== #
-# Result model (pure helpers are unit-tested)
+# Extension generation
+# =========================================================================== #
+
+
+def write_extension(config: ActorConfig, dest_dir: str | Path | None = None) -> Path:
+    """Render the pi bridge extension with this run's config and write it out.
+
+    Returns the path to the generated ``.ts`` file. The template in
+    ``scripts/pi_mcp_bridge_extension.ts`` carries a single ``__...__``
+    placeholder that is replaced with a JSON config blob.
+    """
+    template = Path(__file__).resolve().parent / "pi_mcp_bridge_extension.ts"
+    blob = {
+        "tools": ALLOWED_TOOLS,
+        "server": config.server,
+        "timeout_ms": int(config.timeout_s * 1000),
+    }
+    rendered = template.read_text(encoding="utf-8").replace(
+        "__NEXTDNS_MCP_BRIDGE_CONFIG_JSON__",
+        json.dumps(blob),
+    )
+    dest = Path(dest_dir) if dest_dir else Path(tempfile.gettempdir()) / "nextdns_e2e"
+    dest.mkdir(parents=True, exist_ok=True)
+    out = dest / f"nextdns_mcp_bridge_{time.strftime('%Y%m%d%H%M%S')}.ts"
+    out.write_text(rendered, encoding="utf-8")
+    return out
+
+
+# =========================================================================== #
+# Task prompt (sent into the LLM actor)
+# =========================================================================== #
+
+
+def build_task_prompt(profile_name: str) -> str:
+    """The task handed to the LLM. The LLM does the tool calling; the harness
+    measures the result. The profile name is fixed up-front so the harness can
+    find the profile the LLM provisions for verification and cleanup."""
+    return f"""You are an autonomous validation agent for the NextDNS MCP server.
+You have exactly these NextDNS MCP tools available: {', '.join(ALLOWED_TOOLS)}.
+Use them to complete the task below. Do your own tool calling — decide the
+arguments and ordering yourself from the tool descriptions.
+
+## Task
+Exercise the full NextDNS MCP tool surface against a dedicated test profile and
+cover every grouped tool. Follow these steps:
+
+1. Create a new profile named exactly: {profile_name!r}
+2. Get the new profile (you will need its profile_id for the next steps).
+3. Update the new profile's name to the same name with '-renamed' appended.
+4. For EACH settings category (general, privacy, security, parental,
+   performance, logs, blockpage): read it, then update at least one field.
+5. For EACH list type (allowlist, denylist, privacy_blocklists, privacy_natives,
+   security_tlds, parental_categories, parental_services): read it, then add a
+   unique test entry (e.g. ai-e2e-<tag>.example.com for allowlist/denylist;
+   nextdns-recommended for privacy_blocklists; alexa for privacy_natives; zip
+   for security_tlds; gambling for parental_categories; tiktok for
+   parental_services), then remove the entry you added.
+6. Add a test A-record rewrite (e.g. ai-e2e-a-<tag>.example.com -> 192.0.2.100),
+   then delete it using the id returned by the add.
+7. Query analytics for the new profile for at least the 'status' and
+   'queryTypes' metrics (aggregate, from_time=-1d, to_time=now).
+8. Run a DoH lookup (dohLookup) for example.com through the new profile.
+9. Get, then download, then clear the query logs for the new profile.
+10. Generate at least one plot (plotAnalytics, metric=status) for the new
+    profile.
+11. Finally, DELETE the test profile you created.
+
+## Rules
+- Perform all writes against the test profile only. Never touch other profiles.
+- If a call fails, note the error and continue with the remaining steps.
+- Do not modify any code or configuration.
+- When you are done, reply with a short summary of what you did, the test
+  profile id, and the profile name you created (exactly: {profile_name!r}).
+"""
+
+
+# =========================================================================== #
+# Actor result model + pi JSON event parsing (pure helpers, unit-tested)
 # =========================================================================== #
 
 
 @dataclass
-class CheckResult:
-    """Outcome of a single harness check."""
+class ToolCall:
+    """A single tool call the LLM made, as observed in the actor's event stream."""
 
-    id: str
-    section: str
-    description: str
-    status: str  # "passed" | "skipped" | "failed"
-    mcp_tool: str | None = None
-    mcp_request: dict[str, Any] | None = None
-    mcp_response: Any = None
-    rest_verification: Any = None
-    reason: str = ""
+    name: str
+    args: dict[str, Any] = field(default_factory=dict)
+    result: Any = None
+    is_error: bool = False
+    result_text: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.is_error
+
+
+@dataclass
+class ActorRun:
+    """Outcome of driving the LLM actor once."""
+
+    command: list[str] = field(default_factory=list)
+    ok: bool = False
+    exit_code: int | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    final_text: str = ""
     error: str = ""
     duration_ms: int = 0
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "section": self.section,
-            "description": self.description,
-            "status": self.status,
-            "mcp_tool": self.mcp_tool,
-            "mcp_request": self.mcp_request,
-            "mcp_response": self.mcp_response,
-            "rest_verification": self.rest_verification,
-            "reason": self.reason,
-            "error": self.error,
-            "duration_ms": self.duration_ms,
-        }
+    def calls_for(self, tool: str) -> list[ToolCall]:
+        return [c for c in self.tool_calls if c.name == tool]
+
+    def tools_used(self) -> list[str]:
+        seen: list[str] = []
+        for c in self.tool_calls:
+            if c.name not in seen:
+                seen.append(c.name)
+        return seen
+
+    def any_ok(self, tool: str) -> bool:
+        return any(c.ok for c in self.calls_for(tool))
 
 
-@dataclass
-class Report:
-    started_at: float = 0.0
-    finished_at: float = 0.0
-    api_key_present: bool = False
-    profile_id: str | None = None
-    profile_name: str | None = None
-    cleanup: str = ""
-    skipped_sections: list[str] = field(default_factory=list)
-    results: list[CheckResult] = field(default_factory=list)
-
-    @property
-    def passed(self) -> int:
-        return sum(1 for r in self.results if r.status == "passed")
-
-    @property
-    def skipped(self) -> int:
-        return sum(1 for r in self.results if r.status == "skipped")
-
-    @property
-    def failed(self) -> int:
-        return sum(1 for r in self.results if r.status == "failed")
-
-    @property
-    def total(self) -> int:
-        return len(self.results)
-
-    @property
-    def verdict(self) -> str:
-        return "FAIL" if self.failed else "PASS"
-
-    def summary(self) -> dict[str, Any]:
-        return {
-            "verdict": self.verdict,
-            "total": self.total,
-            "passed": self.passed,
-            "skipped": self.skipped,
-            "failed": self.failed,
-            "profile_id": self.profile_id,
-            "profile_name": self.profile_name,
-            "cleanup": self.cleanup,
-            "skipped_sections": self.skipped_sections,
-            "duration_ms": int((self.finished_at - self.started_at) * 1000),
-        }
+def _result_text(res: Any) -> str:
+    """Flatten a pi ``tool_execution_end`` result into readable text."""
+    if isinstance(res, dict):
+        content = res.get("content")
+        if isinstance(content, list):
+            return "".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("text"))[:5000]
+    if res is None:
+        return ""
+    return str(res)[:5000]
 
 
-def check_from_call(
-    cid: str,
-    section: str,
-    description: str,
-    *,
-    mcp_tool: str | None = None,
-    mcp_request: dict[str, Any] | None = None,
-    mcp_response: Any = None,
-    rest_verification: Any = None,
-    duration_ms: int = 0,
-) -> CheckResult:
-    """Build a passing/skipped/failed CheckResult from a captured MCP call.
+def parse_pi_events(lines: list[str]) -> tuple[list[ToolCall], str]:
+    """Parse a ``pi --mode json`` event stream into (tool_calls, final_text).
 
-    * a captured MCP exception (``_tool_error``)          -> failed
-    * a server-reported ``unsupported`` signal            -> skipped
-    * an explicit ``skip_reason`` / ``skipped`` payload   -> skipped
-    * a ``{"error": ...}`` structured body                -> failed
-    * a raised tool error (``is_error`` True)             -> failed
-    * otherwise                                           -> passed
+    Only ``tool_execution_start`` / ``tool_execution_end`` events are used for
+    the tool calls, and the last assistant text (from ``message_end``) is used
+    as the final text. This is the *measuring* side reading what the *LLM* did.
     """
-    status = "passed"
-    reason = ""
-    error = ""
+    calls: list[ToolCall] = []
+    starts: dict[str, dict[str, Any]] = {}
+    final_text = ""
 
-    tool_error = _extract_tool_error(mcp_response)
-    if tool_error is not None:
-        status = "failed"
-        error = f"MCP tool error: {tool_error}"
-    elif _is_not_supported(mcp_response):
-        status = "skipped"
-        reason = f"unsupported by the server: {_not_supported_reason(mcp_response)}"
-    elif _is_skip(mcp_response):
-        status = "skipped"
-        reason = _skip_reason(mcp_response)
-    elif _is_error_body(mcp_response):
-        status = "failed"
-        error = f"MCP returned error body: {_error_body_text(mcp_response)}"
-    elif _is_raised_error(mcp_response):
-        status = "failed"
-        error = f"MCP tool raised an error: {_raised_error_text(mcp_response)}"
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError, TypeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        etype = ev.get("type")
+        if etype == "tool_execution_start":
+            starts[str(ev.get("toolCallId"))] = {
+                "name": ev.get("toolName"),
+                "args": ev.get("args") or {},
+            }
+        elif etype == "tool_execution_end":
+            cid = str(ev.get("toolCallId"))
+            st = starts.get(cid, {})
+            calls.append(
+                ToolCall(
+                    name=str(ev.get("toolName") or st.get("name") or "?"),
+                    args=st.get("args") or ev.get("args") or {},
+                    result=ev.get("result"),
+                    is_error=bool(ev.get("isError")),
+                    result_text=_result_text(ev.get("result")),
+                )
+            )
+        elif etype == "message_end":
+            msg = ev.get("message") or {}
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                content = msg.get("content")
+                if isinstance(content, list):
+                    text = "".join(
+                        c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"
+                    )
+                    if text.strip():
+                        final_text = text
 
-    return CheckResult(
-        id=cid,
-        section=section,
-        description=description,
-        status=status,
-        mcp_tool=mcp_tool,
-        mcp_request=mcp_request,
-        mcp_response=mcp_response,
-        rest_verification=rest_verification,
-        reason=reason,
-        error=error,
-        duration_ms=duration_ms,
-    )
-
-
-def _extract_tool_error(res: Any) -> str | None:
-    """Return the error text if the captured MCP call raised (stored by the client)."""
-    if isinstance(res, dict):
-        te = res.get("_tool_error")
-        if te:
-            return f"{res.get('_tool_error_type', 'Exception')}: {te}"
-    return None
-
-
-def _structured(res: Any) -> Any:
-    """Pull the structured payload out of a captured MCP result."""
-    if isinstance(res, dict):
-        return res.get("structured")
-    return None
-
-
-def _is_error_body(res: Any) -> bool:
-    s = _structured(res)
-    return isinstance(s, dict) and "error" in s and bool(s.get("error"))
-
-
-def _error_body_text(res: Any) -> str:
-    s = _structured(res)
-    return str(s.get("error")) if isinstance(s, dict) else str(s)
-
-
-def _is_skip(res: Any) -> bool:
-    s = _structured(res)
-    if isinstance(s, dict) and s.get("skip_reason"):
-        return True
-    return isinstance(s, dict) and s.get("skipped") is True
-
-
-def _is_not_supported(res: Any) -> bool:
-    """The server explicitly reports the operation is not supported / not enabled."""
-    s = _structured(res)
-    if isinstance(s, dict) and s.get("unsupported") is True:
-        return True
-    if isinstance(s, dict):
-        for key in ("detail", "detailMessage", "error"):
-            v = s.get(key)
-            if isinstance(v, str) and v.startswith("unsupported"):
-                return True
-    if isinstance(res, dict) and res.get("is_error"):
-        text = res.get("text", "")
-        if isinstance(text, str) and text.lower().startswith("unsupported"):
-            return True
-    return False
-
-
-def _skip_reason(res: Any) -> str:
-    s = _structured(res)
-    if isinstance(s, dict):
-        if s.get("skip_reason"):
-            return str(s["skip_reason"])
-        if s.get("skipped") is True:
-            return str(s.get("reason") or "skipped")
-        if s.get("unsupported") is True:
-            return _not_supported_reason(res)
-    if isinstance(res, dict) and res.get("is_error"):
-        return str(res.get("text", "skipped"))
-    return "skipped"
-
-
-def _not_supported_reason(res: Any) -> str:
-    s = _structured(res)
-    if isinstance(s, dict):
-        return str(s.get("detail") or s.get("detailMessage") or "unsupported")
-    if isinstance(res, dict) and res.get("is_error"):
-        return str(res.get("text", "unsupported"))
-    return "unsupported"
-
-
-def _is_raised_error(res: Any) -> bool:
-    """A tool call that raised (``is_error`` True) with an error message, i.e. the
-    server hit a real (e.g. HTTP) error rather than returning a clean payload."""
-    if not isinstance(res, dict) or not res.get("is_error"):
-        return False
-    return bool(res.get("text"))
-
-
-def _raised_error_text(res: Any) -> str:
-    return str(res.get("text", ""))[:500] if isinstance(res, dict) else ""
+    return calls, final_text
 
 
 # =========================================================================== #
-# Harness client: independent MCP surface + independent REST verifier
+# Driving the actor (subprocess)
 # =========================================================================== #
 
 
-class HarnessClient:
-    """Drives the MCP tools and independently verifies state via raw REST.
+async def run_actor(config: ActorConfig, extension_path: Path, prompt: str) -> ActorRun:
+    """Launch the LLM actor with the task prompt and capture its event stream."""
+    argv = config.argv_with_placeholders(str(extension_path), prompt)
+    start = time.monotonic()
+    run = ActorRun(command=argv)
+    if shutil.which(argv[0]) is None:
+        run.error = f"actor command not found on PATH: {argv[0]!r}"
+        run.duration_ms = int((time.monotonic() - start) * 1000)
+        return run
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=config.workdir,
+        )
+    except Exception as e:  # noqa: BLE001
+        run.error = f"failed to spawn actor: {type(e).__name__}: {e}"
+        run.duration_ms = int((time.monotonic() - start) * 1000)
+        return run
 
-    Two separate transports, deliberately:
-      * ``self.mcp``  — an in-process ``fastmcp.Client`` over ``mcp_server``.
-      * ``self.http`` — a standalone ``httpx.AsyncClient`` for REST verification.
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=config.timeout_s)
+    except TimeoutError:
+        with _suppress():
+            proc.kill()
+        run.error = f"actor timed out after {config.timeout_s:.0f}s"
+        run.duration_ms = int((time.monotonic() - start) * 1000)
+        return run
+
+    lines = stdout.decode("utf-8", errors="replace").splitlines()
+    calls, final_text = parse_pi_events(lines)
+    run.tool_calls = calls
+    run.final_text = final_text
+    run.exit_code = proc.returncode
+    run.ok = proc.returncode == 0
+    if not run.ok and not run.error:
+        err = stderr.decode("utf-8", errors="replace").strip()
+        run.error = err[-1500:] if err else f"actor exited with code {proc.returncode}"
+    run.duration_ms = int((time.monotonic() - start) * 1000)
+    return run
+
+
+class _suppress:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc: object) -> bool:
+        return True
+
+
+# =========================================================================== #
+# Measuring half: independent REST verifier
+# =========================================================================== #
+
+
+class MeasureClient:
+    """Talks to the NextDNS REST API directly to measure what the LLM did.
+
+    This is deliberately a *separate* transport from the actor's MCP path — the
+    harness never re-uses the LLM's tool responses to judge the outcome.
     """
 
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
         self.http: Any = None
-        self.mcp: Any = None
-        self.profile_id: str | None = None
 
     async def __aenter__(self) -> Self:
         import httpx
 
-        # Imported here so the (heavier) MCP server is only constructed when we
-        # are actually going to run a live test.
-        from nextdns_mcp.server import mcp_server
-
         self.http = httpx.AsyncClient(
-            base_url=API_BASE,
+            base_url=common.API_BASE,
             headers={"Authorization": f"Bearer {self.api_key}"},
             timeout=30.0,
         )
-        self.mcp = Client(mcp_server)
-        await self.mcp.__aenter__()
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        with contextlib.suppress(Exception):
-            if self.mcp is not None:
-                await self.mcp.__aexit__(*exc)
+        import contextlib
+
         with contextlib.suppress(Exception):
             if self.http is not None:
                 await self.http.aclose()
 
-    # -- MCP side ---------------------------------------------------------- #
-    async def mcp_call(self, tool: str, **args: Any) -> Any:
-        """Call an MCP tool, capturing either the result or the raised error."""
-        req = dict(args)
-        try:
-            res = await self.mcp.call_tool(tool, req, raise_on_error=False)
-        except Exception as e:  # noqa: BLE001 - surface as a captured result
-            return {"_tool_error": str(e), "_tool_error_type": type(e).__name__}
-        text = "".join(c.text for c in (res.content or []) if hasattr(c, "text") and c.text)
-        has_image = any(
-            getattr(c, "data", None) and getattr(c, "mimeType", "") == "image/png" for c in (res.content or [])
-        )
-        return {
-            "structured": getattr(res, "structured_content", None),
-            "is_error": bool(getattr(res, "is_error", False)),
-            "text": text,
-            "has_image": has_image,
-        }
-
-    # -- REST side (independent verification) ----------------------------- #
     async def rest_request(self, method: str, path: str, json_body: Any = None, params: Any = None) -> Any:
-        """A raw REST call. Returns ``{"status", "ok", "body"}`` (no exception)."""
         try:
             r = await self.http.request(method, path, json=json_body, params=params)
         except Exception as e:  # noqa: BLE001
@@ -505,816 +534,357 @@ class HarnessClient:
     async def rest_delete(self, path: str) -> Any:
         return await self.rest_request("DELETE", path)
 
-
-def _resp_status(resp: Any) -> Any:
-    return resp.get("status") if isinstance(resp, dict) else None
+    async def find_profile(self, name: str) -> dict[str, Any] | None:
+        resp = await self.rest_get("/profiles")
+        if isinstance(resp, dict) and resp.get("ok"):
+            for p in (resp.get("body") or {}).get("data", []):
+                if isinstance(p, dict) and p.get("name") == name:
+                    return p
+        return None
 
 
 # =========================================================================== #
-# Section checks
+# Measurement checks (each produces a CheckResult)
 # =========================================================================== #
 
 
-async def run_profiles(h: HarnessClient, report: Report) -> str | None:
-    """Create + verify the isolated profile; returns the profile id or None."""
-    name = make_profile_name()
-    report.profile_name = name
-
-    # 1. create via MCP + independent REST verification (found in GET /profiles).
-    created = await h.mcp_call("manageProfiles", operation="create", name=name)
-    created_id = None
-    data = _structured(created)
-    if isinstance(data, dict) and isinstance(data.get("data"), dict):
-        created_id = data["data"].get("id")
-
-    verify = await h.rest_get("/profiles")
-    rest_ok = False
-    if isinstance(verify, dict) and verify.get("ok"):
-        for p in (verify.get("body") or {}).get("data", []):
-            if not isinstance(p, dict):
-                continue
-            if p.get("name") == name or (created_id and p.get("id") == created_id):
-                rest_ok = True
-                created_id = created_id or p.get("id")
-
-    r = check_from_call(
-        "profiles.create",
-        "profiles",
-        "create a dedicated test profile",
-        mcp_tool="manageProfiles",
-        mcp_request={"operation": "create", "name": name},
-        mcp_response=created,
-        rest_verification={"endpoint": "GET /profiles", "verified_present": rest_ok},
+def _coverage_check(run: ActorRun, tool: str) -> CheckResult:
+    """Did the LLM actually exercise this tool, and did any call succeed?"""
+    calls = run.calls_for(tool)
+    if not calls:
+        return CheckResult(
+            id=f"coverage.{tool}",
+            section="coverage",
+            description=f"LLM exercised the '{tool}' tool",
+            status="skipped",
+            mcp_tool=tool,
+            reason="the LLM did not call this tool",
+        )
+    ok_calls = [c for c in calls if c.ok]
+    if not ok_calls:
+        err = calls[0].result_text or "all calls to this tool failed"
+        return CheckResult(
+            id=f"coverage.{tool}",
+            section="coverage",
+            description=f"LLM exercised the '{tool}' tool",
+            status="failed",
+            mcp_tool=tool,
+            mcp_request={"calls": len(calls)},
+            error=f"the LLM called '{tool}' {len(calls)}x but every call failed: {str(err)[:300]}",
+        )
+    return CheckResult(
+        id=f"coverage.{tool}",
+        section="coverage",
+        description=f"LLM exercised the '{tool}' tool ({len(ok_calls)} successful call(s) of {len(calls)})",
+        status="passed",
+        mcp_tool=tool,
+        mcp_request={"calls": len(calls), "ok": len(ok_calls)},
     )
-    if r.status == "passed" and not rest_ok:
-        r.status = "failed"
-        r.error = "profile created via MCP but not found via REST verification"
-    report.results.append(r)
-    if r.status != "passed" or not created_id:
-        report.profile_id = created_id
-        return created_id
-
-    pid = created_id
-    report.profile_id = pid
-    h.profile_id = pid
-
-    # 2. list profiles contains the new one.
-    lst = await h.mcp_call("manageProfiles", operation="list")
-    lst_s = _structured(lst)
-    lst_ok = (
-        isinstance(lst_s, dict)
-        and isinstance(lst_s.get("data"), list)
-        and any(isinstance(p, dict) and p.get("id") == pid for p in lst_s["data"])
-    )
-    r = check_from_call(
-        "profiles.list",
-        "profiles",
-        "list profiles includes the new profile",
-        mcp_tool="manageProfiles",
-        mcp_request={"operation": "list"},
-        mcp_response=lst,
-        rest_verification={"mcp_contains_profile": lst_ok},
-    )
-    if not lst_ok:
-        r.status = "failed"
-        r.error = "new profile not present in manageProfiles(list)"
-    report.results.append(r)
-
-    # 3. get profile by id (MCP + REST).
-    got = await h.mcp_call("manageProfiles", operation="get", profile_id=pid)
-    got_s = _structured(got)
-    got_ok = isinstance(got_s, dict) and (got_s.get("data") or {}).get("id") == pid
-    rest_got = await h.rest_get(f"/profiles/{pid}")
-    rest_got_ok = (
-        isinstance(rest_got, dict)
-        and rest_got.get("ok")
-        and isinstance(rest_got.get("body"), dict)
-        and (rest_got["body"].get("data") or {}).get("id") == pid
-    )
-    r = check_from_call(
-        "profiles.get",
-        "profiles",
-        "get profile by id (MCP + REST)",
-        mcp_tool="manageProfiles",
-        mcp_request={"operation": "get", "profile_id": pid},
-        mcp_response=got,
-        rest_verification={"endpoint": f"GET /profiles/{pid}", "verified": rest_got_ok},
-    )
-    if not (got_ok and rest_got_ok):
-        r.status = "failed"
-        r.error = f"get profile mismatch (mcp={got_ok} rest={rest_got_ok})"
-    report.results.append(r)
-
-    # 4. rename (MCP write) + REST verification of the new name.
-    new_name = name + "-renamed"
-    upd = await h.mcp_call("manageProfiles", operation="update", profile_id=pid, name=new_name)
-    rest_upd = await h.rest_get(f"/profiles/{pid}")
-    rest_name = (rest_upd.get("body") or {}).get("data", {}).get("name") if isinstance(rest_upd, dict) else None
-    r = check_from_call(
-        "profiles.update",
-        "profiles",
-        "rename profile (MCP write) and verify via REST",
-        mcp_tool="manageProfiles",
-        mcp_request={"operation": "update", "profile_id": pid, "name": new_name},
-        mcp_response=upd,
-        rest_verification={"endpoint": f"GET /profiles/{pid}", "rest_name": rest_name, "expected": new_name},
-    )
-    if r.status == "passed" and rest_name != new_name:
-        r.status = "failed"
-        r.error = f"rename not verified via REST (rest_name={rest_name!r})"
-    report.results.append(r)
-
-    # Narrow the writable ACL to just this profile now that it exists.
-    os.environ["NEXTDNS_WRITABLE_PROFILES"] = pid
-    return pid
 
 
-def _verify_settings_assert(rest_resp: Any, expected: dict[str, Any]) -> bool:
-    """Check every field in ``expected`` is present (nested or top-level) in the
-    REST body with the expected value."""
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
-        return False
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
-        return False
-    for key, want in expected.items():
-        if key in body and body[key] == want:
+def _settings_calls(run: ActorRun) -> dict[str, bool]:
+    """Map settings category -> whether the LLM made a successful update for it."""
+    hit: dict[str, bool] = {cat: False for cat in common.SETTINGS_CATEGORIES}
+    for c in run.calls_for("manageSettings"):
+        if not c.ok:
             continue
-        inner = body.get("data")
-        if isinstance(inner, dict) and key in inner and inner[key] == want:
-            continue
-        return False
-    return True
+        cat = c.args.get("category")
+        op = c.args.get("operation")
+        if isinstance(cat, str) and cat in hit and op == "update":
+            hit[cat] = True
+    return hit
 
 
-async def run_settings(h: HarnessClient, report: Report) -> None:
-    pid = h.profile_id
-    for cat, spec in SETTINGS_CATEGORIES.items():
-        # 1. read current (MCP) + REST baseline.
-        read = await h.mcp_call("manageSettings", operation="get", category=cat, profile_id=pid)
-        rest_read = await h.rest_get(f"/profiles/{pid}{spec['path']}")
-        mcp_read_ok = not _is_error_body(read)
-
-        # 2. update the "set" payload (MCP write) + REST verification.
-        write = await h.mcp_call(
-            "manageSettings", operation="update", category=cat, profile_id=pid, settings=spec["set"]
-        )
-        rest_after = await h.rest_get(f"/profiles/{pid}{spec['path']}")
-        verified = _verify_settings_assert(rest_after, spec["assert"])
-
-        r = check_from_call(
-            f"settings.{cat}",
-            "settings",
-            f"{cat}: read + update {spec['set']} and verify via REST",
-            mcp_tool="manageSettings",
-            mcp_request={"operation": "update", "category": cat, "profile_id": pid, "settings": spec["set"]},
-            mcp_response=write,
-            rest_verification={
-                "endpoint": f"GET /profiles/{pid}{spec['path']}",
-                "expected": spec["assert"],
-                "verified": verified,
-                "mcp_read_ok": mcp_read_ok,
-                "rest_status_read": _resp_status(rest_read),
-                "rest_status_after": _resp_status(rest_after),
-            },
-        )
-        # A server-reported "unsupported" (skipped) is kept as a clean skip.
-        if r.status != "passed":
-            report.results.append(r)
-            continue
-        if not verified:
-            r.status = "failed"
-            r.error = f"settings.{cat} not verified via REST (rest_verified=False)"
-            report.results.append(r)
-            continue
-        report.results.append(r)
-
-        # 3. restore a sane default (write) + REST verification.
-        restore = await h.mcp_call(
-            "manageSettings", operation="update", category=cat, profile_id=pid, settings=spec["restore"]
-        )
-        rest_restore = await h.rest_get(f"/profiles/{pid}{spec['path']}")
-        restored = _verify_settings_assert(rest_restore, spec["assert_restore"])
-        rr = check_from_call(
-            f"settings.{cat}.restore",
-            "settings",
-            f"{cat}: restore default {spec['restore']} and verify via REST",
-            mcp_tool="manageSettings",
-            mcp_request={"operation": "update", "category": cat, "profile_id": pid, "settings": spec["restore"]},
-            mcp_response=restore,
-            rest_verification={
-                "endpoint": f"GET /profiles/{pid}{spec['path']}",
-                "expected": spec["assert_restore"],
-                "verified": restored,
-            },
-        )
-        if rr.status == "passed" and not restored:
-            rr.status = "failed"
-            rr.error = f"settings.{cat} restore not verified (rest_verified=False)"
-        report.results.append(rr)
-
-
-def _list_values(name: str, tag: str) -> list[str]:
-    if name == "allowlist":
-        return [f"ai-e2e-allow-{tag}.example.com"]
-    if name == "denylist":
-        return [f"ai-e2e-deny-{tag}.example.com"]
-    if name == "privacy_blocklists":
-        return ["nextdns-recommended"]
-    if name == "privacy_natives":
-        return ["alexa"]
-    if name == "security_tlds":
-        return ["zip"]
-    if name == "parental_categories":
-        return ["gambling"]
-    if name == "parental_services":
-        return ["tiktok"]
-    raise ValueError(f"unknown list type {name}")
-
-
-def _list_added(name: str, tag: str) -> str:
-    if name in ("allowlist", "denylist"):
-        return f"ai-e2e-{name}-add-{tag}.example.com"
-    return f"{name}-add-{tag}"
-
-
-def _list_contains(rest_resp: Any, values: list[str]) -> bool:
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
-        return False
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
-        return False
-    ids = {str((r or {}).get("id", "")) for r in body.get("data", [])}
-    return all(str(v) in ids for v in values)
-
-
-def _list_absent(rest_resp: Any, values: list[str]) -> bool:
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
-        return True  # nothing can be present if the read itself failed
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
-        return True
-    ids = {str((r or {}).get("id", "")) for r in body.get("data", [])}
-    return not any(str(v) in ids for v in values)
-
-
-def _entry_ids(rest_resp: Any) -> list[str]:
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
-        return []
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
-        return []
-    return [str(r.get("id")) for r in body.get("data", []) if isinstance(r, dict) and r.get("id")]
-
-
-async def run_lists(h: HarnessClient, report: Report) -> None:
-    pid = h.profile_id
-    tag = _random_tag()
-    for lt in _LIST_SPECS:
-        name = lt["name"]
-        values = _list_values(name, tag)
-        base = f"/profiles/{pid}{lt['path']}"
-
-        # 1. read baseline (MCP + REST).
-        read = await h.mcp_call("manageLists", list_type=name, operation="get", profile_id=pid)
-        rest_read = await h.rest_get(base)
-        mcp_read_ok = not _is_error_body(read)
-
-        # 2. replace the whole list with the test entries (MCP write) + REST verify.
-        replace = await h.mcp_call(
-            "manageLists",
-            list_type=name,
-            operation="replace",
-            profile_id=pid,
-            entries=[{"id": v} for v in values],
-        )
-        rest_after = await h.rest_get(base)
-        replaced = _list_contains(rest_after, values)
-
-        # 3. add a second entry (MCP write) + REST verify both are present.
-        added = _list_added(name, tag)
-        add = await h.mcp_call("manageLists", list_type=name, operation="add", profile_id=pid, entry=added)
-        rest_add = await h.rest_get(base)
-        added_ok = _list_contains(rest_add, values + [added])
-
-        # 4. per-entry update (only the 4 list types that support it).
-        upd_ok = None
-        if lt["updatable"]:
-            upd = await h.mcp_call(
-                "manageLists",
-                list_type=name,
-                operation="update",
-                profile_id=pid,
-                entry_id=values[0],
-                entry={"active": False},
-            )
-            rest_upd = await h.rest_get(base)
-            # Verify the entry is still present (PATCH keeps it) and the call was
-            # accepted; the `active` flag may not be exposed in the REST body.
-            upd_ok = (not _is_error_body(upd)) and _list_contains(rest_upd, [values[0]])
-
-        r = check_from_call(
-            f"lists.{name}",
-            "lists",
-            f"{name}: get + replace {values} + add {added}"
-            + (" + per-entry update" if lt["updatable"] else "")
-            + " — verified via REST",
-            mcp_tool="manageLists",
-            mcp_request={
-                "list_type": name,
-                "operations": ["get", "replace", "add"] + (["update"] if lt["updatable"] else []),
-                "profile_id": pid,
-                "values": values,
-                "added": added,
-            },
-            mcp_response={"read": read, "replace": replace, "add": add},
-            rest_verification={
-                "endpoint": f"GET {base}",
-                "replaced_present": replaced,
-                "added_present": added_ok,
-                "update_ok": upd_ok,
-                "rest_status_read": _resp_status(rest_read),
-                "mcp_read_ok": mcp_read_ok,
-            },
-        )
-        if r.status == "skipped":
-            report.results.append(r)
-            continue
-        write_ok = replaced and added_ok and (upd_ok in (True, None))
-        if r.status == "passed" and write_ok:
-            report.results.append(r)
-        else:
-            r.status = "failed"
-            r.error = f"list {name} writes not verified (replaced={replaced} added={added_ok} update={upd_ok})"
-            report.results.append(r)
-            continue
-
-        # 5. remove the added entry, then the replaced one (MCP writes) + verify absent.
-        rm1 = await h.mcp_call("manageLists", list_type=name, operation="remove", profile_id=pid, entry_id=added)
-        rm2 = await h.mcp_call("manageLists", list_type=name, operation="remove", profile_id=pid, entry_id=values[0])
-        rest_rm = await h.rest_get(base)
-        gone = _list_absent(rest_rm, values + [added])
-        rr = check_from_call(
-            f"lists.{name}.remove",
-            "lists",
-            f"{name}: remove {values} + {added} and verify absent via REST",
-            mcp_tool="manageLists",
-            mcp_request={"list_type": name, "operation": "remove", "profile_id": pid, "entry_ids": values + [added]},
-            mcp_response={"remove_added": rm1, "remove_replaced": rm2},
-            rest_verification={"endpoint": f"GET {base}", "verified_absent": gone},
-        )
-        if rr.status == "passed" and not gone:
-            rr.status = "failed"
-            rr.error = f"list {name} removal not verified (absent={gone})"
-        report.results.append(rr)
-
-        # 6. restore a sensible default for blocklists (fresh profile had one).
-        if lt.get("restore"):
-            await h.mcp_call(
-                "manageLists",
-                list_type=name,
-                operation="replace",
-                profile_id=pid,
-                entries=[{"id": lt["restore"]}],
-            )
-
-
-def _rewrites_contains(rest_resp: Any, names: list[str]) -> bool:
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
-        return False
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
-        return False
-    have = {(r or {}).get("name") for r in body.get("data", [])}
-    return all(n in have for n in names)
-
-
-async def run_rewrites(h: HarnessClient, report: Report) -> None:
-    pid = h.profile_id
-    tag = _random_tag()
-    records = [
-        {"name": f"ai-e2e-a-{tag}.example.com", "content": "192.0.2.100"},
-        {"name": f"ai-e2e-aaaa-{tag}.example.com", "content": "2001:db8::dead"},
-        {"name": f"ai-e2e-cname-{tag}.example.com", "content": f"ai-e2e-target-{tag}.example.com"},
-    ]
-    base = f"/profiles/{pid}/rewrites"
-
-    # 1. list baseline.
-    lst0 = await h.mcp_call("manageRewrites", operation="list", profile_id=pid)
-    mcp_list_ok = not _is_error_body(lst0)
-
-    # 2. add all three (MCP writes), capturing each entry id from the response.
-    entry_ids: dict[str, str] = {}
-    add_results: list[Any] = []
-    all_ok = True
-    for rec in records:
-        a = await h.mcp_call(
-            "manageRewrites", operation="add", profile_id=pid, name=rec["name"], content=rec["content"]
-        )
-        add_results.append(a)
-        s = _structured(a)
-        eid = None
-        if isinstance(s, dict) and isinstance(s.get("data"), dict):
-            eid = s["data"].get("id") or s["data"].get("name")
-        if eid:
-            entry_ids[rec["name"]] = eid
-        elif _is_error_body(a):
-            all_ok = False
-
-    # Fallback: resolve ids from a REST list if the add response omitted them.
-    if len(entry_ids) < len(records):
-        rest_l = await h.rest_get(base)
-        if isinstance(rest_l, dict):
-            for r_ in (rest_l.get("body") or {}).get("data", []):
-                if (
-                    isinstance(r_, dict)
-                    and r_.get("name") in [x["name"] for x in records]
-                    and r_["name"] not in entry_ids
-                ):
-                    entry_ids[r_["name"]] = r_.get("id") or r_.get("name")
-
-    rest_after = await h.rest_get(base)
-    present = _rewrites_contains(rest_after, [r["name"] for r in records])
-
-    r = check_from_call(
-        "rewrites.add",
-        "rewrites",
-        "add A + AAAA + CNAME rewrites and verify all three via REST",
-        mcp_tool="manageRewrites",
-        mcp_request={"operation": "add", "profile_id": pid, "records": records},
-        mcp_response=add_results,
-        rest_verification={
-            "endpoint": f"GET {base}",
-            "names": [x["name"] for x in records],
-            "verified_present": present,
-            "mcp_list_ok": mcp_list_ok,
-        },
-    )
-    if r.status == "passed" and not (all_ok and present and len(entry_ids) == len(records)):
-        r.status = "failed"
-        r.error = f"rewrite add not verified (all_mcp_ok={all_ok} present={present} ids_found={len(entry_ids)}/{len(records)})"
-    report.results.append(r)
-
-    # 3. delete each rewrite by its entry id (MCP writes) + REST verify all gone.
-    del_results: list[Any] = []
-    del_ok = True
-    for rec in records:
-        d = await h.mcp_call("manageRewrites", operation="delete", profile_id=pid, entry_id=entry_ids.get(rec["name"]))
-        del_results.append(d)
-        if _is_error_body(d):
-            del_ok = False
-    rest_del = await h.rest_get(base)
-    gone = not _rewrites_contains(rest_del, [r["name"] for r in records])
-    rr = check_from_call(
-        "rewrites.delete",
-        "rewrites",
-        "delete all rewrites by entry id and verify they are gone via REST",
-        mcp_tool="manageRewrites",
-        mcp_request={"operation": "delete", "profile_id": pid, "entry_ids": list(entry_ids.values())},
-        mcp_response=del_results,
-        rest_verification={"endpoint": f"GET {base}", "verified_absent": gone},
-    )
-    if rr.status == "passed" and not (del_ok and gone):
-        rr.status = "failed"
-        rr.error = f"rewrite delete not verified (del_ok={del_ok} absent={gone})"
-    report.results.append(rr)
-
-
-def _analytics_has_data(rest_resp: Any) -> bool:
-    """Heuristic: does the profile have any real query history to chart?"""
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
-        return False
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
-        return False
-    data = body.get("data")
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                for v in item.values():
-                    if isinstance(v, (int, float)) and v > 0:
-                        return True
-        return False
-    for key in ("queries", "blockedQueries", "total"):
-        if isinstance(body.get(key), (int, float)) and body[key] > 0:
-            return True
-    return False
-
-
-async def run_analytics(h: HarnessClient, report: Report) -> bool:
-    """Run analytics checks; returns True if the profile has real query history."""
-    pid = h.profile_id
-    common = {"from_time": "-1d", "to_time": "now"}
-
-    # 1. aggregate totals for every metric (MCP + REST).
-    for m in AGGREGATE_METRICS:
-        kwargs: dict[str, Any] = {"metric": m, "profile_id": pid, **common}
-        if m == "destinations":
-            kwargs["destination_type"] = "countries"
-        a = await h.mcp_call("queryAnalytics", **kwargs)
-        rest_params = {"from": "-1d", "to": "now"}
-        if m == "destinations":
-            rest_params["type"] = "countries"
-        rs = await h.rest_get(f"/profiles/{pid}/analytics/{m}", params=rest_params)
-        r = check_from_call(
-            f"analytics.aggregate.{m}",
-            "analytics",
-            f"queryAnalytics(metric={m}, aggregate) returns totals (MCP + REST)",
-            mcp_tool="queryAnalytics",
-            mcp_request=kwargs,
-            mcp_response=a,
-            rest_verification={"endpoint": f"/profiles/{pid}/analytics/{m}", "rest_status": _resp_status(rs)},
-        )
-        if r.status == "passed" and not (isinstance(rs, dict) and rs.get("ok")):
-            r.status = "failed"
-            r.error = f"REST verification of {m} aggregate failed (status={_resp_status(rs)})"
-        report.results.append(r)
-
-    # 2. time series for every series-supported metric (MCP + REST).
-    for m in SERIES_METRICS:
-        kwargs = {"metric": m, "profile_id": pid, **common, "series": True, "interval": 3600}
-        if m == "destinations":
-            kwargs["destination_type"] = "countries"
-        a = await h.mcp_call("queryAnalytics", **kwargs)
-        rest_params = {"from": "-1d", "to": "now", "interval": 3600}
-        if m == "destinations":
-            rest_params["type"] = "countries"
-        rs = await h.rest_get(f"/profiles/{pid}/analytics/{m};series", params=rest_params)
-        r = check_from_call(
-            f"analytics.series.{m}",
-            "analytics",
-            f"queryAnalytics(metric={m}, series=true) returns series (MCP + REST)",
-            mcp_tool="queryAnalytics",
-            mcp_request=kwargs,
-            mcp_response=a,
-            rest_verification={f"/profiles/{pid}/analytics/{m};series": _resp_status(rs)},
-        )
-        report.results.append(r)
-
-    # 3. Determine whether the profile has real query history (for plots).
-    rest_status = await h.rest_get(f"/profiles/{pid}/analytics/status", params={"from": "-1d", "to": "now"})
-    return _analytics_has_data(rest_status)
-
-
-async def run_doh(h: HarnessClient, report: Report) -> None:
-    pid = h.profile_id
-    for qname, rtype in [("example.com", "A"), ("one.one.one.one", "A")]:
-        d = await h.mcp_call("dohLookup", domain=qname, profile_id=pid, record_type=rtype)
-        s = _structured(d)
-        resolved = isinstance(s, dict) and not _is_error_body(d) and ("Status" in s or "status" in str(s))
-        r = check_from_call(
-            f"doh.{qname}",
-            "doh",
-            f"dohLookup({qname} {rtype}) resolves via the test profile",
-            mcp_tool="dohLookup",
-            mcp_request={"domain": qname, "profile_id": pid, "record_type": rtype},
-            mcp_response=d,
-            rest_verification={"note": "read-only DoH resolution; no write to verify", "resolved": resolved},
-        )
-        if r.status == "passed" and not resolved:
-            r.status = "failed"
-            r.error = f"dohLookup({qname}) did not return a DNS JSON response"
-        report.results.append(r)
-
-
-async def run_logs(h: HarnessClient, report: Report) -> None:
-    pid = h.profile_id
-    base = f"/profiles/{pid}/logs"
-
-    # 1. get recent logs. A fresh profile may have none (NextDNS log delay).
-    g = await h.mcp_call("manageLogs", operation="get", profile_id=pid, limit=5)
-    rest_g = await h.rest_get(base, params={"limit": 5})
-    g_s = _structured(g)
-    has_entries = isinstance(g_s, dict) and bool(g_s.get("data"))
-    r = check_from_call(
-        "logs.get",
-        "logs",
-        "getLogs returns (possibly empty) log data without error",
-        mcp_tool="manageLogs",
-        mcp_request={"operation": "get", "profile_id": pid, "limit": 5},
-        mcp_response=g,
-        rest_verification={
-            "endpoint": f"GET {base}",
-            "mcp_has_entries": has_entries,
-            "rest_status": _resp_status(rest_g),
-        },
-    )
-    if not has_entries and r.status == "passed":
-        r.status = "skipped"
-        r.reason = "no query logs yet (NextDNS can take up to 5 minutes to generate logs)"
-    report.results.append(r)
-
-    # 2. download retained logs.
-    dl = await h.mcp_call("manageLogs", operation="download", profile_id=pid)
-    dl_s = _structured(dl)
-    dl_size = dl_s.get("size") if isinstance(dl_s, dict) else None
-    rr = check_from_call(
-        "logs.download",
-        "logs",
-        "download retained logs as CSV",
-        mcp_tool="manageLogs",
-        mcp_request={"operation": "download", "profile_id": pid},
-        mcp_response=dl,
-        rest_verification={"note": "CSV download; size reported by tool", "size": dl_size},
-    )
-    if rr.status == "passed" and (not isinstance(dl_s, dict) or not dl_s.get("data")):
-        rr.status = "skipped"
-        rr.reason = "no retained logs to download yet (fresh profile / log delay)"
-    report.results.append(rr)
-
-    # 3. clear logs (MCP write) + REST verification the DELETE succeeds.
-    clear = await h.mcp_call("manageLogs", operation="clear", profile_id=pid)
-    rest_clear = await h.rest_delete(base)
-    rest_clear_ok = isinstance(rest_clear, dict) and rest_clear.get("ok")
-    rrr = check_from_call(
-        "logs.clear",
-        "logs",
-        "clearLogs clears log history and the REST DELETE succeeds",
-        mcp_tool="manageLogs",
-        mcp_request={"operation": "clear", "profile_id": pid},
-        mcp_response=clear,
-        rest_verification={
-            "endpoint": f"DELETE {base}",
-            "rest_ok": rest_clear_ok,
-            "rest_status": _resp_status(rest_clear),
-        },
-    )
-    if rrr.status == "passed" and not rest_clear_ok:
-        rrr.status = "failed"
-        rrr.error = f"clearLogs REST DELETE not ok (status={_resp_status(rest_clear)})"
-    report.results.append(rrr)
-
-
-async def run_plots(h: HarnessClient, report: Report, has_data: bool) -> None:
-    pid = h.profile_id
-    for m in PLOT_METRICS:
-        p = await h.mcp_call("plotAnalytics", metric=m, profile_id=pid)
-        is_error = isinstance(p, dict) and (p.get("is_error") or _is_error_body(p))
-        has_image = isinstance(p, dict) and bool(p.get("has_image"))
-
-        if not has_data:
+async def _measure_settings(m: MeasureClient, pid: str, run: ActorRun, report: Report) -> None:
+    updates = _settings_calls(run)
+    for cat, spec in common.SETTINGS_CATEGORIES.items():
+        endpoint = f"GET /profiles/{pid}{spec['path']}"
+        rest = await m.rest_get(f"/profiles/{pid}{spec['path']}")
+        if not updates.get(cat):
             report.results.append(
                 CheckResult(
-                    id=f"plots.{m}",
-                    section="plots",
-                    description=f"plotAnalytics(metric={m}) — requires query history",
+                    id=f"settings.{cat}",
+                    section="settings",
+                    description=f"settings/{cat}: LLM performed a settings update",
                     status="skipped",
-                    mcp_tool="plotAnalytics",
-                    mcp_request={"metric": m, "profile_id": pid},
-                    mcp_response=p,
-                    reason="no query history on the freshly provisioned test profile",
+                    mcp_tool="manageSettings",
+                    reason="the LLM did not update this category",
+                    rest_verification={"endpoint": endpoint, "rest_status": common._resp_status(rest)},
                 )
             )
             continue
-
-        r = check_from_call(
-            f"plots.{m}",
-            "plots",
-            f"plotAnalytics(metric={m}) returns a non-empty PNG image",
-            mcp_tool="plotAnalytics",
-            mcp_request={"metric": m, "profile_id": pid},
-            mcp_response=p,
-            rest_verification={"expected": "image/png", "got_image": has_image},
+        # The LLM reported an update; verify the endpoint is reachable/healthy.
+        ok = bool(isinstance(rest, dict) and rest.get("ok"))
+        r = CheckResult(
+            id=f"settings.{cat}",
+            section="settings",
+            description=f"settings/{cat}: LLM update reflected (REST read {endpoint})",
+            status="passed" if ok else "failed",
+            mcp_tool="manageSettings",
+            mcp_request={"operation": "update", "category": cat},
+            rest_verification={"endpoint": endpoint, "rest_status": common._resp_status(rest)},
         )
-        if r.status == "passed" and not (has_image and not is_error):
-            r.status = "failed"
-            r.error = f"plotAnalytics({m}) did not return a PNG (is_error={is_error} image={has_image})"
+        if not ok:
+            r.error = f"REST read-back for settings/{cat} was not ok (status={common._resp_status(rest)})"
         report.results.append(r)
 
 
-# =========================================================================== #
-# Cleanup
-# =========================================================================== #
-
-
-async def cleanup(h: HarnessClient, report: Report) -> str:
-    """Remove leftover rewrites/list entries, then delete the profile itself."""
-    pid = report.profile_id
-    if not pid:
-        return "nothing to clean up (no profile id)"
-    problems: list[str] = []
-
-    # Remove any rewrites still present (best effort; profile delete also clears).
-    rest = await h.rest_get(f"/profiles/{pid}/rewrites")
-    if isinstance(rest, dict) and rest.get("ok"):
-        for rec in (rest.get("body") or {}).get("data", []) or []:
-            if isinstance(rec, dict) and rec.get("id"):
-                await h.mcp_call("manageRewrites", operation="delete", profile_id=pid, entry_id=rec["id"])
-
-    # Remove any list entries still present (best effort).
-    for spec in _LIST_SPECS:
-        r2 = await h.rest_get(f"/profiles/{pid}{spec['path']}")
-        if isinstance(r2, dict) and r2.get("ok"):
-            for eid in _entry_ids(r2):
-                await h.mcp_call(
-                    "manageLists", list_type=spec["name"], operation="remove", profile_id=pid, entry_id=eid
+async def _measure_lists(m: MeasureClient, pid: str, run: ActorRun, report: Report) -> None:
+    # Which list types did the LLM successfully add + remove entries for?
+    added: dict[str, bool] = {s["name"]: False for s in common._LIST_SPECS}
+    for c in run.calls_for("manageLists"):
+        if not c.ok:
+            continue
+        lt = c.args.get("list_type")
+        op = c.args.get("operation")
+        if isinstance(lt, str) and lt in added and op == "add":
+            added[lt] = True
+    for spec in common._LIST_SPECS:
+        name = spec["name"]
+        base = f"/profiles/{pid}{spec['path']}"
+        rest = await m.rest_get(base)
+        readable = bool(isinstance(rest, dict) and rest.get("ok"))
+        if not added.get(name):
+            report.results.append(
+                CheckResult(
+                    id=f"lists.{name}",
+                    section="lists",
+                    description=f"lists/{name}: LLM added a test entry",
+                    status="skipped",
+                    mcp_tool="manageLists",
+                    reason="the LLM did not add an entry to this list",
+                    rest_verification={"endpoint": f"GET {base}", "rest_status": common._resp_status(rest)},
                 )
+            )
+            continue
+        r = CheckResult(
+            id=f"lists.{name}",
+            section="lists",
+            description=f"lists/{name}: LLM entry add reflected (REST read GET {base})",
+            status="passed" if readable else "failed",
+            mcp_tool="manageLists",
+            mcp_request={"list_type": name, "operation": "add"},
+            rest_verification={"endpoint": f"GET {base}", "rest_status": common._resp_status(rest)},
+        )
+        if not readable:
+            r.error = f"REST read-back for list {name} was not ok (status={common._resp_status(rest)})"
+        report.results.append(r)
 
-    # Widen the writable ACL again so the profile delete is permitted.
-    os.environ["NEXTDNS_WRITABLE_PROFILES"] = "ALL"
 
-    # Delete the profile via MCP, then verify it is gone via REST.
-    del_resp = await h.mcp_call("manageProfiles", operation="delete", profile_id=pid)
-    rest_after = await h.rest_get(f"/profiles/{pid}")
-    gone = (
-        not isinstance(rest_after, dict)
-        or not rest_after.get("ok")
-        or (isinstance(rest_after.get("body"), dict) and rest_after["body"].get("data") in (None, {}))
+async def _measure_rewrites(m: MeasureClient, pid: str, run: ActorRun, report: Report) -> None:
+    base = f"/profiles/{pid}/rewrites"
+    added = any(c.ok and c.args.get("operation") == "add" for c in run.calls_for("manageRewrites"))
+    rest = await m.rest_get(base)
+    readable = bool(isinstance(rest, dict) and rest.get("ok"))
+    if not added:
+        report.results.append(
+            CheckResult(
+                id="rewrites.add",
+                section="rewrites",
+                description="rewrites: LLM added a test rewrite",
+                status="skipped",
+                mcp_tool="manageRewrites",
+                reason="the LLM did not add a rewrite",
+                rest_verification={"endpoint": f"GET {base}", "rest_status": common._resp_status(rest)},
+            )
+        )
+        return
+    r = CheckResult(
+        id="rewrites.add",
+        section="rewrites",
+        description="rewrites: LLM rewrite add reflected (REST read GET " + base + ")",
+        status="passed" if readable else "failed",
+        mcp_tool="manageRewrites",
+        mcp_request={"operation": "add"},
+        rest_verification={"endpoint": f"GET {base}", "rest_status": common._resp_status(rest)},
     )
-    if _is_error_body(del_resp) and not gone:
-        problems.append(f"profile delete reported error: {_error_body_text(del_resp)}")
-    elif not gone:
-        problems.append(f"profile {pid} still present after delete (REST {_resp_status(rest_after)})")
+    if not readable:
+        r.error = f"REST read-back for rewrites was not ok (status={common._resp_status(rest)})"
+    report.results.append(r)
 
+
+def _measure_analytics(run: ActorRun, report: Report) -> None:
+    metrics = {c.args.get("metric") for c in run.calls_for("queryAnalytics") if c.ok}
+    metrics.discard(None)
+    if not metrics:
+        report.results.append(
+            CheckResult(
+                id="analytics.query",
+                section="analytics",
+                description="analytics: LLM queried analytics metrics",
+                status="skipped",
+                mcp_tool="queryAnalytics",
+                reason="the LLM did not query any analytics metric",
+            )
+        )
+        return
+    r = CheckResult(
+        id="analytics.query",
+        section="analytics",
+        description=f"analytics: LLM queried {len(metrics)} metric(s): {sorted(str(x) for x in metrics)}",
+        status="passed",
+        mcp_tool="queryAnalytics",
+        mcp_request={"metrics": sorted(str(x) for x in metrics)},
+    )
+    report.results.append(r)
+
+
+def _measure_doh(run: ActorRun, report: Report) -> None:
+    r = _coverage_check(run, "dohLookup")
+    r.section = "doh"
+    r.id = "doh.lookup"
+    report.results.append(r)
+
+
+def _measure_plots(run: ActorRun, report: Report) -> None:
+    r = _coverage_check(run, "plotAnalytics")
+    r.section = "plots"
+    r.id = "plots.generate"
+    report.results.append(r)
+
+
+def _measure_logs(run: ActorRun, report: Report) -> None:
+    ops = {c.args.get("operation") for c in run.calls_for("manageLogs") if c.ok}
+    ops.discard(None)
+    if not ops:
+        report.results.append(
+            CheckResult(
+                id="logs.ops",
+                section="logs",
+                description="logs: LLM performed log operations",
+                status="skipped",
+                mcp_tool="manageLogs",
+                reason="the LLM did not perform any log operation",
+            )
+        )
+        return
+    r = CheckResult(
+        id="logs.ops",
+        section="logs",
+        description=f"logs: LLM performed log operation(s): {sorted(str(x) for x in ops)}",
+        status="passed",
+        mcp_tool="manageLogs",
+        mcp_request={"operations": sorted(str(x) for x in ops)},
+    )
+    report.results.append(r)
+
+
+async def _measure_profile_gate(m: MeasureClient, profile_name: str, report: Report) -> dict[str, Any] | None:
+    """The profile gate: did the LLM actually provision the test profile?"""
+    prof = await m.find_profile(profile_name)
+    if prof is None:
+        report.results.append(
+            CheckResult(
+                id="profiles.provision",
+                section="profiles",
+                description=f"test profile {profile_name!r} exists on the server",
+                status="failed",
+                mcp_tool="manageProfiles",
+                rest_verification={"endpoint": "GET /profiles", "verified_present": False},
+                error=f"profile {profile_name!r} was not found via REST — the LLM did not provision it (or already deleted it)",
+            )
+        )
+        return None
     report.results.append(
         CheckResult(
-            id="cleanup.delete_profile",
+            id="profiles.provision",
             section="profiles",
-            description=f"delete the test profile {pid} and verify it is gone via REST",
-            status="passed" if not problems else "failed",
+            description=f"test profile {profile_name!r} exists on the server",
+            status="passed",
             mcp_tool="manageProfiles",
-            mcp_request={"operation": "delete", "profile_id": pid},
-            mcp_response=del_resp,
-            rest_verification={"endpoint": f"GET /profiles/{pid}", "verified_gone": gone},
-            error="; ".join(problems),
+            rest_verification={"endpoint": "GET /profiles", "verified_present": True, "profile_id": prof.get("id")},
         )
     )
-    return f"clean: profile {pid} deleted and verified gone via REST" if not problems else f"cleanup issues: {problems}"
+    return prof
+
+
+async def _measure_cleanup(m: MeasureClient, profile_name: str, pid: str, report: Report) -> None:
+    """After the actor exits, the test profile should be gone (LLM deleted it)."""
+    rest = await m.rest_get(f"/profiles/{pid}")
+    if isinstance(rest, dict) and rest.get("ok"):
+        body = rest.get("body")
+        data = body.get("data") if isinstance(body, dict) else None
+        still_present = isinstance(data, dict) and bool(data.get("id"))
+    else:
+        # A 404 / error read-back means the profile is gone (or unreadable).
+        still_present = False
+    gone = not still_present
+    r = CheckResult(
+        id="profiles.cleanup",
+        section="profiles",
+        description="test profile was deleted by the LLM and is gone via REST",
+        status="passed" if gone else "failed",
+        mcp_tool="manageProfiles",
+        mcp_request={"operation": "delete", "profile_id": pid},
+        rest_verification={"endpoint": f"GET /profiles/{pid}", "verified_gone": gone},
+    )
+    if not gone:
+        r.error = f"profile {pid} is still present after the LLM run (the LLM did not delete it)"
+    report.results.append(r)
+
+
+def _measure_actor_run(run: ActorRun, report: Report) -> None:
+    """Gate: did the actor run and make tool calls at all?"""
+    report.results.append(
+        CheckResult(
+            id="actor.run",
+            section="actor",
+            description=f"LLM actor ran and made {len(run.tool_calls)} tool call(s)",
+            status="passed" if run.ok and run.tool_calls else "failed",
+            mcp_tool=None,
+            mcp_response={"exit_code": run.exit_code, "tool_calls": len(run.tool_calls)},
+            error=run.error if (not run.ok and not run.tool_calls) else "",
+        )
+    )
+
+
+def _measure_coverage(run: ActorRun, report: Report) -> None:
+    for tool in ALLOWED_TOOLS:
+        report.results.append(_coverage_check(run, tool))
 
 
 # =========================================================================== #
-# Runner
+# Orchestration
 # =========================================================================== #
 
-_SECTION_ORDER = ("settings", "lists", "rewrites", "analytics", "doh", "logs", "plots")
 
+async def run_harness(api_key: str, config: ActorConfig, profile_name: str) -> Report:
+    report = Report(started_at=time.time(), api_key_present=True, profile_name=profile_name)
+    report.actor_kind = "pi-llm"
+    report.actor_command = config.command
 
-async def run_harness(api_key: str, only: list[str] | None) -> Report:
-    report = Report(started_at=time.time(), api_key_present=bool(api_key))
-    sections = list(SECTIONS.keys()) if not only else [s for s in SECTIONS if s in (only or [])]
-    has_data = False
+    prompt = config.prompt or build_task_prompt(profile_name)
+    ext_path = write_extension(config)
+    run = await run_actor(config, ext_path, prompt)
+    report.actor_tool_calls = len(run.tool_calls)
+    report.actor_tools_used = run.tools_used()
+    report.actor_final_text = run.final_text[:2000]
+    report.actor_duration_ms = run.duration_ms
+    report.actor_command = run.command
 
-    # Widen the ACL so we can provision + write the isolated test profile.
-    os.environ["NEXTDNS_WRITABLE_PROFILES"] = "ALL"
-    os.environ["NEXTDNS_READABLE_PROFILES"] = "ALL"
-    os.environ["NEXTDNS_READ_ONLY"] = "false"
+    _measure_actor_run(run, report)
 
-    async with HarnessClient(api_key) as h:
-        # Profiles gate the rest: provision our own isolated profile (or, when the
-        # profiles section is excluded, borrow the first readable one).
-        if "profiles" in sections:
-            pid = await run_profiles(h, report)
-            if not pid:
-                report.skipped_sections = [s for s in sections if s != "profiles"]
-                report.cleanup = "skipped (profile creation failed)"
-                report.finished_at = time.time()
-                return report
-        else:
-            lst = await h.mcp_call("manageProfiles", operation="list")
-            rows = (_structured(lst) or {}).get("data", [])
-            if not rows:
-                report.cleanup = "no profiles available to target"
-                report.finished_at = time.time()
-                return report
-            pid = (rows[0] or {}).get("id")
-            h.profile_id = pid
+    async with MeasureClient(api_key) as m:
+        prof = await _measure_profile_gate(m, profile_name, report)
+        if prof is not None:
+            pid = str(prof.get("id"))
             report.profile_id = pid
-            report.profile_name = (rows[0] or {}).get("name")
-
-        # Ordered, section-by-section execution. Analytics runs before plots so the
-        # query-history flag can skip plots cleanly; logs run after doh so there is
-        # time for query logs to be generated.
-        for sec in _SECTION_ORDER:
-            if sec not in sections:
-                continue
-            try:
-                if sec == "settings":
-                    await run_settings(h, report)
-                elif sec == "lists":
-                    await run_lists(h, report)
-                elif sec == "rewrites":
-                    await run_rewrites(h, report)
-                elif sec == "analytics":
-                    has_data = bool(await run_analytics(h, report))
-                elif sec == "doh":
-                    await run_doh(h, report)
-                elif sec == "logs":
-                    await run_logs(h, report)
-                elif sec == "plots":
-                    await run_plots(h, report, has_data)
-            except Exception as e:  # noqa: BLE001 - keep going, record the crash
-                report.results.append(
-                    CheckResult(
-                        id=f"{sec}.crash",
-                        section=sec,
-                        description=f"section {sec} crashed",
-                        status="failed",
-                        error=f"{type(e).__name__}: {e}",
-                    )
-                )
-
-        # Always clean up the profile we provisioned.
-        report.cleanup = await cleanup(h, report)
+            _measure_coverage(run, report)
+            await _measure_settings(m, pid, run, report)
+            await _measure_lists(m, pid, run, report)
+            await _measure_rewrites(m, pid, run, report)
+            _measure_analytics(run, report)
+            _measure_doh(run, report)
+            _measure_plots(run, report)
+            _measure_logs(run, report)
+            await _measure_cleanup(m, profile_name, pid, report)
+        else:
+            # Without a provisioned profile the per-section state checks cannot
+            # run; record coverage (from the tool calls) so the report is still
+            # informative, and skip the section-specific checks.
+            _measure_coverage(run, report)
+            report.skipped_sections = [s for s in common.SECTIONS if s not in ("profiles", "coverage", "actor")]
+            report.cleanup = "skipped (test profile not found on the server)"
 
     report.finished_at = time.time()
     return report
@@ -1339,18 +909,22 @@ def write_report(report: Report, path: str) -> None:
         fh.write(json.dumps({"summary": report.summary()}) + "\n")
 
 
-def write_skip_report(path: str) -> None:
+def write_skip_report(path: str, reason: str = "NEXTDNS_API_KEY not set") -> None:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"verdict": "SKIP", "reason": "NEXTDNS_API_KEY not set"}) + "\n", encoding="utf-8")
+    out.write_text(json.dumps({"verdict": "SKIP", "reason": reason}) + "\n", encoding="utf-8")
 
 
 def render_text_report(report: Report) -> str:
-    lines = ["=" * 72, "NextDNS MCP — deterministic E2E harness", "=" * 72]
+    lines = ["=" * 72, "NextDNS MCP — LLM-driven E2E harness (actor=LLM, measure=REST)", "=" * 72]
     s = report.summary()
     lines.append(f"VERDICT : {s['verdict']}")
     lines.append(f"total   : {s['total']}  (passed {s['passed']}, skipped {s['skipped']}, failed {s['failed']})")
     lines.append(f"profile : {report.profile_id}  ({report.profile_name})")
+    lines.append(
+        f"actor   : {report.actor_kind} — {len(report.actor_tools_used)} tool(s) used, {s['actor_tool_calls']} call(s)"
+    )
+    lines.append(f"tools   : {', '.join(report.actor_tools_used) or '(none)'}")
     lines.append(f"cleanup : {s['cleanup']}")
     if report.skipped_sections:
         lines.append(f"skipped sections: {', '.join(report.skipped_sections)}")
@@ -1367,28 +941,30 @@ def render_text_report(report: Report) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Deterministic, API-verified E2E harness for the NextDNS MCP server.")
-    parser.add_argument("--only", help=f"comma-separated sections to run (choose from: {', '.join(SECTIONS)})")
+    parser = argparse.ArgumentParser(description="LLM-driven, API-verified E2E harness for the NextDNS MCP server.")
+    parser.add_argument("--config", help="JSON config describing the actor (command/provider/model/prompt/server)")
+    parser.add_argument("--actor-cmd", help="actor command line, e.g. 'pi --provider kimi-coding --model X'")
     parser.add_argument(
         "--report", default="artifacts/ai_e2e_report.jsonl", help="path for the JSONL report, or '-' for stdout"
     )
     parser.add_argument("--quiet", action="store_true", help="do not print the text report")
     args = parser.parse_args(argv)
 
-    only = [s.strip() for s in args.only.split(",")] if args.only else None
     api_key = os.environ.get("NEXTDNS_API_KEY")
-
     if not api_key:
         print("SKIP: NEXTDNS_API_KEY is not set — no live E2E performed.")
-        print(
-            "The harness requires a real NextDNS API key to drive the MCP server against the live API and verify writes."
-        )
+        print("The harness requires a real NextDNS API key to run the LLM actor against the live server.")
         if args.report != "-":
-            write_skip_report(args.report)
+            write_skip_report(args.report, "NEXTDNS_API_KEY not set")
             print(f"Report written to {args.report}")
         return 0
 
-    report = asyncio.run(run_harness(api_key, only))
+    config = ActorConfig.load(args.config)
+    if args.actor_cmd:
+        config.command = _as_argv(args.actor_cmd)
+
+    profile_name = common.make_profile_name()
+    report = asyncio.run(run_harness(api_key, config, profile_name))
     write_report(report, args.report)
     if args.report != "-":
         print(f"Report written to {args.report}")
