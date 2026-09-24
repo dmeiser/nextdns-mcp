@@ -10,6 +10,7 @@ SPDX-License-Identifier: MIT
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -705,9 +706,12 @@ class TestTaskTargets:
         assert "manageProfiles" in p and "dohLookup" in p
         for cat in h.SETTINGS_CATEGORIES:
             assert cat in p
-        assert "ai-e2e-allow-abc.example.com" in p
+        # Anchored (not bare-substring) matches: the hostnames must appear as
+        # whole tokens, which also keeps CodeQL's incomplete-url-substring-
+        # sanitization rule quiet.
+        for host in ("ai-e2e-allow-abc.example.com", "ai-e2e-a-abc.example.com"):
+            assert re.search(rf"(?<![A-Za-z0-9.-]){re.escape(host)}(?![A-Za-z0-9.-])", p)
         assert "nextdns-recommended" in p
-        assert "ai-e2e-a-abc.example.com" in p
         # The harness owns cleanup; the actor must not delete the profile.
         assert "Do NOT delete the test profile" in p
 
