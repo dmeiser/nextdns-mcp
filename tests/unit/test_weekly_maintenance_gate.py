@@ -100,16 +100,14 @@ def test_approval_gate_is_wired_as_required_output(workflow: dict) -> None:
     condition ``== 'true'`` is false — so the merge is blocked, not bypassed.
     """
     wait_checks = _jobs(workflow)["wait-checks"]
-    assert any(
-        "maintainer_approved" in str(v) for v in wait_checks.get("outputs", {}).values()
-    ), "wait-checks must expose the maintainer_approved gate"
+    assert any("maintainer_approved" in str(v) for v in wait_checks.get("outputs", {}).values()), (
+        "wait-checks must expose the maintainer_approved gate"
+    )
     assert "maintainer_approved" in _merge_if(workflow)
 
 
 def _wait_approval_script(workflow: dict) -> str:
-    step = next(
-        s for s in _jobs(workflow)["wait-checks"]["steps"] if s.get("id") == "wait_approval"
-    )
+    step = next(s for s in _jobs(workflow)["wait-checks"]["steps"] if s.get("id") == "wait_approval")
     # Normalize GitHub Actions template expressions, which are unresolvable here.
     return re.sub(r"\$\{\{[^{}]*\}\}", "", step["run"])
 
