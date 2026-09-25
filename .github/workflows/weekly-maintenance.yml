@@ -389,8 +389,10 @@ jobs:
               "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100&sort=created&direction=desc" \
               --jq '.' 2>/dev/null || echo "[]")
 
+            # Reviews are returned newest-first; keep only each reviewer's
+            # LATEST review so a superseded approval cannot open the gate.
             APPROVED=$(echo "$REVIEWS_JSON" | jq -r '
-              [ .[]
+              [ unique_by(.user.login)[]
                 | select(.state == "APPROVED")
                 | .user.login
               ] | map(ascii_downcase) | join(",")')

@@ -115,9 +115,19 @@ def _wait_approval_script(workflow: dict) -> str:
 
 
 def _run_wait_approval(
-    workflow: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, maintainers: str, reviews: list
+    workflow: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    maintainers: str,
+    reviews: list,
+    timeout: float = 120,
 ) -> str:
-    """Execute the extracted wait_approval script with a mocked ``gh`` binary."""
+    """Execute the extracted wait_approval script with a mocked ``gh`` binary.
+
+    Returns the accumulated GITHUB_OUTPUT content. If ``timeout`` expires the
+    script is killed and the output collected so far is returned — a gate that
+    never opens keeps polling, which is itself the observable behavior.
+    """
     if shutil.which("bash") is None or shutil.which("jq") is None:
         pytest.skip("behavioral gate test requires bash and jq")
     bin_dir = tmp_path / "bin"
@@ -132,13 +142,16 @@ def _run_wait_approval(
     monkeypatch.setenv("MAINTAINERS", maintainers)
     monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    subprocess.run(
-        ["bash", "-c", _wait_approval_script(workflow)],
-        check=True,
-        cwd=tmp_path,
-        timeout=120,
-    )
-    return output_file.read_text()
+    try:
+        subprocess.run(
+            ["bash", "-c", _wait_approval_script(workflow)],
+            check=True,
+            cwd=tmp_path,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    return output_file.read_text() if output_file.exists() else ""
 
 
 def test_wait_approval_accepts_approval_from_named_maintainer(
@@ -167,4 +180,47 @@ def test_wait_approval_fails_closed_without_maintainers(
         reviews=[{"state": "APPROVED", "user": {"login": "Alice"}}],
     )
     assert "maintainer_approved=false" in output
+    assert "maintainer_approved=true" not in output
+
+
+def test_wait_approval_accepts_latest_approval_after_changes(
+    workflow: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A maintainer whose NEWEST review is APPROVED opens the gate.
+
+    Positive control for the latest-review-only semantics: an older
+    CHANGES_REQUESTED followed by a newer APPROVED must still merge.
+    """
+    output = _run_wait_approval(
+        workflow,
+        tmp_path,
+        monkeypatch,
+        maintainers="alice",
+        reviews=[
+            {"state": "APPROVED", "user": {"login": "alice"}},
+            {"state": "CHANGES_REQUESTED", "user": {"login": "alice"}},
+        ],
+    )
+    assert "maintainer_approved=true" in output
+
+
+def test_wait_approval_ignores_superseded_approval(
+    workflow: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A maintainer's stale APPROVED must not open the gate after later CHANGES_REQUESTED.
+
+    The reviews API returns history newest-first; here the maintainer's newest
+    review is CHANGES_REQUESTED, so no maintainer_approved=true may be emitted.
+    """
+    output = _run_wait_approval(
+        workflow,
+        tmp_path,
+        monkeypatch,
+        maintainers="alice",
+        reviews=[
+            {"state": "CHANGES_REQUESTED", "user": {"login": "alice"}},
+            {"state": "APPROVED", "user": {"login": "alice"}},
+        ],
+        timeout=5,
+    )
     assert "maintainer_approved=true" not in output
