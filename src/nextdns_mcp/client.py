@@ -16,6 +16,7 @@ from .config import (
     can_write_profile,
     get_api_key,
     get_http_timeout,
+    get_readable_profiles_set,
     get_writable_profiles_set,
     is_read_only,
 )
@@ -163,6 +164,20 @@ class AccessControlledClient(httpx.AsyncClient):
 
         return None
 
+    def _check_collection_read_access(self, method: str, url: str) -> httpx.Response | None:
+        """Enforce global read denials for collection endpoints (no profile_id in URL).
+
+        Collection endpoints such as GET /profiles list profile-scoped resources, so
+        they must respect the readable-profile deny-all default even though the URL
+        carries no profile_id.
+        """
+        if get_readable_profiles_set() is None:
+            error_msg = "Read access denied: no profiles are readable"
+            logger.warning(f"{error_msg} (method={method}, url={url})")
+            return create_access_denied_response(method, url, error_msg, "")
+
+        return None
+
     def _check_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
         """Check access control for profile operations."""
         if is_write_operation(method):
@@ -206,7 +221,9 @@ class AccessControlledClient(httpx.AsyncClient):
             # still create profile-scoped resources; enforce global write denials.
             error_response = self._check_collection_write_access(method, url)
         else:
-            error_response = None
+            # Collection reads (e.g., GET /profiles) carry no profile_id but must
+            # still respect the readable-profile deny-all default.
+            error_response = self._check_collection_read_access(method, url)
         if error_response:
             return error_response
 
