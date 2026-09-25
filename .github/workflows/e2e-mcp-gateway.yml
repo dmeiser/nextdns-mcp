@@ -60,9 +60,15 @@ jobs:
           activate-environment: "true"
 
       - name: Build docker-mcp plugin from source
+        env:
+          # Pin the MCP Gateway checkout to a release tag so the E2E build is
+          # reproducible and immune to supply-chain risk from a mutable upstream
+          # HEAD. Bump this tag deliberately when a newer gateway is wanted.
+          MCP_GATEWAY_REF: v0.44.1
         run: |
-          # Clone the MCP Gateway repo at latest HEAD
-          git clone --depth 1 https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway
+          # Clone the MCP Gateway repo at a pinned release tag (not HEAD).
+          git clone --depth 1 --branch "${MCP_GATEWAY_REF}" \
+            https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway
           cd /tmp/mcp-gateway
           
           # Build the plugin

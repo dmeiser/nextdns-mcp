@@ -9,11 +9,23 @@ name: Weekly Maintenance
 #   3. Run formatters (isort, black, ruff) + unit tests locally
 #   4. Push a release branch and open a PR
 #   5. Wait up to 90 min for all CI checks to pass
-#   6. Scan Copilot review comments for critical keywords; block + open issue if found
-#   7. Auto-merge the PR
-#   8. Create the formal GitHub release (tag + generated notes)
+#   6. Wait for an approving review from a named maintainer (required gate)
+#   7. Scan Copilot review comments for critical keywords — a BLOCK signal only
+#   8. Auto-merge the PR only when checks are green AND a maintainer approved
+#      AND the keyword scan found nothing critical
+#   9. Create the formal GitHub release (tag + generated notes)
+#
+# Merge gating model (issue #138):
+#   Merging requires THREE independent gates, all of which must pass:
+#     (a) Full CI green (wait-checks.checks_passed == true)
+#     (b) A maintainer approval review (wait-checks.maintainer_approved == true)
+#     (c) No critical keyword in Copilot review (review.safe_to_merge == true)
+#   The keyword scan is a block signal only: it can stop a merge, but it can
+#   never be the sole thing that permits one. Approval (b) is a real
+#   required-check gate that the regex alone can never satisfy.
 #
 # What is NOT automated (requires human judgment):
+#   - Approving the auto-PR (a maintainer must review and approve it)
 #   - Evaluating non-critical Copilot review suggestions or acting on them
 #   - Deciding whether a breaking API change from a dependency is acceptable
 #
@@ -278,6 +290,7 @@ jobs:
       checks: read
     outputs:
       checks_passed: ${{ steps.poll.outputs.checks_passed }}
+      maintainer_approved: ${{ steps.wait_approval.outputs.maintainer_approved }}
 
     steps:
       - name: Poll checks (max 90 min)
@@ -335,6 +348,84 @@ jobs:
 
           echo "⏰ Timed out after ${MAX_ATTEMPTS} minutes waiting for checks"
           echo "checks_passed=false" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for a maintainer approval review (required gate)
+        id: wait_approval
+        if: steps.poll.outputs.checks_passed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAINTAINERS: ${{ vars.WEEKLY_MAINTENERS }}
+        run: |
+          PR_NUMBER="${{ needs.prepare.outputs.pr_number }}"
+          REPO="${{ github.repository }}"
+
+          # ── Required approval gate ────────────────────────────────────────
+          # This is the merge's required human gate. The Copilot keyword scan
+          # (review job) is a BLOCK signal only — it can stop a merge, but it
+          # can never be the sole thing that allows one. A real approval review
+          # from a named maintainer is required before the merge job runs.
+          #
+          # MAINTAINERS is a comma-separated list of maintainer GitHub logins
+          # exposed as a repository variable (WEEKLY_MAINTENERS). When the
+          # variable is unset the gate falls back to ANY approving review, so
+          # the gate is never bypassed by an empty list.
+          # ────────────────────────────────────────────────────────────────
+          MAX_ATTEMPTS=360   # 360 × 60s = 6 hours
+          ATTEMPT=0
+
+          if [ -n "$MAINTAINERS" ]; then
+            echo "Waiting up to ${MAX_ATTEMPTS} min for an approving review from a maintainer: ${MAINTAINERS}"
+          else
+            echo "WEEKLY_MAINTENERS variable not set — requiring ANY approving review as the gate."
+          fi
+
+          while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+
+            # All reviews currently attached to the PR, newest first.
+            REVIEWS_JSON=$(gh api \
+              "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100&sort=created&direction=desc" \
+              --jq '.' 2>/dev/null || echo "[]")
+
+            APPROVED=$(echo "$REVIEWS_JSON" | jq -r '
+              [ .[]
+                | select(.state == "APPROVED")
+                | .user.login
+              ] | map(ascii_downcase) | join(",")')
+
+            if [ -z "$APPROVED" ]; then
+              echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — no approving review yet"
+            else
+              if [ -z "$MAINTAINERS" ]; then
+                echo "✅ Approving review present (any approver accepted): ${APPROVED}"
+                echo "maintainer_approved=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              MATCH=""
+              for approver in $(echo "$APPROVED" | tr ',' ' '); do
+                for allowed in $(echo "$MAINTAINERS" | tr ',' ' '); do
+                  if [ "${approver,,}" = "${allowed,,}" ]; then
+                    MATCH="$approver"
+                  fi
+                done
+                [ -n "$MATCH" ] && break
+              done
+
+              if [ -n "$MATCH" ]; then
+                echo "✅ Approving review from maintainer: ${MATCH}"
+                echo "maintainer_approved=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — approvals present (${APPROVED}) but none from a maintainer yet"
+            fi
+
+            sleep 60
+          done
+
+          echo "⏰ Timed out after ${MAX_ATTEMPTS} minutes waiting for a maintainer approval review."
+          echo "The PR will NOT be auto-merged. A maintainer must approve and merge it manually."
+          echo "maintainer_approved=false" >> "$GITHUB_OUTPUT"
 
 
   # ───────────────────────────────────────────────────────────────────────────
@@ -439,7 +530,15 @@ jobs:
   merge:
     name: Merge PR
     needs: [prepare, wait-checks, review]
-    if: needs.review.outputs.safe_to_merge == 'true'
+    # Three independent gates must ALL pass before the PR is merged (issue #138):
+    #   (a) CI green            -> needs.wait-checks.outputs.checks_passed (transitive: review only runs on green CI)
+    #   (b) maintainer approval -> needs.wait-checks.outputs.maintainer_approved (a real required-check gate)
+    #   (c) keyword block clear -> needs.review.outputs.safe_to_merge (a block signal, never the sole gate)
+    # The keyword regex alone can never open this gate: (b) requires a human
+    # maintainer approval that the scan cannot produce.
+    if: >-
+      needs.review.outputs.safe_to_merge == 'true'
+      && needs.wait-checks.outputs.maintainer_approved == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -451,10 +550,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUMBER="${{ needs.prepare.outputs.pr_number }}"
-          echo "Enabling auto-merge on PR #$PR_NUMBER..."
+          echo "Merging PR #$PR_NUMBER (checks green + maintainer approved + no critical keywords)..."
 
-          # Direct merge — no --auto needed because wait-checks already confirmed CI is green,
-          # and github-actions[bot] is configured as a branch-protection bypass actor.
+          # Direct merge — safe because the job `if` already confirmed all three
+          # gates: CI green, a maintainer approval review, and a clean keyword
+          # scan. github-actions[bot] is configured as a branch-protection
+          # bypass actor so it can merge its own release branch.
           gh pr merge "$PR_NUMBER" --merge
 
           echo "Waiting for merge to complete (max 10 min)..."
