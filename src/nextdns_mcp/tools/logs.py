@@ -16,6 +16,15 @@ from ..utils import _api_request, _build_query_params, _cap_limit, _validate_pro
 
 logger = logging.getLogger(__name__)
 
+
+def _unlink_temp_file(path: str) -> None:
+    """Best-effort removal of a temp file; never masks the original error."""
+    try:
+        os.unlink(path)
+    except OSError:
+        logger.warning(f"Failed to remove temp log file: {path}")
+
+
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 LogOperation = Literal["get", "clear", "download"]
 
@@ -38,9 +47,12 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
     tool payload returns only the file path, size, row count, and preview —
     never the full CSV text.
     """
+    fd: int | None
     fd, path = tempfile.mkstemp(suffix=".csv", prefix="nextdns_logs_")
     try:
-        async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download", follow_redirects=True) as response:
+        async with client.api_client.stream(
+            "GET", f"/profiles/{profile_id}/logs/download", follow_redirects=True
+        ) as response:
             response.raise_for_status()
             preview: list[str] = []
             preview_bytes = 0
@@ -48,6 +60,7 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
             total_chars = 0
             open_line = False
             with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as out:
+                fd = None  # ownership transferred to the file object
                 async for text in response.aiter_text():
                     out.write(text)
                     if not text:
@@ -81,7 +94,9 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
             },
         }
     except httpx.HTTPError as e:
-        os.unlink(path)
+        if fd is not None:
+            os.close(fd)
+        _unlink_temp_file(path)
         logger.error(f"HTTP error downloading logs: {e}")
         error_response = getattr(e, "response", None)
         status_code = error_response.status_code if error_response is not None else None
@@ -90,7 +105,9 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
             "status_code": status_code,
         }
     except Exception as e:
-        os.unlink(path)
+        if fd is not None:
+            os.close(fd)
+        _unlink_temp_file(path)
         logger.error(f"Unexpected error downloading logs: {e}")
         raise RuntimeError(f"Unexpected error while downloading logs: {e}") from e
 

@@ -6,6 +6,8 @@ SPDX-License-Identifier: MIT
 import logging
 import posixpath
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -147,6 +149,27 @@ class AccessControlledClient(httpx.AsyncClient):
 
         self._coerce_json_body(kwargs)
         return await super().request(method, url, **kwargs)
+
+    @asynccontextmanager
+    async def stream(self, method: str, url: Any, **kwargs: Any) -> AsyncIterator[httpx.Response]:  # type: ignore[override]
+        """Stream a response with access control checks.
+
+        httpx's ``stream()`` does not call ``request()``, so the ACL guard is
+        applied here as well. When access is denied, the synthetic 403 response
+        is yielded without any network request, so the caller's
+        ``raise_for_status()`` surfaces the same 403-shaped error as request().
+        """
+        logger.info(f"HTTP Stream: {method} {url}")
+
+        profile_id = extract_profile_id_from_url(str(url))
+        if profile_id:
+            error_response = self._check_access(profile_id, method, str(url))
+            if error_response:
+                yield error_response
+                return
+
+        async with super().stream(method, url, **kwargs) as response:
+            yield response
 
 
 def create_nextdns_client() -> httpx.AsyncClient:

@@ -3,13 +3,15 @@
 import asyncio
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+import nextdns_mcp.config
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
+from nextdns_mcp.tools import logs as logs_module
 from nextdns_mcp.tools import profiles as profiles_module
 
 
@@ -436,9 +438,7 @@ class TestManageLogs:
         response.aiter_text = lambda: _async_chunks([csv_text])
         mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
         result = await server.manageLogs("download", "abc123")
-        mock_api_client.stream.assert_called_once_with(
-            "GET", "/profiles/abc123/logs/download", follow_redirects=True
-        )
+        mock_api_client.stream.assert_called_once_with("GET", "/profiles/abc123/logs/download", follow_redirects=True)
         assert result["content_type"] == "text/csv"
         assert result["size"] == len(csv_text.encode("utf-8"))
         assert result["row_count"] == 2
@@ -489,6 +489,43 @@ class TestManageLogs:
         mock_api_client.stream = MagicMock(side_effect=RuntimeError("boom"))
         with pytest.raises(RuntimeError, match="Unexpected error"):
             await server.manageLogs("download", "abc123")
+
+    @pytest.mark.asyncio
+    async def test_download_denied_profile_returns_403(self, monkeypatch):
+        """A profile outside NEXTDNS_READABLE_PROFILES gets a 403 on download, not a file."""
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "xyz999")
+        nextdns_mcp.config._readable_profiles_cache = None
+        nextdns_mcp.config._writable_profiles_cache = None
+        real_client = client_module.AccessControlledClient(base_url="https://api.nextdns.io")
+        monkeypatch.setattr(logs_module.client, "api_client", real_client)
+        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+            result = await server.manageLogs("download", "abc123")
+        await real_client.aclose()
+        mock_send.assert_not_called()
+        assert result["status_code"] == 403
+        assert "error" in result
+        assert "file_path" not in result
+
+    @pytest.mark.asyncio
+    async def test_download_denied_in_read_only_mode(self, monkeypatch):
+        """In read-only mode the write-implies-read fallback is gone, so download is denied.
+
+        Without read-only, NEXTDNS_WRITABLE_PROFILES=abc123 makes abc123 implicitly
+        readable; with read-only enabled the download must get a 403 instead.
+        """
+        monkeypatch.delenv("NEXTDNS_READABLE_PROFILES")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abc123")
+        monkeypatch.setenv("NEXTDNS_READ_ONLY", "true")
+        nextdns_mcp.config._readable_profiles_cache = None
+        nextdns_mcp.config._writable_profiles_cache = None
+        real_client = client_module.AccessControlledClient(base_url="https://api.nextdns.io")
+        monkeypatch.setattr(logs_module.client, "api_client", real_client)
+        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+            result = await server.manageLogs("download", "abc123")
+        await real_client.aclose()
+        mock_send.assert_not_called()
+        assert result["status_code"] == 403
+        assert "file_path" not in result
 
     @pytest.mark.asyncio
     async def test_get_limit_capped(self, mock_api_client):
