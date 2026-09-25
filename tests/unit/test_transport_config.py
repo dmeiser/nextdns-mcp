@@ -35,20 +35,24 @@ def test_http_transport_case_insensitive():
 
 
 def test_default_host_and_port():
-    """Verify default HTTP host and port values."""
+    """Verify default HTTP host and port values.
+
+    The default host must be loopback-only (see #142): the HTTP endpoint has
+    no built-in authentication, so it must not bind all interfaces by default.
+    """
     with patch.dict(os.environ, {}, clear=True):
-        host = os.getenv("MCP_HOST", "0.0.0.0")
+        host = os.getenv("MCP_HOST", "127.0.0.1")
         port = int(os.getenv("MCP_PORT", "8000"))
-        assert host == "0.0.0.0"
+        assert host == "127.0.0.1"
         assert port == 8000
 
 
 def test_custom_host_and_port():
     """Verify custom HTTP host and port are respected."""
-    with patch.dict(os.environ, {"MCP_HOST": "127.0.0.1", "MCP_PORT": "9000"}):
-        host = os.getenv("MCP_HOST", "0.0.0.0")
+    with patch.dict(os.environ, {"MCP_HOST": "0.0.0.0", "MCP_PORT": "9000"}):
+        host = os.getenv("MCP_HOST", "127.0.0.1")
         port = int(os.getenv("MCP_PORT", "8000"))
-        assert host == "127.0.0.1"
+        assert host == "0.0.0.0"
         assert port == 9000
 
 

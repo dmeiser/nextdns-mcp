@@ -129,6 +129,36 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
    uv run python -m nextdns_mcp.server
    ```
 
+## HTTP Transport (network access)
+
+By default the server uses **stdio**, which is what MCP clients (Claude Desktop, Docker MCP Gateway, CLI tools) expect. You can switch to a **streamable-HTTP** transport for network-based clients, but the HTTP endpoint has **no built-in authentication**.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_TRANSPORT` | `stdio` | Set to `http` to serve over streamable-HTTP |
+| `MCP_HOST` | `127.0.0.1` | Interface to bind. Loopback-only by default |
+| `MCP_PORT` | `8000` | Port to listen on |
+
+Because there is no authentication, the default bind is **loopback-only** (`127.0.0.1`). This means the HTTP endpoint is only reachable from the same host, which is safe for local development and same-host proxies.
+
+### Binding to a non-loopback interface (explicit opt-in)
+
+To make the endpoint reachable from other hosts you must **explicitly** set `MCP_HOST` to a non-loopback address (e.g. `0.0.0.0` or a specific IP). The server logs a prominent `SECURITY` warning on startup when this happens, because it exposes every tool — and the full reachability of your NextDNS API key — to anyone who can reach the port.
+
+A non-loopback bind is **only** production-suitable when it is fronted by a reverse proxy (or gateway) that provides **authentication and/or TLS**, such that unauthenticated remote callers cannot reach the `/mcp` endpoint. Recommended setup:
+
+- Terminate TLS at the reverse proxy.
+- Require authentication (e.g. a shared secret, OAuth2/OIDC, or IP allow-listing) before forwarding to the MCP server.
+- Bind the MCP server itself to a private interface or `127.0.0.1` behind the proxy where possible.
+
+```bash
+# Loopback-only (default, safe for local use):
+MCP_TRANSPORT=http uv run python -m nextdns_mcp.server
+
+# Non-loopback bind — MUST be placed behind an authenticating reverse proxy:
+MCP_TRANSPORT=http MCP_HOST=0.0.0.0 uv run python -m nextdns_mcp.server
+```
+
 ## Architecture
 
 This server uses a modern, declarative approach:
