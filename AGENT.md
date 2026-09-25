@@ -48,6 +48,14 @@ This file contains repository-specific agent rules. Agents should follow these w
     - Set environment variables in `.env` file (see `.env.example`)
     - Required: `NEXTDNS_API_KEY`, `NEXTDNS_READABLE_PROFILES`, `NEXTDNS_WRITABLE_PROFILES`
     - Optional: `ALLOW_LIVE_WRITES=true` (default: read-only mode)
+  - **E2E CI Security Contract (issue #137):** `pull_request` runs NEVER get the
+    repo `NEXTDNS_API_KEY` and NEVER run live writes; the gateway E2E job is
+    excluded for PRs and a `pr-security` job runs instead. Live writes are an
+    explicit maintainer `workflow_dispatch` opt-in (`allow_live_writes`
+    defaults to `false`). The invariants are enforced by
+    `scripts/assert_workflow_security.py` (run in CI) and
+    `tests/unit/test_workflow_security.py`; keep those green when editing the
+    workflow.
   - **When to Run E2E Tests:**
     - When fixing bugs or adding features that affect any MCP tool
     - Before reporting completion of any API changes
