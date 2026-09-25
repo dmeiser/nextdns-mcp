@@ -7,6 +7,7 @@ import pytest
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
+from nextdns_mcp.tools import logs as logs_module
 from nextdns_mcp.tools import profiles as profiles_module
 
 
@@ -401,16 +402,125 @@ class TestManageLogs:
 
     @pytest.mark.asyncio
     async def test_download(self, mock_api_client):
-        response = MagicMock()
-        response.status_code = 200
-        response.content = b"csv,data"
-        response.headers = {"content-type": "text/csv"}
-        response.text = "csv,data"
+        response = _make_download_response(b"csv,data")
         mock_api_client.get.return_value = response
         result = await server.manageLogs("download", "abc123")
         assert result["content_type"] == "text/csv"
         assert result["size"] == 8
-        mock_api_client.get.assert_called_once_with("/profiles/abc123/logs/download", follow_redirects=True)
+        mock_api_client.get.assert_called_once_with("/profiles/abc123/logs/download")
+
+    @pytest.mark.asyncio
+    async def test_download_does_not_pass_follow_redirects_to_authenticated_client(self, mock_api_client):
+        """The authenticated client must never follow redirects (issue #130)."""
+        mock_api_client.get.return_value = _make_download_response(b"csv,data")
+        await server.manageLogs("download", "abc123")
+        args, kwargs = mock_api_client.get.call_args
+        assert kwargs.get("follow_redirects") is not True
+        assert all(arg is not True for arg in args)
+
+
+def _make_download_response(content: bytes, content_type: str = "text/csv") -> httpx.Response:
+    """Build a final (non-redirect) download response as httpx would return it."""
+    request = httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/logs/download")
+    return httpx.Response(200, content=content, request=request, headers={"content-type": content_type})
+
+
+class _FakeRedirectClient:
+    """Stands in for the unauthenticated httpx.AsyncClient used for redirected fetches."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def get(self, url) -> httpx.Response:
+        self.last_request = httpx.Request("GET", str(url))
+        return httpx.Response(
+            302,
+            request=self.last_request,
+            headers={"location": "https://cdn.example.com/again.csv"},
+        )
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _FakeFinalClient:
+    """Unauthenticated stand-in whose redirected fetch returns the final CSV body."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def get(self, url) -> httpx.Response:
+        request = httpx.Request("GET", str(url))
+        self.last_request = request
+        return httpx.Response(200, content=b"csv,data", request=request, headers={"content-type": "text/csv"})
+
+    async def aclose(self) -> None:
+        pass
+
+
+class TestManageLogsDownloadRedirects:
+    """Regression tests for issue #130: the API key must not leak on log-download redirects."""
+
+    def _redirect_response(self, location: str) -> httpx.Request:
+        """Build a 302 redirect response for the authenticated download request."""
+        request = httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/logs/download")
+        return httpx.Response(302, request=request, headers={"location": location})
+
+    @pytest.mark.asyncio
+    async def test_api_key_absent_on_redirected_request(self, mock_api_client, monkeypatch):
+        """Mock-302 key-leak scenario: the X-Api-Key must be absent on the redirected request."""
+        mock_api_client.get.return_value = self._redirect_response(
+            "https://cdn.example.com/profiles/abc123/logs.csv?sig=1"
+        )
+        fake = _FakeFinalClient()
+
+        def fake_client(*args, **kwargs):
+            return fake
+
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", fake_client)
+
+        result = await server.manageLogs("download", "abc123")
+        assert result["content_type"] == "text/csv"
+        assert result["data"] == "csv,data"
+
+        # The authenticated client was not asked to follow the redirect.
+        mock_api_client.get.assert_called_once_with("/profiles/abc123/logs/download")
+        assert mock_api_client.get.call_args.kwargs.get("follow_redirects") is not True
+
+        # The redirected request went to the third-party host...
+        assert str(fake.last_request.url) == "https://cdn.example.com/profiles/abc123/logs.csv?sig=1"
+        # ...and it carried no API key header.
+        assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
+
+    @pytest.mark.asyncio
+    async def test_relative_location_resolved_against_origin(self, mock_api_client, monkeypatch):
+        """A relative Location is resolved against the API origin and still sent unauthenticated."""
+        mock_api_client.get.return_value = self._redirect_response("/redirects/abc123.csv")
+        fake = _FakeFinalClient()
+
+        def fake_client(*args, **kwargs):
+            return fake
+
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", fake_client)
+
+        result = await server.manageLogs("download", "abc123")
+        assert result["size"] == 8
+        assert str(fake.last_request.url) == "https://api.nextdns.io/redirects/abc123.csv"
+        assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
+
+    @pytest.mark.asyncio
+    async def test_redirect_loop_is_bounded(self, mock_api_client, monkeypatch):
+        """A redirect loop must raise a bounded HTTP error instead of looping forever."""
+        mock_api_client.get.return_value = self._redirect_response("https://cdn.example.com/logs.csv")
+
+        def fake_client(*args, **kwargs):
+            return _FakeRedirectClient()
+
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", fake_client)
+
+        result = await server.manageLogs("download", "abc123")
+        assert "error" in result
+        assert "Exceeded 5 redirects" in result["error"]
 
     @pytest.mark.asyncio
     async def test_download_http_error(self, mock_api_client):
