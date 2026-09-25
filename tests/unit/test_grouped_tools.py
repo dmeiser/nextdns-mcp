@@ -1,6 +1,7 @@
 """Unit tests for the grouped CRUD tools in server.py."""
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -471,6 +472,59 @@ class TestManageLogs:
         assert result["preview"]["bytes"] <= 256 * 1024
         assert "x" * 1000 * 2 not in result["preview"]["text"]
         await asyncio.to_thread(os.unlink, result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_download_empty_chunk_is_skipped(self, mock_api_client):
+        """An empty text chunk from the stream does not corrupt counts or preview."""
+        csv_text = "date,time,question,answer\n2024-01-01,12:00:00,example.com,A\n"
+        response = MagicMock()
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks(["", csv_text, ""])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert result["row_count"] == 2
+        assert result["preview"]["line_count"] == 2
+        assert result["preview"]["truncated"] is False
+        await asyncio.to_thread(os.unlink, result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_download_preview_capped_by_bytes(self, mock_api_client):
+        """A single line larger than the byte cap yields a truncated preview."""
+        header = "date,time,question,answer\n"
+        huge_line = "x" * (300 * 1024) + "\n"
+        response = MagicMock()
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([header + huge_line])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert result["preview"]["bytes"] <= 256 * 1024
+        assert result["preview"]["text"] == header
+        assert result["preview"]["truncated"] is True
+        assert result["row_count"] == 2
+        await asyncio.to_thread(os.unlink, result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_download_final_line_without_newline_counts_as_row(self, mock_api_client):
+        """A CSV whose last line has no trailing newline still counts that row."""
+        csv_text = "date,time,question,answer\n2024-01-01,12:00:00,example.com,A"
+        response = MagicMock()
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([csv_text])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert result["row_count"] == 2
+        assert result["preview"]["line_count"] == 2
+        await asyncio.to_thread(os.unlink, result["file_path"])
+
+    def test_unlink_temp_file_missing_path_logs_warning(self, caplog):
+        """A failed temp-file removal logs a warning and never raises."""
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"):
+            logs_module._unlink_temp_file("/nonexistent/nextdns_logs_missing.csv")
+        assert not os.path.exists("/nonexistent/nextdns_logs_missing.csv")
+        assert any("Failed to remove temp log file" in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
     async def test_download_http_error(self, mock_api_client):
