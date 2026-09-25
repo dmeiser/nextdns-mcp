@@ -15,6 +15,11 @@ These tests pin that structure so a regression that lets the regex stand in for
 a human review is caught at CI time.
 """
 
+import json
+import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -87,25 +92,79 @@ def test_keyword_scan_is_block_signal_never_sole_gate(workflow: dict) -> None:
     assert scan_terms != approval_terms
 
 
-def test_approval_gate_is_fail_safe_on_timeout(workflow: dict) -> None:
-    """If no maintainer approves in time, the merge is blocked (not bypassed).
+def test_approval_gate_is_wired_as_required_output(workflow: dict) -> None:
+    """The approval gate output is exposed by wait-checks and feeds the merge ``if``.
 
-    The approval step must be wired as a real gate (its output feeds the merge
-    ``if``), and its timeout path must set ``maintainer_approved=false`` so that
-    a missing approval is fail-safe: it blocks the merge rather than defaulting
-    to merging.
+    If the approval step never emits ``maintainer_approved=true`` (timeout,
+    missing variable, no approval), the output stays empty and the merge
+    condition ``== 'true'`` is false — so the merge is blocked, not bypassed.
     """
     wait_checks = _jobs(workflow)["wait-checks"]
-    # The approval gate output is wired into the job outputs...
     assert any(
         "maintainer_approved" in str(v) for v in wait_checks.get("outputs", {}).values()
     ), "wait-checks must expose the maintainer_approved gate"
-    # ...and that same output feeds the merge condition.
     assert "maintainer_approved" in _merge_if(workflow)
 
-    # The approval step exists and its script fails safe on timeout.
-    step = next(s for s in wait_checks["steps"] if s.get("id") == "wait_approval")
-    script = step.get("run", "")
-    assert "maintainer_approved=false" in script, "timeout must set maintainer_approved=false"
-    # The true path and the timeout path must be distinct and explicit.
-    assert "maintainer_approved=true" in script
+
+def _wait_approval_script(workflow: dict) -> str:
+    step = next(
+        s for s in _jobs(workflow)["wait-checks"]["steps"] if s.get("id") == "wait_approval"
+    )
+    # Normalize GitHub Actions template expressions, which are unresolvable here.
+    return re.sub(r"\$\{\{[^{}]*\}\}", "", step["run"])
+
+
+def _run_wait_approval(
+    workflow: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, maintainers: str, reviews: list
+) -> str:
+    """Execute the extracted wait_approval script with a mocked ``gh`` binary."""
+    if shutil.which("bash") is None or shutil.which("jq") is None:
+        pytest.skip("behavioral gate test requires bash and jq")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    reviews_file = tmp_path / "reviews.json"
+    reviews_file.write_text(json.dumps(reviews))
+    gh = bin_dir / "gh"
+    gh.write_text('#!/usr/bin/env bash\ncat "$FAKE_REVIEWS_JSON"\n')
+    gh.chmod(0o755)
+    output_file = tmp_path / "github_output.txt"
+    monkeypatch.setenv("FAKE_REVIEWS_JSON", str(reviews_file))
+    monkeypatch.setenv("MAINTAINERS", maintainers)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output_file))
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    subprocess.run(
+        ["bash", "-c", _wait_approval_script(workflow)],
+        check=True,
+        cwd=tmp_path,
+        timeout=120,
+    )
+    return output_file.read_text()
+
+
+def test_wait_approval_accepts_approval_from_named_maintainer(
+    workflow: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An APPROVED review from a listed maintainer sets maintainer_approved=true."""
+    output = _run_wait_approval(
+        workflow,
+        tmp_path,
+        monkeypatch,
+        maintainers="someone,alice",
+        reviews=[{"state": "APPROVED", "user": {"login": "Alice"}}],
+    )
+    assert "maintainer_approved=true" in output
+
+
+def test_wait_approval_fails_closed_without_maintainers(
+    workflow: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With WEEKLY_MAINTAINERS unset, the gate fails closed even if a review approves."""
+    output = _run_wait_approval(
+        workflow,
+        tmp_path,
+        monkeypatch,
+        maintainers="",
+        reviews=[{"state": "APPROVED", "user": {"login": "Alice"}}],
+    )
+    assert "maintainer_approved=false" in output
+    assert "maintainer_approved=true" not in output

@@ -27,17 +27,6 @@ def _build_step(workflow: dict) -> dict:
     raise AssertionError("expected the 'Build docker-mcp plugin from source' step to exist")
 
 
-def test_gateway_checkout_is_pinned_not_head(workflow: dict) -> None:
-    """The MCP Gateway clone must pin an explicit ref, not follow mutable HEAD."""
-    step = _build_step(workflow)
-    run = step.get("run", "")
-    assert "git clone" in run
-    # A pinned clone names a branch/tag. Cloning without --branch follows HEAD.
-    assert "--branch" in run, "the gateway clone must pin a ref with --branch (not follow HEAD)"
-    # The pinned ref must be declared, not a bare HEAD/lazy default.
-    assert "MCP_GATEWAY_REF" in run
-
-
 def test_gateway_ref_is_a_release_tag(workflow: dict) -> None:
     """The pinned ref must be a concrete v<semver> release tag."""
     step = _build_step(workflow)

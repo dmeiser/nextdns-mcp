@@ -367,17 +367,19 @@ jobs:
           #
           # MAINTAINERS is a comma-separated list of maintainer GitHub logins
           # exposed as a repository variable (WEEKLY_MAINTENERS). When the
-          # variable is unset the gate falls back to ANY approving review, so
-          # the gate is never bypassed by an empty list.
+          # variable is unset the gate fails closed: no auto-merge.
           # ────────────────────────────────────────────────────────────────
-          MAX_ATTEMPTS=360   # 360 × 60s = 6 hours
+          MAX_ATTEMPTS=250   # 250 × 60s ≈ 4h10m; fits the 6h job limit after the 90-min checks poll
           ATTEMPT=0
 
-          if [ -n "$MAINTAINERS" ]; then
-            echo "Waiting up to ${MAX_ATTEMPTS} min for an approving review from a maintainer: ${MAINTAINERS}"
-          else
-            echo "WEEKLY_MAINTENERS variable not set — requiring ANY approving review as the gate."
+          if [ -z "$MAINTAINERS" ]; then
+            echo "WEEKLY_MAINTAINERS repository variable is not set — failing closed."
+            echo "The PR will NOT be auto-merged. Set WEEKLY_MAINTAINERS to enable auto-merge."
+            echo "maintainer_approved=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          echo "Waiting up to ${MAX_ATTEMPTS} min for an approving review from a maintainer: ${MAINTAINERS}"
 
           while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
             ATTEMPT=$((ATTEMPT + 1))
@@ -396,12 +398,6 @@ jobs:
             if [ -z "$APPROVED" ]; then
               echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — no approving review yet"
             else
-              if [ -z "$MAINTAINERS" ]; then
-                echo "✅ Approving review present (any approver accepted): ${APPROVED}"
-                echo "maintainer_approved=true" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
-
               MATCH=""
               for approver in $(echo "$APPROVED" | tr ',' ' '); do
                 for allowed in $(echo "$MAINTAINERS" | tr ',' ' '); do
