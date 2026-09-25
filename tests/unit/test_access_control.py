@@ -240,10 +240,20 @@ class TestExtractProfileIdFromUrl:
         result = extract_profile_id_from_url("/profiles/ghi789/privacy/blocklists")
         assert result == "ghi789"
 
-    def test_extracts_without_leading_slash(self):
-        """Test extracting profile ID without leading slash."""
+    def test_returns_none_for_path_without_leading_slash(self):
+        """Test that paths without a leading slash are not classified as profile paths."""
         result = extract_profile_id_from_url("profiles/jkl012/logs")
-        assert result == "jkl012"
+        assert result is None
+
+    def test_returns_none_for_absolute_url(self):
+        """Test that absolute URLs are rejected."""
+        result = extract_profile_id_from_url("https://evil.example/profiles/abc123/settings")
+        assert result is None
+
+    def test_returns_none_for_authority_url(self):
+        """Test that scheme-relative authority URLs are rejected."""
+        result = extract_profile_id_from_url("//evil.example/profiles/abc123/settings")
+        assert result is None
 
     def test_returns_none_for_list_profiles(self):
         """Test that /profiles without ID returns None."""
@@ -311,6 +321,7 @@ class TestExtractProfileIdFromUrlValidation:
     """Test that extract_profile_id_from_url rejects unsafe IDs."""
 
     def test_returns_none_for_path_traversal_profile_id(self):
+        """Test that traversal payloads are rejected instead of extracting an id."""
         result = extract_profile_id_from_url("/profiles/allowed123/../../profiles/denied456/settings")
         assert result is None
 

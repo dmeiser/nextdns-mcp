@@ -33,18 +33,30 @@ def extract_profile_id_from_url(url: str) -> str | None:
         url: The URL path (e.g., "/profiles/abc123/settings")
 
     Returns:
-        The profile_id if found and safe, None otherwise
+        The profile_id if found and safe, None otherwise. Traversal payloads
+        and absolute URLs are rejected (returns None) so callers can fail
+        closed instead of silently skipping the access check.
     """
-    # Reject any path containing parent-directory references defensively.
-    # This blocks traversal payloads such as /profiles/allowed123/../../profiles/denied456
-    # before normalization.
-    if ".." in url:
+    parsed = httpx.URL(url)
+
+    # Reject absolute URLs and authority-bearing URLs (e.g., //host/path): they
+    # target a different host and must not be routed through the profile ACL.
+    if parsed.is_absolute_url or parsed.scheme or parsed.host:
+        return None
+
+    path = parsed.path
+
+    # Reject any path containing parent-directory references before matching.
+    # httpx does not normalize ".." segments, so /profiles/allowed123/../../profiles/denied456
+    # would otherwise be normalized downstream into the denied profile while the
+    # ACL check is skipped for the "safe" id we extracted here.
+    if ".." in path:
         return None
 
     # Normalize the path so that equivalent paths are treated consistently.
-    normalized = posixpath.normpath(url)
+    normalized = posixpath.normpath(path)
     # Match /profiles/{profile_id}/... pattern
-    match = re.match(r"^/?profiles/([^/]+)(?:/|$)", normalized)
+    match = re.match(r"^/profiles/([^/]+)(?:/|$)", normalized)
     if match:
         profile_id = match.group(1)
         if _SAFE_PROFILE_ID_PATTERN.match(profile_id):
@@ -139,11 +151,25 @@ class AccessControlledClient(httpx.AsyncClient):
         """
         logger.info(f"HTTP Request: {method} {url}")
 
+        parsed_url = httpx.URL(str(url))
+        is_absolute_url = parsed_url.is_absolute_url or bool(parsed_url.scheme) or bool(parsed_url.host)
+        contains_traversal = ".." in parsed_url.path
+        # /profiles paths that name something after the prefix but do not carry a
+        # safe, extractable profile id (e.g. /profiles/abc.def/settings).
+        unclassifiable_profiles_path = parsed_url.path.rstrip("/").startswith("/profiles/")
         profile_id = extract_profile_id_from_url(str(url))
+
         if profile_id:
             error_response = self._check_access(profile_id, method, url)
             if error_response:
                 return error_response
+        elif is_absolute_url or contains_traversal or unclassifiable_profiles_path:
+            # Fail closed: absolute/authority-bearing URLs, traversal payloads, and
+            # unclassifiable /profiles paths cannot be matched against the profile
+            # ACL, so deny them instead of letting them bypass the check entirely.
+            error_msg = f"Forbidden URL: {url!s}"
+            logger.warning(f"{error_msg} (method={method})")
+            return create_access_denied_response(method, url, error_msg, profile_id or "")
 
         self._coerce_json_body(kwargs)
         return await super().request(method, url, **kwargs)
