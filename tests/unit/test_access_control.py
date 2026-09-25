@@ -240,10 +240,10 @@ class TestExtractProfileIdFromUrl:
         result = extract_profile_id_from_url("/profiles/ghi789/privacy/blocklists")
         assert result == "ghi789"
 
-    def test_returns_none_for_path_without_leading_slash(self):
-        """Test that paths without a leading slash are not classified as profile paths."""
+    def test_extracts_without_leading_slash(self):
+        """Test extracting profile ID from a relative path without leading slash."""
         result = extract_profile_id_from_url("profiles/jkl012/logs")
-        assert result is None
+        assert result == "jkl012"
 
     def test_returns_none_for_absolute_url(self):
         """Test that absolute URLs are rejected."""
