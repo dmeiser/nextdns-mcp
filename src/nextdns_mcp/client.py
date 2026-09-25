@@ -160,7 +160,11 @@ class AccessControlledClient(httpx.AsyncClient):
         Returns:
             Response from the API, or a 403 Forbidden response if access is denied
         """
-        logger.info(f"HTTP Request: {method} {url}")
+        # Query strings can carry sensitive data (search terms, device IDs, cursor
+        # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
+        request_path = str(url).split("?", 1)[0]
+        logger.info(f"HTTP Request: {method} {request_path}")
+        logger.debug(f"HTTP Request: {method} {url}")
 
         request_path = _normalized_request_path(str(url))
         is_absolute_url = request_path is None

@@ -1,5 +1,6 @@
 """Integration tests for AccessControlledClient HTTP interception."""
 
+import logging
 import os
 from collections.abc import Callable
 from typing import Any
@@ -246,6 +247,55 @@ class TestAccessControlledClientFailsClosed:
         mock_super_request.assert_not_called()
         assert response.status_code == 403
         assert "error" in response.json()
+class TestAccessControlledClientRequestLogging:
+    """Regression tests for issue #139: query-string PII must not be logged at INFO."""
+
+    @pytest.mark.asyncio
+    async def test_query_string_not_logged_at_info(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """INFO request logs must contain only method + path, never the query string."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123")
+
+        sensitive_query = "search=secret-search-term&device=secret-device-id&cursor=secret-cursor-token"
+        request_url = f"/profiles/abc123/logs?{sensitive_query}"
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.client"):
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                await client.request("GET", request_url)
+
+        info_messages = [record.message for record in caplog.records if record.levelno == logging.INFO]
+        # The PII must not appear in any INFO-level record.
+        joined_info = "".join(info_messages)
+        assert "secret-search-term" not in joined_info
+        assert "secret-device-id" not in joined_info
+        assert "secret-cursor-token" not in joined_info
+        # No INFO request log may contain a query string at all.
+        for record in caplog.records:
+            if record.levelno == logging.INFO:
+                assert "?" not in record.message, f"Query string leaked at INFO: {record.message}"
+
+    @pytest.mark.asyncio
+    async def test_full_url_logged_at_debug_not_info(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The full URL (with query) may only appear at DEBUG level."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123")
+
+        sensitive_query = "search=secret-search-term&device=secret-device-id&cursor=secret-cursor-token"
+        request_url = f"/profiles/abc123/logs?{sensitive_query}"
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.client"):
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                await client.request("GET", request_url)
+
+        info_messages = [record.message for record in caplog.records if record.levelno == logging.INFO]
+        debug_messages = [record.message for record in caplog.records if record.levelno == logging.DEBUG]
+
+        # INFO has the path without the query.
+        assert any("/profiles/abc123/logs" in msg and "?" not in msg for msg in info_messages)
+        # DEBUG carries the full URL including the sensitive query string.
+        assert any(sensitive_query in msg for msg in debug_messages)
 
 
 class TestAccessControlledClientMethods:
