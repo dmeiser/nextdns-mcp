@@ -131,7 +131,7 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
 
 ## HTTP Transport (network access)
 
-By default the server uses **stdio**, which is what MCP clients (Claude Desktop, Docker MCP Gateway, CLI tools) expect. You can switch to a **streamable-HTTP** transport for network-based clients, but the HTTP endpoint has **no built-in authentication**.
+By default the server uses **stdio**, which is what MCP clients (Claude Desktop, CLI tools) expect. You can switch to a **streamable-HTTP** transport for network-based clients, but the HTTP endpoint has **no built-in authentication**.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
