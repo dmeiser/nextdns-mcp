@@ -16,6 +16,7 @@ from .config import (
     can_write_profile,
     get_api_key,
     get_http_timeout,
+    get_writable_profiles_set,
     is_read_only,
 )
 from .errors import ErrorCode
@@ -143,6 +144,25 @@ class AccessControlledClient(httpx.AsyncClient):
         logger.warning(f"{error_msg} (method={method}, url={url})")
         return create_access_denied_response(method, url, error_msg, profile_id, code=ErrorCode.READ_ACCESS_DENIED)
 
+    def _check_collection_write_access(self, method: str, url: str) -> httpx.Response | None:
+        """Enforce global write denials for collection endpoints (no profile_id in URL).
+
+        Collection endpoints such as POST /profiles create resources that belong to a
+        profile, so they must respect read-only mode and the writable-profile set even
+        though the URL carries no profile_id.
+        """
+        if is_read_only():
+            error_msg = "Write operation denied: server is in read-only mode"
+            logger.warning(f"{error_msg} (method={method}, url={url})")
+            return create_access_denied_response(method, url, error_msg, "")
+
+        if get_writable_profiles_set() is None:
+            error_msg = "Write access denied: no profiles are writable"
+            logger.warning(f"{error_msg} (method={method}, url={url})")
+            return create_access_denied_response(method, url, error_msg, "")
+
+        return None
+
     def _check_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
         """Check access control for profile operations."""
         if is_write_operation(method):
@@ -181,6 +201,14 @@ class AccessControlledClient(httpx.AsyncClient):
             error_msg = f"Forbidden URL: {url!s}"
             logger.warning(f"{error_msg} (method={method})")
             return create_access_denied_response(method, url, error_msg, profile_id or "")
+        elif is_write_operation(method):
+            # Collection endpoints (e.g., POST /profiles) carry no profile_id but
+            # still create profile-scoped resources; enforce global write denials.
+            error_response = self._check_collection_write_access(method, url)
+        else:
+            error_response = None
+        if error_response:
+            return error_response
 
         # No body coercion here: string values in JSON bodies are passed through
         # unchanged. Schema-aware coercion of tool arguments already happens in
