@@ -119,7 +119,7 @@ class AccessControlledClient(httpx.AsyncClient):
         """Coerce string types in JSON request body.
 
         This handles type coercion for parameters passed as strings by clients like
-        Docker MCP CLI. FastMCP's OpenAPI integration may pass string values for
+        CLI tools. FastMCP's OpenAPI integration may pass string values for
         boolean/integer fields which need to be coerced before sending to the API.
         """
         if "json" in kwargs and isinstance(kwargs["json"], dict):
