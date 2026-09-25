@@ -261,7 +261,7 @@ def create_mcp_server(api_client: httpx.AsyncClient) -> FastMCP:
 
     mcp = FastMCP.from_openapi(
         openapi_spec=openapi_spec,
-        client=api_client,
+        client=api_client,  # type: ignore[arg-type]  # fastmcp 4.0.4 types this as httpx2.AsyncClient but still accepts httpx.AsyncClient at runtime (deprecated)
         route_maps=route_maps,
         name="NextDNS MCP Server",
         strict_input_validation=False,

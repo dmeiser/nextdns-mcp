@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       allow_live_writes:
-        description: 'Enable write operations (creates/deletes test profiles)'
+        description: 'Enable write operations (creates/deletes test profiles). Maintainer opt-in only.'
         required: false
-        default: 'true'
+        default: 'false'
         type: choice
         options:
           - 'true'
@@ -24,16 +24,51 @@ permissions:
   contents: read
 
 jobs:
+  # Security gate for pull_request events (issue #137). PRs cannot see repo
+  # secrets and PR-controlled code must never execute against a live account,
+  # so the gateway E2E job below is excluded for pull_request. Instead, PRs run
+  # this static assertion of the E2E workflow's security invariants, which keeps
+  # PR CI green without materializing NEXTDNS_API_KEY or exercising live writes.
+  # (The unit test suite is covered separately by unit-tests.yml on pull_request.)
+  pr-security:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Assert E2E workflow security invariants
+        run: uv run --no-project --with pyyaml python3 scripts/assert_workflow_security.py .github/workflows/e2e-mcp-gateway.yml
+
   e2e:
+    # Live writes and secret access are restricted to maintainer/non-PR events
+    # (workflow_dispatch/schedule), push, and the release workflow_call
+    # (issue #137). pull_request runs are handled by the pr-security job above.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         variant: [slim, alpine]
     env:
-      ALLOW_LIVE_WRITES: ${{ github.event.inputs.allow_live_writes || 'true' }}
-      NEXTDNS_READABLE_PROFILES: 'ALL'
-      NEXTDNS_WRITABLE_PROFILES: 'ALL'
+      # Security (issue #137): live writes are opt-in and restricted to
+      # maintainer-initiated events. pull_request always resolves 'false' and
+      # the dispatch input is only consulted on workflow_dispatch, so a PR can
+      # never opt in. push/tag/schedule/workflow_call keep the original
+      # release-path default of 'true' (the release pipeline relies on it),
+      # and workflow_dispatch is 'true' only when a maintainer explicitly
+      # selects it (the input defaults to 'false').
+      ALLOW_LIVE_WRITES: ${{ github.event_name == 'pull_request' && 'false' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.allow_live_writes == 'true' && 'true' || 'false') || 'true') }}
+      # Gate secret injection to non-PR events: on pull_request the API key
+      # and profile secret resolve empty, so PR-controlled checkout contents
+      # never see the repo secret (issue #137).
+      NEXTDNS_READABLE_PROFILES: ${{ github.event_name == 'pull_request' && '' || 'ALL' }}
+      NEXTDNS_WRITABLE_PROFILES: ${{ github.event_name == 'pull_request' && '' || 'ALL' }}
       CI: 'true'
     
     steps:
@@ -58,6 +93,11 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           activate-environment: "true"
+
+      # Fail fast (before any secret-bearing step) if the workflow drifts back
+      # into allowing live writes or secret injection on pull_request.
+      - name: Assert E2E workflow security invariants
+        run: uv run --no-project --with pyyaml python3 scripts/assert_workflow_security.py .github/workflows/e2e-mcp-gateway.yml
 
       - name: Build docker-mcp plugin from source
         run: |
@@ -107,8 +147,12 @@ jobs:
 
       - name: Create .env file for script
         env:
-          NEXTDNS_API_KEY: ${{ secrets.NEXTDNS_API_KEY }}
-          NEXTDNS_PLOT_PROFILE: ${{ secrets.NEXTDNS_PLOT_PROFILE }}
+          # Defense in depth: the job-level `if` above already excludes
+          # pull_request, and the job env pins these to '' for pull_request,
+          # so the repo secret is never materialized on PR runs even if the
+          # job-level guard were ever weakened (issue #137).
+          NEXTDNS_API_KEY: ${{ github.event_name == 'pull_request' && '' || secrets.NEXTDNS_API_KEY }}
+          NEXTDNS_PLOT_PROFILE: ${{ github.event_name == 'pull_request' && '' || secrets.NEXTDNS_PLOT_PROFILE }}
         run: |
           cat > .env <<EOF
           NEXTDNS_API_KEY=${NEXTDNS_API_KEY}
