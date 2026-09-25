@@ -261,7 +261,7 @@ def create_mcp_server(api_client: httpx.AsyncClient) -> FastMCP:
 
     mcp = FastMCP.from_openapi(
         openapi_spec=openapi_spec,
-        client=api_client,  # type: ignore[arg-type]
+        client=api_client,
         route_maps=route_maps,
         name="NextDNS MCP Server",
         strict_input_validation=False,
