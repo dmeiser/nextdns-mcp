@@ -131,7 +131,7 @@ class AccessControlledClient(httpx.AsyncClient):
         else:
             error_msg = f"Write access denied for profile: {profile_id}"
 
-        logger.warning(f"{error_msg} (method={method}, url={url})")
+        logger.warning(f"{error_msg} (method={method}, url={str(url).split('?', 1)[0]})")
         return create_access_denied_response(method, url, error_msg, profile_id, code=ErrorCode.WRITE_ACCESS_DENIED)
 
     def _check_read_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
@@ -140,7 +140,7 @@ class AccessControlledClient(httpx.AsyncClient):
             return None
 
         error_msg = f"Read access denied for profile: {profile_id}"
-        logger.warning(f"{error_msg} (method={method}, url={url})")
+        logger.warning(f"{error_msg} (method={method}, url={str(url).split('?', 1)[0]})")
         return create_access_denied_response(method, url, error_msg, profile_id, code=ErrorCode.READ_ACCESS_DENIED)
 
     def _check_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
@@ -162,8 +162,8 @@ class AccessControlledClient(httpx.AsyncClient):
         """
         # Query strings can carry sensitive data (search terms, device IDs, cursor
         # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
-        request_path = str(url).split("?", 1)[0]
-        logger.info(f"HTTP Request: {method} {request_path}")
+        logged_path = str(url).split("?", 1)[0]
+        logger.info(f"HTTP Request: {method} {logged_path}")
         logger.debug(f"HTTP Request: {method} {url}")
 
         request_path = _normalized_request_path(str(url))

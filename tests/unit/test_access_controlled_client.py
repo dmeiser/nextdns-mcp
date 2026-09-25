@@ -247,6 +247,8 @@ class TestAccessControlledClientFailsClosed:
         mock_super_request.assert_not_called()
         assert response.status_code == 403
         assert "error" in response.json()
+
+
 class TestAccessControlledClientRequestLogging:
     """Regression tests for issue #139: query-string PII must not be logged at INFO."""
 
