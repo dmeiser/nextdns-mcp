@@ -1,5 +1,8 @@
 """Unit tests for the grouped CRUD tools in server.py."""
 
+import asyncio
+import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -23,6 +26,29 @@ def open_profile_access(monkeypatch):
     """Allow all profile read/write access for grouped-tool tests."""
     monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
     monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+
+
+class _stream_ctx:
+    """Async context manager mimicking httpx.AsyncClient.stream()."""
+
+    def __init__(self, response):
+        self.response = response
+
+    async def __aenter__(self):
+        return self.response
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _async_chunks(chunks):
+    """Async iterator yielding the given text chunks (for streamed responses)."""
+
+    async def _gen():
+        for chunk in chunks:
+            yield chunk
+
+    return _gen()
 
 
 def _make_response(json_data=None, status_code=200, content=None):
@@ -401,29 +427,81 @@ class TestManageLogs:
 
     @pytest.mark.asyncio
     async def test_download(self, mock_api_client):
+        """Download streams to a temp file and returns a capped preview, not inline data."""
+        csv_text = "date,time,question,answer\n2024-01-01,12:00:00,example.com,A\n"
         response = MagicMock()
         response.status_code = 200
-        response.content = b"csv,data"
         response.headers = {"content-type": "text/csv"}
-        response.text = "csv,data"
-        mock_api_client.get.return_value = response
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([csv_text])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
         result = await server.manageLogs("download", "abc123")
+        mock_api_client.stream.assert_called_once_with(
+            "GET", "/profiles/abc123/logs/download", follow_redirects=True
+        )
         assert result["content_type"] == "text/csv"
-        assert result["size"] == 8
-        mock_api_client.get.assert_called_once_with("/profiles/abc123/logs/download", follow_redirects=True)
+        assert result["size"] == len(csv_text.encode("utf-8"))
+        assert result["row_count"] == 2
+        assert "data" not in result
+        assert "text" not in result
+        assert os.path.isfile(result["file_path"])
+        assert await asyncio.to_thread(Path(result["file_path"]).read_text, encoding="utf-8") == csv_text
+        os.unlink(result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_download_large_is_capped_not_inline(self, mock_api_client):
+        """A large download is not double-buffered or inlined: only a bounded preview is returned."""
+        row = "x" * 1000 + "\n"
+        # ~10k rows, multi-MB — far beyond any sane inline payload.
+        chunks = [row * 500 for _ in range(20)]
+        total_text = "".join(chunks)
+        response = MagicMock()
+        response.status_code = 200
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks(chunks)
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert result["size"] == len(total_text.encode("utf-8"))
+        assert result["row_count"] == 10_000
+        # The preview is bounded and flagged truncated; the full body never appears inline.
+        assert len(result["preview"]["text"]) < len(total_text)
+        assert result["preview"]["truncated"] is True
+        assert result["preview"]["line_count"] <= 20
+        assert result["preview"]["bytes"] <= 256 * 1024
+        assert "x" * 1000 * 2 not in result["preview"]["text"]
+        await asyncio.to_thread(os.unlink, result["file_path"])
 
     @pytest.mark.asyncio
     async def test_download_http_error(self, mock_api_client):
-        mock_api_client.get.side_effect = httpx.HTTPError("boom")
+        response = MagicMock()
+        response.headers = {}
+        exc = httpx.HTTPStatusError("boom", request=MagicMock(), response=httpx.Response(500, headers={}))
+        response.raise_for_status.side_effect = exc
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
         result = await server.manageLogs("download", "abc123")
         assert "error" in result
         assert "HTTP error" in result["error"]
+        assert result["status_code"] == 500
 
     @pytest.mark.asyncio
     async def test_download_unexpected_error(self, mock_api_client):
-        mock_api_client.get.side_effect = RuntimeError("boom")
+        mock_api_client.stream = MagicMock(side_effect=RuntimeError("boom"))
         with pytest.raises(RuntimeError, match="Unexpected error"):
             await server.manageLogs("download", "abc123")
+
+    @pytest.mark.asyncio
+    async def test_get_limit_capped(self, mock_api_client):
+        """A limit above the server-side cap is clamped before reaching the API."""
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.manageLogs("get", "abc123", limit=10_000)
+        assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_get_limit_unchanged_under_cap(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.manageLogs("get", "abc123", limit=10)
+        assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 10
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
@@ -442,6 +520,19 @@ class TestQueryAnalytics:
         mock_api_client.request.assert_called_once_with(
             "GET", "/profiles/abc123/analytics/status", params={"from": "-1d", "limit": 5}, json=None
         )
+
+    @pytest.mark.asyncio
+    async def test_limit_capped(self, mock_api_client):
+        """A limit above the server-side cap is clamped before reaching the API."""
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.queryAnalytics("status", "abc123", limit=10_000)
+        assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 500
+
+    @pytest.mark.asyncio
+    async def test_limit_at_cap_unchanged(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.queryAnalytics("status", "abc123", limit=500)
+        assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 500
 
     @pytest.mark.asyncio
     async def test_series(self, mock_api_client):
