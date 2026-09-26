@@ -6,7 +6,7 @@ name: Weekly Maintenance
 # What this automates:
 #   1. Detect unreleased commits OR dependency updates (uv lock --upgrade)
 #   2. Bump the patch version across pyproject.toml / __init__.py / Dockerfile
-#   3. Run formatters (isort, black, ruff) + unit tests locally
+#   3. Run formatter (ruff) + unit tests locally
 #   4. Push a release branch and open a PR
 #   5. Wait up to 90 min for all CI checks to pass
 #   6. Scan Copilot review comments for critical keywords; block + open issue if found
@@ -201,9 +201,8 @@ jobs:
 
       - name: Run formatters
         run: |
-          uv run isort src/ tests/
-          uv run black src/ tests/
           uv run ruff check --fix .
+          uv run ruff format .
 
       - name: Run unit tests
         run: uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term-missing
@@ -249,7 +248,7 @@ jobs:
           fi
 
           # Build PR body using printf (avoids heredoc/multi-line-string YAML issues)
-          printf '## Weekly Automated Maintenance\n\n**Trigger:** %s\n**Version bump:** `%s` \u2192 `%s`\n\n### What was done\n- Ran `uv lock --upgrade` to update dependencies\n- Bumped patch version to `%s`\n- Applied formatters (isort, black, ruff)\n- All unit tests passed locally\n\n---\n*Auto-created by the [weekly maintenance workflow](../actions/workflows/weekly-maintenance.yml). Will auto-merge once CI is green and no critical review issues are detected.*\n' \
+          printf '## Weekly Automated Maintenance\n\n**Trigger:** %s\n**Version bump:** `%s` \u2192 `%s`\n\n### What was done\n- Ran `uv lock --upgrade` to update dependencies\n- Bumped patch version to `%s`\n- Applied formatter (ruff)\n- All unit tests passed locally\n\n---\n*Auto-created by the [weekly maintenance workflow](../actions/workflows/weekly-maintenance.yml). Will auto-merge once CI is green and no critical review issues are detected.*\n' \
             "${CHANGES}" "${CURRENT_VERSION}" "${NEW_VERSION}" "${NEW_VERSION}" \
             > /tmp/pr_body.md
 
