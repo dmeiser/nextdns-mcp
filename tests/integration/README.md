@@ -4,24 +4,22 @@ This directory contains integration tests for the NextDNS MCP server.
 
 ## Test Files
 
-- **`test_server_init.py`** - Server initialization and creation tests (no live API calls)
+Server initialization and `create_mcp_server` tests live in the unit suite
+(`tests/unit/test_mcp_server.py`) and make no live API calls.
 
 ## Running Tests
 
 ```bash
-# Run server initialization tests
-uv run pytest tests/integration/test_server_init.py -v
+# Run the server-creation unit tests
+uv run pytest tests/unit/test_mcp_server.py -v
 ```
 
 ## What These Tests Cover
 
-### `test_server_init.py`
-- MCP server module loading
-- Server creation with valid configuration
-- Tool registration and counting
-- OpenAPI spec loading
+### `tests/unit/test_mcp_server.py`
+- MCP server creation with valid configuration
+- Tool registration (grouped CRUD tools only)
 - Access control client initialization
-- Error handling for missing configuration
 
 These tests use mocked dependencies and do NOT make live API calls.
 
@@ -43,10 +41,9 @@ These tests use mocked dependencies and do NOT make live API calls.
 
 ## Test Coverage
 
-The integration tests verify:
+The server-creation tests verify:
 - ✅ MCP server can be initialized
-- ✅ OpenAPI spec loads correctly
-- ✅ Tools are registered properly
+- ✅ Tools are registered properly (grouped CRUD tools only)
 - ✅ Access control mechanisms work
 - ✅ Configuration validation functions correctly
 
@@ -56,20 +53,17 @@ The integration tests verify:
 
 ```bash
 # Run with verbose output
-uv run pytest tests/integration/test_server_init.py -v
+uv run pytest tests/unit/test_mcp_server.py -v
 
 # Run with coverage
-uv run pytest tests/integration/test_server_init.py --cov=src/nextdns_mcp
-
-# Run specific test
-uv run pytest tests/integration/test_server_init.py::TestServerInitialization::test_create_mcp_server -v
+uv run pytest tests/unit/test_mcp_server.py --cov=src/nextdns_mcp
 ```
 
 ### Adding New Tests
 
 When adding new MCP server functionality:
 
-1. Add tests to `test_server_init.py` to verify server initialization
+1. Add tests to `tests/unit/test_mcp_server.py` to verify server initialization
 2. Use mocked dependencies (see existing tests for examples)
 3. Do NOT make live API calls in integration tests
 

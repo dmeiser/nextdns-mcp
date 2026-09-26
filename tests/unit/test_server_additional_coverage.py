@@ -236,8 +236,6 @@ def test_use_all_fixtures(
     clean_env,
     set_env_api_key,
     temp_api_key_file,
-    mock_openapi_spec,
-    temp_openapi_file,
     mock_nextdns_base_url,
     mock_doh_response,
     mock_profiles_response,
@@ -246,7 +244,6 @@ def test_use_all_fixtures(
     assert mock_api_key == "test_api_key_12345"
     assert mock_profile_id == "abc123"
     assert temp_api_key_file.exists()
-    assert temp_openapi_file.exists()
     assert mock_doh_response.get("Status") == 0
     assert isinstance(mock_profiles_response, dict)
 

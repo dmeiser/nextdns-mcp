@@ -5,7 +5,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-import yaml
 
 
 @pytest.fixture
@@ -45,38 +44,6 @@ def temp_api_key_file(mock_api_key: str) -> Iterator[Path]:
     """Create a temporary file with an API key."""
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
         f.write(mock_api_key)
-        temp_path = Path(f.name)
-
-    yield temp_path
-
-    # Cleanup
-    temp_path.unlink(missing_ok=True)
-
-
-@pytest.fixture
-def mock_openapi_spec() -> dict:
-    """Provide a minimal valid OpenAPI spec for testing."""
-    return {
-        "openapi": "3.0.3",
-        "info": {"title": "Test NextDNS API", "version": "1.0.0"},
-        "servers": [{"url": "https://api.nextdns.io"}],
-        "paths": {
-            "/profiles": {
-                "get": {
-                    "operationId": "listProfiles",
-                    "responses": {"200": {"description": "Success"}},
-                }
-            }
-        },
-        "components": {"securitySchemes": {"ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}}},
-    }
-
-
-@pytest.fixture
-def temp_openapi_file(mock_openapi_spec: dict) -> Iterator[Path]:
-    """Create a temporary OpenAPI spec file."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        yaml.dump(mock_openapi_spec, f)
         temp_path = Path(f.name)
 
     yield temp_path

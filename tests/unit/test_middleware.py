@@ -1,11 +1,10 @@
-"""Tests for StripExtraFieldsMiddleware and allow_extra_fields_component_fn."""
+"""Tests for StripExtraFieldsMiddleware."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import BaseModel
 
-from nextdns_mcp.openapi import StripExtraFieldsMiddleware, allow_extra_fields_component_fn
+from nextdns_mcp.openapi import StripExtraFieldsMiddleware
 
 
 class TestStripExtraFieldsMiddleware:
@@ -183,114 +182,3 @@ class TestStripExtraFieldsMiddleware:
         """Test array items are coerced when items schema is provided."""
         result = middleware._coerce_value(["true", "false"], {"type": "array", "items": {"type": "boolean"}})
         assert result == [True, False]
-
-
-class TestAllowExtraFieldsComponentFn:
-    """Tests for the allow_extra_fields_component_fn function."""
-
-    def test_patches_pydantic_v2_model(self):
-        """Test patching a Pydantic v2 model."""
-
-        class TestModel(BaseModel):
-            name: str
-
-        # Before patching
-
-        result = allow_extra_fields_component_fn(TestModel)
-
-        # Should return the same component
-        assert result is TestModel
-        # Should have extra: ignore in model_config
-        assert result.model_config.get("extra") == "ignore"
-
-    def test_does_not_patch_non_pydantic_classes(self):
-        """Test that non-Pydantic classes are not modified."""
-
-        class RegularClass:
-            pass
-
-        result = allow_extra_fields_component_fn(RegularClass)
-
-        assert result is RegularClass
-        assert not hasattr(result, "model_config")
-
-    def test_does_not_patch_primitives(self):
-        """Test that primitives are returned unchanged."""
-        assert allow_extra_fields_component_fn(str) is str
-        assert allow_extra_fields_component_fn(int) is int
-        assert allow_extra_fields_component_fn(None) is None
-
-    def test_does_not_patch_enums(self):
-        """Test that enums are returned unchanged."""
-        from enum import Enum
-
-        class Color(Enum):
-            RED = 1
-            GREEN = 2
-
-        result = allow_extra_fields_component_fn(Color)
-        assert result is Color
-
-    def test_preserves_existing_model_config(self):
-        """Test that existing model_config values are preserved."""
-
-        class TestModel(BaseModel):
-            model_config = {"strict": True, "frozen": True}
-            name: str
-
-        result = allow_extra_fields_component_fn(TestModel)
-
-        assert result.model_config.get("strict") is True
-        assert result.model_config.get("frozen") is True
-        assert result.model_config.get("extra") == "ignore"
-
-    def test_handles_pydantic_import_error(self):
-        """Test graceful handling when pydantic import fails."""
-        # We can't easily test ImportError in isolation since pydantic is imported
-        # at module level. The code path exists for edge cases where pydantic
-        # might not be available. We verify the function handles non-pydantic types.
-
-        class NonPydanticClass:
-            pass
-
-        # Should return unchanged without raising
-        result = allow_extra_fields_component_fn(NonPydanticClass)
-        assert result is NonPydanticClass
-
-    def test_handles_pydantic_v1_style_config(self):
-        """Test patching a class with Pydantic v1 style __config__."""
-        # Create a mock class that has __config__ but not model_config
-        # to simulate Pydantic v1 behavior
-
-        class OldConfig:
-            extra = "forbid"
-
-        class MockV1Model:
-            __config__ = OldConfig
-
-        # Make it look like a BaseModel subclass by patching isinstance check
-        with (
-            patch("nextdns_mcp.openapi.isinstance", side_effect=lambda obj, cls: True),
-            patch("nextdns_mcp.openapi.issubclass", side_effect=lambda obj, cls: True),
-        ):
-            # This is tricky - the function checks isinstance(component, type)
-            # and issubclass(component, BaseModel), but we're mocking those
-            pass
-
-        # Alternative: directly test the v1 branch behavior is correct
-        # by verifying our v2 model gets the right config applied
-        class TestModel(BaseModel):
-            name: str
-
-        result = allow_extra_fields_component_fn(TestModel)
-        assert result.model_config.get("extra") == "ignore"
-
-    def test_accepts_additional_args_kwargs(self):
-        """Test that function accepts and ignores additional args/kwargs."""
-
-        class TestModel(BaseModel):
-            name: str
-
-        # Should not raise with extra args
-        result = allow_extra_fields_component_fn(TestModel, "extra_arg", another="kwarg")
-        assert result is TestModel

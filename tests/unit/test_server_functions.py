@@ -13,7 +13,6 @@ from nextdns_mcp.server import (
     _validate_record_type,
     create_access_denied_response,
     create_nextdns_client,
-    load_openapi_spec,
 )
 from nextdns_mcp.tools import doh as doh_module
 
@@ -45,28 +44,6 @@ async def mock_doh_client(monkeypatch):
     mock_client.get.return_value = mock_response
     monkeypatch.setattr(doh_module, "_doh_client", mock_client)
     return mock_client
-
-
-class TestLoadOpenAPISpec:
-    """Tests for load_openapi_spec function."""
-
-    def test_loads_valid_spec(self):
-        """Test loading valid OpenAPI spec."""
-        spec = load_openapi_spec()
-
-        assert isinstance(spec, dict)
-        assert "openapi" in spec
-        assert "info" in spec
-        assert "paths" in spec
-        assert spec["info"]["title"] == "NextDNS API"
-
-    def test_spec_has_paths(self):
-        """Test that spec has expected paths."""
-        spec = load_openapi_spec()
-
-        # Check for some expected paths
-        assert "/profiles" in spec["paths"]
-        assert "/profiles/{profile_id}" in spec["paths"]
 
 
 class TestCreateNextDNSClient:

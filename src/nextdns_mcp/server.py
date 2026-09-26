@@ -1,31 +1,10 @@
-# ---
-# Extra Field Relaxation for MCP Tool Arguments
-#
-# AI clients (like OpenAI) often send extra/unknown fields with tool calls.
-# We use a complementary two-layer approach to handle this:
-#
-# 1. StripExtraFieldsMiddleware: Intercepts tool calls and filters arguments
-#    to only include fields defined in the tool's schema. This operates at the
-#    MCP call level, preventing most validation errors from unknown fields.
-#
-# 2. allow_extra_fields_component_fn: Configures OpenAPI-imported Pydantic models
-#    with "extra": "ignore" (via strict_input_validation=False), ensuring that any
-#    extra fields that reach model validation are silently ignored.
-#
-# These mechanisms work together at different layers to ensure:
-# - Unknown fields are silently ignored (not rejected)
-# - Required/typed fields are still validated
-# - Works with both OpenAPI-imported and custom @mcp_server.tool() decorated tools
-#
-# See docs/troubleshooting.md for details.
-"""NextDNS MCP Server - FastMCP-based implementation using OpenAPI spec.
+"""NextDNS MCP Server - FastMCP-based implementation built from grouped CRUD tools.
 
 SPDX-License-Identifier: MIT
 """
 
 import logging
 import os
-from pathlib import Path  # noqa: F401
 from typing import Any
 
 from dotenv import load_dotenv
@@ -79,9 +58,8 @@ def build_mcp_server() -> FastMCP:
     Returns:
         FastMCP: Configured MCP server instance with all tools registered
     """
-    client = get_api_client()
     logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
-    server = create_mcp_server(client)
+    server = create_mcp_server()
     for tool in _GROUPED_TOOLS:
         server.tool()(tool)
     server.prompt(name="nextdns-usage-guide", description="Comprehensive guide for using the NextDNS MCP server tools")(
@@ -175,13 +153,7 @@ from .coercion import (  # noqa: F401
     coerce_json_types,
 )
 from .config import get_api_key  # noqa: F401
-from .openapi import (  # noqa: F401
-    StripExtraFieldsMiddleware,
-    allow_extra_fields_component_fn,
-    build_route_mappings,
-    get_openapi_tool_names,
-    load_openapi_spec,
-)
+from .openapi import StripExtraFieldsMiddleware  # noqa: F401
 from .tools.analytics import AnalyticsMetric, _query_analytics_impl  # noqa: F401
 from .tools.doh import (  # noqa: F401
     _build_doh_metadata,

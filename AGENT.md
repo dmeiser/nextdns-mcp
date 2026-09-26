@@ -16,7 +16,7 @@ This file contains repository-specific agent rules. Agents should follow these w
 
 - Purpose: implement an MCP server for NextDNS API in Python using the `fastmcp` library, containerized with Docker.
 - Keep changes minimal and self-contained. Prefer adding new files rather than editing many unrelated files.
-- Use the `fastmcp` library to build the MCP server, specifically using the `from_openapi` function to generate the server from OpenAPI/Swagger documentation.
+- Use the `fastmcp` library to build the MCP server from the grouped CRUD tools in `src/nextdns_mcp/tools/`. Do NOT use `FastMCP.from_openapi()`: it was removed (issues #141/#146) because FastMCP 4.x's OpenAPI provider expects an `httpx2.AsyncClient` while our `AccessControlledClient` subclasses `httpx.AsyncClient`.
 - Configuration should be environment-variable first. Example: `NEXTDNS_API_KEY` for API access.
 - Provide a minimal health endpoint at `/health` returning 200 OK and JSON `{ "status": "ok" }`.
 - Tests: add pytest-based unit tests for new functionality and run them with `uv run pytest`.
@@ -27,10 +27,9 @@ This file contains repository-specific agent rules. Agents should follow these w
   - Write operations (create, update) are only allowed against designated test profiles
   - Always verify the target profile ID before any write operation
 - **Development Workflow:**
-  - Phase 1: Create complete and accurate OpenAPI/Swagger documentation for the NextDNS API
-  - Phase 2: Use `fastmcp.from_openapi()` to generate the MCP server from the OpenAPI spec
-  - All NextDNS API endpoints should be documented in the OpenAPI spec before server generation
-  - The fastmcp library will handle MCP protocol implementation, routing, and tool registration
+  - The server is built from the grouped CRUD tools in `src/nextdns_mcp/tools/`; `create_mcp_server()` (src/nextdns_mcp/openapi.py) creates a plain `FastMCP` instance, and server.py registers the tools on it.
+  - `src/nextdns_mcp/nextdns-openapi.yaml` is a reference specification (used by `scripts/validate_schema.py`); it is NOT used for tool generation.
+  - The fastmcp library handles MCP protocol implementation, routing, and tool registration
 - **Array-body Endpoints (FastMCP 3.x):**
   - FastMCP 3.x supports array bodies natively via the `body` parameter.
   - Use `body=[{"id":"value"}]` for list replacement tools (e.g., `replaceDenylist`, `replaceAllowlist`).

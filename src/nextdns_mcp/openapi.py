@@ -2,41 +2,35 @@
 # Extra Field Relaxation for MCP Tool Arguments
 #
 # AI clients (like OpenAI) often send extra/unknown fields with tool calls.
-# We use a complementary two-layer approach to handle this:
-#
-# 1. StripExtraFieldsMiddleware: Intercepts tool calls and filters arguments
-#    to only include fields defined in the tool's schema. This operates at the
-#    MCP call level, preventing most validation errors from unknown fields.
-#
-# 2. allow_extra_fields_component_fn: Configures OpenAPI-imported Pydantic models
-#    with "extra": "ignore" (via strict_input_validation=False), ensuring that any
-#    extra fields that reach model validation are silently ignored.
-#
-# These mechanisms work together at different layers to ensure:
-# - Unknown fields are silently ignored (not rejected)
-# - Required/typed fields are still validated
-# - Works with both OpenAPI-imported and custom @mcp_server.tool() decorated tools
+# StripExtraFieldsMiddleware intercepts tool calls and filters arguments to
+# only include fields defined in the tool's schema, operating at the MCP call
+# level so that unknown fields are silently ignored (not rejected) while
+# required/typed fields are still validated.
 #
 # See docs/troubleshooting.md for details.
-"""OpenAPI spec loading, middleware, and MCP server creation.
+"""MCP server creation.
+
+The NextDNS MCP server is built directly from the grouped CRUD tools in
+``src/nextdns_mcp/tools/``. The historical OpenAPI-spec-based tool generation
+(``FastMCP.from_openapi``) was removed: the generated atomic tools were
+immediately stripped from the server (see issue #146, dead OpenAPI loading),
+and FastMCP 4.x's OpenAPI provider expects an ``httpx2.AsyncClient`` while
+this project's ``AccessControlledClient`` subclasses ``httpx.AsyncClient``
+(see issue #141), which broke ``uv run mypy src`` and emitted a
+``FastMCPDeprecationWarning`` at startup.
 
 SPDX-License-Identifier: MIT
 """
 
 import logging
-from pathlib import Path
 from typing import Any
 
-import httpx
 import mcp.types
-import yaml
 from fastmcp import FastMCP
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.server.providers.openapi import RouteMap
-from fastmcp.server.providers.openapi.routing import DEFAULT_ROUTE_MAPPINGS
 from fastmcp.tools import ToolResult
 
-from .config import EXCLUDED_ROUTES, get_default_profile
+from .config import get_default_profile
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +43,7 @@ class StripExtraFieldsMiddleware(Middleware):
     """Middleware that strips unknown fields and coerces types in tool arguments.
 
     AI clients (like OpenAI) often send extra/unknown fields with tool calls
-    that don't match the tool's input schema. CLI tools may also pass values
+    that don't match the tool's input schema. Docker MCP CLI also passes values
     as strings (e.g., "true" instead of true). This middleware:
     1. Filters arguments to only include fields defined in the tool's parameter schema
     2. Coerces string values to proper types (booleans, integers, floats)
@@ -168,132 +162,24 @@ class StripExtraFieldsMiddleware(Middleware):
         return await call_next(context)
 
 
-def load_openapi_spec() -> dict[str, Any]:
-    """Load the NextDNS OpenAPI specification from YAML file.
-
-    Returns:
-        dict: The OpenAPI specification as a dictionary
-
-    Raises:
-        FileNotFoundError: If the OpenAPI spec file cannot be found
-        yaml.YAMLError: If the YAML file is invalid
-    """
-    # Load spec from package directory
-    spec_path = Path(__file__).parent / "nextdns-openapi.yaml"
-
-    if not spec_path.exists():
-        logger.critical(f"OpenAPI spec not found at: {spec_path}")
-        logger.critical("The nextdns-openapi.yaml file must be in the package directory.")
-        raise OpenApiSpecNotFound(str(spec_path))
-
-    logger.info(f"Loading OpenAPI spec from: {spec_path}")
-    with open(spec_path, "r") as f:
-        spec: dict[str, Any] = yaml.safe_load(f)
-
-    return spec
-
-
-def build_route_mappings() -> list[RouteMap]:
-    """Create the RouteMap list used for OpenAPI conversion.
-
-    Combines excluded routes with default route mappings.
-
-    Returns:
-        list[RouteMap]: Complete list of route mappings for MCP tool generation
-    """
-    return [*EXCLUDED_ROUTES, *DEFAULT_ROUTE_MAPPINGS]
-
-
-def get_openapi_tool_names(spec: dict[str, Any]) -> set[str]:
-    """Extract operationIds from an OpenAPI spec to identify auto-generated tools."""
-    names: set[str] = set()
-    for path_item in spec.get("paths", {}).values():
-        for method, operation in path_item.items():
-            if method.lower() in ("get", "post", "put", "patch", "delete"):
-                op_id = operation.get("operationId") if isinstance(operation, dict) else None
-                if op_id:
-                    names.add(op_id)
-    return names
-
-
-def allow_extra_fields_component_fn(component, *args, **kwargs):
-    """
-    Patch OpenAPI-imported Pydantic models to allow extra fields (ignore unknown fields).
-    Only applies to Pydantic model classes, not enums or primitives.
-    Compatible with Pydantic v2 and v1.
-    """
-    # Only patch Pydantic model classes (skip enums, primitives, etc.)
-    try:
-        from pydantic import BaseModel
-    except ImportError:  # pragma: no cover
-        return component  # pragma: no cover
-    if isinstance(component, type) and issubclass(component, BaseModel):
-        # Pydantic v2
-        if hasattr(component, "model_config"):
-            component.model_config = {**getattr(component, "model_config", {}), "extra": "ignore"}
-        # Pydantic v1 (legacy compatibility)
-        elif hasattr(component, "__config__"):  # pragma: no cover
-
-            class Config(component.__config__):  # pragma: no cover
-                extra = "ignore"  # pragma: no cover
-
-            component.__config__ = Config  # pragma: no cover
-    return component
-
-
-def create_mcp_server(api_client: httpx.AsyncClient) -> FastMCP:
+def create_mcp_server(client: Any = None) -> FastMCP:
     """Create and configure the NextDNS MCP server.
 
-    Args:
-        api_client: Pre-configured AsyncClient for API calls
+    The server exposes only the grouped CRUD tools registered by
+    ``src/nextdns_mcp/server.py`` plus the usage-guide prompt. No tools are
+    generated from the OpenAPI spec anymore (see module docstring and issue
+    #141/#146 for the rationale).
 
     Returns:
         FastMCP: Configured MCP server instance
-
-    Raises:
-        FileNotFoundError: If OpenAPI spec cannot be found
-        yaml.YAMLError: If OpenAPI spec is invalid
     """
-    # Load the OpenAPI specification
-    logger.info("Loading NextDNS OpenAPI specification...")
-    openapi_spec = load_openapi_spec()
-
-    # Create MCP server from OpenAPI spec
-    logger.info("Generating MCP server from OpenAPI specification...")
-    route_maps = build_route_mappings()
-
-    mcp = FastMCP.from_openapi(
-        openapi_spec=openapi_spec,
-        client=api_client,  # type: ignore[arg-type]  # fastmcp 4.0.4 types this as httpx2.AsyncClient but accepts httpx.AsyncClient at runtime
-        route_maps=route_maps,
-        name="NextDNS MCP Server",
-        strict_input_validation=False,
-        mcp_component_fn=allow_extra_fields_component_fn,
-    )
+    logger.info("Creating NextDNS MCP server...")
+    mcp = FastMCP(name="NextDNS MCP Server")
 
     # Add middleware to strip unknown fields from tool arguments
     # This allows AI clients (like OpenAI) that send extra fields to work properly
     mcp.add_middleware(StripExtraFieldsMiddleware())
 
-    # Remove the ~80 auto-generated OpenAPI tools. The grouped CRUD tools below
-    # replace them, so only the small intentional surface is exposed.
-    # FastMCP internally stores registered tools on each provider in a private
-    # ``_tools`` dict. We intentionally mutate it here as a version-pinned
-    # workaround; the project pins FastMCP so this shape is controlled.
-    openapi_tool_names = get_openapi_tool_names(openapi_spec)
-    for provider in mcp.providers:
-        tool_registry = getattr(provider, "_tools", None)
-        if not isinstance(tool_registry, dict):
-            logger.warning(
-                "Provider %s has no _tools dict; OpenAPI tool cleanup skipped. FastMCP shape may have changed.",
-                provider,
-            )
-            continue
-        for tool_name in openapi_tool_names:
-            tool_registry.pop(tool_name, None)
-            # Tool may have already been excluded by route mappings; ignore silently.
-
-    # Add metadata about the server
     logger.info("MCP server created successfully")
     default_profile = get_default_profile()
     if default_profile:
