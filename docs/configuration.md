@@ -30,6 +30,7 @@ Notes
 - Per-profile checks match the `profile_id` in the URL. Collection profile endpoints (`GET /profiles` for `manageProfiles(operation="list")`, `POST /profiles` for `create`) carry no `profile_id` but still respect the global denials above: collection reads are denied when both profile sets are unset, and collection writes are denied in read-only mode or when `NEXTDNS_WRITABLE_PROFILES` is unset.
 - Only `dohLookup` bypasses per-profile checks entirely (it uses a separate DoH endpoint).
 - "Write implies read": profiles allowed for writes are automatically considered readable.
+- Access control settings are read once per request, into an immutable snapshot that governs every check for that request (including the decision to send it upstream). A change to the environment therefore applies from the next request onward, never midway through one in flight, and no cache invalidation or restart is needed: there is no cross-request cache to expire. In-process code that wants the same guarantee takes its own snapshot with `nextdns_mcp.config.load_profile_access_control()`.
 
 ## Examples
 

@@ -9,6 +9,7 @@ SPDX-License-Identifier: MIT
 import logging
 import math
 import os
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ DEFAULT_HTTP_TIMEOUT: float = 30.0
 
 # Constants for profile access control
 ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
+ALLOW_ALL_FROZENSET: frozenset[str] = frozenset()  # Same, for immutable snapshots
 
 
 def get_api_key() -> str | None:
@@ -97,6 +99,17 @@ def get_default_profile() -> str | None:
     return os.getenv("NEXTDNS_DEFAULT_PROFILE")
 
 
+def _read_only_from_env() -> bool:
+    """Read NEXTDNS_READ_ONLY once."""
+    value = os.getenv("NEXTDNS_READ_ONLY", "").lower()
+    return value in ("true", "1", "yes")
+
+
+def is_read_only() -> bool:
+    """Check if read-only mode is enabled."""
+    return _read_only_from_env()
+
+
 def get_readable_profiles() -> set[str] | None:
     """Get readable profile list from environment.
 
@@ -119,12 +132,6 @@ def get_writable_profiles() -> set[str] | None:
         return None  # Read-only mode = deny all writes
     profiles = os.getenv("NEXTDNS_WRITABLE_PROFILES", "")
     return parse_profile_list(profiles)
-
-
-def is_read_only() -> bool:
-    """Check if read-only mode is enabled."""
-    value = os.getenv("NEXTDNS_READ_ONLY", "").lower()
-    return value in ("true", "1", "yes")
 
 
 def _is_empty_profile_list(profile_str: str) -> bool:
@@ -155,55 +162,139 @@ def parse_profile_list(profile_str: str) -> set[str] | None:
     return {p.strip().lower() for p in profile_str.split(",") if p.strip()}
 
 
+@dataclass(frozen=True)
+class ProfileAccessControl:
+    """Immutable snapshot of the profile access control environment.
+
+    Every request takes exactly one snapshot (see
+    :func:`load_profile_access_control`) and runs all of its access checks
+    against it, so a change to the process environment that lands while a
+    request is in flight cannot desynchronize the checks from each other or
+    from the decision to send the request upstream.
+
+    ``readable`` is the *combined* readable set (write implies read) and
+    ``writable`` is the raw writable set; both use ``None`` for "deny all" and
+    an empty set for "allow all".
+    """
+
+    read_only: bool
+    readable: frozenset[str] | None
+    writable: frozenset[str] | None
+
+    def can_read(self, profile_id: str) -> bool:
+        """Return whether the snapshot allows reading ``profile_id``."""
+        if self.readable is None:
+            return False
+        if not self.readable:
+            return True
+        return profile_id.lower() in self.readable
+
+    def can_write(self, profile_id: str) -> bool:
+        """Return whether the snapshot allows writing ``profile_id``."""
+        if self.read_only or self.writable is None:
+            return False
+        if not self.writable:
+            return True
+        return profile_id.lower() in self.writable
+
+    @property
+    def any_readable(self) -> bool:
+        """Whether the global (deny-all) read gate is open."""
+        return self.readable is not None
+
+    @property
+    def any_writable(self) -> bool:
+        """Whether the global (deny-all) write gate is open."""
+        return not self.read_only and self.writable is not None
+
+
+def load_profile_access_control() -> ProfileAccessControl:
+    """Read the profile ACL environment exactly once and return a snapshot.
+
+    Each of NEXTDNS_READ_ONLY, NEXTDNS_READABLE_PROFILES and
+    NEXTDNS_WRITABLE_PROFILES is read once, so all decisions derived from the
+    returned snapshot agree with each other.
+
+    The snapshot is deliberately not cached across requests: it is a
+    per-request value, so the next request re-reads the environment and no
+    invalidation step (or TTL) is needed. Configuration changes therefore take
+    effect on the next request, never retroactively on one already in flight.
+    """
+    read_only = _read_only_from_env()
+    readable = parse_profile_list(os.getenv("NEXTDNS_READABLE_PROFILES", ""))
+    # Read-only mode denies all writes, so the writable set stays None.
+    writable = None if read_only else parse_profile_list(os.getenv("NEXTDNS_WRITABLE_PROFILES", ""))
+    return ProfileAccessControl(
+        read_only=read_only,
+        readable=_combine_readable(readable, writable),
+        writable=None if writable is None else frozenset(writable),
+    )
+
+
+def _combine_readable(readable: set[str] | None, writable: set[str] | None) -> frozenset[str] | None:
+    """Combine the readable and writable sets into the effective readable set.
+
+    Returns:
+        None if nothing is readable (deny all), an empty frozenset if all
+        profiles are readable (allow all), else the set of readable profile IDs.
+    """
+    # No writable profiles: the readable list alone decides, and both unset = deny all
+    if writable is None:
+        return None if readable is None else frozenset(readable)
+
+    # Readable unset but writable set: writable profiles are implicitly readable
+    if readable is None:
+        return frozenset(writable)
+
+    # If readable is empty set (ALL), allow all
+    if not readable:
+        return ALLOW_ALL_FROZENSET
+
+    # Writable ALL implies readable ALL
+    if not writable:
+        return ALLOW_ALL_FROZENSET
+
+    # Readable is set: combine with writable (write implies read)
+    return frozenset(readable | writable)
+
+
 def get_readable_profiles_set() -> set[str] | None:
     """Get the set of profiles that are allowed to be read.
+
+    Convenience wrapper that takes a fresh snapshot; callers performing
+    several checks for one request should take a single snapshot with
+    :func:`load_profile_access_control` instead.
 
     Returns:
         None if no profiles are readable (deny all),
         empty set if all profiles are readable (allow all),
         or set of specific profile IDs
     """
-    # Always compute fresh to avoid stale cache across tests or env changes
-    readable = get_readable_profiles()  # Get from env
-    writable = get_writable_profiles()  # Get from env
-
-    # Both unset = deny all
-    if readable is None and writable is None:
-        return None
-
-    # Readable unset but writable set: writable profiles are implicitly readable
-    if readable is None:
-        return writable
-
-    # If readable is empty set (ALL), allow all
-    if not readable:
-        return ALLOW_ALL_PROFILES
-
-    # If readable is set, combine with writable (write implies read)
-    # Handle case where writable might be None
-    if writable is None:
-        return readable
-    if not writable:
-        return ALLOW_ALL_PROFILES  # Writable ALL implies readable ALL
-    return readable | writable
+    readable = load_profile_access_control().readable
+    return None if readable is None else set(readable)
 
 
 def get_writable_profiles_set() -> set[str] | None:
     """Get the set of profiles that are allowed to be written to.
+
+    Convenience wrapper that takes a fresh snapshot; callers performing
+    several checks for one request should take a single snapshot with
+    :func:`load_profile_access_control` instead.
 
     Returns:
         None if no profiles are writable (deny all),
         empty set if all profiles are writable (allow all),
         or set of specific profile IDs
     """
-    # Always compute fresh to avoid stale cache across tests or env changes
-    if is_read_only():
-        return None
-    return get_writable_profiles()  # Already checks read-only flag
+    writable = load_profile_access_control().writable
+    return None if writable is None else set(writable)
 
 
 def can_read_profile(profile_id: str) -> bool:
     """Check if a profile can be read.
+
+    Convenience wrapper around a fresh snapshot; see
+    :func:`load_profile_access_control`.
 
     Args:
         profile_id: The profile ID to check
@@ -211,15 +302,14 @@ def can_read_profile(profile_id: str) -> bool:
     Returns:
         True if the profile can be read, False otherwise
     """
-    readable = get_readable_profiles_set()
-    # None means deny all, empty set means allow all, otherwise check membership
-    if readable is None:
-        return False
-    return not readable or profile_id.lower() in {p.lower() for p in readable}
+    return load_profile_access_control().can_read(profile_id)
 
 
 def can_write_profile(profile_id: str) -> bool:
     """Check if a profile can be written to.
+
+    Convenience wrapper around a fresh snapshot; see
+    :func:`load_profile_access_control`.
 
     Args:
         profile_id: The profile ID to check
@@ -227,13 +317,7 @@ def can_write_profile(profile_id: str) -> bool:
     Returns:
         True if the profile can be written to, False otherwise
     """
-    if is_read_only():
-        return False
-    writable = get_writable_profiles_set()
-    # None means deny all, empty set means allow all, otherwise check membership
-    if writable is None:
-        return False
-    return not writable or profile_id.lower() in {p.lower() for p in writable}
+    return load_profile_access_control().can_write(profile_id)
 
 
 def _log_api_key_error() -> None:
@@ -256,9 +340,10 @@ def _log_profile_access(profile_set: set[str] | None, access_type: str) -> None:
 
 def _log_access_control_settings() -> None:
     """Log current access control configuration."""
-    readable = get_readable_profiles_set()
-    writable = get_writable_profiles_set()
-    read_only = is_read_only()
+    access = load_profile_access_control()
+    readable = None if access.readable is None else set(access.readable)
+    writable = None if access.writable is None else set(access.writable)
+    read_only = access.read_only
 
     if read_only:
         logger.info("Read-only mode is ENABLED - all write operations are disabled")
