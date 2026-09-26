@@ -82,6 +82,11 @@ class TestCoerceJsonArg:
     def test_returns_invalid_json_string_unchanged(self):
         assert server._coerce_json_arg("not-json") == "not-json"
 
+    def test_returns_malformed_json_object_string_unchanged(self):
+        # Starts with '{' but is invalid JSON: must fall through the
+        # except clause instead of raising.
+        assert server._coerce_json_arg('{"enabled": true') == '{"enabled": true'
+
 
 class TestApiRequest:
     """Tests for the shared _api_request helper."""
@@ -106,14 +111,38 @@ class TestApiRequest:
         exc.response.status_code = 500
         exc.response.text = "internal server error"
         mock_api_client.request.side_effect = exc
-        with pytest.raises(RuntimeError, match="HTTP error 500"):
-            await server._api_request("GET", "/profiles")
+        result = await server._api_request("GET", "/profiles")
+        assert "error" in result
+        assert result["code"] == "http_error"
+        assert result["status_code"] == 500
+
+    @pytest.mark.asyncio
+    async def test_http_error_status_distinguishable(self, mock_api_client):
+        """401/403/429/5xx failures all surface as http_error with distinct status_code."""
+        for status in (401, 403, 429, 503):
+            exc = httpx.HTTPError("boom")
+            exc.response = MagicMock()
+            exc.response.status_code = status
+            exc.response.text = None
+            mock_api_client.request.side_effect = exc
+            result = await server._api_request("GET", "/profiles")
+            assert result["code"] == "http_error"
+            assert result["status_code"] == status
+
+    @pytest.mark.asyncio
+    async def test_http_error_no_response(self, mock_api_client):
+        mock_api_client.request.side_effect = httpx.ConnectError("network down")
+        result = await server._api_request("GET", "/profiles")
+        assert result["code"] == "http_error"
+        assert result["status_code"] is None
+        assert "response_body" not in result
 
     @pytest.mark.asyncio
     async def test_unexpected_error(self, mock_api_client):
         mock_api_client.request.side_effect = RuntimeError("unexpected")
-        with pytest.raises(RuntimeError, match="Unexpected error"):
-            await server._api_request("GET", "/profiles")
+        result = await server._api_request("GET", "/profiles")
+        assert "error" in result
+        assert result["code"] == "internal_error"
 
 
 class TestGetOpenapiToolNames:
@@ -434,12 +463,13 @@ class TestManageLogs:
         csv_text = "date,time,question,answer\n2024-01-01,12:00:00,example.com,A\n"
         response = MagicMock()
         response.status_code = 200
+        response.has_redirect_location = False
         response.headers = {"content-type": "text/csv"}
         response.raise_for_status.return_value = None
         response.aiter_text = lambda: _async_chunks([csv_text])
         mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
         result = await server.manageLogs("download", "abc123")
-        mock_api_client.stream.assert_called_once_with("GET", "/profiles/abc123/logs/download", follow_redirects=True)
+        mock_api_client.stream.assert_called_once_with("GET", "/profiles/abc123/logs/download")
         assert result["content_type"] == "text/csv"
         assert result["size"] == len(csv_text.encode("utf-8"))
         assert result["row_count"] == 2
@@ -458,6 +488,7 @@ class TestManageLogs:
         total_text = "".join(chunks)
         response = MagicMock()
         response.status_code = 200
+        response.has_redirect_location = False
         response.headers = {"content-type": "text/csv"}
         response.raise_for_status.return_value = None
         response.aiter_text = lambda: _async_chunks(chunks)
@@ -478,6 +509,7 @@ class TestManageLogs:
         """An empty text chunk from the stream does not corrupt counts or preview."""
         csv_text = "date,time,question,answer\n2024-01-01,12:00:00,example.com,A\n"
         response = MagicMock()
+        response.has_redirect_location = False
         response.headers = {"content-type": "text/csv"}
         response.raise_for_status.return_value = None
         response.aiter_text = lambda: _async_chunks(["", csv_text, ""])
@@ -494,6 +526,7 @@ class TestManageLogs:
         header = "date,time,question,answer\n"
         huge_line = "x" * (300 * 1024) + "\n"
         response = MagicMock()
+        response.has_redirect_location = False
         response.headers = {"content-type": "text/csv"}
         response.raise_for_status.return_value = None
         response.aiter_text = lambda: _async_chunks([header + huge_line])
@@ -510,6 +543,7 @@ class TestManageLogs:
         """A CSV whose last line has no trailing newline still counts that row."""
         csv_text = "date,time,question,answer\n2024-01-01,12:00:00,example.com,A"
         response = MagicMock()
+        response.has_redirect_location = False
         response.headers = {"content-type": "text/csv"}
         response.raise_for_status.return_value = None
         response.aiter_text = lambda: _async_chunks([csv_text])
@@ -527,27 +561,188 @@ class TestManageLogs:
         assert any("Failed to remove temp log file" in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
+    async def test_download_does_not_pass_follow_redirects_to_authenticated_client(self, mock_api_client):
+        """The authenticated client must never follow redirects (issue #130)."""
+        response = MagicMock()
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks(["csv,data\n"])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        args, kwargs = mock_api_client.stream.call_args
+        assert kwargs.get("follow_redirects") is not True
+        assert all(arg is not True for arg in args)
+        os.unlink(result["file_path"])
+
+
+class _FakeFinalClient:
+    """Unauthenticated stand-in whose streamed fetch returns the final CSV body."""
+
+    def __init__(self, *args, **kwargs):
+        self.last_request = None
+
+    def stream(self, method, url, **kwargs):
+        request = httpx.Request("GET", str(url))
+        self.last_request = request
+        response = httpx.Response(
+            200, request=request, headers={"content-type": "text/csv"}, content=b"csv,data"
+        )
+
+        class _Ctx:
+            async def __aenter__(self):
+                return response
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+    async def aclose(self) -> None:
+        pass
+
+
+class TestManageLogsDownloadRedirects:
+    """Regression tests for issue #130: the API key must not leak on log-download redirects."""
+
+    def _redirect_response(self, location: str) -> httpx.Response:
+        """Build a 302 redirect response for the authenticated download request."""
+        request = httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/logs/download")
+        return httpx.Response(302, request=request, headers={"location": location})
+
+    def _route_through_redirect(self, mock_api_client, location: str, fake):
+        """Route the authenticated stream through a 302 and the unauthenticated client to ``fake``."""
+        redirect = self._redirect_response(location)
+
+        class _RedirectCtx:
+            async def __aenter__(self):
+                return redirect
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_api_client.stream = MagicMock(return_value=_RedirectCtx())
+
+        def fake_client(*args, **kwargs):
+            return fake
+
+        return fake_client
+
+    @pytest.mark.asyncio
+    async def test_api_key_absent_on_redirected_request(self, mock_api_client, monkeypatch):
+        """Mock-302 key-leak scenario: the X-Api-Key must be absent on the redirected request."""
+        fake = _FakeFinalClient()
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", self._route_through_redirect(
+            mock_api_client, "https://cdn.example.com/profiles/abc123/logs.csv?sig=1", fake
+        ))
+
+        result = await server.manageLogs("download", "abc123")
+        assert result["content_type"] == "text/csv"
+        assert result["size"] == 8
+        assert result["row_count"] == 1
+        assert "data" not in result
+
+        # The authenticated client was not asked to follow the redirect.
+        mock_api_client.stream.assert_called_once_with("GET", "/profiles/abc123/logs/download")
+        assert mock_api_client.stream.call_args.kwargs.get("follow_redirects") is not True
+
+        # The redirected request went to the third-party host...
+        assert str(fake.last_request.url) == "https://cdn.example.com/profiles/abc123/logs.csv?sig=1"
+        # ...and it carried no API key header.
+        assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
+        os.unlink(result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_relative_location_resolved_against_origin(self, mock_api_client, monkeypatch):
+        """A relative Location is resolved against the API origin and still sent unauthenticated."""
+        fake = _FakeFinalClient()
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", self._route_through_redirect(
+            mock_api_client, "/redirects/abc123.csv", fake
+        ))
+
+        result = await server.manageLogs("download", "abc123")
+        assert result["size"] == 8
+        assert str(fake.last_request.url) == "https://api.nextdns.io/redirects/abc123.csv"
+        assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
+        os.unlink(result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_redirect_loop_is_bounded(self, mock_api_client, monkeypatch):
+        """A redirect loop must raise a bounded HTTP error instead of looping forever."""
+
+        class _LoopClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def stream(self, method, url, **kwargs):
+                request = httpx.Request("GET", str(url))
+                response = httpx.Response(
+                    302, request=request, headers={"location": "https://cdn.example.com/again.csv"}
+                )
+
+                class _Ctx:
+                    async def __aenter__(self):
+                        return response
+
+                    async def __aexit__(self, *exc):
+                        return False
+
+                return _Ctx()
+
+            async def aclose(self) -> None:
+                pass
+
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", _LoopClient)
+
+        class _RedirectCtx:
+            async def __aenter__(self):
+                return self._redirect_response("https://cdn.example.com/logs.csv")
+
+            async def __aexit__(self, *exc):
+                return False
+
+        loop_redirect = self._redirect_response("https://cdn.example.com/logs.csv")
+
+        class _RedirectCtx:
+            async def __aenter__(self):
+                return loop_redirect
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_api_client.stream = MagicMock(return_value=_RedirectCtx())
+
+        result = await server.manageLogs("download", "abc123")
+        assert "error" in result
+        assert "Exceeded 5 redirects" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_download_http_error(self, mock_api_client):
         response = MagicMock()
+        response.has_redirect_location = False
         response.headers = {}
         exc = httpx.HTTPStatusError("boom", request=MagicMock(), response=httpx.Response(500, headers={}))
         response.raise_for_status.side_effect = exc
         mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
         result = await server.manageLogs("download", "abc123")
         assert "error" in result
-        assert "HTTP error" in result["error"]
+        assert result["code"] == "http_error"
         assert result["status_code"] == 500
 
     @pytest.mark.asyncio
     async def test_download_unexpected_error(self, mock_api_client):
         mock_api_client.stream = MagicMock(side_effect=RuntimeError("boom"))
-        with pytest.raises(RuntimeError, match="Unexpected error"):
-            await server.manageLogs("download", "abc123")
+        result = await server.manageLogs("download", "abc123")
+        assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
     async def test_download_denied_profile_returns_403(self, monkeypatch):
         """A profile outside NEXTDNS_READABLE_PROFILES gets a 403 on download, not a file."""
+        # Restrict both read and write ACLs: the autouse fixture sets
+        # WRITABLE_PROFILES=ALL, which would otherwise make abc123 implicitly
+        # readable (write implies read), so it must be narrowed too.
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "xyz999")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "xyz999")
         nextdns_mcp.config._readable_profiles_cache = None
         nextdns_mcp.config._writable_profiles_cache = None
         real_client = client_module.AccessControlledClient(base_url="https://api.nextdns.io")
@@ -688,8 +883,9 @@ class TestQueryAnalytics:
 
     @pytest.mark.asyncio
     async def test_domains_series_rejected(self, mock_api_client):
-        with pytest.raises(ValueError, match="series=true is not supported"):
-            await server.queryAnalytics("domains", "abc123", series=True)
+        result = await server.queryAnalytics("domains", "abc123", series=True)
+        assert result["code"] == "unsupported_parameter"
+        assert "series=true is not supported" in result["error"]
 
 
 class TestManageProfilesAccessAndValidation:

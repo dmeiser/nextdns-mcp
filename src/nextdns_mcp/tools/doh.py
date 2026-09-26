@@ -10,6 +10,7 @@ import httpx
 
 from ..coercion import OptionalProfileId
 from ..config import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES, can_read_profile, get_default_profile, get_http_timeout
+from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import is_safe_profile_id
 
 logger = logging.getLogger(__name__)
@@ -69,15 +70,20 @@ async def doh_lookup(doh_url: str, domain: str, record_type: str, target_profile
             if result.get("Status") is not None:
                 logger.debug(f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}")
             return result
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error during DoH lookup for {domain}: {e!s}")
+        payload = http_error_payload(f"HTTP error during DoH lookup: {e!s}", e, fallback_code=ErrorCode.HTTP_ERROR)
+        payload.update(profile_id=target_profile, domain=domain, type=record_type)
+        return payload
     except Exception as e:  # noqa: BLE001
-        error_type = "HTTP error" if isinstance(e, httpx.HTTPError) else "Unexpected error"
-        logger.error(f"{error_type} during DoH lookup for {domain}: {e!s}")
-        return {
-            "error": f"{error_type} during DoH lookup: {e!s}",
-            "profile_id": target_profile,
-            "domain": domain,
-            "type": record_type,
-        }
+        logger.error(f"Unexpected error during DoH lookup for {domain}: {e!s}")
+        return error_payload(
+            ErrorCode.INTERNAL_ERROR,
+            f"Unexpected error during DoH lookup: {e!s}",
+            profile_id=target_profile,
+            domain=domain,
+            type=record_type,
+        )
 
 
 async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, record_type: str = "A") -> dict[str, Any]:
@@ -87,24 +93,26 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
     """
     target_profile = _get_target_profile(profile_id)
     if not target_profile:
-        return {
-            "error": "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
-            "hint": "Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
-        }
+        return error_payload(
+            ErrorCode.MISSING_PROFILE_ID,
+            "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
+            hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
+        )
 
     if not is_safe_profile_id(target_profile):
-        return {"error": f"Invalid profile_id format: {target_profile}"}
+        return error_payload(ErrorCode.INVALID_PROFILE_ID, f"Invalid profile_id format: {target_profile}")
 
     if not can_read_profile(target_profile):
-        return {"error": f"Read access denied for profile: {target_profile}"}
+        return error_payload(ErrorCode.READ_ACCESS_DENIED, f"Read access denied for profile: {target_profile}")
 
     is_valid, record_type_upper = _validate_record_type(record_type)
     if not is_valid:
         logger.warning(f"Invalid DNS record type requested: {record_type}")
-        return {
-            "error": f"Invalid record type: {record_type}",
-            "valid_types": VALID_DNS_RECORD_TYPES,
-        }
+        return error_payload(
+            ErrorCode.INVALID_RECORD_TYPE,
+            f"Invalid record type: {record_type}",
+            valid_types=VALID_DNS_RECORD_TYPES,
+        )
 
     doh_url = f"https://dns.nextdns.io/{target_profile}/dns-query"
     logger.info(f"DoH lookup: {domain} ({record_type_upper}) via profile {target_profile}")

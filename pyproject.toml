@@ -5,7 +5,12 @@ description = "NextDNS MCP Server - Model Context Protocol server for NextDNS AP
 authors = [{name = "NextDNS MCP Contributors"}]
 license = {text = "MIT"}
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 dependencies = [
     "fastmcp==4.0.4",
     "httpx>=0.28.1",
@@ -46,11 +51,11 @@ testpaths = ["tests"]
 
 [tool.black]
 line-length = 120
-target-version = ["py314"]
+target-version = ["py312"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py314"
+target-version = "py312"
 
 [tool.isort]
 profile = "black"
