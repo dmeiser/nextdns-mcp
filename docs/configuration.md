@@ -25,7 +25,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 
 Notes
 - Per-profile checks match the `profile_id` in the URL. Collection profile endpoints (`GET /profiles` for `manageProfiles(operation="list")`, `POST /profiles` for `create`) carry no `profile_id` but still respect the global denials above: collection reads are denied when both profile sets are unset, and collection writes are denied in read-only mode or when `NEXTDNS_WRITABLE_PROFILES` is unset.
-- Only `dohLookup` bypasses per-profile checks entirely (it uses a separate DoH endpoint).
+- `dohLookup` uses a separate DoH endpoint (dns.nextdns.io) but still enforces per-profile read access via `can_read_profile`; no tool bypasses the per-profile checks entirely.
 - "Write implies read": profiles allowed for writes are automatically considered readable.
 
 ## Examples
