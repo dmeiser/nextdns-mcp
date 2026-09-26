@@ -6,10 +6,13 @@ importing the modules must not build the client or server, and the
 factories must cache and lazily expose the singletons.
 """
 
+import importlib
 import logging
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
@@ -87,10 +90,54 @@ class TestLazyMcpServer:
         assert server.mcp_server is server.get_mcp_server()
         assert server.mcp is server.get_mcp_server()
 
+    def test_module_getattr_exposes_api_client(self, monkeypatch, mock_api_key):
+        """server.api_client resolves to the same shared instance as the client factory."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setattr(client_module, "_client", None)
+        sentinel = object()
+        monkeypatch.setattr(client_module, "create_nextdns_client", lambda: sentinel)
+
+        assert server.api_client is sentinel
+        assert client_module.get_api_client() is sentinel
+
     def test_module_getattr_unknown_name_raises(self):
         """Unknown attribute names still raise AttributeError."""
         with pytest.raises(AttributeError):
             _ = server.does_not_exist_xyz
+
+
+class TestImportHasNoSideEffects:
+    """A fresh import of the modules must not construct the singletons (issue #150)."""
+
+    def test_reimport_does_not_construct_singletons(self, monkeypatch, request):
+        """Re-importing with constructors instrumented must not invoke them."""
+        monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+        monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
+
+        constructions: list[str] = []
+
+        def record_client_init(*args: object, **kwargs: object) -> None:
+            constructions.append("httpx.AsyncClient")
+
+        monkeypatch.setattr(httpx.AsyncClient, "__init__", record_client_init)
+
+        original_server = sys.modules["nextdns_mcp.server"]
+        original_client = sys.modules["nextdns_mcp.client"]
+        sys.modules.pop("nextdns_mcp.server", None)
+        sys.modules.pop("nextdns_mcp.client", None)
+
+        def restore_modules() -> None:
+            sys.modules["nextdns_mcp.server"] = original_server
+            sys.modules["nextdns_mcp.client"] = original_client
+
+        request.addfinalizer(restore_modules)
+
+        fresh_server = importlib.import_module("nextdns_mcp.server")
+        fresh_client = importlib.import_module("nextdns_mcp.client")
+
+        assert constructions == []
+        assert fresh_client._client is None
+        assert fresh_server._mcp_server is None
 
 
 class TestConfigureLogging:

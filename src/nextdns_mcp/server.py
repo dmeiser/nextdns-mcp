@@ -99,9 +99,11 @@ def get_mcp_server() -> FastMCP:
 
 
 def __getattr__(name: str) -> Any:
-    """Lazily expose the ``mcp_server`` (and ``mcp``) singleton for backward compatibility."""
+    """Lazily expose the ``mcp_server``/``mcp`` server and ``api_client`` singletons for backward compatibility."""
     if name in ("mcp_server", "mcp"):
         return get_mcp_server()
+    if name == "api_client":
+        return get_api_client()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
