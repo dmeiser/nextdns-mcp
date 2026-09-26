@@ -2,24 +2,32 @@ name: Dependabot Auto-Merge
 
 on:
   # Use pull_request_target so Dependabot PRs run in the base repository context with a
-  # writable GITHUB_TOKEN. This workflow does NOT check out or execute any PR code; it
-  # only queries workflow-run statuses and calls the GitHub PR API (review + auto-merge),
-  # which is the documented safe pattern for pull_request_target.
+  # GITHUB_TOKEN that may write to pull requests (approve/comment/auto-merge). The token
+  # has read-only contents access, so it cannot push to any branch, including main.
+  # This workflow does NOT check out or execute any PR code; it only queries
+  # workflow-run statuses and calls the GitHub PR API (review + auto-merge), which is the
+  # documented safe pattern for pull_request_target.
   pull_request_target:
     types: [opened, synchronize, reopened]
-
-permissions:
-  contents: write
-  pull-requests: write
-  actions: read
-  checks: read
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
     # Only run on dependabot PRs
     if: github.actor == 'dependabot[bot]'
-    
+
+    # Least privilege: this workflow only approves/reviews, comments, and enables
+    # auto-merge on Dependabot PRs. It never pushes code, so contents stays read-only.
+    #   contents: read       - read-only repository metadata
+    #   pull-requests: write - approve + comment + enable auto-merge
+    #   actions: read        - list workflow runs for the PR head SHA
+    #   checks: read         - read check run status
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+      checks: read
+
     steps:
       - name: Wait for required workflows
         uses: actions/github-script@v7
