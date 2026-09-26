@@ -73,6 +73,8 @@ class TestAccessControlledClientReadAccess:
         mock_super_request.assert_not_called()
         assert response.status_code == 403
         assert "error" in response.json()
+        assert response.json()["code"] == "read_access_denied"
+        assert "Read access denied" in response.json()["error"]
 
     @pytest.mark.asyncio
     async def test_allows_list_profiles_without_check(self, mock_super_request: Any) -> None:
@@ -118,6 +120,7 @@ class TestAccessControlledClientWriteAccess:
         mock_super_request.assert_not_called()
         assert response.status_code == 403
         assert "error" in response.json()
+        assert response.json()["code"] == "write_access_denied"
 
     @pytest.mark.asyncio
     async def test_denies_all_writes_in_read_only_mode(
@@ -135,6 +138,7 @@ class TestAccessControlledClientWriteAccess:
         mock_super_request.assert_not_called()
         assert response.status_code == 403
         assert "read-only mode" in response.json()["error"]
+        assert response.json()["code"] == "write_access_denied"
 
     @pytest.mark.asyncio
     async def test_allows_create_profile_without_check(
