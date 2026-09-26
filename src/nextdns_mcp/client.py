@@ -171,5 +171,23 @@ def create_nextdns_client() -> httpx.AsyncClient:
     )
 
 
-# Create authenticated HTTP client (module-level for access by helper functions)
-api_client = create_nextdns_client()
+_client: httpx.AsyncClient | None = None
+
+
+def get_api_client() -> httpx.AsyncClient:
+    """Return the shared authenticated API client, creating it on first use.
+
+    The client is built lazily so that importing this module has no side
+    effects and configuration changes (e.g. in tests) are picked up.
+    """
+    global _client
+    if _client is None:
+        _client = create_nextdns_client()
+    return _client
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose the ``api_client`` singleton for backward compatibility."""
+    if name == "api_client":
+        return get_api_client()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

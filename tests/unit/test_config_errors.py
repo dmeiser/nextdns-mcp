@@ -22,6 +22,12 @@ def mock_nextdns_config():
     # Create mock logger with proper spec
     module.logger = Mock(name="logger", spec=logging.Logger)
 
+    # Typed exception mirroring nextdns_mcp.config.MissingApiKeyError
+    class MissingApiKeyError(RuntimeError):
+        """Raised when required NextDNS configuration is missing."""
+
+    module.MissingApiKeyError = MissingApiKeyError
+
     # Function definitions that use our mock logger
     def parse_profile_list(profile_str: str) -> set[str]:
         """Pure function, no logging."""
@@ -70,7 +76,7 @@ def mock_nextdns_config():
         """Validate configuration."""
         if not module.NEXTDNS_API_KEY:
             _log_api_key_error()
-            sys.exit(1)
+            raise module.MissingApiKeyError("NEXTDNS_API_KEY is required")
         _log_access_control_settings()
 
     # Add functions to module
@@ -159,14 +165,13 @@ def test_log_access_control_settings_unrestricted(mock_module):
     assert mock_module.logger.info.call_count == 2
 
 
-def test_validate_configuration_exits_on_missing_api_key(mock_module):
-    """Test validate_configuration exits when API key is missing."""
+def test_validate_configuration_raises_on_missing_api_key(mock_module):
+    """Test validate_configuration raises when API key is missing."""
     mock_module.NEXTDNS_API_KEY = None
 
-    # Should exit with code 1
-    with pytest.raises(SystemExit) as exc_info:
+    # Should raise the typed exception (not sys.exit)
+    with pytest.raises(mock_module.MissingApiKeyError):
         mock_module.validate_configuration()
-    assert exc_info.value.code == 1
 
     # Check expected error logs
     calls = [
@@ -198,11 +203,9 @@ def test_validate_configuration_logs_settings(mock_module):
     # Configure the mock module
     mock_module.NEXTDNS_API_KEY = None
 
-    # Test that the function raises SystemExit
-    with pytest.raises(SystemExit) as excinfo:
+    # Test that the function raises the typed exception
+    with pytest.raises(mock_module.MissingApiKeyError):
         mock_module.validate_configuration()
-
-    assert excinfo.value.code == 1
 
     # Check logger calls
     expected_calls = [

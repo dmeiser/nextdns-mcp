@@ -24,7 +24,6 @@ SPDX-License-Identifier: MIT
 """
 
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +39,10 @@ from fastmcp.tools import ToolResult
 from .config import EXCLUDED_ROUTES, get_default_profile
 
 logger = logging.getLogger(__name__)
+
+
+class OpenApiSpecNotFound(FileNotFoundError):
+    """Raised when the NextDNS OpenAPI spec file cannot be found."""
 
 
 class StripExtraFieldsMiddleware(Middleware):
@@ -181,7 +184,7 @@ def load_openapi_spec() -> dict[str, Any]:
     if not spec_path.exists():
         logger.critical(f"OpenAPI spec not found at: {spec_path}")
         logger.critical("The nextdns-openapi.yaml file must be in the package directory.")
-        sys.exit(1)
+        raise OpenApiSpecNotFound(str(spec_path))
 
     logger.info(f"Loading OpenAPI spec from: {spec_path}")
     with open(spec_path, "r") as f:

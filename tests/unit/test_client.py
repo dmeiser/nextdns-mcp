@@ -1,7 +1,6 @@
 """Unit tests for HTTP client creation."""
 
 import httpx
-import pytest
 
 
 class TestCreateNextdnsClient:
@@ -22,12 +21,15 @@ class TestCreateNextdnsClient:
 
         assert isinstance(client, httpx.AsyncClient)
 
-    @pytest.mark.skip(reason="Module-level initialization prevents reliable testing")
     def test_create_client_has_correct_base_url(self, monkeypatch, mock_api_key):
         """Test that client has correct base URL."""
-        # This test is skipped because module reloading doesn't work reliably in pytest.
-        # The base URL constant is already tested in test_base_url_is_correct.
-        pass  # noqa: PIE790  # pragma: no cover
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        client = create_nextdns_client()
+
+        assert str(client.base_url) == "https://api.nextdns.io"
 
     def test_create_client_has_api_key_header(self, monkeypatch, mock_api_key):
         """Test that X-Api-Key header is set as a static header during client creation."""

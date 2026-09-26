@@ -8,17 +8,28 @@ SPDX-License-Identifier: MIT
 
 import logging
 import os
-import sys
 
 from fastmcp.server.providers.openapi import MCPType, RouteMap
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger(__name__)
+
+
+class MissingApiKeyError(RuntimeError):
+    """Raised when required NextDNS configuration is missing."""
+
+
+def configure_logging() -> None:
+    """Configure root logging for the NextDNS MCP server.
+
+    Called only from the ``__main__`` entrypoint so that importing this
+    module has no logging side effects.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
 
 # Core API configuration
 NEXTDNS_BASE_URL = "https://api.nextdns.io"
@@ -246,11 +257,14 @@ def validate_configuration() -> None:
     """Validate required configuration is present.
 
     Raises:
-        SystemExit: If required configuration is missing
+        MissingApiKeyError: If required configuration is missing
     """
     if not get_api_key():
         _log_api_key_error()
-        sys.exit(1)
+        raise MissingApiKeyError(
+            "NEXTDNS_API_KEY is required. Set the NEXTDNS_API_KEY environment "
+            "variable or NEXTDNS_API_KEY_FILE pointing to a Docker secret."
+        )
 
     _log_access_control_settings()
 

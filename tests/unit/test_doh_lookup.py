@@ -116,14 +116,16 @@ class TestDohLookup:
             assert result["_metadata"]["query_domain"] == "example.com"
             assert result["_metadata"]["query_type"] == "A"
 
-    @pytest.mark.skip(reason="Module-level constant binding prevents reliable testing")
     @pytest.mark.asyncio
-    async def test_doh_lookup_no_profile_error(self):
+    async def test_doh_lookup_no_profile_error(self, monkeypatch):
         """Test error when no profile_id provided and no default set."""
-        # This test is skipped because the module-level NEXTDNS_DEFAULT_PROFILE constant
-        # is bound at import time and can't be reliably mocked. The error handling logic
-        # for missing profile is simple validation code (lines 189-193 in server.py).
-        pass  # noqa: PIE790  # pragma: no cover
+        monkeypatch.delenv("NEXTDNS_DEFAULT_PROFILE", raising=False)
+
+        result = await dohLookup("example.com", None, "A")
+
+        assert "error" in result
+        assert "No profile_id provided" in result["error"]
+        assert "NEXTDNS_DEFAULT_PROFILE" in result["hint"]
 
     @pytest.mark.asyncio
     async def test_doh_lookup_invalid_record_type(self, mock_profile_id):
