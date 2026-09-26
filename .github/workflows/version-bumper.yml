@@ -33,16 +33,19 @@ jobs:
 
       - name: Calculate and Update Version
         id: update_version
+        env:
+          BUMP_LABEL: ${{ github.event.label.name }}
         run: |
           set -euo pipefail
           
           python3 << 'PY'
+          import os
           import re
           import sys
           import tomllib
           from pathlib import Path
 
-          LABEL = "${{ github.event.label.name }}"
+          LABEL = os.environ["BUMP_LABEL"]
           MAIN_ROOT = Path("main-ref")
           PR_ROOT = Path(".")
 
@@ -85,9 +88,13 @@ jobs:
           PY
           
           NEXT_V=$(cat new_version.txt)
-          echo "next_version=$NEXT_V" >> $GITHUB_OUTPUT
+          echo "next_version=$NEXT_V" >> "$GITHUB_OUTPUT"
 
       - name: Commit and Push
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          NEXT_VERSION: ${{ steps.update_version.outputs.next_version }}
+          BUMP_LABEL: ${{ github.event.label.name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -99,5 +106,5 @@ jobs:
             exit 0
           fi
           
-          git commit -m "chore: bump version to ${{ steps.update_version.outputs.next_version }} (${{ github.event.label.name }})"
-          git push origin ${{ github.head_ref }}
+          git commit -m "chore: bump version to $NEXT_VERSION ($BUMP_LABEL)"
+          git push origin "$HEAD_REF"
