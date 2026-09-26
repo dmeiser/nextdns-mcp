@@ -170,7 +170,6 @@ async def test_request_body_passthrough_and_access_denied(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_profiles_response):
-    # Mock AsyncClient used in _execute_doh_query
     class DummyResponse:
         def __init__(self, data):
             self._data = data
@@ -194,7 +193,9 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
         async def get(self, doh_url, params=None, headers=None):
             return DummyResponse({**mock_doh_response})
 
-    monkeypatch.setattr(doh_module.httpx, "AsyncClient", DummyClient)
+    # Install the dummy client as the doh tool module's cached persistent
+    # client (issue #149) so doh_lookup never hits the network.
+    monkeypatch.setattr(doh_module, "_doh_client", DummyClient())
 
     # doh_lookup success
     res = await server.doh_lookup("https://dns.nextdns.io/abc/dns-query", "google.com", "A", "abc")

@@ -1,7 +1,7 @@
 """Tests for server.py helper functions and tools."""
 
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -15,6 +15,7 @@ from nextdns_mcp.server import (
     create_nextdns_client,
     load_openapi_spec,
 )
+from nextdns_mcp.tools import doh as doh_module
 
 
 @pytest.fixture
@@ -33,6 +34,17 @@ def allow_doh_read_access(monkeypatch):
     module reloads performed by other tests.
     """
     monkeypatch.setitem(_dohLookup_impl.__globals__, "can_read_profile", lambda _profile_id: True)
+
+
+@pytest.fixture(autouse=True)
+async def mock_doh_client(monkeypatch):
+    """Install a mock persistent DoH client so no test hits the network."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"Status": 0, "Answer": [{"data": "1.2.3.4"}]}
+    mock_client.get.return_value = mock_response
+    monkeypatch.setattr(doh_module, "_doh_client", mock_client)
+    return mock_client
 
 
 class TestLoadOpenAPISpec:
@@ -199,37 +211,23 @@ class TestDohLookupImpl:
         assert "Invalid record type: INVALID" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_successful_lookup(self, clean_env):
+    async def test_successful_lookup(self, clean_env, mock_doh_client):
         """Test successful DNS lookup."""
         clean_env("NEXTDNS_HTTP_TIMEOUT", "30")
 
-        # Mock the httpx response
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"Status": 0, "Answer": [{"data": "1.2.3.4"}]}
-
-        with patch("httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_client.__aenter__.return_value = mock_client
-            mock_client.get.return_value = mock_response
-            mock_client_class.return_value = mock_client
-
-            result = await _dohLookup_impl("example.com", "abc123", "A")
+        result = await _dohLookup_impl("example.com", "abc123", "A")
 
         assert "Status" in result
         assert "_metadata" in result
 
     @pytest.mark.asyncio
-    async def test_http_error_returns_error_dict(self, clean_env):
+    async def test_http_error_returns_error_dict(self, clean_env, mock_doh_client):
         """Test HTTP error returns error dict."""
         clean_env("NEXTDNS_HTTP_TIMEOUT", "30")
 
-        with patch("httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_client.__aenter__.return_value = mock_client
-            mock_client.get.side_effect = httpx.HTTPError("Connection failed")
-            mock_client_class.return_value = mock_client
+        mock_doh_client.get.side_effect = httpx.HTTPError("Connection failed")
 
-            result = await _dohLookup_impl("example.com", "abc123", "A")
+        result = await _dohLookup_impl("example.com", "abc123", "A")
 
         assert "error" in result
         assert "HTTP error" in result["error"]

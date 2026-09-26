@@ -73,7 +73,7 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
     if response is not None:
         try:
             parsed = response.json()
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             parsed = None
         if isinstance(parsed, dict) and parsed.get("error"):
             payload = dict(parsed)

@@ -15,6 +15,18 @@ from ..utils import is_safe_profile_id
 
 logger = logging.getLogger(__name__)
 
+# Persistent DoH HTTP client, module-level for keep-alive connection reuse
+# (mirrors client.api_client).
+_doh_client: httpx.AsyncClient | None = None
+
+
+def _get_doh_client() -> httpx.AsyncClient:
+    """Return the persistent DoH HTTP client, creating it on first use."""
+    global _doh_client
+    if _doh_client is None:
+        _doh_client = httpx.AsyncClient(timeout=get_http_timeout())
+    return _doh_client
+
 
 def _get_target_profile(profile_id: str | None) -> str | None:
     """Get the target profile ID, using default if not specified."""
@@ -59,17 +71,15 @@ async def doh_lookup(doh_url: str, domain: str, record_type: str, target_profile
     params = {"name": domain, "type": record_type}
     headers = {"accept": "application/dns-json"}
 
+    client = _get_doh_client()
     try:
-        async with httpx.AsyncClient(timeout=get_http_timeout()) as client:
-            response = await client.get(doh_url, params=params, headers=headers)
-            response.raise_for_status()
-            result: dict[str, Any] = response.json()
-            result["_metadata"] = _build_doh_metadata(
-                target_profile, domain, record_type, doh_url, result.get("Status")
-            )
-            if result.get("Status") is not None:
-                logger.debug(f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}")
-            return result
+        response = await client.get(doh_url, params=params, headers=headers)
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        result["_metadata"] = _build_doh_metadata(target_profile, domain, record_type, doh_url, result.get("Status"))
+        if result.get("Status") is not None:
+            logger.debug(f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}")
+        return result
     except httpx.HTTPError as e:
         logger.error(f"HTTP error during DoH lookup for {domain}: {e!s}")
         payload = http_error_payload(f"HTTP error during DoH lookup: {e!s}", e, fallback_code=ErrorCode.HTTP_ERROR)
