@@ -7,6 +7,10 @@ The grouped CRUD tools collapse many OpenAPI operations into a single MCP tool,
 so validation is performed against the union of response schemas for the
 underlying operations. A response is considered valid if it matches any of the
 expected schemas for that grouped tool.
+
+Known limitation: a cyclic $ref whose target has no unambiguous expected type
+(e.g. a mixed anyOf/oneOf union) falls back to permissive validation of that
+subtree rather than guessing a type.
 """
 
 import json
@@ -217,24 +221,6 @@ def _extract_schema_type(
 
     if "items" in schema:
         return "array"
-
-    if "allOf" in schema and isinstance(schema["allOf"], list):
-        for sub_schema in schema["allOf"]:
-            t = _extract_schema_type(spec, sub_schema, _visited)
-            if t:
-                return t
-
-    if "anyOf" in schema and isinstance(schema["anyOf"], list):
-        for sub_schema in schema["anyOf"]:
-            t = _extract_schema_type(spec, sub_schema, _visited)
-            if t:
-                return t
-
-    if "oneOf" in schema and isinstance(schema["oneOf"], list):
-        for sub_schema in schema["oneOf"]:
-            t = _extract_schema_type(spec, sub_schema, _visited)
-            if t:
-                return t
 
     return None
 

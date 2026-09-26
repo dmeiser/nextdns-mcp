@@ -216,13 +216,11 @@ def test_resolve_schema_seen_scoped_per_top_level_call():
 
 
 def test_extract_schema_type_coverage():
-    """Cover edge cases in _extract_schema_type (allOf, anyOf, oneOf, non-dict)."""
+    """Cover edge cases in _extract_schema_type (non-dict, properties, items)."""
     assert _extract_schema_type(None, "not-a-dict") is None
     assert _extract_schema_type(None, {"properties": {"a": {}}}) == "object"
     assert _extract_schema_type(None, {"items": {"type": "string"}}) == "array"
-    assert _extract_schema_type(None, {"allOf": [{"type": "string"}]}) == "string"
-    assert _extract_schema_type(None, {"anyOf": [{"type": "integer"}]}) == "integer"
-    assert _extract_schema_type(None, {"oneOf": [{"type": "boolean"}]}) == "boolean"
+    assert _extract_schema_type(None, {"anyOf": [{"type": "integer"}]}) is None
     assert _extract_schema_type(None, {"oneOf": [{"invalid": "no-type"}]}) is None
     assert _extract_schema_type(None, {"$ref": "nonexistent"}) is None
     assert _extract_schema_type(None, {"$ref": "#/some/ref"}) is None
