@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 import pytest
 
-from nextdns_mcp.config import ConfigurationError
 from nextdns_mcp.server import _is_loopback_host, get_mcp_run_options
 
 
@@ -105,53 +104,6 @@ class TestGetMcpRunOptions:
             pytest.raises(ValueError),
         ):
             get_mcp_run_options()
-
-    def test_invalid_port_raises_configuration_error_with_actionable_message(self):
-        """Test that invalid port raises ConfigurationError with actionable message."""
-        with (
-            patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "not-a-port"}),
-            pytest.raises(ConfigurationError) as exc_info,
-        ):
-            get_mcp_run_options()
-
-        err = exc_info.value
-        assert "MCP_PORT" in str(err)
-        assert "'not-a-port'" in str(err)
-        assert "Expected an integer port number between 1 and 65535." in str(err)
-        assert err.__cause__ is None
-
-    def test_empty_port_raises_configuration_error(self):
-        """Test that empty port raises ConfigurationError."""
-        with (
-            patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": ""}),
-            pytest.raises(ConfigurationError) as exc_info,
-        ):
-            get_mcp_run_options()
-
-        err = exc_info.value
-        assert "MCP_PORT" in str(err)
-        assert "''" in str(err)
-        assert "Expected an integer port number between 1 and 65535." in str(err)
-
-    @pytest.mark.parametrize("port_val", ["0", "-1", "65536", "70000"])
-    def test_boundary_invalid_port_raises_configuration_error(self, port_val):
-        """Test that boundary out-of-range port values raise ConfigurationError."""
-        with (
-            patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": port_val}),
-            pytest.raises(ConfigurationError) as exc_info,
-        ):
-            get_mcp_run_options()
-
-        err = exc_info.value
-        assert "MCP_PORT" in str(err)
-        assert repr(port_val) in str(err)
-
-    @pytest.mark.parametrize("port_val, expected", [("1", 1), ("65535", 65535)])
-    def test_boundary_valid_port(self, port_val, expected):
-        """Test that boundary valid port values are accepted."""
-        with patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": port_val}):
-            options = get_mcp_run_options()
-            assert options["port"] == expected
 
     def test_options_can_be_unpacked_to_mcp_run(self):
         """Test that returned dict can be unpacked with **kwargs."""

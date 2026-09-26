@@ -20,7 +20,6 @@ from fastmcp import FastMCP
 from .client import get_api_client
 from .config import (
     NEXTDNS_BASE_URL,
-    ConfigurationError,
     configure_logging,
     get_http_timeout,
     validate_configuration,
@@ -114,15 +113,7 @@ def get_mcp_run_options() -> dict[str, Any]:
 
     if transport_mode == "http":
         host = os.getenv("MCP_HOST", "127.0.0.1")
-        port_raw = os.getenv("MCP_PORT", "8000")
-        try:
-            port = int(port_raw)
-            if not (1 <= port <= 65535):
-                raise ValueError
-        except (ValueError, TypeError):
-            raise ConfigurationError(
-                f"Invalid MCP_PORT: {port_raw!r}. Expected an integer port number between 1 and 65535."
-            ) from None
+        port = int(os.getenv("MCP_PORT", "8000"))
         logger.info(f"  Transport: HTTP streamable on {host}:{port}")
         logger.info(f"  MCP endpoint: http://{host}:{port}/mcp")
         if not _is_loopback_host(host):
