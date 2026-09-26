@@ -211,11 +211,106 @@ class TestStripExtraFieldsMiddleware:
         assert middleware._coerce_string_value("42", {"string"}) == "42"
         # Unicode digit-like characters must not crash int() or float()
         assert middleware._coerce_string_value("²", {"integer"}) == "²"
-        assert middleware._coerce_string_value("²", {"number"}) == "²"
+        assert middleware._coerce_string_value("³", {"integer"}) == "³"
+        assert middleware._coerce_string_value("¹", {"integer"}) == "¹"
+        assert middleware._coerce_string_value("⁴", {"integer"}) == "⁴"
         assert middleware._coerce_string_value("-²", {"integer"}) == "-²"
+        assert middleware._coerce_string_value("1²", {"integer"}) == "1²"
+        assert middleware._coerce_string_value("½", {"integer"}) == "½"
+        assert middleware._coerce_string_value("¼", {"integer"}) == "¼"
+        assert middleware._coerce_string_value("²", {"number"}) == "²"
         assert middleware._coerce_string_value("1.²", {"number"}) == "1.²"
+        assert middleware._coerce_string_value("-1.²", {"number"}) == "-1.²"
 
     def test_coerce_value_schema_aware_for_lists(self, middleware):
         """Test array items are coerced when items schema is provided."""
         result = middleware._coerce_value(["true", "false"], {"type": "array", "items": {"type": "boolean"}})
         assert result == [True, False]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raw_value", "schema_type", "expected"),
+        [
+            ("²", "integer", "²"),
+            ("³", "integer", "³"),
+            ("¹", "integer", "¹"),
+            ("⁴", "integer", "⁴"),
+            ("-²", "integer", "-²"),
+            ("1²", "integer", "1²"),
+            ("½", "integer", "½"),
+            ("¼", "integer", "¼"),
+            ("²", "number", "²"),
+            ("1.²", "number", "1.²"),
+            ("-1.²", "number", "-1.²"),
+            ("42", "integer", 42),
+            ("-42", "integer", -42),
+            ("3.14", "number", 3.14),
+        ],
+    )
+    async def test_unicode_digits_through_middleware_path(self, middleware, raw_value, schema_type, expected):
+        """Test Unicode digit strings do not crash int/float parsing through on_call_tool."""
+        tool = MagicMock()
+        tool.parameters = {
+            "properties": {
+                "val": {"type": schema_type},
+            }
+        }
+        context = MagicMock()
+        context.message.name = "testTool"
+        context.message.arguments = {"val": raw_value}
+        context.fastmcp_context = MagicMock()
+        context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
+        call_next = AsyncMock(return_value=MagicMock())
+
+        await middleware.on_call_tool(context, call_next)
+
+        call_next.assert_called_once_with(context)
+        assert context.message.arguments["val"] == expected
+
+    @pytest.mark.asyncio
+    async def test_unicode_digits_multi_field_through_middleware_path(self, middleware):
+        """Test multi-field arguments with Unicode digits through on_call_tool."""
+        tool = MagicMock()
+        tool.parameters = {
+            "properties": {
+                "integer_field": {"type": "integer"},
+                "number_field": {"type": "number"},
+                "valid_int": {"type": "integer"},
+                "valid_num": {"type": "number"},
+                "string_field": {"type": "string"},
+                "list_field": {"type": "array", "items": {"type": "integer"}},
+                "nested_obj": {"type": "object"},
+            }
+        }
+        context = MagicMock()
+        context.message.name = "testNumericTool"
+        context.message.arguments = {
+            "integer_field": "²",
+            "number_field": "1.²",
+            "valid_int": "42",
+            "valid_num": "3.14",
+            "string_field": "³",
+            "list_field": ["²", "42", "³"],
+            "nested_obj": {"power": "²"},
+        }
+        context.fastmcp_context = MagicMock()
+        context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
+        call_next = AsyncMock(return_value=MagicMock())
+
+        await middleware.on_call_tool(context, call_next)
+
+        call_next.assert_called_once_with(context)
+        assert context.message.arguments == {
+            "integer_field": "²",
+            "number_field": "1.²",
+            "valid_int": 42,
+            "valid_num": 3.14,
+            "string_field": "³",
+            "list_field": ["²", 42, "³"],
+            "nested_obj": {"power": "²"},
+        }
+
+    def test_coerce_string_value_int_value_error_fallback(self, middleware, monkeypatch):
+        """Test fallback to original string if int() raises ValueError."""
+        monkeypatch.setattr("nextdns_mcp.openapi._is_integer", lambda _s: True)
+        assert middleware._coerce_string_value("invalid", {"integer"}) == "invalid"
