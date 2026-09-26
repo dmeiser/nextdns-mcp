@@ -7,11 +7,6 @@ import logging
 import os
 from typing import Any
 
-from dotenv import load_dotenv
-
-# Load environment variables from .env file first
-load_dotenv()
-
 # Disable FastMCP automatic update checks to prevent startup delays and hangs in offline/CI environments
 os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
 
@@ -146,4 +141,10 @@ if __name__ == "__main__":  # pragma: no cover
     # 2. When pytest imports the module, __name__ != "__main__"
     # 3. The mcp_server.run() call starts a blocking event loop unsuitable for unit tests
     # The options building logic IS tested via tests/unit/test_mcp_run_options.py
+    # Load .env only for the real entrypoint (issue #177): calling load_dotenv() at
+    # import time made importing server.py from any working directory walk upward and
+    # load whatever .env it found into the importing process.
+    from dotenv import load_dotenv
+
+    load_dotenv()
     _run_server()
