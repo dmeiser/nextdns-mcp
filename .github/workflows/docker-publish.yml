@@ -132,6 +132,9 @@ jobs:
           # For schedule events, checkout main (stable release code)
           ref: ${{ github.event.workflow_run.head_sha || (github.event_name == 'schedule' && 'main') || github.sha }}
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -256,7 +259,7 @@ jobs:
             type=raw,value=${{ steps.version.outputs.major }}-alpine,enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
             type=raw,value=${{ steps.version.outputs.major_minor }}-alpine,enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
 
-      - name: Build and push fresh image
+      - name: Build and push Docker image (${{ matrix.variant }})
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -281,31 +284,33 @@ jobs:
       - name: Generate image summary (${{ matrix.variant }})
         if: always()
         run: |
-          echo "## 🚀 Docker Images Published — ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Docker Hub" >> $GITHUB_STEP_SUMMARY
-          echo "**Registry:** docker.io/${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          if [ "${{ matrix.variant }}" = "alpine" ]; then
-            echo "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp:alpine" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp:latest" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### GitHub Container Registry" >> $GITHUB_STEP_SUMMARY
-          echo "**Registry:** ghcr.io/${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          if [ "${{ matrix.variant }}" = "alpine" ]; then
-            echo "docker pull ghcr.io/${{ github.repository }}:alpine" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "docker pull ghcr.io/${{ github.repository }}:latest" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Tags Applied:**" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps[format('meta-{0}', matrix.variant)].outputs.tags }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Platforms:** ${{ steps.platforms.outputs.list }}" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## 🚀 Docker Images Published — ${{ matrix.variant }}"
+            echo ""
+            echo "### Docker Hub"
+            echo "**Registry:** docker.io/${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp"
+            echo '```bash'
+            if [ "${{ matrix.variant }}" = "alpine" ]; then
+              echo "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp:alpine"
+            else
+              echo "docker pull ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp:latest"
+            fi
+            echo '```'
+            echo ""
+            echo "### GitHub Container Registry"
+            echo "**Registry:** ghcr.io/${{ github.repository }}"
+            echo '```bash'
+            if [ "${{ matrix.variant }}" = "alpine" ]; then
+              echo "docker pull ghcr.io/${{ github.repository }}:alpine"
+            else
+              echo "docker pull ghcr.io/${{ github.repository }}:latest"
+            fi
+            echo '```'
+            echo ""
+            echo "**Tags Applied:**"
+            echo '```'
+            echo "${{ steps[format('meta-{0}', matrix.variant)].outputs.tags }}"
+            echo '```'
+            echo ""
+            echo "**Platforms:** ${{ steps.platforms.outputs.list }}"
+          } >> "$GITHUB_STEP_SUMMARY"
