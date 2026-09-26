@@ -298,9 +298,20 @@ class TestIsWriteOperation:
 class TestSafeIdValidation:
     """Test safe identifier validation helpers."""
 
-    def test_is_safe_profile_id_accepts_alphanumeric(self):
+    def test_is_safe_profile_id_accepts_spec_ids(self):
         assert is_safe_profile_id("abc123") is True
-        assert is_safe_profile_id("test-profile_1") is True
+        assert is_safe_profile_id("def456") is True
+
+    def test_is_safe_profile_id_rejects_non_spec_ids(self):
+        # The spec pattern is ^[a-z0-9]{6}$: exactly 6 lowercase alphanumeric chars.
+        assert is_safe_profile_id("a" * 40) is False  # wrong length
+        assert is_safe_profile_id("abc") is False  # too short
+        assert is_safe_profile_id("abcdefg") is False  # too long
+        assert is_safe_profile_id("AbC123") is False  # mixed case
+        assert is_safe_profile_id("ABCDEF") is False  # uppercase
+        assert is_safe_profile_id("abc_def") is False  # underscore
+        assert is_safe_profile_id("abc-def") is False  # hyphen
+        assert is_safe_profile_id("abc.def") is False  # dot
 
     def test_is_safe_profile_id_rejects_path_traversal(self):
         assert is_safe_profile_id("abc/../def") is False
@@ -327,4 +338,17 @@ class TestExtractProfileIdFromUrlValidation:
 
     def test_returns_none_for_invalid_profile_id_characters(self):
         result = extract_profile_id_from_url("/profiles/abc.def/settings")
+        assert result is None
+
+    def test_returns_none_for_overlong_profile_id(self):
+        # 40-char IDs previously passed local validation then 404ed upstream.
+        result = extract_profile_id_from_url("/profiles/" + "a" * 40 + "/settings")
+        assert result is None
+
+    def test_returns_none_for_mixed_case_profile_id(self):
+        result = extract_profile_id_from_url("/profiles/AbC123/settings")
+        assert result is None
+
+    def test_returns_none_for_profile_id_with_underscore(self):
+        result = extract_profile_id_from_url("/profiles/abc_def/settings")
         assert result is None

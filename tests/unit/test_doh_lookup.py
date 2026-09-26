@@ -74,7 +74,7 @@ class TestDohLookup:
     @pytest.mark.asyncio
     async def test_doh_lookup_uses_default_profile(self, monkeypatch):
         """Test that dohLookup uses NEXTDNS_DEFAULT_PROFILE when profile_id not provided."""
-        test_profile = "test123"
+        test_profile = "abc123"
 
         # Patch environment and reload config
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", test_profile)

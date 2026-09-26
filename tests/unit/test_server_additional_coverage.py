@@ -152,7 +152,7 @@ async def test_request_body_passthrough_and_access_denied(monkeypatch):
     client = server.AccessControlledClient()
 
     # Test request returns early when access denied
-    monkeypatch.setattr(client_module, "extract_profile_id_from_url", lambda url: "abc")
+    monkeypatch.setattr(client_module, "extract_profile_id_from_url", lambda url: "abc123")
     monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
     monkeypatch.setattr(client_module, "is_read_only", lambda: False)
     # allow reads for this test
@@ -164,7 +164,7 @@ async def test_request_body_passthrough_and_access_denied(monkeypatch):
     # Patch the parent httpx.AsyncClient.request
     monkeypatch.setattr(httpx.AsyncClient, "request", fake_super_request)
 
-    r = await client.request("GET", "/profiles/abc/something")
+    r = await client.request("GET", "/profiles/abc123/something")
     assert r.status_code == 200
 
 
@@ -198,7 +198,7 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     monkeypatch.setattr(doh_module, "_doh_client", DummyClient())
 
     # doh_lookup success
-    res = await server.doh_lookup("https://dns.nextdns.io/abc/dns-query", "google.com", "A", "abc")
+    res = await server.doh_lookup("https://dns.nextdns.io/abc123/dns-query", "google.com", "A", "abc123")
     assert "_metadata" in res
 
     # _dohLookup_impl: no default profile
@@ -207,7 +207,7 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     assert "error" in r and "No profile_id" in r["error"]
 
     # invalid record type
-    monkeypatch.setattr(doh_module, "get_default_profile", lambda: "abc")
+    monkeypatch.setattr(doh_module, "get_default_profile", lambda: "abc123")
     r2 = await server._dohLookup_impl("example.com", record_type="INVALID")
     assert "error" in r2 and "Invalid record type" in r2["error"]
 

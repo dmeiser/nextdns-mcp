@@ -22,8 +22,10 @@ from .errors import ErrorCode
 
 logger = logging.getLogger(__name__)
 
-# Safe identifier pattern to prevent path traversal and ACL bypass.
-_SAFE_PROFILE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+# Safe identifier patterns to prevent path traversal and ACL bypass.
+# Profile IDs must match the upstream spec exactly (nextdns-openapi.yaml ProfileId
+# parameter): 6 lowercase alphanumeric characters. Anything else 404s upstream.
+SAFE_PROFILE_ID_PATTERN = re.compile(r"^[a-z0-9]{6}$")
 
 
 def _normalized_request_path(url: str) -> str | None:
@@ -62,7 +64,7 @@ def _extract_profile_id_from_path(path: str | None) -> str | None:
     match = re.match(r"^/profiles/([^/]+)(?:/|$)", normalized)
     if match:
         profile_id = match.group(1)
-        if _SAFE_PROFILE_ID_PATTERN.match(profile_id):
+        if SAFE_PROFILE_ID_PATTERN.match(profile_id):
             return profile_id
     return None
 
