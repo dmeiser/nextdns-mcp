@@ -91,9 +91,9 @@ class StripExtraFieldsMiddleware(Middleware):
         sl = s.lower()
         if "boolean" in schema_types and sl in ("true", "false"):
             return sl == "true"
-        if "integer" in schema_types and (s.isdigit() or (s.startswith("-") and s[1:].isdigit())):
+        if "integer" in schema_types and (s.isdecimal() or (s.startswith("-") and s[1:].isdecimal())):
             return int(s)
-        if "number" in schema_types and s.replace(".", "", 1).replace("-", "", 1).isdigit():
+        if "number" in schema_types and s.replace(".", "", 1).replace("-", "", 1).isdecimal():
             try:
                 return float(s)
             except ValueError:
