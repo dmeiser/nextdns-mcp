@@ -262,12 +262,8 @@ class AccessControlledClient(httpx.AsyncClient):
             yield response
 
 
-def create_nextdns_client(api_key: str | None = None) -> httpx.AsyncClient:
+def create_nextdns_client() -> httpx.AsyncClient:
     """Create an authenticated HTTP client for NextDNS API with access control.
-
-    Args:
-        api_key: Optional NextDNS API key. If not provided, it is read from the
-            environment via :func:`get_api_key`.
 
     Returns:
         httpx.AsyncClient: Configured async HTTP client with authentication and access control
@@ -275,7 +271,7 @@ def create_nextdns_client(api_key: str | None = None) -> httpx.AsyncClient:
     Raises:
         ConfigurationError: If the API key is absent or empty.
     """
-    key = api_key if api_key is not None else get_api_key()
+    key = get_api_key()
     if not key or not key.strip():
         raise ConfigurationError(
             "NEXTDNS_API_KEY is required. Set the NEXTDNS_API_KEY environment "

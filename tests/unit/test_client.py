@@ -248,24 +248,6 @@ class TestCreateNextdnsClient:
         assert isinstance(client, httpx.AsyncClient)
         assert client.headers["X-Api-Key"] == mock_api_key
 
-    def test_create_client_raises_configuration_error_on_empty_key_argument(self):
-        """Regression test for #185: create_nextdns_client(api_key='') raises ConfigurationError."""
-        from nextdns_mcp.client import create_nextdns_client
-
-        with pytest.raises(ConfigurationError) as exc_info:
-            create_nextdns_client(api_key="")
-
-        assert "NEXTDNS_API_KEY is required" in str(exc_info.value)
-
-    def test_create_client_with_valid_key_argument(self):
-        """Regression test for #185: create_nextdns_client(api_key=...) constructs normally with explicit key."""
-        from nextdns_mcp.client import create_nextdns_client
-
-        client = create_nextdns_client(api_key="custom_explicit_key")
-
-        assert isinstance(client, httpx.AsyncClient)
-        assert client.headers["X-Api-Key"] == "custom_explicit_key"
-
     def test_get_api_client_raises_configuration_error_on_absent_api_key(self, monkeypatch):
         """Regression test for #185: get_api_client raises ConfigurationError when key is absent."""
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
