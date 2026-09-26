@@ -36,7 +36,6 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-import nextdns_mcp.config
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
 from nextdns_mcp.client import AccessControlledClient
@@ -47,16 +46,6 @@ API_KEY = "test-key-12345"
 CSV = "date,time,question,answer\n2024-01-01,12:00:00,example.com,A\n"
 
 
-@pytest.fixture(autouse=True)
-def reset_caches():
-    """Clear the config profile caches so each test reads env fresh."""
-    nextdns_mcp.config._readable_profiles_cache = None
-    nextdns_mcp.config._writable_profiles_cache = None
-    yield
-    nextdns_mcp.config._readable_profiles_cache = None
-    nextdns_mcp.config._writable_profiles_cache = None
-
-
 class _LiveClient:
     """A real AccessControlledClient on a MockTransport that records requests.
 
@@ -65,7 +54,11 @@ class _LiveClient:
     for an authenticated, permitted request.
     """
 
-    def __init__(self, handler: Callable[[httpx.Request], httpx.Response] | None = None):
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        handler: Callable[[httpx.Request], httpx.Response] | None = None,
+    ):
         self.seen: list[httpx.Request] = []
         self._inner = handler or self._default_inner
         self.client = AccessControlledClient(
@@ -74,7 +67,7 @@ class _LiveClient:
             follow_redirects=False,
             headers={"X-Api-Key": API_KEY},
         )
-        client_module.api_client = self.client
+        monkeypatch.setattr(client_module, "api_client", self.client)
 
     def _recording_handler(self, request: httpx.Request) -> httpx.Response:
         self.seen.append(request)
@@ -104,9 +97,11 @@ class _LiveClient:
 
 
 @pytest.fixture
-def live_client() -> _LiveClient:
+async def live_client(monkeypatch: pytest.MonkeyPatch) -> _LiveClient:
     """Real access-controlled client wired into the grouped tools' api_client."""
-    return _LiveClient()
+    live = _LiveClient(monkeypatch)
+    yield live
+    await live.close()
 
 
 @pytest.fixture
