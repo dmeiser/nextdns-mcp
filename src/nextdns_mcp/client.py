@@ -38,7 +38,7 @@ def extract_profile_id_from_url(url: str) -> str | None:
         The profile_id if found and safe, None otherwise
     """
     # Reject any path containing parent-directory references defensively.
-    # This blocks traversal payloads such as /profiles/allowed123/../../profiles/denied456
+    # This blocks traversal payloads such as /profiles/abc123/../../profiles/def456
     # before normalization.
     if ".." in url:
         return None
