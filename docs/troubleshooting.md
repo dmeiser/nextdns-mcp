@@ -24,7 +24,7 @@ The middleware inspects each tool's parameter schema and removes any arguments t
 See `src/nextdns_mcp/server.py` for implementation details (class `StripExtraFieldsMiddleware`).
 
 ## "NEXTDNS_API_KEY is required" or 401 errors
-- Set `NEXTDNS_API_KEY` or configure the `nextdns.api_key` secret in Docker MCP Gateway.
+- Set `NEXTDNS_API_KEY` in your environment.
 - Alternatively set `NEXTDNS_API_KEY_FILE` to a readable file containing only the key.
 
 ## 403: Read/Write access denied
