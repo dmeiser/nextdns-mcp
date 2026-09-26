@@ -80,11 +80,11 @@ jobs:
           update_file("Dockerfile", r'LABEL org\.opencontainers\.image\.version=["\'].*["\']', f'LABEL org.opencontainers.image.version="{next_v}"', flags=re.MULTILINE)
           update_file("Dockerfile.alpine", r'LABEL org\.opencontainers\.image\.version=["\'].*["\']', f'LABEL org.opencontainers.image.version="{next_v}"', flags=re.MULTILINE)
           
-          with open("next_version.txt", "w") as f:
+          with open("new_version.txt", "w") as f:
               f.write(next_v)
           PY
           
-          NEXT_V=$(cat next_version.txt)
+          NEXT_V=$(cat new_version.txt)
           echo "next_version=$NEXT_V" >> $GITHUB_OUTPUT
 
       - name: Commit and Push

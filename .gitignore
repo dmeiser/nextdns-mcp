@@ -76,3 +76,6 @@ htmlcov/
 
 # Test outputs
 temp-report/
+
+# Version scratch file (written by version-bumper / weekly-maintenance workflows)
+new_version.txt
