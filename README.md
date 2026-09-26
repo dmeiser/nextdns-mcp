@@ -20,7 +20,6 @@ This project provides an MCP server that exposes NextDNS API operations as tools
 - **Privacy**: Privacy settings, blocklists, and native tracking protection management
 - **Parental Control**: Settings management with safe search and YouTube restrictions
 - **OpenAPI-backed**: Tool behaviors are driven by [nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml)
-- **Docker MCP Gateway**: Full integration with Docker's MCP Gateway for secure, isolated deployment
 - **Docker Support**: Containerized deployment with proper OCI labels
 - **Safety Mechanisms**: Write operation protections and validation
 
@@ -143,8 +142,7 @@ This server uses a modern, declarative approach:
 
 - `src/nextdns_mcp/nextdns-openapi.yaml`: OpenAPI 3.0 specification for NextDNS API
 - `src/nextdns_mcp/server.py`: FastMCP server implementation
-- `catalog.yaml`: Docker MCP Gateway catalog entry with server metadata
-- `Dockerfile`: Container definition with OCI labels for MCP Gateway
+- `Dockerfile`: Container definition with OCI labels for container metadata
 - `AGENT.md`: Development guidelines and safety rules
 
 ### Docker Tags
