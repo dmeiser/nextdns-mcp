@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import ProfileId
+from ..errors import ErrorCode, error_payload
 from ..utils import _api_request, _validate_entry_id, _validate_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
@@ -36,15 +37,15 @@ async def _manage_rewrites_impl(
 
     if operation == "add":
         if not name or not content:
-            return {"error": "name and content are required for add operation"}
+            return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name and content are required for add operation")
         return await _api_request("POST", base_url, json={"name": name, "content": content})
 
     if operation == "delete":
         if not entry_id:
-            return {"error": "entry_id is required for delete operation"}
+            return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for delete operation")
         return await _api_request("DELETE", f"{base_url}/{entry_id}")
 
-    return {"error": f"Unsupported operation: {operation}"}
+    return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 
 
 async def manageRewrites(

@@ -21,6 +21,9 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 | NEXTDNS_READ_ONLY | bool (true/false/1/0/yes/no) | false | No | Disables all write operations when true |
 | NEXTDNS_READABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for reads; special value "ALL" allows reads of all profiles; empty/unset denies all reads |
 | NEXTDNS_WRITABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for writes; special value "ALL" allows writes to all profiles; empty/unset denies all writes; ignored if NEXTDNS_READ_ONLY=true |
+| MCP_TRANSPORT | string | stdio | No | `stdio` (default) or `http` (streamable-HTTP). See "HTTP Transport" in the README |
+| MCP_HOST | string | 127.0.0.1 | No | Bind interface for HTTP transport. Loopback-only by default; a non-loopback value is an explicit opt-in that requires reverse-proxy/auth protection |
+| MCP_PORT | number | 8000 | No | Port for HTTP transport |
 
 Notes
 - Global tools bypass per-profile checks: `manageProfiles(operation="list")` and `dohLookup`.

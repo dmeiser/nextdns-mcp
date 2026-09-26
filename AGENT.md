@@ -156,13 +156,13 @@ Before claiming work is complete:
 - Ensures consistent import organization
 
 **black** (code formatting):
-- Line length: 100 characters
-- Target version: Python 3.13
+- Line length: 120 characters
+- Target version: Python 3.12
 - Configuration in `pyproject.toml`:
   ```toml
   [tool.black]
-  line-length = 100
-  target-version = ["py313"]
+  line-length = 120
+  target-version = ["py312"]
   ```
 
 **mypy** (type checking):

@@ -49,6 +49,7 @@ class TestDohLookup:
         result = await dohLookup("example.com", mock_profile_id, "A")
         assert "error" in result
         assert "Read access denied" in result["error"]
+        assert result["code"] == "read_access_denied"
 
     @pytest.mark.asyncio
     async def test_doh_lookup_rejects_invalid_profile_id(self, monkeypatch):
@@ -56,6 +57,7 @@ class TestDohLookup:
         result = await dohLookup("example.com", "abc/def", "A")
         assert "error" in result
         assert "Invalid profile_id format" in result["error"]
+        assert result["code"] == "invalid_profile_id"
 
     @pytest.mark.asyncio
     async def test_doh_lookup_basic_query(self, mock_profile_id):
@@ -115,6 +117,7 @@ class TestDohLookup:
 
         assert "error" in result
         assert "Invalid record type" in result["error"]
+        assert result["code"] == "invalid_record_type"
         assert "valid_types" in result
 
     @pytest.mark.asyncio
@@ -158,13 +161,17 @@ class TestDohLookup:
 
     @pytest.mark.asyncio
     async def test_doh_lookup_http_error(self, mock_profile_id, mock_doh_client):
-        """Test error handling for HTTP errors."""
-        mock_doh_client.get.side_effect = httpx.HTTPError("Connection failed")
+        """Test error handling for HTTP errors surfaces a typed http_error payload."""
+        http_exc = httpx.HTTPError("Connection failed")
+        http_exc.response = Mock(status_code=500)
+        mock_doh_client.get.side_effect = http_exc
 
         result = await dohLookup("example.com", mock_profile_id, "A")
 
         assert "error" in result
         assert "HTTP error" in result["error"]
+        assert result["code"] == "http_error"
+        assert result["status_code"] == 500
         assert result["profile_id"] == mock_profile_id
 
     @pytest.mark.asyncio
@@ -176,6 +183,7 @@ class TestDohLookup:
 
         assert "error" in result
         assert "Unexpected error" in result["error"]
+        assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
     async def test_doh_lookup_correct_url_format(self, mock_profile_id):

@@ -120,6 +120,27 @@ def test_readable_profiles_include_writable(patch_env):
     assert readable_set == {"profile1", "profile2", "profile3"}
 
 
+def test_writable_all_implies_readable_all(patch_env):
+    """Test that writable ALL grants read access to all profiles.
+
+    Regression test for https://github.com/dmeiser/nextdns-mcp/issues/133:
+    writable=ALL must imply read-all (write implies read), so a full-write
+    admin restricted to one readable profile can still read every profile.
+    """
+    patch_env("NEXTDNS_READABLE_PROFILES", "p1")
+    patch_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+
+    from nextdns_mcp import config
+
+    # Writable ALL collapses the readable union to allow-all
+    assert config.get_readable_profiles_set() == config.ALLOW_ALL_PROFILES
+
+    # Read checks pass for any profile, not just p1
+    assert config.can_read_profile("p1")
+    assert config.can_read_profile("p2")
+    assert config.can_read_profile("any-other-profile")
+
+
 def test_read_only_mode_blocks_writes(patch_env):
     """Test read-only mode disables all writes."""
     # Enable read-only mode and set writable profiles

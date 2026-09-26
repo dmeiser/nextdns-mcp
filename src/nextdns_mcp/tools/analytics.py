@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import ProfileId
+from ..errors import ErrorCode, error_payload
 from ..utils import _api_request, _build_query_params, _validate_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
@@ -47,7 +48,12 @@ async def _query_analytics_impl(
         return error
 
     if series and metric == "domains":
-        raise ValueError("series=true is not supported for the 'domains' metric")
+        return error_payload(
+            ErrorCode.UNSUPPORTED_PARAMETER,
+            "series=true is not supported for the 'domains' metric",
+            metric=metric,
+            series=series,
+        )
 
     suffix = ";series" if series else ""
     url = f"/profiles/{profile_id}/analytics/{metric}{suffix}"
@@ -68,7 +74,9 @@ async def _query_analytics_impl(
 
     if metric == "destinations":
         if not destination_type:
-            return {"error": "destination_type is required for destinations metric"}
+            return error_payload(
+                ErrorCode.MISSING_REQUIRED_ARGUMENT, "destination_type is required for destinations metric"
+            )
         params["type"] = destination_type
 
     if metric == "domains":
