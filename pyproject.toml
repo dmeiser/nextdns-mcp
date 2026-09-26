@@ -51,6 +51,9 @@ testpaths = ["tests"]
 line-length = 120
 target-version = "py312"
 
+[tool.ruff.lint]
+extend-select = ["I"]
+
 [tool.mypy]
 python_version = "3.12"
 files = ["src"]
