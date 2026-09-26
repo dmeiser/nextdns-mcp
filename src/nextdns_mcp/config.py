@@ -151,7 +151,7 @@ def parse_profile_list(profile_str: str) -> set[str] | None:
         return None  # Empty/unset = deny all
     if _is_allow_all(profile_str):
         return set()  # Empty set = allow all
-    return {p.strip() for p in profile_str.split(",") if p.strip()}
+    return {p.strip().lower() for p in profile_str.split(",") if p.strip()}
 
 
 def get_readable_profiles_set() -> set[str] | None:
@@ -214,7 +214,7 @@ def can_read_profile(profile_id: str) -> bool:
     # None means deny all, empty set means allow all, otherwise check membership
     if readable is None:
         return False
-    return not readable or profile_id in readable
+    return not readable or profile_id.lower() in {p.lower() for p in readable}
 
 
 def can_write_profile(profile_id: str) -> bool:
@@ -232,7 +232,7 @@ def can_write_profile(profile_id: str) -> bool:
     # None means deny all, empty set means allow all, otherwise check membership
     if writable is None:
         return False
-    return not writable or profile_id in writable
+    return not writable or profile_id.lower() in {p.lower() for p in writable}
 
 
 def _log_api_key_error() -> None:

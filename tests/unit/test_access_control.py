@@ -80,6 +80,11 @@ class TestParseProfileList:
         result = parse_profile_list("abc123,,def456,  ,ghi789")
         assert result == {"abc123", "def456", "ghi789"}
 
+    def test_parse_normalizes_to_lowercase(self):
+        """Test parsing normalizes profile IDs to lowercase."""
+        result = parse_profile_list("2F4A9B,AbC123,DEF456")
+        assert result == {"2f4a9b", "abc123", "def456"}
+
 
 class TestGetReadableProfiles:
     """Test the get_readable_profiles function."""
@@ -186,6 +191,30 @@ class TestCanReadProfile:
         assert can_read_profile("abc123") is True
         assert can_read_profile("xyz999") is False
 
+    def test_uppercase_config_lowercase_query(self, clean_env):
+        """Regression test for #168: uppercase config allows lowercase query."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "2F4A9B")
+        assert can_read_profile("2f4a9b") is True
+
+    def test_lowercase_config_uppercase_query(self, clean_env):
+        """Test lowercase config allows uppercase query."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "2f4a9b")
+        assert can_read_profile("2F4A9B") is True
+
+    def test_mixed_case_round_trips(self, clean_env):
+        """Test mixed-case config and query round-trips."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "2F4a9B")
+        assert can_read_profile("2f4a9b") is True
+        assert can_read_profile("2F4A9B") is True
+        assert can_read_profile("2F4a9B") is True
+        assert can_read_profile("2f4A9b") is True
+        assert can_read_profile("xyz999") is False
+
+    def test_uppercase_writable_implies_readable_lowercase_query(self, clean_env):
+        """Test uppercase writable config implies read access for lowercase query."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "2F4A9B")
+        assert can_read_profile("2f4a9b") is True
+
 
 class TestCanWriteProfile:
     """Test the can_write_profile function."""
@@ -214,6 +243,25 @@ class TestCanWriteProfile:
         clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123,def456")
         assert can_write_profile("abc123") is False
         assert can_write_profile("def456") is False
+        assert can_write_profile("xyz999") is False
+
+    def test_uppercase_config_lowercase_query(self, clean_env):
+        """Regression test for #168: uppercase config allows lowercase query for writes."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "2F4A9B")
+        assert can_write_profile("2f4a9b") is True
+
+    def test_lowercase_config_uppercase_query(self, clean_env):
+        """Test lowercase config allows uppercase query for writes."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "2f4a9b")
+        assert can_write_profile("2F4A9B") is True
+
+    def test_mixed_case_round_trips(self, clean_env):
+        """Test mixed-case config and query round-trips for writes."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "2F4a9B")
+        assert can_write_profile("2f4a9b") is True
+        assert can_write_profile("2F4A9B") is True
+        assert can_write_profile("2F4a9B") is True
+        assert can_write_profile("2f4A9b") is True
         assert can_write_profile("xyz999") is False
 
 

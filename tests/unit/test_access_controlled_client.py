@@ -55,6 +55,19 @@ class TestAccessControlledClientReadAccess:
         assert response.status_code == 200
 
     @pytest.mark.asyncio
+    async def test_uppercase_config_allows_lowercase_query(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Regression test for #168: uppercase NEXTDNS_READABLE_PROFILES allows lowercase query."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "2F4A9B")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("GET", "/profiles/2f4a9b/settings")
+
+        mock_super_request.assert_called_once()
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
     async def test_denies_read_when_not_permitted(
         self, mock_super_request: Any, clean_env: Callable[[str, str], None]
     ) -> None:
