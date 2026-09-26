@@ -152,7 +152,7 @@ from .coercion import (  # noqa: F401
     _try_parse_float,
     coerce_json_types,
 )
-from .config import get_api_key  # noqa: F401
+from .config import ConfigurationError, get_api_key  # noqa: F401
 from .openapi import StripExtraFieldsMiddleware  # noqa: F401
 from .tools.analytics import AnalyticsMetric, _query_analytics_impl  # noqa: F401
 from .tools.doh import (  # noqa: F401

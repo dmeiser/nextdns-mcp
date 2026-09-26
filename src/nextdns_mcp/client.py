@@ -14,6 +14,7 @@ import httpx
 
 from .config import (
     NEXTDNS_BASE_URL,
+    ConfigurationError,
     can_read_profile,
     can_write_profile,
     get_api_key,
@@ -261,23 +262,35 @@ class AccessControlledClient(httpx.AsyncClient):
             yield response
 
 
-def create_nextdns_client() -> httpx.AsyncClient:
+def create_nextdns_client(api_key: str | None = None) -> httpx.AsyncClient:
     """Create an authenticated HTTP client for NextDNS API with access control.
+
+    Args:
+        api_key: Optional NextDNS API key. If not provided, it is read from the
+            environment via :func:`get_api_key`.
 
     Returns:
         httpx.AsyncClient: Configured async HTTP client with authentication and access control
+
+    Raises:
+        ConfigurationError: If the API key is absent or empty.
     """
+    key = api_key if api_key is not None else get_api_key()
+    if not key or not key.strip():
+        raise ConfigurationError(
+            "NEXTDNS_API_KEY is required. Set the NEXTDNS_API_KEY environment "
+            "variable or NEXTDNS_API_KEY_FILE pointing to a Docker secret."
+        )
+
     headers = {
-        "X-Api-Key": get_api_key(),
+        "X-Api-Key": key.strip(),
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    # Remove any headers that weren't set to actual values to satisfy type checkers
-    clean_headers = {key: value for key, value in headers.items() if value is not None}
 
     return AccessControlledClient(
         base_url=NEXTDNS_BASE_URL,
-        headers=clean_headers,
+        headers=headers,
         timeout=get_http_timeout(),
         follow_redirects=False,
     )

@@ -30,6 +30,7 @@ def mock_api_client(monkeypatch):
 @pytest.fixture(autouse=True)
 def open_profile_access(monkeypatch):
     """Allow all profile read/write access for grouped-tool tests."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", "test-api-key")
     monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
     monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
