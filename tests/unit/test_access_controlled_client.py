@@ -150,6 +150,100 @@ class TestAccessControlledClientWriteAccess:
         assert response.status_code == 200
 
 
+class TestAccessControlledClientFailsClosed:
+    """Test that the client fails closed (403) on URLs that bypass the profile ACL.
+
+    Regression tests for issue #131: traversal payloads and absolute URLs used to
+    skip the access check entirely because extract_profile_id_from_url returned
+    None and None was treated as 'no profile, no check'.
+    """
+
+    @pytest.mark.asyncio
+    async def test_denies_path_traversal_bypassing_acl(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Test that traversal payloads are denied even when they point at a denied profile."""
+        # Only the 'allowed123' profile is readable; the traversal target is denied.
+        clean_env("NEXTDNS_READABLE_PROFILES", "allowed123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("GET", "/profiles/allowed123/../../profiles/denied456/settings")
+
+        # The request must NOT reach the transport; it must be denied with 403.
+        mock_super_request.assert_not_called()
+        assert response.status_code == 403
+        assert "error" in response.json()
+
+    @pytest.mark.asyncio
+    async def test_denies_absolute_url_with_profile_path(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Test that absolute URLs carrying a profile path are denied."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("GET", "https://evil.example/profiles/abc123/settings")
+
+        mock_super_request.assert_not_called()
+        assert response.status_code == 403
+        assert "error" in response.json()
+
+    @pytest.mark.asyncio
+    async def test_denies_unclassifiable_profiles_path(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Test that /profiles paths without a safe profile id are denied."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("GET", "/profiles/abc.def/settings")
+
+        mock_super_request.assert_not_called()
+        assert response.status_code == 403
+        assert "error" in response.json()
+
+    @pytest.mark.asyncio
+    async def test_denies_relative_profile_path_when_not_readable(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Test that a relative profile path without a leading slash is denied when unreadable."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "allowed123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("GET", "profiles/denied456/settings")
+
+        mock_super_request.assert_not_called()
+        assert response.status_code == 403
+        assert "error" in response.json()
+
+    @pytest.mark.asyncio
+    async def test_allows_relative_profile_path_when_readable(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Test that a relative profile path without a leading slash passes when readable."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("GET", "profiles/abc123/settings")
+
+        mock_super_request.assert_called_once()
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_denies_traversal_even_when_all_profiles_readable(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Test that traversal payloads are denied even when every profile is readable."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("GET", "/profiles/allowed123/../../profiles/denied456/settings")
+
+        mock_super_request.assert_not_called()
+        assert response.status_code == 403
+        assert "error" in response.json()
+
+
 class TestAccessControlledClientMethods:
     """Test different HTTP methods."""
 
