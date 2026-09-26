@@ -25,6 +25,42 @@ def _png_image_size(png: bytes) -> tuple[int, int]:
     return width, height
 
 
+class TestNoEagerMatplotlibImport:
+    """Regression tests (issue #165): importing the server must not import matplotlib."""
+
+    def test_importing_server_does_not_import_matplotlib(self):
+        # Importing the server (and thus every tool module, including the plot
+        # tool module) in a fresh interpreter must not pull matplotlib in:
+        # its ~2s cold import should only be paid by the plot tool path.
+        import subprocess
+        import sys
+
+        # The child interpreter imports the server and the tools package (which
+        # pulls in the plot tool module) and asserts matplotlib never made it
+        # into sys.modules: the ~2s matplotlib import is only paid on the plot path.
+        code = "import sys\n"
+        code += "import nextdns_mcp.server\n"
+        code += "import nextdns_mcp.tools\n"
+        code += "assert not any(m == 'matplotlib' or m.startswith('matplotlib.') for m in sys.modules)\n"
+        code += "print('ok')\n"
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "ok"
+
+    def test_plot_path_still_renders_headless(self):
+        # The lazy plot path must still render a complete PNG using the Agg
+        # backend, so headless servers keep working after making the import lazy.
+        import matplotlib
+
+        times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
+        series_data = [{"name": "blocked", "queries": [1, 2]}]
+
+        png = server._render_series_chart("status", times, series_data)
+        assert png.startswith(b"\x89PNG")
+        assert _png_is_complete(png)
+        assert matplotlib.get_backend().lower() == "agg"
+
+
 class TestExtractSeriesLabel:
     """Tests for _extract_series_label."""
 
