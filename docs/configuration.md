@@ -24,7 +24,8 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 | MCP_PORT | number | 8000 | No | Port for HTTP transport |
 
 Notes
-- Global tools bypass per-profile checks: `manageProfiles(operation="list")` and `dohLookup`.
+- Per-profile checks match the `profile_id` in the URL. Collection profile endpoints (`GET /profiles` for `manageProfiles(operation="list")`, `POST /profiles` for `create`) carry no `profile_id` but still respect the global denials above: collection reads are denied when both profile sets are unset, and collection writes are denied in read-only mode or when `NEXTDNS_WRITABLE_PROFILES` is unset.
+- Only `dohLookup` bypasses per-profile checks entirely (it uses a separate DoH endpoint).
 - "Write implies read": profiles allowed for writes are automatically considered readable.
 
 ## Examples
