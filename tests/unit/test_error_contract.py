@@ -17,6 +17,12 @@ import pytest
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
 from nextdns_mcp.errors import ErrorCode, error_payload, http_error_payload
+from nextdns_mcp.tools.doh import _dohLookup_impl
+from nextdns_mcp.tools.logs import _manage_logs_impl
+from nextdns_mcp.tools.plots import _plot_analytics_series_impl
+from nextdns_mcp.tools.profiles import _manage_profiles_impl
+from nextdns_mcp.tools.rewrites import _manage_rewrites_impl
+from nextdns_mcp.tools.settings import _manage_settings_impl
 
 
 @pytest.fixture
@@ -155,10 +161,10 @@ class TestValidationErrorContract:
     @pytest.mark.asyncio
     async def test_unsupported_operations_across_tools(self):
         for coro in (
-            server._manage_settings_impl("nope", "general", "abc123"),
-            server._manage_rewrites_impl("nope", "abc123"),
-            server._manage_logs_impl("nope", "abc123"),
-            server._manage_profiles_impl("nope", profile_id="abc123"),
+            _manage_settings_impl("nope", "general", "abc123"),
+            _manage_rewrites_impl("nope", "abc123"),
+            _manage_logs_impl("nope", "abc123"),
+            _manage_profiles_impl("nope", profile_id="abc123"),
         ):
             result = await coro
             _assert_error_contract(result)
@@ -242,14 +248,14 @@ class TestPlotAndDohErrorContract:
     @pytest.mark.asyncio
     async def test_plot_unsupported_metric(self, monkeypatch):
         monkeypatch.delenv("NEXTDNS_DEFAULT_PROFILE", raising=False)
-        result = await server._plot_analytics_series_impl("domains")
+        result = await _plot_analytics_series_impl("domains")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.UNSUPPORTED_METRIC
 
     @pytest.mark.asyncio
     async def test_plot_invalid_interval(self, monkeypatch):
         monkeypatch.delenv("NEXTDNS_DEFAULT_PROFILE", raising=False)
-        result = await server._plot_analytics_series_impl("status", interval=30)
+        result = await _plot_analytics_series_impl("status", interval=30)
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.INVALID_ARGUMENT
 
@@ -259,7 +265,7 @@ class TestPlotAndDohErrorContract:
         response = MagicMock()
         response.json.return_value = {"meta": {"series": {"times": []}}, "data": []}
         mock_api_client.get.return_value = response
-        result = await server._plot_analytics_series_impl("status")
+        result = await _plot_analytics_series_impl("status")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.NO_DATA
 
@@ -274,7 +280,7 @@ class TestPlotAndDohErrorContract:
 
     @pytest.mark.asyncio
     async def test_doh_unsupported_metric_style_codes(self, monkeypatch):
-        monkeypatch.setitem(server._dohLookup_impl.__globals__, "can_read_profile", lambda _p: False)
+        monkeypatch.setitem(_dohLookup_impl.__globals__, "can_read_profile", lambda _p: False)
         result = await server.dohLookup("example.com", "abc123", "A")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.READ_ACCESS_DENIED

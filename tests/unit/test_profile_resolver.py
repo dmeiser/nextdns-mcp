@@ -8,7 +8,7 @@ import os
 import pytest
 
 from nextdns_mcp.errors import ErrorCode
-from nextdns_mcp.server import resolve_profile_id
+from nextdns_mcp.utils import resolve_profile_id
 
 
 @pytest.fixture

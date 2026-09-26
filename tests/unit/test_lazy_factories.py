@@ -125,8 +125,8 @@ class TestImportHasNoSideEffects:
 
         monkeypatch.setattr(httpx.AsyncClient, "__init__", record_client_init)
 
-        original_server = sys.modules["nextdns_mcp.server"]
-        original_client = sys.modules["nextdns_mcp.client"]
+        original_server = importlib.import_module("nextdns_mcp.server")
+        original_client = importlib.import_module("nextdns_mcp.client")
         sys.modules.pop("nextdns_mcp.server", None)
         sys.modules.pop("nextdns_mcp.client", None)
 

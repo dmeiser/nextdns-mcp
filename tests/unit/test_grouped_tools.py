@@ -10,9 +10,12 @@ import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import server
+from nextdns_mcp import coercion, server, utils
+from nextdns_mcp.tools import lists as lists_module
 from nextdns_mcp.tools import logs as logs_module
 from nextdns_mcp.tools import profiles as profiles_module
+from nextdns_mcp.tools import rewrites as rewrites_module
+from nextdns_mcp.tools import settings as settings_module
 
 
 @pytest.fixture
@@ -70,22 +73,22 @@ class TestCoerceJsonArg:
     """Tests for the _coerce_json_arg helper."""
 
     def test_parses_json_object_string(self):
-        assert server._coerce_json_arg('{"enabled": true}') == {"enabled": True}
+        assert coercion._coerce_json_arg('{"enabled": true}') == {"enabled": True}
 
     def test_parses_json_array_string(self):
-        assert server._coerce_json_arg('[{"id":"x"}]') == [{"id": "x"}]
+        assert coercion._coerce_json_arg('[{"id":"x"}]') == [{"id": "x"}]
 
     def test_returns_non_strings_unchanged(self):
-        assert server._coerce_json_arg({"a": 1}) == {"a": 1}
-        assert server._coerce_json_arg([1, 2]) == [1, 2]
+        assert coercion._coerce_json_arg({"a": 1}) == {"a": 1}
+        assert coercion._coerce_json_arg([1, 2]) == [1, 2]
 
     def test_returns_invalid_json_string_unchanged(self):
-        assert server._coerce_json_arg("not-json") == "not-json"
+        assert coercion._coerce_json_arg("not-json") == "not-json"
 
     def test_returns_malformed_json_object_string_unchanged(self):
         # Starts with '{' but is invalid JSON: must fall through the
         # except clause instead of raising.
-        assert server._coerce_json_arg('{"enabled": true') == '{"enabled": true'
+        assert coercion._coerce_json_arg('{"enabled": true') == '{"enabled": true'
 
 
 class TestApiRequest:
@@ -94,7 +97,7 @@ class TestApiRequest:
     @pytest.mark.asyncio
     async def test_success_json(self, mock_api_client):
         mock_api_client.request.return_value = _make_response({"data": [1, 2, 3]})
-        result = await server._api_request("GET", "/profiles")
+        result = await utils._api_request("GET", "/profiles")
         assert result == {"data": [1, 2, 3]}
         mock_api_client.request.assert_called_once_with("GET", "/profiles", params=None, json=None)
 
@@ -106,7 +109,7 @@ class TestApiRequest:
         # it returned a success codified the fail-open behavior this repo rejects
         # (see TestFailClosedContract in test_grouped_tools_adversarial.py).
         mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
-        result = await server._api_request("DELETE", "/profiles/abc123")
+        result = await utils._api_request("DELETE", "/profiles/abc123")
         assert result == {"success": True}
 
     @pytest.mark.asyncio
@@ -116,7 +119,7 @@ class TestApiRequest:
         exc.response.status_code = 500
         exc.response.text = "internal server error"
         mock_api_client.request.side_effect = exc
-        result = await server._api_request("GET", "/profiles")
+        result = await utils._api_request("GET", "/profiles")
         assert "error" in result
         assert result["code"] == "http_error"
         assert result["status_code"] == 500
@@ -130,14 +133,14 @@ class TestApiRequest:
             exc.response.status_code = status
             exc.response.text = None
             mock_api_client.request.side_effect = exc
-            result = await server._api_request("GET", "/profiles")
+            result = await utils._api_request("GET", "/profiles")
             assert result["code"] == "http_error"
             assert result["status_code"] == status
 
     @pytest.mark.asyncio
     async def test_http_error_no_response(self, mock_api_client):
         mock_api_client.request.side_effect = httpx.ConnectError("network down")
-        result = await server._api_request("GET", "/profiles")
+        result = await utils._api_request("GET", "/profiles")
         assert result["code"] == "http_error"
         assert result["status_code"] is None
         assert "response_body" not in result
@@ -145,7 +148,7 @@ class TestApiRequest:
     @pytest.mark.asyncio
     async def test_unexpected_error(self, mock_api_client):
         mock_api_client.request.side_effect = RuntimeError("unexpected")
-        result = await server._api_request("GET", "/profiles")
+        result = await utils._api_request("GET", "/profiles")
         assert "error" in result
         assert result["code"] == "internal_error"
 
@@ -256,7 +259,7 @@ class TestManageProfiles:
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
-        result = await server._manage_profiles_impl("nope", profile_id="abc123")
+        result = await profiles_module._manage_profiles_impl("nope", profile_id="abc123")
         assert "Unsupported operation" in result["error"]
 
 
@@ -271,7 +274,7 @@ class TestManageSettings:
         mock_api_client.request.return_value = _make_response({"enabled": True})
         result = await server.manageSettings("get", category, "abc123")
         assert result == {"enabled": True}
-        path = server._SETTINGS_PATHS[category]
+        path = settings_module._SETTINGS_PATHS[category]
         mock_api_client.request.assert_called_once_with("GET", f"/profiles/abc123/{path}", params=None, json=None)
 
     @pytest.mark.asyncio
@@ -309,7 +312,7 @@ class TestManageSettings:
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
-        result = await server._manage_settings_impl("nope", "general", "abc123")
+        result = await settings_module._manage_settings_impl("nope", "general", "abc123")
         assert "Unsupported operation" in result["error"]
 
 
@@ -423,7 +426,7 @@ class TestManageLists:
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
-        result = await server._manage_lists_impl("allowlist", "nope", "abc123")
+        result = await lists_module._manage_lists_impl("allowlist", "nope", "abc123")
         assert "Unsupported operation" in result["error"]
 
 
@@ -460,7 +463,7 @@ class TestManageRewrites:
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
-        result = await server._manage_rewrites_impl("nope", "abc123")
+        result = await rewrites_module._manage_rewrites_impl("nope", "abc123")
         assert "Unsupported operation" in result["error"]
 
 
@@ -821,7 +824,7 @@ class TestManageLogsDownloadRedirects:
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
-        result = await server._manage_logs_impl("nope", "abc123")
+        result = await logs_module._manage_logs_impl("nope", "abc123")
         assert "Unsupported operation" in result["error"]
 
 

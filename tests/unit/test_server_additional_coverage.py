@@ -6,7 +6,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import server
+from nextdns_mcp import coercion, openapi, server
 from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools import doh as doh_module
 
@@ -18,49 +18,49 @@ def allow_doh_read_access(monkeypatch):
     Patches the function's global namespace directly so the bypass survives
     module reloads performed by other tests.
     """
-    monkeypatch.setitem(server._dohLookup_impl.__globals__, "can_read_profile", lambda _profile_id: True)
+    monkeypatch.setitem(doh_module._dohLookup_impl.__globals__, "can_read_profile", lambda _profile_id: True)
 
 
 def test_coerce_helpers():
     # bool
-    assert server._coerce_string_to_bool("true") is True
-    assert server._coerce_string_to_bool("false") is False
-    assert server._coerce_string_to_bool("maybe") is None
+    assert coercion._coerce_string_to_bool("true") is True
+    assert coercion._coerce_string_to_bool("false") is False
+    assert coercion._coerce_string_to_bool("maybe") is None
 
     # integer
-    assert server._is_integer("123") is True
-    assert server._is_integer("-5") is True
-    assert server._is_integer("1.2") is False
-    assert server._is_integer("²") is False
-    assert server._is_integer("-²") is False
+    assert coercion._is_integer("123") is True
+    assert coercion._is_integer("-5") is True
+    assert coercion._is_integer("1.2") is False
+    assert coercion._is_integer("²") is False
+    assert coercion._is_integer("-²") is False
 
     # float parsing
-    assert server._try_parse_float("1.23") == 1.23
-    assert server._try_parse_float("notfloat") is None
-    assert server._try_parse_float("²") is None
-    assert server._try_parse_float("1.²") is None
+    assert coercion._try_parse_float("1.23") == 1.23
+    assert coercion._try_parse_float("notfloat") is None
+    assert coercion._try_parse_float("²") is None
+    assert coercion._try_parse_float("1.²") is None
 
     # coerce number
-    assert server._coerce_string_to_number("42") == 42
-    assert server._coerce_string_to_number("3.14") == 3.14
-    assert server._coerce_string_to_number("no") is None
+    assert coercion._coerce_string_to_number("42") == 42
+    assert coercion._coerce_string_to_number("3.14") == 3.14
+    assert coercion._coerce_string_to_number("no") is None
 
     # general string coercion
-    assert server._coerce_string("true") is True
-    assert server._coerce_string("10") == 10
-    assert server._coerce_string("3.5") == 3.5
-    assert server._coerce_string("x") == "x"
+    assert coercion._coerce_string("true") is True
+    assert coercion._coerce_string("10") == 10
+    assert coercion._coerce_string("3.5") == 3.5
+    assert coercion._coerce_string("x") == "x"
 
     # dict and list coercion
-    assert server.coerce_json_types({"a": "true", "b": "2"}) == {"a": True, "b": 2}
-    assert server.coerce_json_types(["1", "2.2"]) == [1, 2.2]
-    assert server.coerce_json_types(123) == 123
+    assert coercion.coerce_json_types({"a": "true", "b": "2"}) == {"a": True, "b": 2}
+    assert coercion.coerce_json_types(["1", "2.2"]) == [1, 2.2]
+    assert coercion.coerce_json_types(123) == 123
 
 
 def test_coerce_json_arg_invalid_json_returns_value():
     # String that looks like JSON but fails to parse should be returned as-is.
-    assert server._coerce_json_arg('{"broken": ') == '{"broken": '
-    assert server._coerce_json_arg("[1, 2, ") == "[1, 2, "
+    assert coercion._coerce_json_arg('{"broken": ') == '{"broken": '
+    assert coercion._coerce_json_arg("[1, 2, ") == "[1, 2, "
 
 
 class DummyTool:
@@ -101,7 +101,7 @@ async def _dummy_call_next(context):
 
 @pytest.mark.asyncio
 async def test_strip_extra_fields_middleware_basic_and_exception():
-    mw = server.StripExtraFieldsMiddleware()
+    mw = openapi.StripExtraFieldsMiddleware()
 
     # Normal operation: known property 'keep' retained, unknown removed, bool coerced
     context = DummyContext("tool", {"keep": "true", "drop": "x"})
@@ -129,14 +129,14 @@ async def test_strip_extra_fields_middleware_basic_and_exception():
 
 
 def test_create_access_denied_response():
-    resp = server.create_access_denied_response("PUT", "/profiles/abc/settings", "denied", "abc")
+    resp = client_module.create_access_denied_response("PUT", "/profiles/abc/settings", "denied", "abc")
     assert resp.status_code == 403
     assert resp.json()["profile_id"] == "abc"
     assert resp.request.method == "PUT"
 
 
 def test_access_control_client_checks(monkeypatch):
-    client = server.AccessControlledClient()
+    client = client_module.AccessControlledClient()
 
     # Deny write, read-only true
     monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
@@ -155,7 +155,7 @@ def test_access_control_client_checks(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_request_body_passthrough_and_access_denied(monkeypatch):
-    client = server.AccessControlledClient()
+    client = client_module.AccessControlledClient()
 
     # Test request returns early when access denied
     monkeypatch.setattr(client_module, "extract_profile_id_from_url", lambda url: "abc123")
@@ -204,17 +204,17 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     monkeypatch.setattr(doh_module, "_doh_client", DummyClient())
 
     # doh_lookup success
-    res = await server.doh_lookup("https://dns.nextdns.io/abc123/dns-query", "google.com", "A", "abc123")
+    res = await doh_module.doh_lookup("https://dns.nextdns.io/abc123/dns-query", "google.com", "A", "abc123")
     assert "_metadata" in res
 
     # _dohLookup_impl: no default profile
     monkeypatch.setattr(utils_module, "get_default_profile", lambda: None)
-    r = await server._dohLookup_impl("example.com")
+    r = await doh_module._dohLookup_impl("example.com")
     assert "error" in r and "No profile_id" in r["error"]
 
     # invalid record type
     monkeypatch.setattr(utils_module, "get_default_profile", lambda: "abc123")
-    r2 = await server._dohLookup_impl("example.com", record_type="INVALID")
+    r2 = await doh_module._dohLookup_impl("example.com", record_type="INVALID")
     assert "error" in r2 and "Invalid record type" in r2["error"]
 
     # success path uses doh_lookup
@@ -222,7 +222,7 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
         return {"ok": True}
 
     monkeypatch.setattr(doh_module, "doh_lookup", fake_exec)
-    r3 = await server._dohLookup_impl("example.com")
+    r3 = await doh_module._dohLookup_impl("example.com")
     assert r3 == {"ok": True}
 
 
@@ -255,7 +255,7 @@ def test_use_all_fixtures(
 
 
 def test_coerce_value_schema_aware_and_collections(monkeypatch):
-    mw = server.StripExtraFieldsMiddleware()
+    mw = openapi.StripExtraFieldsMiddleware()
 
     # Dict and list values are recursed without schema context, so strings stay strings
     assert mw._coerce_value({"a": "true", "b": "2"}) == {"a": "true", "b": "2"}
