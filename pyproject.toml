@@ -61,6 +61,10 @@ target-version = "py312"
 profile = "black"
 line_length = 120
 
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+
 [tool.uv]
 # Rolling 7-day dependency cooldown: ignore releases published within the
 # last 7 days so the community can vet them first. Matches the Dependabot

@@ -555,9 +555,7 @@ class _FakeFinalClient:
     def stream(self, method, url, **kwargs):
         request = httpx.Request("GET", str(url))
         self.last_request = request
-        response = httpx.Response(
-            200, request=request, headers={"content-type": "text/csv"}, content=b"csv,data"
-        )
+        response = httpx.Response(200, request=request, headers={"content-type": "text/csv"}, content=b"csv,data")
 
         class _Ctx:
             async def __aenter__(self):
@@ -602,9 +600,13 @@ class TestManageLogsDownloadRedirects:
     async def test_api_key_absent_on_redirected_request(self, mock_api_client, monkeypatch):
         """Mock-302 key-leak scenario: the X-Api-Key must be absent on the redirected request."""
         fake = _FakeFinalClient()
-        monkeypatch.setattr(logs_module.httpx, "AsyncClient", self._route_through_redirect(
-            mock_api_client, "https://cdn.example.com/profiles/abc123/logs.csv?sig=1", fake
-        ))
+        monkeypatch.setattr(
+            logs_module.httpx,
+            "AsyncClient",
+            self._route_through_redirect(
+                mock_api_client, "https://cdn.example.com/profiles/abc123/logs.csv?sig=1", fake
+            ),
+        )
 
         result = await server.manageLogs("download", "abc123")
         assert result["content_type"] == "text/csv"
@@ -626,9 +628,11 @@ class TestManageLogsDownloadRedirects:
     async def test_relative_location_resolved_against_origin(self, mock_api_client, monkeypatch):
         """A relative Location is resolved against the API origin and still sent unauthenticated."""
         fake = _FakeFinalClient()
-        monkeypatch.setattr(logs_module.httpx, "AsyncClient", self._route_through_redirect(
-            mock_api_client, "/redirects/abc123.csv", fake
-        ))
+        monkeypatch.setattr(
+            logs_module.httpx,
+            "AsyncClient",
+            self._route_through_redirect(mock_api_client, "/redirects/abc123.csv", fake),
+        )
 
         result = await server.manageLogs("download", "abc123")
         assert result["size"] == 8

@@ -37,11 +37,75 @@ jobs:
       - name: Set up Python
         run: uv python install 3.14
 
+      - name: Check lockfile
+        run: uv lock --check
+
       - name: Install dependencies
         run: uv sync --frozen --all-extras
 
       - name: Run mypy
         run: uv run mypy src
+
+  ruff:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Run ruff check
+        run: uv run ruff check src tests
+
+      - name: Run ruff format check
+        run: uv run ruff format --check src tests
+
+  complexity:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Run radon complexity check
+        run: |
+          uv run radon cc src/ -a
+          OUTPUT=$(uv run radon cc src/ -nc)
+          if [ -n "$OUTPUT" ]; then
+            echo "Radon found functions exceeding Grade B:"
+            echo "$OUTPUT"
+            exit 1
+          fi
+
+      - name: Run xenon complexity check
+        run: uv run xenon -b B -m B -a A src
 
   unit-tests:
     runs-on: ubuntu-latest

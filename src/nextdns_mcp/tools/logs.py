@@ -57,7 +57,9 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     open_line = False
     # fdopen (not open) so the file handle stays usable from the event loop
     # without tripping ASYNC230; per-chunk writes are small and cheap.
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8", errors="replace") as out:
+    with os.fdopen(
+        os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8", errors="replace"
+    ) as out:
         async for text in response.aiter_text():
             out.write(text)
             if not text:
