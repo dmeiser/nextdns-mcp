@@ -253,7 +253,12 @@ class TestConcurrentRenderIndependence:
 
 @pytest.fixture
 def mock_api_client(monkeypatch):
-    """Patch the module-level api_client.get used by plotting helpers."""
+    """Replace the module-level api_client with an AsyncMock.
+
+    The plot fetch routes through ``_api_request`` (issue #183), which issues
+    requests via ``client.api_client.request``; tests therefore drive the mock
+    through ``.request``.
+    """
     monkeypatch.setenv("NEXTDNS_API_KEY", "test-api-key")
     client = AsyncMock()
     monkeypatch.setattr(client_module, "api_client", client)
@@ -305,14 +310,14 @@ class TestPlotAnalyticsSeriesImpl:
     @pytest.mark.asyncio
     async def test_http_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.get.side_effect = httpx.HTTPError("boom")
+        mock_api_client.request.side_effect = httpx.HTTPError("boom")
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "http_error"
 
     @pytest.mark.asyncio
     async def test_unexpected_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.get.side_effect = RuntimeError("unexpected")
+        mock_api_client.request.side_effect = RuntimeError("unexpected")
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "internal_error"
 
@@ -321,7 +326,7 @@ class TestPlotAnalyticsSeriesImpl:
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         response = MagicMock()
         response.json.return_value = {"meta": {"series": {"times": []}}, "data": []}
-        mock_api_client.get.return_value = response
+        mock_api_client.request.return_value = response
         result = await plots_module._plot_analytics_series_impl("status")
         assert "error" in result
         assert "No time-series data available" in result["error"]
@@ -334,7 +339,7 @@ class TestPlotAnalyticsSeriesImpl:
             "meta": {"series": {"times": ["bad-timestamp"]}},
             "data": [{"name": "x", "queries": [1]}],
         }
-        mock_api_client.get.return_value = response
+        mock_api_client.request.return_value = response
         result = await plots_module._plot_analytics_series_impl("status")
         assert "error" in result
         assert "Error rendering chart" in result["error"]
@@ -344,7 +349,7 @@ class TestPlotAnalyticsSeriesImpl:
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         response = MagicMock()
         response.json.return_value = sample_series_payload
-        mock_api_client.get.return_value = response
+        mock_api_client.request.return_value = response
 
         result = await plots_module._plot_analytics_series_impl("status")
 
@@ -368,6 +373,76 @@ class TestPlotAnalyticsToolWrapper:
     @pytest.mark.asyncio
     async def test_plot_analytics_wrapper_with_default_profile(self, clean_env, monkeypatch, mock_api_client):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.get.side_effect = httpx.HTTPError("boom")
+        mock_api_client.request.side_effect = httpx.HTTPError("boom")
         result = await server.plotAnalytics("status")
         assert result["code"] == "http_error"
+
+
+class TestPlotFetchUsesSharedWrapper:
+    """Regression (issue #183): the plot series fetch must route through ``_api_request``.
+
+    Before the fix ``_fetch_series_payload`` called the raw
+    ``client.api_client.get(...)`` directly, bypassing ``_api_request`` and its
+    error handling/logging (and any future retry/rate-limit/telemetry). These
+    mock-level assertions pin the wrapped path so a raw-client regression is
+    caught: the shared wrapper is awaited and the raw transport is not.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fetch_series_payload_uses_api_request(
+        self, clean_env, monkeypatch, mock_api_client, sample_series_payload
+    ):
+        import nextdns_mcp.tools.plots as plots_module
+
+        wrapped = AsyncMock(return_value=sample_series_payload)
+        monkeypatch.setattr(plots_module, "_api_request", wrapped)
+
+        params = {"from": "-1d", "to": "now", "interval": 3600}
+        payload, error = await plots_module._fetch_series_payload(
+            "/profiles/abc123/analytics/status;series", params, "status"
+        )
+
+        wrapped.assert_awaited_once_with("GET", "/profiles/abc123/analytics/status;series", params=params)
+        # Routing moved off the raw client: the underlying transport must not be hit.
+        mock_api_client.request.assert_not_awaited()
+        assert error is None
+        assert payload is sample_series_payload
+
+    @pytest.mark.asyncio
+    async def test_fetch_series_payload_surfaces_wrapper_error(self, clean_env, monkeypatch, mock_api_client):
+        import nextdns_mcp.tools.plots as plots_module
+
+        wrapped = AsyncMock(
+            return_value={"error": "HTTP error in GET /x: boom", "code": "http_error", "status_code": 500}
+        )
+        monkeypatch.setattr(plots_module, "_api_request", wrapped)
+
+        payload, error = await plots_module._fetch_series_payload(
+            "/profiles/abc123/analytics/status;series", {}, "status"
+        )
+
+        assert payload is None
+        assert error is not None
+        assert error["code"] == "http_error"
+        mock_api_client.request.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_plot_analytics_series_impl_uses_api_request(self, clean_env, monkeypatch):
+        import nextdns_mcp.tools.plots as plots_module
+
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        # Empty series so the impl returns before rendering; the fetch has already
+        # run, which is what we are asserting on.
+        wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
+        monkeypatch.setattr(plots_module, "_api_request", wrapped)
+
+        # Drive the impl end-to-end; the fetch must go through the shared
+        # wrapper rather than the raw client.
+        result = await plots_module._plot_analytics_series_impl("status")
+
+        assert result["code"] == "no_data"
+        wrapped.assert_awaited_once()
+        args, kwargs = wrapped.await_args
+        assert args[0] == "GET"
+        assert args[1] == "/profiles/abc123/analytics/status;series"
+        assert kwargs["params"]["interval"] == 3600

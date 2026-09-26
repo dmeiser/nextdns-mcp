@@ -9,14 +9,12 @@ import logging
 from datetime import datetime
 from typing import Any, Literal
 
-import httpx
 import mcp.types
 from fastmcp.utilities.types import Image
 
-from .. import client
 from ..coercion import OptionalProfileId
-from ..errors import ErrorCode, error_payload, http_error_payload
-from ..utils import resolve_profile_id
+from ..errors import ErrorCode, error_payload
+from ..utils import _api_request, resolve_profile_id
 
 logger = logging.getLogger(__name__)
 
@@ -166,23 +164,17 @@ async def _fetch_series_payload(
     params: dict[str, Any],
     metric: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Fetch time-series payload from the API."""
-    try:
-        response = await client.api_client.get(url, params=params)
-        response.raise_for_status()
-        payload: dict[str, Any] = response.json()
-        return payload, None
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error while fetching analytics series {metric}: {e}")
-        return None, http_error_payload(
-            f"HTTP error while fetching analytics series {metric}: {e}", e, fallback_code=ErrorCode.HTTP_ERROR
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Unexpected error while fetching analytics series {metric}: {e}")
-        return None, error_payload(
-            ErrorCode.INTERNAL_ERROR,
-            f"Unexpected error while fetching analytics series {metric}: {e}",
-        )
+    """Fetch time-series payload from the API through the shared wrapper.
+
+    Goes through ``_api_request`` (not the raw client) so plotting shares the
+    same error handling, logging, and any future retry/rate-limit/telemetry
+    behavior as every other tool (issue #183). Failures surface as the
+    wrapper's standardized error payloads, so no behavior changes for callers.
+    """
+    payload = await _api_request("GET", url, params=params)
+    if "error" in payload:
+        return None, payload
+    return payload, None
 
 
 async def _plot_analytics_series_impl(
