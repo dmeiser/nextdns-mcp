@@ -36,11 +36,12 @@ load_dotenv()
 # Disable FastMCP automatic update checks to prevent startup delays and hangs in offline/CI environments
 os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
 
-from fastmcp import FastMCP  # noqa: F401
+from fastmcp import FastMCP
 
-from .client import api_client
+from .client import get_api_client
 from .config import (
     NEXTDNS_BASE_URL,
+    configure_logging,
     get_http_timeout,
     validate_configuration,
 )
@@ -57,31 +58,53 @@ from .usage import nextdns_usage_guide
 
 logger = logging.getLogger(__name__)
 
-# Replicate the original server.py log message on import for backward compatibility.
-logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
+# Grouped MCP tools to register on the server instance
+_GROUPED_TOOLS = (
+    manageProfiles,
+    manageSettings,
+    manageLists,
+    manageRewrites,
+    manageLogs,
+    queryAnalytics,
+    plotAnalytics,
+    dohLookup,
+)
+
+_mcp_server: FastMCP | None = None
 
 
-# Create the MCP server instance
-mcp_server = create_mcp_server(api_client)
+def build_mcp_server() -> FastMCP:
+    """Create the MCP server and register the grouped tools and usage prompt.
 
-# Backward-compatible alias
-mcp = mcp_server
+    Returns:
+        FastMCP: Configured MCP server instance with all tools registered
+    """
+    client = get_api_client()
+    logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
+    server = create_mcp_server(client)
+    for tool in _GROUPED_TOOLS:
+        server.tool()(tool)
+    server.prompt(name="nextdns-usage-guide", description="Comprehensive guide for using the NextDNS MCP server tools")(
+        nextdns_usage_guide
+    )
+    return server
 
-# Register the grouped MCP tools
-manageProfiles = mcp_server.tool()(manageProfiles)
-manageSettings = mcp_server.tool()(manageSettings)
-manageLists = mcp_server.tool()(manageLists)
-manageRewrites = mcp_server.tool()(manageRewrites)
-manageLogs = mcp_server.tool()(manageLogs)
-queryAnalytics = mcp_server.tool()(queryAnalytics)
-plotAnalytics = mcp_server.tool()(plotAnalytics)
-dohLookup = mcp_server.tool()(dohLookup)
 
-# Register the usage guide prompt
-nextdns_usage_guide = mcp_server.prompt(
-    name="nextdns-usage-guide",
-    description="Comprehensive guide for using the NextDNS MCP server tools",
-)(nextdns_usage_guide)
+def get_mcp_server() -> FastMCP:
+    """Return the shared MCP server instance, creating it on first use."""
+    global _mcp_server
+    if _mcp_server is None:
+        _mcp_server = build_mcp_server()
+    return _mcp_server
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose the ``mcp_server``/``mcp`` server and ``api_client`` singletons for backward compatibility."""
+    if name in ("mcp_server", "mcp"):
+        return get_mcp_server()
+    if name == "api_client":
+        return get_api_client()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -202,14 +225,21 @@ from .utils import (  # noqa: F401
     is_safe_profile_id,
 )
 
+
+def _run_server() -> None:
+    """Validate configuration and start the MCP server (blocking)."""
+    configure_logging()
+    logger.info("Starting NextDNS MCP Server...")
+    logger.info(f"  Base URL: {NEXTDNS_BASE_URL}")
+    logger.info(f"  Timeout: {get_http_timeout()}s")
+    validate_configuration()
+    get_mcp_server().run(**get_mcp_run_options())
+
+
 if __name__ == "__main__":  # pragma: no cover
     # Note: This block is excluded from unit test coverage because:
     # 1. It only executes when running `python -m nextdns_mcp.server` directly
     # 2. When pytest imports the module, __name__ != "__main__"
     # 3. The mcp_server.run() call starts a blocking event loop unsuitable for unit tests
     # The options building logic IS tested via tests/unit/test_mcp_run_options.py
-    logger.info("Starting NextDNS MCP Server...")
-    logger.info(f"  Base URL: {NEXTDNS_BASE_URL}")
-    logger.info(f"  Timeout: {get_http_timeout()}s")
-    validate_configuration()
-    mcp_server.run(**get_mcp_run_options())
+    _run_server()

@@ -11,13 +11,17 @@ import yaml
 class TestServerInitialization:
     """Test MCP server initialization."""
 
-    @pytest.mark.skip(reason="Module-level initialization makes this test difficult - requires clean import")
-    def test_server_module_requires_api_key(self, monkeypatch, capsys):
-        """Test that server module exits if API key is not set."""
-        # This test is skipped because the module is already imported by other tests,
-        # making it impossible to test the sys.exit(1) behavior in module-level code.
-        # This is a known limitation documented in /tmp/fix_test_approach.md (lines 12-13).
-        # pragma: no cover
+    def test_server_module_requires_api_key(self, monkeypatch):
+        """Test that starting the server without an API key raises MissingApiKeyError."""
+        from nextdns_mcp import config, server
+
+        for key in ("NEXTDNS_API_KEY", "NEXTDNS_API_KEY_FILE"):
+            monkeypatch.delenv(key, raising=False)
+
+        # validate_configuration() raises before the server is constructed, so no
+        # blocking run loop is started.
+        with pytest.raises(config.MissingApiKeyError):
+            server._run_server()
 
     def test_server_module_loads_with_api_key(self, monkeypatch, mock_api_key, mock_openapi_spec):
         """Test that server module loads successfully with API key."""
@@ -69,19 +73,32 @@ class TestServerInitialization:
         assert callable(server.get_api_key)
         assert callable(server.get_http_timeout)
 
-    @pytest.mark.skip(reason="Module-level initialization prevents testing different env configs")
     def test_server_default_profile_is_optional(self, monkeypatch, mock_api_key):
         """Test that NEXTDNS_DEFAULT_PROFILE is optional."""
-        # This test is skipped because the module is already loaded with specific
-        # environment variables, and reloading doesn't work reliably in pytest.
-        pass  # noqa: PIE790  # pragma: no cover
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.delenv("NEXTDNS_DEFAULT_PROFILE", raising=False)
 
-    @pytest.mark.skip(reason="Module-level initialization prevents testing different env configs")
-    def test_server_can_set_default_profile(self, monkeypatch, mock_api_key, mock_profile_id):
+        from nextdns_mcp.server import build_mcp_server
+
+        server = build_mcp_server()
+
+        assert server is not None
+        assert hasattr(server, "run")
+
+    def test_server_can_set_default_profile(self, monkeypatch, mock_api_key, mock_profile_id, caplog):
         """Test that default profile can be set."""
-        # This test is skipped because the module is already loaded with specific
-        # environment variables, and reloading doesn't work reliably in pytest.
-        pass  # noqa: PIE790  # pragma: no cover
+        import logging
+
+        caplog.set_level(logging.INFO)
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", mock_profile_id)
+
+        from nextdns_mcp.server import build_mcp_server
+
+        server = build_mcp_server()
+
+        assert server is not None
+        assert f"Default profile: {mock_profile_id}" in caplog.text
 
 
 class TestCreateMcpServer:
@@ -142,10 +159,16 @@ class TestCreateMcpServer:
                 if "nextdns_mcp.server" in sys.modules:
                     del sys.modules["nextdns_mcp.server"]
 
+                import nextdns_mcp.server as server_module
                 from nextdns_mcp.server import create_mcp_server, create_nextdns_client
 
                 api_client = create_nextdns_client()
                 create_mcp_server(api_client)
+
+                # The client/server construction is now lazy: it happens when the
+                # server is built, not when the module is imported.
+                monkeypatch.setattr(server_module, "_mcp_server", None)
+                server_module.get_mcp_server()
 
                 assert "Loading NextDNS OpenAPI specification" in caplog.text
                 assert "Creating HTTP client" in caplog.text

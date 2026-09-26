@@ -16,8 +16,8 @@ def clean_env(monkeypatch):
     return monkeypatch.setenv
 
 
-def test_validate_configuration_calls_sys_exit(clean_env):
-    """Test that validate_configuration actually calls sys.exit when no API key."""
+def test_validate_configuration_raises_on_missing_api_key(clean_env):
+    """Test that validate_configuration raises MissingApiKeyError when no API key."""
     # No API key set
 
     # Need to reload the module to get fresh state
@@ -27,10 +27,9 @@ def test_validate_configuration_calls_sys_exit(clean_env):
 
     import nextdns_mcp.config as config  # noqa: PLR0402
 
-    # Mock sys.exit to capture the call
-    with patch.object(sys, "exit") as mock_exit:
+    # Should raise a typed exception instead of calling sys.exit
+    with pytest.raises(config.MissingApiKeyError):
         config.validate_configuration()
-        mock_exit.assert_called_once_with(1)
 
 
 def test_log_api_key_error_calls_logger(clean_env):

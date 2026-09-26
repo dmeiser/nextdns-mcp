@@ -230,7 +230,6 @@ def test_get_mcp_run_options_http(monkeypatch):
 
 
 def test_use_all_fixtures(
-    intercept_exit_and_validation,
     mock_api_key,
     mock_profile_id,
     clean_env,

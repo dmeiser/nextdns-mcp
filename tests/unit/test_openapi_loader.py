@@ -88,12 +88,12 @@ class TestLoadOpenApiSpec:
             mock_parent.__truediv__ = Mock(return_value=mock_spec_path)
             mock_path.return_value.parent = mock_parent
 
+            from nextdns_mcp.openapi import OpenApiSpecNotFound
             from nextdns_mcp.server import load_openapi_spec
 
-            with pytest.raises(SystemExit) as exc_info:
+            with pytest.raises(OpenApiSpecNotFound):
                 load_openapi_spec()
 
-            assert exc_info.value.code == 1
             assert "OpenAPI spec not found" in caplog.text
 
     def test_load_openapi_spec_invalid_yaml(self, monkeypatch, mock_api_key, capsys):
