@@ -104,6 +104,7 @@ class TestAccessControlledClientReadAccess:
         mock_super_request.assert_not_called()
         assert response.status_code == 403
         assert "no profiles are readable" in response.json()["error"]
+        assert response.json()["code"] == "read_access_denied"
 
 
 class TestAccessControlledClientWriteAccess:
@@ -172,6 +173,7 @@ class TestAccessControlledClientWriteAccess:
         mock_super_request.assert_not_called()
         assert response.status_code == 403
         assert "error" in response.json()
+        assert response.json()["code"] == "write_access_denied"
 
     @pytest.mark.asyncio
     async def test_denies_create_profile_in_read_only_mode(
@@ -187,6 +189,7 @@ class TestAccessControlledClientWriteAccess:
         mock_super_request.assert_not_called()
         assert response.status_code == 403
         assert "read-only mode" in response.json()["error"]
+        assert response.json()["code"] == "write_access_denied"
 
     @pytest.mark.asyncio
     async def test_allows_create_profile_when_writable_set_allows(

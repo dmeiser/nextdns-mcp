@@ -155,12 +155,16 @@ class AccessControlledClient(httpx.AsyncClient):
         if is_read_only():
             error_msg = "Write operation denied: server is in read-only mode"
             logger.warning(f"{error_msg} (method={method}, url={url})")
-            return create_access_denied_response(method, url, error_msg, "")
+            return create_access_denied_response(
+                method, url, error_msg, "", code=ErrorCode.WRITE_ACCESS_DENIED
+            )
 
         if get_writable_profiles_set() is None:
             error_msg = "Write access denied: no profiles are writable"
             logger.warning(f"{error_msg} (method={method}, url={url})")
-            return create_access_denied_response(method, url, error_msg, "")
+            return create_access_denied_response(
+                method, url, error_msg, "", code=ErrorCode.WRITE_ACCESS_DENIED
+            )
 
         return None
 
@@ -174,7 +178,9 @@ class AccessControlledClient(httpx.AsyncClient):
         if get_readable_profiles_set() is None:
             error_msg = "Read access denied: no profiles are readable"
             logger.warning(f"{error_msg} (method={method}, url={url})")
-            return create_access_denied_response(method, url, error_msg, "")
+            return create_access_denied_response(
+                method, url, error_msg, "", code=ErrorCode.READ_ACCESS_DENIED
+            )
 
         return None
 
