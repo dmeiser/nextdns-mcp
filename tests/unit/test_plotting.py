@@ -2,6 +2,7 @@
 
 import struct
 import threading
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -106,14 +107,53 @@ class TestParseSeriesTimestamp:
         assert ts.day == 15
         assert ts.hour == 10
         assert ts.minute == 30
+        assert ts.tzinfo is not None
+        assert ts.utcoffset() == timedelta(0)
 
     def test_parses_offset_timestamp(self):
         ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00+00:00")
         assert ts.year == 2024
 
+    def test_parses_microseconds_with_z(self):
+        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00.123456Z")
+        assert ts.microsecond == 123456
+        assert ts.tzinfo is not None
+        assert ts.utcoffset() == timedelta(0)
+
     def test_parses_microseconds_fallback(self):
         ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00.123456+00:00")
         assert ts.year == 2024
+        assert ts.microsecond == 123456
+
+    def test_parses_whole_second_without_timezone(self):
+        # Regression (issue #186): the old single %f-bearing strptime fallback
+        # could not match a whole-second timestamp, so it leaked a bare
+        # ValueError from strptime.
+        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00")
+        assert ts.year == 2024
+        assert ts.hour == 10
+        assert ts.minute == 30
+        assert ts.second == 0
+        assert ts.tzinfo is None
+
+    def test_parses_whole_second_with_z_via_fallback_format(self, monkeypatch):
+        # Force the strptime fallback path and confirm the whole-second format
+        # is reachable when fromisoformat fails (issue #186). The datetime C
+        # type is immutable, so the module-level name is swapped for a subclass.
+        class _NoIsoFrom(datetime):
+            @classmethod
+            def fromisoformat(cls, value: str):
+                raise ValueError("fromisoformat unavailable")
+
+        monkeypatch.setattr(plots_module, "datetime", _NoIsoFrom)
+        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00Z")
+        assert ts.hour == 10
+        assert ts.tzinfo is not None
+        assert ts.utcoffset() == timedelta(0)
+
+    def test_malformed_timestamp_raises_value_error(self):
+        with pytest.raises(ValueError):
+            plots_module._parse_series_timestamp("not-a-timestamp")
 
 
 class TestRenderSeriesChart:
