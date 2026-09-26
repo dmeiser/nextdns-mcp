@@ -44,8 +44,12 @@ async def test_health_route_is_a_get_endpoint_that_returns_ok():
     assert body == {"status": "ok"}
 
 
-def test_register_health_endpoint_is_idempotent_per_server():
-    """_register_health_endpoint attaches exactly one /health route per server."""
+def test_register_health_endpoint_adds_route_on_each_invocation():
+    """_register_health_endpoint adds one /health route per invocation: no de-duplication.
+
+    Each create_mcp_server() call registers one route; calling
+    _register_health_endpoint again on the same server adds a second route.
+    """
     server = create_mcp_server()
     count_before = len(server._additional_http_routes)
 
