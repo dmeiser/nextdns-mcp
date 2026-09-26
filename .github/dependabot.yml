@@ -27,3 +27,11 @@ updates:
     commit-message:
       prefix: "deps(docker)"
       include: "scope"
+  # --- GitHub Actions ---
+  - package-ecosystem: "github-actions"
+    directory: "/"                      # location of workflow files
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps(actions)"
+      include: "scope"

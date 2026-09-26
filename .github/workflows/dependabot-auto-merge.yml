@@ -22,7 +22,7 @@ jobs:
     
     steps:
       - name: Wait for required workflows
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7@f28e40c7f34bde8b3046d885e986cb6290c5673b  # actions/github-script@v7
         id: check-workflows
         with:
           script: |
