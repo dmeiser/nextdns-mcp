@@ -8,16 +8,22 @@ from typing import Any, Literal
 from ..coercion import OptionalProfileId
 from ..config import get_readable_profiles_set, get_writable_profiles_set, is_read_only
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _validate_profile_id
+from ..utils import _api_request, _build_query_params, _validate_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ProfileOperation = Literal["list", "create", "get", "update", "delete"]
 
 
-async def _profiles_list() -> dict[str, Any]:
+async def _profiles_list(cursor: str | None = None) -> dict[str, Any]:
     if get_readable_profiles_set() is None:
         return error_payload(ErrorCode.READ_ACCESS_DENIED, "Read access denied: no profiles are readable")
-    return await _api_request("GET", "/profiles")
+    params = _build_query_params(cursor=cursor)
+    result = await _api_request("GET", "/profiles", params=params or None)
+    if isinstance(result, dict) and "meta" in result and isinstance(result["meta"], dict):
+        pagination = result["meta"].get("pagination")
+        if isinstance(pagination, dict) and pagination.get("cursor"):
+            result.setdefault("cursor", pagination["cursor"])
+    return result
 
 
 async def _profiles_create(name: str | None) -> dict[str, Any]:
@@ -40,10 +46,11 @@ async def _manage_profiles_impl(
     operation: ProfileOperation,
     profile_id: OptionalProfileId = None,
     name: str | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for NextDNS profiles."""
     if operation == "list":
-        return await _profiles_list()
+        return await _profiles_list(cursor=cursor)
 
     if operation == "create":
         return await _profiles_create(name)
@@ -70,6 +77,7 @@ async def manageProfiles(
     operation: ProfileOperation,
     profile_id: OptionalProfileId = None,
     name: str | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Manage NextDNS profiles.
 
@@ -77,15 +85,16 @@ async def manageProfiles(
     analytics, and logs. Most other tools require a ``profile_id`` from this tool.
 
     Operations:
-        - ``list``: Return all profiles the API key can access.
+        - ``list``: Return profiles the API key can access (supports ``cursor`` for pagination).
         - ``create``: Create a new profile (requires ``name``).
         - ``get``: Retrieve a single profile (requires ``profile_id``).
         - ``update``: Rename a profile (requires ``profile_id`` and ``name``).
         - ``delete``: Remove a profile (requires ``profile_id``).
 
     Examples:
-        - list:  ``manageProfiles(operation="list")``
-        - create: ``manageProfiles(operation="create", name="Home Network")``
-        - get:   ``manageProfiles(operation="get", profile_id="abc123")``
+        - list:        ``manageProfiles(operation="list")``
+        - list (page): ``manageProfiles(operation="list", cursor="j2k3zl3b4v")``
+        - create:      ``manageProfiles(operation="create", name="Home Network")``
+        - get:         ``manageProfiles(operation="get", profile_id="abc123")``
     """
-    return await _manage_profiles_impl(operation, profile_id, name)
+    return await _manage_profiles_impl(operation, profile_id, name, cursor)

@@ -68,6 +68,19 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Profile'
+        cursor:
+          type: string
+          description: Pagination cursor for fetching the next page
+        meta:
+          type: object
+          description: Metadata including pagination details
+          properties:
+            pagination:
+              type: object
+              properties:
+                cursor:
+                  type: string
+                  description: Cursor for fetching the next page
 
     ProfileResponse:
       type: object
@@ -496,6 +509,8 @@ paths:
       operationId: listProfiles
       tags:
         - Profiles
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
       responses:
         '200':
           description: List of profiles
