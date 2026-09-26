@@ -7,6 +7,7 @@ from fastmcp.exceptions import ToolError
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
+from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools import doh as doh_module
 
 
@@ -207,12 +208,12 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     assert "_metadata" in res
 
     # _dohLookup_impl: no default profile
-    monkeypatch.setattr(doh_module, "get_default_profile", lambda: None)
+    monkeypatch.setattr(utils_module, "get_default_profile", lambda: None)
     r = await server._dohLookup_impl("example.com")
     assert "error" in r and "No profile_id" in r["error"]
 
     # invalid record type
-    monkeypatch.setattr(doh_module, "get_default_profile", lambda: "abc123")
+    monkeypatch.setattr(utils_module, "get_default_profile", lambda: "abc123")
     r2 = await server._dohLookup_impl("example.com", record_type="INVALID")
     assert "error" in r2 and "Invalid record type" in r2["error"]
 

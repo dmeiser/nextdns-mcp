@@ -9,9 +9,9 @@ from typing import Any
 import httpx
 
 from ..coercion import OptionalProfileId
-from ..config import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES, can_read_profile, get_default_profile, get_http_timeout
+from ..config import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES, can_read_profile, get_http_timeout
 from ..errors import ErrorCode, error_payload, http_error_payload
-from ..utils import is_safe_profile_id
+from ..utils import resolve_profile_id
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +26,6 @@ def _get_doh_client() -> httpx.AsyncClient:
     if _doh_client is None:
         _doh_client = httpx.AsyncClient(timeout=get_http_timeout())
     return _doh_client
-
-
-def _get_target_profile(profile_id: str | None) -> str | None:
-    """Get the target profile ID, using default if not specified."""
-    if profile_id:
-        return profile_id
-
-    # Use config function to get default profile
-    return get_default_profile()
 
 
 def _validate_record_type(record_type: str) -> tuple[bool, str]:
@@ -101,16 +92,10 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
 
     See dohLookup() for full documentation.
     """
-    target_profile = _get_target_profile(profile_id)
-    if not target_profile:
-        return error_payload(
-            ErrorCode.MISSING_PROFILE_ID,
-            "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
-            hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
-        )
-
-    if not is_safe_profile_id(target_profile):
-        return error_payload(ErrorCode.INVALID_PROFILE_ID, f"Invalid profile_id format: {target_profile}")
+    target_profile, error = resolve_profile_id(profile_id)
+    if error:
+        return error
+    assert target_profile is not None
 
     if not can_read_profile(target_profile):
         return error_payload(ErrorCode.READ_ACCESS_DENIED, f"Read access denied for profile: {target_profile}")

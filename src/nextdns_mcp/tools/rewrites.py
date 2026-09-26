@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _validate_entry_id, _validate_profile_id
+from ..utils import _api_request, _validate_entry_id, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 RewriteOperation = Literal["list", "add", "delete"]
@@ -21,7 +21,7 @@ async def _manage_rewrites_impl(
     entry_id: str | None = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for DNS rewrite entries."""
-    error = _validate_profile_id(profile_id)
+    target_profile, error = resolve_profile_id(profile_id, allow_default=False)
     if error:
         return error
 
@@ -30,7 +30,7 @@ async def _manage_rewrites_impl(
         if error:
             return error
 
-    base_url = f"/profiles/{profile_id}/rewrites"
+    base_url = f"/profiles/{target_profile}/rewrites"
 
     if operation == "list":
         return await _api_request("GET", base_url)

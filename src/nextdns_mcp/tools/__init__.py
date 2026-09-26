@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT
 """
 
 from .analytics import AnalyticsMetric, _query_analytics_impl, queryAnalytics
-from .doh import _build_doh_metadata, _dohLookup_impl, _get_target_profile, _validate_record_type, doh_lookup, dohLookup
+from .doh import _build_doh_metadata, _dohLookup_impl, _validate_record_type, doh_lookup, dohLookup
 from .lists import (
     _LIST_PATHS,
     _LIST_UPDATEABLE_TYPES,
@@ -48,7 +48,6 @@ __all__ = [
     "_build_doh_metadata",
     "_dohLookup_impl",
     "_extract_series_label",
-    "_get_target_profile",
     "_lists_add",
     "_lists_get",
     "_lists_remove",

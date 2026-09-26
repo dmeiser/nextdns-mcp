@@ -9,7 +9,6 @@ import pytest
 from nextdns_mcp.server import (
     _build_doh_metadata,
     _dohLookup_impl,
-    _get_target_profile,
     _validate_record_type,
     create_access_denied_response,
     create_nextdns_client,
@@ -92,26 +91,6 @@ class TestCreateAccessDeniedResponse:
         # Method and URL are in the request, not the response body
         assert response.request.method == "POST"
         assert "/profiles/abc123/denylist" in str(response.request.url)
-
-
-class TestGetTargetProfile:
-    """Tests for _get_target_profile function."""
-
-    def test_returns_provided_profile(self, clean_env):
-        """Test returns profile_id when provided."""
-        result = _get_target_profile("abc123")
-        assert result == "abc123"
-
-    def test_returns_default_when_not_provided(self, clean_env):
-        """Test returns default profile when profile_id is None."""
-        clean_env("NEXTDNS_DEFAULT_PROFILE", "def456")
-        result = _get_target_profile(None)
-        assert result == "def456"
-
-    def test_returns_none_when_no_default(self, clean_env):
-        """Test returns None when no profile_id and no default."""
-        result = _get_target_profile(None)
-        assert result is None
 
 
 class TestValidateRecordType:

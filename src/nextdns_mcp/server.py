@@ -158,7 +158,6 @@ from .tools.analytics import AnalyticsMetric, _query_analytics_impl  # noqa: F40
 from .tools.doh import (  # noqa: F401
     _build_doh_metadata,
     _dohLookup_impl,
-    _get_target_profile,
     _validate_record_type,
     doh_lookup,
 )
@@ -192,9 +191,9 @@ from .utils import (  # noqa: F401
     _api_request,
     _build_query_params,
     _validate_entry_id,
-    _validate_profile_id,
     is_safe_entry_id,
     is_safe_profile_id,
+    resolve_profile_id,
 )
 
 

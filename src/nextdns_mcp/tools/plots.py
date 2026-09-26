@@ -15,9 +15,8 @@ from fastmcp.utilities.types import Image
 
 from .. import client
 from ..coercion import OptionalProfileId
-from ..config import get_default_profile
 from ..errors import ErrorCode, error_payload, http_error_payload
-from ..utils import _validate_profile_id
+from ..utils import resolve_profile_id
 
 logger = logging.getLogger(__name__)
 
@@ -159,19 +158,7 @@ def _validate_plot_params(
             minimum_interval=60,
         )
 
-    target_profile = profile_id if profile_id else get_default_profile()
-    if not target_profile:
-        return None, error_payload(
-            ErrorCode.MISSING_PROFILE_ID,
-            "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
-            hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
-        )
-
-    error = _validate_profile_id(target_profile)
-    if error:
-        return None, error
-
-    return target_profile, None
+    return resolve_profile_id(profile_id, allow_default=True)
 
 
 async def _fetch_series_payload(

@@ -13,7 +13,7 @@ import httpx
 from .. import client
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload, http_error_payload
-from ..utils import _api_request, _build_query_params, _cap_limit, _validate_profile_id
+from ..utils import _api_request, _build_query_params, _cap_limit, resolve_profile_id
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +166,12 @@ async def _manage_logs_impl(
     raw: bool | None = None,
 ) -> dict[str, Any]:
     """Grouped implementation for query logs (get, clear, download)."""
-    error = _validate_profile_id(profile_id)
+    target_profile, error = resolve_profile_id(profile_id, allow_default=False)
     if error:
         return error
+    assert target_profile is not None
 
-    base_url = f"/profiles/{profile_id}/logs"
+    base_url = f"/profiles/{target_profile}/logs"
 
     if operation == "get":
         capped_limit, _ = _cap_limit(limit, LOGS_LIMIT_MAX)
@@ -183,7 +184,7 @@ async def _manage_logs_impl(
         return await _api_request("DELETE", base_url)
 
     if operation == "download":
-        return await _download_logs_to_tempfile(profile_id)
+        return await _download_logs_to_tempfile(target_profile)
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 
