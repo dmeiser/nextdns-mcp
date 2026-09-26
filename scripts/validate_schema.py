@@ -187,11 +187,65 @@ def _resolve_json_pointer(spec: dict[str, Any], pointer: str) -> Any:
     return target
 
 
+def _extract_schema_type(
+    spec: dict[str, Any] | None,
+    schema: Any,
+    _visited: set[str] | None = None,
+) -> str | None:
+    """Extract the expected OpenAPI type string from a schema or ref."""
+    if not isinstance(schema, dict):
+        return None
+
+    if _visited is None:
+        _visited = set()
+
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        if ref in _visited:
+            return None
+        target = _resolve_json_pointer(spec, ref) if spec else None
+        if target is None:
+            return None
+        return _extract_schema_type(spec, target, _visited | {ref})
+
+    schema_type = schema.get("type")
+    if isinstance(schema_type, str):
+        return schema_type
+
+    if "properties" in schema:
+        return "object"
+
+    if "items" in schema:
+        return "array"
+
+    if "allOf" in schema and isinstance(schema["allOf"], list):
+        for sub_schema in schema["allOf"]:
+            t = _extract_schema_type(spec, sub_schema, _visited)
+            if t:
+                return t
+
+    if "anyOf" in schema and isinstance(schema["anyOf"], list):
+        for sub_schema in schema["anyOf"]:
+            t = _extract_schema_type(spec, sub_schema, _visited)
+            if t:
+                return t
+
+    if "oneOf" in schema and isinstance(schema["oneOf"], list):
+        for sub_schema in schema["oneOf"]:
+            t = _extract_schema_type(spec, sub_schema, _visited)
+            if t:
+                return t
+
+    return None
+
+
 def resolve_schema(spec: dict[str, Any] | None, schema: Any, _seen: set[str] | None = None) -> Any:
     """Recursively resolve ``$ref`` pointers and nested schema references.
 
     Returns a schema dict with all local references expanded. Cyclic references
-    are broken by returning an empty dict for the repeated reference.
+    are broken by returning a schema with the expected type for the repeated
+    reference (or an empty dict if the type cannot be determined), preventing
+    infinite recursion while still enforcing type validation.
     """
     if _seen is None:
         _seen = set()
@@ -199,11 +253,16 @@ def resolve_schema(spec: dict[str, Any] | None, schema: Any, _seen: set[str] | N
         return schema
     if "$ref" in schema:
         ref = schema["$ref"]
-        if ref in _seen:
-            # Cycle guard: avoid infinite recursion on self-referential schemas.
-            return {}
         target = _resolve_json_pointer(spec, ref) if spec else None
         if target is None:
+            return {}
+        if ref in _seen:
+            # Cycle guard: avoid infinite recursion on self-referential schemas.
+            # Validate the unresolved ref's expected type instead of returning
+            # an empty schema that passes everything.
+            expected_type = _extract_schema_type(spec, target, _seen | {ref})
+            if expected_type:
+                return {"type": expected_type}
             return {}
         return resolve_schema(spec, target, _seen | {ref})
     resolved: dict[str, Any] = {}
