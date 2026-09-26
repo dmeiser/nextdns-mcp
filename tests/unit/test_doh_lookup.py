@@ -240,6 +240,7 @@ class TestDohClientReuse:
         assert client.timeout is not None
         assert client.timeout.connect == 7.5
 
+
 class TestOptionalProfileIdCoercion:
     """Test OptionalProfileId coerces int profile_id to str via FastMCP TypeAdapter."""
 
