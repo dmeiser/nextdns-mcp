@@ -31,7 +31,7 @@ Threat classes covered
 import asyncio
 import json
 import os
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 
 import httpx
 import pytest
@@ -97,7 +97,7 @@ class _LiveClient:
 
 
 @pytest.fixture
-async def live_client(monkeypatch: pytest.MonkeyPatch) -> _LiveClient:
+async def live_client(monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[_LiveClient, None]:
     """Real access-controlled client wired into the grouped tools' api_client."""
     live = _LiveClient(monkeypatch)
     yield live
