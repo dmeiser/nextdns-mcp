@@ -10,11 +10,8 @@ from datetime import datetime
 from typing import Any, Literal
 
 import httpx
-import matplotlib.dates as mdates
 import mcp.types
 from fastmcp.utilities.types import Image
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.figure import Figure
 
 from .. import client
 from ..coercion import OptionalProfileId
@@ -36,6 +33,15 @@ PlotMetric = Literal[
     "reasons",
     "ips",
 ]
+
+# matplotlib is imported lazily inside _render_series_chart (issue #165): the
+# import alone costs ~2s and every stdio cold start would pay it even though
+# only the plot tool needs it. These module-level slots are filled once on the
+# first render and are only accessed from within _render_series_chart, which
+# fills them under the same lazy-import guard.
+mdates: Any = None
+Figure: Any = None
+FigureCanvasAgg: Any = None
 
 # Metrics supported by the analytics time-series plotting tools.
 _PLOT_ANALYTICS_METRICS = frozenset(
@@ -87,6 +93,24 @@ def _render_series_chart(
     The figure is cleared in a finally block so a rendering exception cannot
     leak figure state in the long-running server.
     """
+    # Lazy imports: importing matplotlib costs ~2s, so the plot path is the only
+    # place that may pull it in (issue #165). Force the headless Agg backend
+    # before pyplot is first imported: pyplot resolves the backend at import
+    # time, so setting it later is version-fragile. FigureCanvasAgg keeps the
+    # rendering fully headless even if another backend is active.
+    global mdates, Figure, FigureCanvasAgg
+    if Figure is None:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.dates as _mdates
+        from matplotlib.backends.backend_agg import FigureCanvasAgg as _FigureCanvasAgg
+        from matplotlib.figure import Figure as _Figure
+
+        mdates = _mdates
+        Figure = _Figure
+        FigureCanvasAgg = _FigureCanvasAgg
+
     parsed_times = [_parse_series_timestamp(t) for t in times]
     numeric_times = mdates.date2num(parsed_times)
 
