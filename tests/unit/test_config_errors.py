@@ -1,107 +1,43 @@
 """Unit tests for error handling in configuration."""
 
 import logging
-import sys
-from types import ModuleType
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, call
 
 import pytest
 
+from nextdns_mcp import config
+from nextdns_mcp.config import MissingApiKeyError
 
-def mock_nextdns_config():
-    """Create fresh mock config module."""
-    module = ModuleType("nextdns_mcp.config")
 
-    # Set up module state
-    module.NEXTDNS_API_KEY = None
-    module.NEXTDNS_READ_ONLY = False
-    module.NEXTDNS_READABLE_PROFILES = ""
-    module.NEXTDNS_WRITABLE_PROFILES = ""
-    module.sys = sys
-
-    # Create mock logger with proper spec
-    module.logger = Mock(name="logger", spec=logging.Logger)
-
-    # Typed exception mirroring nextdns_mcp.config.MissingApiKeyError
-    class MissingApiKeyError(RuntimeError):
-        """Raised when required NextDNS configuration is missing."""
-
-    module.MissingApiKeyError = MissingApiKeyError
-
-    # Function definitions that use our mock logger
-    def parse_profile_list(profile_str: str) -> set[str]:
-        """Pure function, no logging."""
-        return set() if not profile_str.strip() else {p.strip() for p in profile_str.split(",")}
-
-    def get_readable_profiles() -> set[str]:
-        """Get readable profiles set."""
-        readable = parse_profile_list(module.NEXTDNS_READABLE_PROFILES)
-        writable = parse_profile_list(module.NEXTDNS_WRITABLE_PROFILES)
-        return readable | writable if readable else set()
-
-    def get_writable_profiles() -> set[str]:
-        """Get writable profiles set."""
-        return set() if module.NEXTDNS_READ_ONLY else parse_profile_list(module.NEXTDNS_WRITABLE_PROFILES)
-
-    def get_api_key() -> str | None:
-        """Get API key with logging."""
-        return module.NEXTDNS_API_KEY
-
-    def _log_api_key_error():  # pragma: no cover
-        """Log missing API key."""
-        module.logger.critical("NEXTDNS_API_KEY is required")
-        module.logger.critical("Set either:")
-        module.logger.critical("  - NEXTDNS_API_KEY environment variable")
-        module.logger.critical("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret")
-
-    def _log_access_control_settings():  # pragma: no cover
-        """Log access control configuration."""
-        readable = get_readable_profiles()
-        writable = get_writable_profiles()
-
-        if module.NEXTDNS_READ_ONLY:
-            module.logger.info("Read-only mode is ENABLED - all write operations are disabled")
-
-        if readable:
-            module.logger.info(f"Readable profiles restricted to: {sorted(readable)}")
-        else:
-            module.logger.info("All profiles are readable (no restrictions)")
-
-        if writable:
-            module.logger.info(f"Writable profiles restricted to: {sorted(writable)}")
-        elif not module.NEXTDNS_READ_ONLY:
-            module.logger.info("All profiles are writable (no restrictions)")
-
-    def validate_configuration():
-        """Validate configuration."""
-        if not module.NEXTDNS_API_KEY:
-            _log_api_key_error()
-            raise module.MissingApiKeyError("NEXTDNS_API_KEY is required")
-        _log_access_control_settings()
-
-    # Add functions to module
-    module.parse_profile_list = parse_profile_list
-    module.get_readable_profiles = get_readable_profiles
-    module.get_writable_profiles = get_writable_profiles
-    module.get_api_key = get_api_key
-    module._log_api_key_error = _log_api_key_error
-    module._log_access_control_settings = _log_access_control_settings
-    module.validate_configuration = validate_configuration
-
-    return module
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    """Clean configuration environment variables before each test."""
+    monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+    monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
+    monkeypatch.delenv("NEXTDNS_READ_ONLY", raising=False)
+    monkeypatch.delenv("NEXTDNS_READABLE_PROFILES", raising=False)
+    monkeypatch.delenv("NEXTDNS_WRITABLE_PROFILES", raising=False)
 
 
 @pytest.fixture
-def mock_module():
-    """Create mock module for each test."""
-    module = mock_nextdns_config()
-    with patch.dict("sys.modules", {"nextdns_mcp.config": module}):
-        yield module
+def active_config():
+    """Get the currently loaded nextdns_mcp.config module."""
+    import sys
+
+    return sys.modules.get("nextdns_mcp.config", config)
 
 
-def test_log_api_key_error(mock_module):
+@pytest.fixture
+def mock_logger(monkeypatch, active_config):
+    """Mock nextdns_mcp.config.logger for verifying log calls."""
+    logger_mock = Mock(spec=logging.Logger)
+    monkeypatch.setattr(active_config, "logger", logger_mock)
+    return logger_mock
+
+
+def test_log_api_key_error(active_config, mock_logger):
     """Test API key error logging."""
-    mock_module._log_api_key_error()
+    active_config._log_api_key_error()
 
     # Check each expected call individually for clarity in errors
     calls = [
@@ -113,67 +49,93 @@ def test_log_api_key_error(mock_module):
 
     for expected_call in calls:
         msg = f"Missing expected critical log: {expected_call}"
-        assert expected_call in mock_module.logger.critical.mock_calls, msg
+        assert expected_call in mock_logger.critical.mock_calls, msg
 
 
-def test_get_api_key_returns_value(mock_module):
-    """Test get_api_key returns the configured key"""
-    mock_module.NEXTDNS_API_KEY = "some-key"
-    assert mock_module.get_api_key() == "some-key"
+def test_get_api_key_returns_value(monkeypatch, active_config):
+    """Test get_api_key returns the configured key."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", "some-key")
+    assert active_config.get_api_key() == "some-key"
 
 
-def test_log_access_control_settings_restricted(mock_module):
+def test_log_access_control_settings_restricted(monkeypatch, active_config, mock_logger):
     """Test access control logging with both readable and writable restrictions."""
-    # Set up restricted profiles
-    mock_module.NEXTDNS_READ_ONLY = True
-    mock_module.NEXTDNS_READABLE_PROFILES = "profile1,profile2"
-    mock_module.NEXTDNS_WRITABLE_PROFILES = "profile2"
+    monkeypatch.setenv("NEXTDNS_READ_ONLY", "true")
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "profile1,profile2")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "profile2")
 
-    # Call function
-    mock_module._log_access_control_settings()
+    active_config._log_access_control_settings()
 
-    # Check expected logs
     expected_calls = [
         call("Read-only mode is ENABLED - all write operations are disabled"),
         call("Readable profiles restricted to: ['profile1', 'profile2']"),
     ]
 
     for expected_call in expected_calls:
-        assert expected_call in mock_module.logger.info.mock_calls, f"Missing expected info log: {expected_call}"
+        assert expected_call in mock_logger.info.mock_calls, f"Missing expected info log: {expected_call}"
 
 
-def test_log_access_control_settings_unrestricted(mock_module):
+def test_log_access_control_settings_unrestricted(monkeypatch, active_config, mock_logger):
     """Test access control logging with no restrictions."""
-    # Configure the mock module
-    mock_module.NEXTDNS_READ_ONLY = False
-    mock_module.get_readable_profiles = lambda: set()
-    mock_module.get_writable_profiles = lambda: set()
+    monkeypatch.delenv("NEXTDNS_READ_ONLY", raising=False)
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
-    # Call function
-    mock_module._log_access_control_settings()
+    active_config._log_access_control_settings()
 
-    # Check expected logs
     expected_calls = [
         call("All profiles are readable (no restrictions)"),
         call("All profiles are writable (no restrictions)"),
     ]
 
     for expected_call in expected_calls:
-        assert expected_call in mock_module.logger.info.mock_calls, f"Missing expected info log: {expected_call}"
+        assert expected_call in mock_logger.info.mock_calls, f"Missing expected info log: {expected_call}"
 
-    # Ensure no unexpected calls
-    assert mock_module.logger.info.call_count == 2
+    assert mock_logger.info.call_count == 2
 
 
-def test_validate_configuration_raises_on_missing_api_key(mock_module):
+def test_log_access_control_settings_default_deny(monkeypatch, active_config, mock_logger):
+    """Test access control logging with default deny-all (no profiles set)."""
+    monkeypatch.delenv("NEXTDNS_READ_ONLY", raising=False)
+    monkeypatch.delenv("NEXTDNS_READABLE_PROFILES", raising=False)
+    monkeypatch.delenv("NEXTDNS_WRITABLE_PROFILES", raising=False)
+
+    active_config._log_access_control_settings()
+
+    expected_calls = [
+        call("No profiles are readable (deny all by default)"),
+        call("No profiles are writable (deny all by default)"),
+    ]
+
+    for expected_call in expected_calls:
+        assert expected_call in mock_logger.info.mock_calls, f"Missing expected info log: {expected_call}"
+
+
+def test_log_access_control_settings_writable_restricted(monkeypatch, active_config, mock_logger):
+    """Test access control logging when writable profiles are restricted and read-only is disabled."""
+    monkeypatch.delenv("NEXTDNS_READ_ONLY", raising=False)
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "profile1")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "profile2")
+
+    active_config._log_access_control_settings()
+
+    expected_calls = [
+        call("Readable profiles restricted to: ['profile1', 'profile2']"),
+        call("Writable profiles restricted to: ['profile2']"),
+    ]
+
+    for expected_call in expected_calls:
+        assert expected_call in mock_logger.info.mock_calls, f"Missing expected info log: {expected_call}"
+
+
+def test_validate_configuration_raises_on_missing_api_key(monkeypatch, active_config, mock_logger):
     """Test validate_configuration raises when API key is missing."""
-    mock_module.NEXTDNS_API_KEY = None
+    monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+    monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
 
-    # Should raise the typed exception (not sys.exit)
-    with pytest.raises(mock_module.MissingApiKeyError):
-        mock_module.validate_configuration()
+    with pytest.raises(MissingApiKeyError):
+        active_config.validate_configuration()
 
-    # Check expected error logs
     calls = [
         call("NEXTDNS_API_KEY is required"),
         call("Set either:"),
@@ -183,40 +145,34 @@ def test_validate_configuration_raises_on_missing_api_key(mock_module):
 
     for expected_call in calls:
         msg = f"Missing expected critical log: {expected_call}"
-        assert expected_call in mock_module.logger.critical.mock_calls, msg
+        assert expected_call in mock_logger.critical.mock_calls, msg
 
 
-def test_validate_configuration_logs_settings(mock_module):
+def test_validate_configuration_logs_settings(monkeypatch, active_config, mock_logger):
     """Test validate_configuration logs access control settings when API key exists."""
-    mock_module.NEXTDNS_API_KEY = "test-key"
-    mock_module.NEXTDNS_READ_ONLY = True
+    monkeypatch.setenv("NEXTDNS_API_KEY", "test-key")
+    monkeypatch.setenv("NEXTDNS_READ_ONLY", "true")
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
 
-    # Verify no exit with API key present
-    mock_module.validate_configuration()
+    active_config.validate_configuration()
 
-    # Check read-only mode log
-    assert call("Read-only mode is ENABLED - all write operations are disabled") in mock_module.logger.info.mock_calls
+    assert call("Read-only mode is ENABLED - all write operations are disabled") in mock_logger.info.mock_calls
+    assert call("All profiles are readable (no restrictions)") in mock_logger.info.mock_calls
 
-    # Check default access control logging
-    assert call("All profiles are readable (no restrictions)") in mock_module.logger.info.mock_calls
+    monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
 
-    # Configure the mock module
-    mock_module.NEXTDNS_API_KEY = None
+    with pytest.raises(MissingApiKeyError):
+        active_config.validate_configuration()
 
-    # Test that the function raises the typed exception
-    with pytest.raises(mock_module.MissingApiKeyError):
-        mock_module.validate_configuration()
-
-    # Check logger calls
-    expected_calls = [
+    calls = [
         call("NEXTDNS_API_KEY is required"),
         call("Set either:"),
         call("  - NEXTDNS_API_KEY environment variable"),
         call("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret"),
     ]
 
-    for expected_call in expected_calls:
+    for expected_call in calls:
         msg = f"Missing expected critical log: {expected_call}"
-        assert expected_call in mock_module.logger.critical.mock_calls, msg
+        assert expected_call in mock_logger.critical.mock_calls, msg
 
-    assert mock_module.logger.critical.call_count == 4
+    assert mock_logger.critical.call_count == 4
