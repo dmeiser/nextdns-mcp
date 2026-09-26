@@ -9,6 +9,7 @@ import pytest
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
+from nextdns_mcp.tools import plots as plots_module
 
 
 def _png_is_complete(png: bytes) -> bool:
@@ -55,7 +56,7 @@ class TestNoEagerMatplotlibImport:
         times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
         series_data = [{"name": "blocked", "queries": [1, 2]}]
 
-        png = server._render_series_chart("status", times, series_data)
+        png = plots_module._render_series_chart("status", times, series_data)
         assert png.startswith(b"\x89PNG")
         assert _png_is_complete(png)
         assert matplotlib.get_backend().lower() == "agg"
@@ -65,41 +66,41 @@ class TestExtractSeriesLabel:
     """Tests for _extract_series_label."""
 
     def test_name_label(self):
-        assert server._extract_series_label({"name": "example.com"}, 0) == "example.com"
+        assert plots_module._extract_series_label({"name": "example.com"}, 0) == "example.com"
 
     def test_status_label(self):
-        assert server._extract_series_label({"status": "blocked"}, 0) == "blocked"
+        assert plots_module._extract_series_label({"status": "blocked"}, 0) == "blocked"
 
     def test_protocol_label(self):
-        assert server._extract_series_label({"protocol": "DoH"}, 0) == "DoH"
+        assert plots_module._extract_series_label({"protocol": "DoH"}, 0) == "DoH"
 
     def test_version_label(self):
-        assert server._extract_series_label({"version": "IPv4"}, 0) == "IPv4"
+        assert plots_module._extract_series_label({"version": "IPv4"}, 0) == "IPv4"
 
     def test_id_label(self):
-        assert server._extract_series_label({"id": "device1"}, 0) == "device1"
+        assert plots_module._extract_series_label({"id": "device1"}, 0) == "device1"
 
     def test_validated_true_label(self):
-        assert server._extract_series_label({"validated": True}, 0) == "validated"
+        assert plots_module._extract_series_label({"validated": True}, 0) == "validated"
 
     def test_validated_false_label(self):
-        assert server._extract_series_label({"validated": False}, 0) == "not_validated"
+        assert plots_module._extract_series_label({"validated": False}, 0) == "not_validated"
 
     def test_encrypted_true_label(self):
-        assert server._extract_series_label({"encrypted": True}, 0) == "encrypted"
+        assert plots_module._extract_series_label({"encrypted": True}, 0) == "encrypted"
 
     def test_encrypted_false_label(self):
-        assert server._extract_series_label({"encrypted": False}, 0) == "unencrypted"
+        assert plots_module._extract_series_label({"encrypted": False}, 0) == "unencrypted"
 
     def test_fallback_index_label(self):
-        assert server._extract_series_label({"queries": []}, 3) == "series_3"
+        assert plots_module._extract_series_label({"queries": []}, 3) == "series_3"
 
 
 class TestParseSeriesTimestamp:
     """Tests for _parse_series_timestamp."""
 
     def test_parses_z_timestamp(self):
-        ts = server._parse_series_timestamp("2024-01-15T10:30:00Z")
+        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00Z")
         assert ts.year == 2024
         assert ts.month == 1
         assert ts.day == 15
@@ -107,11 +108,11 @@ class TestParseSeriesTimestamp:
         assert ts.minute == 30
 
     def test_parses_offset_timestamp(self):
-        ts = server._parse_series_timestamp("2024-01-15T10:30:00+00:00")
+        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00+00:00")
         assert ts.year == 2024
 
     def test_parses_microseconds_fallback(self):
-        ts = server._parse_series_timestamp("2024-01-15T10:30:00.123456+00:00")
+        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00.123456+00:00")
         assert ts.year == 2024
 
 
@@ -124,14 +125,14 @@ class TestRenderSeriesChart:
             {"name": "blocked", "queries": [10, 20]},
             {"name": "allowed", "queries": [5, 8]},
         ]
-        png = server._render_series_chart("status", times, series_data)
+        png = plots_module._render_series_chart("status", times, series_data)
         assert isinstance(png, bytes)
         assert png.startswith(b"\x89PNG")
 
     def test_renders_with_default_label(self):
         times = ["2024-01-15T10:00:00Z"]
         series_data = [{"queries": [1]}]
-        png = server._render_series_chart("reasons", times, series_data)
+        png = plots_module._render_series_chart("reasons", times, series_data)
         assert isinstance(png, bytes)
         assert png.startswith(b"\x89PNG")
 
@@ -141,7 +142,7 @@ class TestRenderSeriesChart:
             {"name": "blocked", "queries": [10, 20]},
             {"name": "allowed", "queries": [5, 8]},
         ]
-        png = server._render_series_chart("status", times, series_data)
+        png = plots_module._render_series_chart("status", times, series_data)
         assert _png_is_complete(png)
         width, height = _png_image_size(png)
         assert width > 0 and height > 0
@@ -174,7 +175,7 @@ class TestRenderSeriesChartFigureSafety:
 
         before = self._figure_registry_size()
         with pytest.raises(RuntimeError, match="boom"):
-            server._render_series_chart("status", times, series_data)
+            plots_module._render_series_chart("status", times, series_data)
         after = self._figure_registry_size()
         assert after == before
 
@@ -185,14 +186,14 @@ class TestRenderSeriesChartFigureSafety:
 
         before = self._figure_registry_size()
         with pytest.raises(ValueError):
-            server._render_series_chart("status", times, series_data)
+            plots_module._render_series_chart("status", times, series_data)
         after = self._figure_registry_size()
         assert after == before
 
     def test_successful_render_does_not_register_figures(self):
         before = self._figure_registry_size()
         times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
-        server._render_series_chart("status", times, [{"name": "blocked", "queries": [1, 2]}])
+        plots_module._render_series_chart("status", times, [{"name": "blocked", "queries": [1, 2]}])
         after = self._figure_registry_size()
         assert after == before
 
@@ -215,7 +216,7 @@ class TestConcurrentRenderIndependence:
                             "queries": [worker_index * 10 + i, worker_index * 10 + i + 1],
                         },
                     ]
-                    png = server._render_series_chart(f"metric-{worker_index}", times, series_data)
+                    png = plots_module._render_series_chart(f"metric-{worker_index}", times, series_data)
                     if not png.startswith(b"\x89PNG") or not _png_is_complete(png):
                         errors.append(f"worker {worker_index}: corrupt PNG")
             except Exception as e:  # noqa: BLE001
@@ -235,7 +236,7 @@ class TestConcurrentRenderIndependence:
         def worker(worker_index: int) -> None:
             for i in range(3):
                 times = [f"2024-01-15T{10 + i}:00:00Z", f"2024-01-15T{11 + i}:00:00Z"]
-                server._render_series_chart("status", times, [{"queries": [1, 2]}])
+                plots_module._render_series_chart("status", times, [{"queries": [1, 2]}])
 
         def count() -> int:
             return len(matplotlib._pylab_helpers.Gcf.figs)
@@ -279,25 +280,25 @@ class TestPlotAnalyticsSeriesImpl:
 
     @pytest.mark.asyncio
     async def test_unsupported_metric_returns_error(self, clean_env):
-        result = await server._plot_analytics_series_impl("notametric")
+        result = await plots_module._plot_analytics_series_impl("notametric")
         assert "error" in result
         assert "Unsupported metric" in result["error"]
 
     @pytest.mark.asyncio
     async def test_domains_metric_returns_error(self, clean_env):
-        result = await server._plot_analytics_series_impl("domains")
+        result = await plots_module._plot_analytics_series_impl("domains")
         assert "error" in result
         assert "Unsupported metric" in result["error"]
 
     @pytest.mark.asyncio
     async def test_interval_too_small_returns_error(self, clean_env):
-        result = await server._plot_analytics_series_impl("status", interval=30)
+        result = await plots_module._plot_analytics_series_impl("status", interval=30)
         assert "error" in result
         assert "interval must be at least 60" in result["error"]
 
     @pytest.mark.asyncio
     async def test_no_profile_returns_error(self, clean_env):
-        result = await server._plot_analytics_series_impl("status")
+        result = await plots_module._plot_analytics_series_impl("status")
         assert "error" in result
         assert "No profile_id provided" in result["error"]
 
@@ -305,14 +306,14 @@ class TestPlotAnalyticsSeriesImpl:
     async def test_http_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         mock_api_client.get.side_effect = httpx.HTTPError("boom")
-        result = await server._plot_analytics_series_impl("status")
+        result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "http_error"
 
     @pytest.mark.asyncio
     async def test_unexpected_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         mock_api_client.get.side_effect = RuntimeError("unexpected")
-        result = await server._plot_analytics_series_impl("status")
+        result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
@@ -321,7 +322,7 @@ class TestPlotAnalyticsSeriesImpl:
         response = MagicMock()
         response.json.return_value = {"meta": {"series": {"times": []}}, "data": []}
         mock_api_client.get.return_value = response
-        result = await server._plot_analytics_series_impl("status")
+        result = await plots_module._plot_analytics_series_impl("status")
         assert "error" in result
         assert "No time-series data available" in result["error"]
 
@@ -334,7 +335,7 @@ class TestPlotAnalyticsSeriesImpl:
             "data": [{"name": "x", "queries": [1]}],
         }
         mock_api_client.get.return_value = response
-        result = await server._plot_analytics_series_impl("status")
+        result = await plots_module._plot_analytics_series_impl("status")
         assert "error" in result
         assert "Error rendering chart" in result["error"]
 
@@ -345,7 +346,7 @@ class TestPlotAnalyticsSeriesImpl:
         response.json.return_value = sample_series_payload
         mock_api_client.get.return_value = response
 
-        result = await server._plot_analytics_series_impl("status")
+        result = await plots_module._plot_analytics_series_impl("status")
 
         assert hasattr(result, "type") or isinstance(result, dict)
         if isinstance(result, dict):

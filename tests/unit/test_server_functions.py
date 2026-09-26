@@ -6,14 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from nextdns_mcp.server import (
+from nextdns_mcp.client import create_access_denied_response, create_nextdns_client
+from nextdns_mcp.tools import doh as doh_module
+from nextdns_mcp.tools.doh import (
     _build_doh_metadata,
     _dohLookup_impl,
     _validate_record_type,
-    create_access_denied_response,
-    create_nextdns_client,
 )
-from nextdns_mcp.tools import doh as doh_module
 
 
 @pytest.fixture

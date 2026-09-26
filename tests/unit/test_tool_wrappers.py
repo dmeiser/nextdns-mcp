@@ -6,7 +6,7 @@ implementation functions. The actual logic is tested in test_server_functions.py
 
 import pytest
 
-from nextdns_mcp.server import _dohLookup_impl, dohLookup
+from nextdns_mcp.tools.doh import _dohLookup_impl, dohLookup
 
 
 @pytest.fixture(autouse=True)

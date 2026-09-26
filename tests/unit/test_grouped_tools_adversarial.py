@@ -37,7 +37,7 @@ import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import server
+from nextdns_mcp import server, utils
 from nextdns_mcp.client import AccessControlledClient
 from nextdns_mcp.tools import logs as logs_module
 
@@ -432,7 +432,7 @@ class TestFailClosedContract:
         assert response.status_code == 403
         assert response.json()["code"] == "access_denied"
         # And through the grouped tool the same shape is surfaced as a denial.
-        result = await server._api_request("DELETE", "/profiles/abc")
+        result = await utils._api_request("DELETE", "/profiles/abc")
         assert result["code"] == "access_denied"
         assert result["status_code"] == 403
         assert result != {"success": True}
@@ -440,7 +440,7 @@ class TestFailClosedContract:
     @pytest.mark.asyncio
     async def test_denied_read_is_never_success(self, live_client, restricted_env):
         """A denied read surfaces read_access_denied, not a 200 payload."""
-        result = await server._api_request("GET", "/profiles/xyz999/settings")
+        result = await utils._api_request("GET", "/profiles/xyz999/settings")
         assert result["code"] == "read_access_denied"
         assert result != {"success": True}
         assert live_client.seen == []
@@ -448,7 +448,7 @@ class TestFailClosedContract:
     @pytest.mark.asyncio
     async def test_denied_write_is_never_success(self, live_client, restricted_env):
         """A denied write surfaces write_access_denied, not a 204 success."""
-        result = await server._api_request("POST", "/profiles/xyz999/denylist", json={"id": "a.com"})
+        result = await utils._api_request("POST", "/profiles/xyz999/denylist", json={"id": "a.com"})
         assert result["code"] == "write_access_denied"
         assert result != {"success": True}
         assert live_client.seen == []

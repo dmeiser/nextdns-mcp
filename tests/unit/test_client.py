@@ -18,7 +18,7 @@ class TestCreateNextdnsClient:
         if "nextdns_mcp.server" in sys.modules:
             del sys.modules["nextdns_mcp.server"]
 
-        from nextdns_mcp.server import create_nextdns_client
+        from nextdns_mcp.client import create_nextdns_client
 
         client = create_nextdns_client()
 
@@ -46,7 +46,7 @@ class TestCreateNextdnsClient:
         if "nextdns_mcp.config" in sys.modules:
             del sys.modules["nextdns_mcp.config"]
 
-        from nextdns_mcp.server import create_nextdns_client
+        from nextdns_mcp.client import create_nextdns_client
 
         client = create_nextdns_client()
 
@@ -67,7 +67,7 @@ class TestCreateNextdnsClient:
         if "nextdns_mcp.config" in sys.modules:
             del sys.modules["nextdns_mcp.config"]
 
-        from nextdns_mcp.server import create_nextdns_client
+        from nextdns_mcp.client import create_nextdns_client
 
         client = create_nextdns_client()
 
@@ -86,7 +86,7 @@ class TestCreateNextdnsClient:
         if "nextdns_mcp.server" in sys.modules:
             del sys.modules["nextdns_mcp.server"]
 
-        from nextdns_mcp.server import create_nextdns_client
+        from nextdns_mcp.client import create_nextdns_client
 
         client = create_nextdns_client()
 
@@ -102,7 +102,7 @@ class TestCreateNextdnsClient:
         if "nextdns_mcp.server" in sys.modules:
             del sys.modules["nextdns_mcp.server"]
 
-        from nextdns_mcp.server import create_nextdns_client
+        from nextdns_mcp.client import create_nextdns_client
 
         client = create_nextdns_client()
 
@@ -118,7 +118,7 @@ class TestCreateNextdnsClient:
         if "nextdns_mcp.server" in sys.modules:
             del sys.modules["nextdns_mcp.server"]
 
-        from nextdns_mcp.server import create_nextdns_client
+        from nextdns_mcp.client import create_nextdns_client
 
         client = create_nextdns_client()
 

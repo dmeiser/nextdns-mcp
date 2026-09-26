@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+from nextdns_mcp.client import extract_profile_id_from_url, is_write_operation
 from nextdns_mcp.config import (
     can_read_profile,
     can_write_profile,
@@ -11,12 +12,7 @@ from nextdns_mcp.config import (
     get_writable_profiles,
     parse_profile_list,
 )
-from nextdns_mcp.server import (
-    extract_profile_id_from_url,
-    is_safe_entry_id,
-    is_safe_profile_id,
-    is_write_operation,
-)
+from nextdns_mcp.utils import is_safe_entry_id, is_safe_profile_id
 
 
 @pytest.fixture

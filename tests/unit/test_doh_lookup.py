@@ -290,7 +290,7 @@ class TestOptionalProfileIdCoercion:
         """Numeric-only profile ID (e.g. 315244) arriving as int must be coerced to str."""
         from fastmcp import FastMCP
 
-        from nextdns_mcp.server import OptionalProfileId
+        from nextdns_mcp.coercion import OptionalProfileId
 
         mcp = FastMCP("test", strict_input_validation=False)
 
@@ -307,7 +307,7 @@ class TestOptionalProfileIdCoercion:
         """None profile_id must not be coerced to the string 'None'."""
         from fastmcp import FastMCP
 
-        from nextdns_mcp.server import OptionalProfileId
+        from nextdns_mcp.coercion import OptionalProfileId
 
         mcp = FastMCP("test", strict_input_validation=False)
 
@@ -324,7 +324,7 @@ class TestOptionalProfileIdCoercion:
         """String profile IDs (the normal case) pass through unchanged."""
         from fastmcp import FastMCP
 
-        from nextdns_mcp.server import OptionalProfileId
+        from nextdns_mcp.coercion import OptionalProfileId
 
         mcp = FastMCP("test", strict_input_validation=False)
 
