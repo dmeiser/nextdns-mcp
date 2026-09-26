@@ -144,7 +144,8 @@ def parse_profile_list(profile_str: str) -> set[str] | None:
         profile_str: Comma-separated string of profile IDs
 
     Returns:
-        Set of profile IDs, None if string is empty/unset (deny all),
+        Set of profile IDs normalized to lowercase (profile IDs are hex and
+        matched case-insensitively), None if string is empty/unset (deny all),
         or empty set if "ALL"/"all" specified (allow all)
     """
     if _is_empty_profile_list(profile_str):
