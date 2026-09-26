@@ -53,11 +53,11 @@ def error_payload(code: str, message: str, **extra: Any) -> dict[str, Any]:
 def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorCode.HTTP_ERROR) -> dict[str, Any]:
     """Build a typed error payload for a failed HTTP request.
 
-    If the failed response body is a structured JSON error - for example the
-    synthetic 403 emitted by the access-controlled client for an ACL denial - its
-    fields (including the typed ``code`` and the denial reason) are surfaced so
-    they are not lost. Otherwise a generic payload built from ``fallback_code`` is
-    returned, always carrying ``status_code`` when the response has one.
+    If the failed response body is a structured JSON error, its fields are
+    surfaced so they are not lost. Otherwise a generic payload built from
+    ``fallback_code`` is returned, always carrying ``status_code`` when the
+    response has one. (ACL denials do not reach this helper: the access-control
+    layer raises the typed ``AccessDeniedError`` instead of faking a response.)
 
     Args:
         message: The human-readable message used when no structured body exists.

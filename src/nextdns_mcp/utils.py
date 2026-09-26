@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from . import client
-from .client import SAFE_PROFILE_ID_PATTERN
+from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError
 from .config import get_default_profile
 from .errors import ErrorCode, error_payload, http_error_payload
 
@@ -107,13 +107,27 @@ def _build_query_params(**kwargs: Any) -> dict[str, Any]:
     return {k: ("true" if v else "false") if isinstance(v, bool) else v for k, v in params.items()}
 
 
+def access_denied_payload(exc: AccessDeniedError) -> dict[str, Any]:
+    """Build the standardized error payload for an ACL denial (issue #178).
+
+    Carries the typed denial ``code`` (``read_access_denied`` /
+    ``write_access_denied`` / ``access_denied``) and the full denial reason in
+    ``error``, with a nominal ``status_code`` of 403 for caller compatibility.
+    """
+    payload = error_payload(exc.code, exc.message, status_code=403)
+    payload["profile_id"] = exc.profile_id
+    return payload
+
+
 async def _api_request(method: str, url: str, params: dict[str, Any] | None = None, json: Any = None) -> dict[str, Any]:
     """Make an HTTP request through the access-controlled client and return JSON.
 
     Failures are reported as standardized error payloads (see ``errors.py``) rather
     than raised exceptions, so callers get a consistent, typed failure shape:
     ``{"error": ..., "code": "http_error", "status_code": ...}`` for HTTP failures
-    (401/403/429/5xx are distinguishable via ``status_code``) and
+    (401/403/429/5xx are distinguishable via ``status_code``),
+    ``{"error": ..., "code": "read_access_denied" | "write_access_denied" | "access_denied"}
+    for denials raised by the access-control layer, and
     ``{"error": ..., "code": "internal_error"}`` for non-HTTP failures.
     """
     try:
@@ -122,6 +136,12 @@ async def _api_request(method: str, url: str, params: dict[str, Any] | None = No
         if response.status_code == 204 or not response.content:
             return {"success": True}
         return response.json()
+    except AccessDeniedError as e:
+        # Raised by the ACL layer before any network request. Kept out of the
+        # httpx.HTTPError branch: a real upstream 403 (raise_for_status) must
+        # keep its existing http_error path.
+        logger.warning(f"Access denied in {method} {url}: {e}")
+        return access_denied_payload(e)
     except httpx.HTTPError as e:
         logger.error(f"HTTP error in {method} {url}: {e}")
         message = f"HTTP error in {method} {url}: {e}"
