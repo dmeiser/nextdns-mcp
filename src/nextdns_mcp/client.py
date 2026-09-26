@@ -183,6 +183,25 @@ class AccessControlledClient(httpx.AsyncClient):
         else:
             self._check_collection_read_access(method, url, access)
 
+    async def raw_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Make an HTTP request WITHOUT any access-control check.
+
+        This is the raw transport path: it goes straight to ``httpx`` and is
+        used by server-level probes that must observe the true upstream state.
+        The ``/health`` readiness check uses it because a local ACL denial (for
+        example a deny-all readable-profile configuration) would otherwise be
+        indistinguishable from a real NextDNS authentication failure.
+
+        Args:
+            method: HTTP method
+            url: Request URL
+            **kwargs: Additional request arguments
+
+        Returns:
+            The unmodified response from the API.
+        """
+        return await super().request(method, url, **kwargs)
+
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
         """Make an HTTP request with access control checks.
 
@@ -259,11 +278,12 @@ class AccessControlledClient(httpx.AsyncClient):
             yield response
 
 
-def create_nextdns_client() -> httpx.AsyncClient:
+def create_nextdns_client() -> AccessControlledClient:
     """Create an authenticated HTTP client for NextDNS API with access control.
 
     Returns:
-        httpx.AsyncClient: Configured async HTTP client with authentication and access control
+        AccessControlledClient: Configured async HTTP client with authentication
+            and access control
 
     Raises:
         ConfigurationError: If the API key is absent or empty.
@@ -289,10 +309,10 @@ def create_nextdns_client() -> httpx.AsyncClient:
     )
 
 
-_client: httpx.AsyncClient | None = None
+_client: AccessControlledClient | None = None
 
 
-def get_api_client() -> httpx.AsyncClient:
+def get_api_client() -> AccessControlledClient:
     """Return the shared authenticated API client, creating it on first use.
 
     The client is built lazily so that importing this module has no side
