@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from ..coercion import OptionalProfileId
-from ..config import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES, can_read_profile, get_default_profile, get_http_timeout
+from ..config import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES, can_read_profile, get_http_timeout
 from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import resolve_profile_id
 
@@ -26,15 +26,6 @@ def _get_doh_client() -> httpx.AsyncClient:
     if _doh_client is None:
         _doh_client = httpx.AsyncClient(timeout=get_http_timeout())
     return _doh_client
-
-
-def _get_target_profile(profile_id: str | None) -> str | None:
-    """Get the target profile ID, using default if not specified."""
-    if profile_id:
-        return profile_id
-
-    # Use config function to get default profile
-    return get_default_profile()
 
 
 def _validate_record_type(record_type: str) -> tuple[bool, str]:
@@ -101,11 +92,7 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
 
     See dohLookup() for full documentation.
     """
-    target_profile, error = resolve_profile_id(
-        profile_id,
-        allow_default=True,
-        default_fn=get_default_profile,
-    )
+    target_profile, error = resolve_profile_id(profile_id)
     if error:
         return error
     assert target_profile is not None

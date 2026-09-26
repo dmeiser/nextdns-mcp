@@ -8,7 +8,7 @@ import os
 import pytest
 
 from nextdns_mcp.errors import ErrorCode
-from nextdns_mcp.server import _validate_profile_id, resolve_profile_id
+from nextdns_mcp.server import resolve_profile_id
 
 
 @pytest.fixture
@@ -88,17 +88,6 @@ class TestResolveProfileIdWithDefault:
         assert error["code"] == ErrorCode.INVALID_PROFILE_ID
         assert error["error"] == "Invalid profile_id format: invalid_def"
 
-    def test_uses_custom_default_fn(self):
-        resolved, error = resolve_profile_id(None, default_fn=lambda: "xyz789")
-        assert resolved == "xyz789"
-        assert error is None
-
-    def test_custom_default_fn_returning_none(self):
-        resolved, error = resolve_profile_id(None, default_fn=lambda: None)
-        assert resolved is None
-        assert error is not None
-        assert error["code"] == ErrorCode.MISSING_PROFILE_ID
-
 
 class TestResolveProfileIdMandatory:
     """Tests for resolve_profile_id without default fallback (allow_default=False)."""
@@ -149,17 +138,3 @@ class TestResolveProfileIdMandatory:
         assert error is not None
         assert error["code"] == ErrorCode.INVALID_PROFILE_ID
         assert error["error"] == f"Invalid profile_id format: {invalid_id}"
-
-
-class TestValidateProfileIdCompatibility:
-    """Tests for _validate_profile_id backward-compatible helper."""
-
-    def test_returns_none_for_valid_profile_id(self):
-        assert _validate_profile_id("abc123") is None
-        assert _validate_profile_id(123456) is None
-
-    def test_returns_error_for_invalid_profile_id(self):
-        error = _validate_profile_id("abc/def")
-        assert error is not None
-        assert error["code"] == ErrorCode.INVALID_PROFILE_ID
-        assert error["error"] == "Invalid profile_id format: abc/def"

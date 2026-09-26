@@ -5,7 +5,6 @@ SPDX-License-Identifier: MIT
 
 import logging
 import re
-from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -41,7 +40,6 @@ def resolve_profile_id(
     profile_id: str | int | None = None,
     *,
     allow_default: bool = True,
-    default_fn: Callable[[], str | None] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Resolve and validate a NextDNS profile ID with optional default fallback.
 
@@ -50,8 +48,6 @@ def resolve_profile_id(
         allow_default: If True (default), fall back to the configured default
             profile when profile_id is None or empty. If False, profile_id is
             mandatory.
-        default_fn: Optional callable returning a default profile string.
-            Defaults to ``get_default_profile``.
 
     Returns:
         A tuple of ``(resolved_profile_id, error_payload)``. On success, the
@@ -62,8 +58,7 @@ def resolve_profile_id(
     if allow_default:
         target_profile: str | int | None = profile_id
         if not target_profile:
-            fn = default_fn if default_fn is not None else get_default_profile
-            target_profile = fn()
+            target_profile = get_default_profile()
         if not target_profile:
             return None, error_payload(
                 ErrorCode.MISSING_PROFILE_ID,
@@ -83,12 +78,6 @@ def resolve_profile_id(
             f"Invalid profile_id format: {profile_id}",
         )
     return str(profile_id), None
-
-
-def _validate_profile_id(profile_id: str | int) -> dict[str, Any] | None:
-    """Return an error dict if profile_id is not a safe identifier."""
-    _, error = resolve_profile_id(profile_id, allow_default=False)
-    return error
 
 
 def _validate_entry_id(entry_id: str) -> dict[str, Any] | None:
