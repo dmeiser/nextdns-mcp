@@ -1,0 +1,179 @@
+name: E2E Container
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      allow_live_writes:
+        description: 'Enable write operations (creates/deletes test profiles)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+  push:
+    branches: 
+      - main
+    tags:
+      - 'v*.*.*'  # Also run on version tags
+  pull_request:
+    branches: [ main ]  # Run on all PRs to main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-container-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: E2E Container (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [slim, alpine]
+    env:
+      CI: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Build NextDNS MCP Docker image (${{ matrix.variant }})
+        run: |
+          if [ "${{ matrix.variant }}" = "alpine" ]; then
+            docker build -f Dockerfile.alpine -t nextdns-mcp:alpine .
+          else
+            docker build -f Dockerfile -t nextdns-mcp:slim .
+          fi
+
+      - name: Check secret availability
+        id: check-secrets
+        env:
+          NEXTDNS_API_KEY: ${{ secrets.NEXTDNS_API_KEY }}
+        run: |
+          if [ -z "${NEXTDNS_API_KEY}" ]; then
+            echo "has_secret=false" >> $GITHUB_OUTPUT
+            echo "::notice::NEXTDNS_API_KEY is not available (e.g. fork PR). Skipping live container tests."
+          else
+            echo "has_secret=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Start MCP Server Container (${{ matrix.variant }})
+        if: steps.check-secrets.outputs.has_secret == 'true'
+        env:
+          NEXTDNS_API_KEY: ${{ secrets.NEXTDNS_API_KEY }}
+        run: |
+          docker run -d \
+            --name nextdns-container-e2e \
+            -p 8000:8000 \
+            -e NEXTDNS_API_KEY="${NEXTDNS_API_KEY}" \
+            -e NEXTDNS_READABLE_PROFILES="ALL" \
+            -e NEXTDNS_WRITABLE_PROFILES="ALL" \
+            -e MCP_TRANSPORT="http" \
+            -e MCP_HOST="0.0.0.0" \
+            -e MCP_PORT="8000" \
+            nextdns-mcp:${{ matrix.variant }}
+
+          echo "Waiting for container HTTP endpoint to be ready..."
+          READY=0
+          for i in $(seq 1 30); do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/mcp 2>/dev/null || echo "000")
+            if [ "$HTTP_STATUS" != "000" ]; then
+              echo "Container is ready (HTTP $HTTP_STATUS at attempt $i)"
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "❌ Container failed to respond within 30 seconds"
+            docker logs nextdns-container-e2e || true
+            exit 1
+          fi
+
+      - name: Run E2E validation against container (${{ matrix.variant }})
+        if: steps.check-secrets.outputs.has_secret == 'true'
+        env:
+          NEXTDNS_API_KEY: ${{ secrets.NEXTDNS_API_KEY }}
+          NEXTDNS_PLOT_PROFILE: ${{ secrets.NEXTDNS_PLOT_PROFILE }}
+          ALLOW_LIVE_WRITES: ${{ github.event_name == 'pull_request' && 'false' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.allow_live_writes == 'true' && 'true' || 'false') || 'true') }}
+        run: |
+          uv run python scripts/run_container_e2e.py \
+            --endpoint http://127.0.0.1:8000/mcp \
+            --variant ${{ matrix.variant }}
+
+      - name: Collect container logs and stop container (${{ matrix.variant }})
+        if: always() && steps.check-secrets.outputs.has_secret == 'true'
+        run: |
+          echo "--- Container Logs (${{ matrix.variant }}) ---"
+          docker logs nextdns-container-e2e || true
+          docker rm -f nextdns-container-e2e || true
+
+      - name: Upload test report (${{ matrix.variant }})
+        if: always() && steps.check-secrets.outputs.has_secret == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-report-${{ matrix.variant }}
+          path: artifacts/tools_report_${{ matrix.variant }}.jsonl
+          if-no-files-found: warn
+
+      - name: Display test summary (${{ matrix.variant }})
+        if: always()
+        env:
+          REPORT_FILE: artifacts/tools_report_${{ matrix.variant }}.jsonl
+          HAS_SECRET: ${{ steps.check-secrets.outputs.has_secret }}
+        run: |
+          echo "## E2E Container Test Results — ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$HAS_SECRET" != "true" ]; then
+            echo "⚠️ **Skipped**: NEXTDNS_API_KEY secret is not available (e.g. fork PR). Image build succeeded." >> $GITHUB_STEP_SUMMARY
+          elif [ -f "$REPORT_FILE" ]; then
+            TOTAL=$(wc -l < "$REPORT_FILE")
+            PASSED=$(grep -c '"status":"OK"' "$REPORT_FILE" || echo "0")
+            FAILED=$(grep -c '"status":"FAILED"' "$REPORT_FILE" || echo "0")
+            SKIPPED=$(grep -c '"status":"SKIPPED"' "$REPORT_FILE" || echo "0")
+            SCHEMA_VALID=$(grep -c '"schema_validation":"VALID"' "$REPORT_FILE" || echo "0")
+            SCHEMA_INVALID=$(grep -c '"schema_validation":"INVALID"' "$REPORT_FILE" || echo "0")
+            SCHEMA_SKIPPED=$(grep -c '"schema_validation":"SKIPPED"' "$REPORT_FILE" || echo "0")
+
+            echo "- **Total Calls**: $TOTAL" >> $GITHUB_STEP_SUMMARY
+            echo "- **Passed**: ✅ $PASSED" >> $GITHUB_STEP_SUMMARY
+            echo "- **Failed**: ❌ $FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "- **Skipped**: ⏭️ $SKIPPED" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Schema Validation" >> $GITHUB_STEP_SUMMARY
+            echo "- **Valid**: ✅ $SCHEMA_VALID" >> $GITHUB_STEP_SUMMARY
+            echo "- **Invalid**: ❌ $SCHEMA_INVALID" >> $GITHUB_STEP_SUMMARY
+            echo "- **Skipped**: ⏭️ $SCHEMA_SKIPPED" >> $GITHUB_STEP_SUMMARY
+
+            if [ "$FAILED" -gt 0 ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Failed Calls" >> $GITHUB_STEP_SUMMARY
+              grep '"status":"FAILED"' "$REPORT_FILE" | jq -r '"\(.tool): \(.error // "Unknown error")"' >> $GITHUB_STEP_SUMMARY || echo "Could not parse failures" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            if [ "$SCHEMA_INVALID" -gt 0 ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Schema Validation Failures" >> $GITHUB_STEP_SUMMARY
+              grep '"schema_validation":"INVALID"' "$REPORT_FILE" | jq -r '"\(.tool): \(.schema_error)"' >> $GITHUB_STEP_SUMMARY || echo "Could not parse schema errors" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "❌ No test report generated ($REPORT_FILE)" >> $GITHUB_STEP_SUMMARY
+          fi
