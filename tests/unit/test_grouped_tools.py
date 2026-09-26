@@ -152,6 +152,61 @@ class TestManageProfiles:
         mock_api_client.request.return_value = _make_response({"data": []})
         result = await server.manageProfiles("list")
         assert result == {"data": []}
+        mock_api_client.request.assert_called_once_with("GET", "/profiles", params=None, json=None)
+
+    @pytest.mark.asyncio
+    async def test_list_with_cursor(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response({"data": []})
+        result = await server.manageProfiles("list", cursor="tok123")
+        assert result == {"data": []}
+        mock_api_client.request.assert_called_once_with("GET", "/profiles", params={"cursor": "tok123"}, json=None)
+
+    @pytest.mark.asyncio
+    async def test_list_surfaces_cursor_from_meta_pagination(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response(
+            {
+                "data": [{"id": "abc123", "name": "Profile 1"}],
+                "meta": {"pagination": {"cursor": "next_cursor_token"}},
+            }
+        )
+        result = await server.manageProfiles("list")
+        assert result["cursor"] == "next_cursor_token"
+        assert result["meta"]["pagination"]["cursor"] == "next_cursor_token"
+        assert result["data"] == [{"id": "abc123", "name": "Profile 1"}]
+
+    @pytest.mark.asyncio
+    async def test_list_surfaces_top_level_cursor(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response(
+            {
+                "data": [{"id": "abc123", "name": "Profile 1"}],
+                "cursor": "top_level_cursor_token",
+            }
+        )
+        result = await server.manageProfiles("list")
+        assert result["cursor"] == "top_level_cursor_token"
+        assert result["data"] == [{"id": "abc123", "name": "Profile 1"}]
+
+    @pytest.mark.asyncio
+    async def test_list_no_cursor_when_not_provided(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response(
+            {
+                "data": [{"id": "abc123", "name": "Profile 1"}],
+                "meta": {"pagination": {"cursor": None}},
+            }
+        )
+        result = await server.manageProfiles("list")
+        assert "cursor" not in result
+
+    @pytest.mark.asyncio
+    async def test_list_meta_without_pagination(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response(
+            {
+                "data": [{"id": "abc123", "name": "Profile 1"}],
+                "meta": {"other": "value"},
+            }
+        )
+        result = await server.manageProfiles("list")
+        assert "cursor" not in result
 
     @pytest.mark.asyncio
     async def test_create(self, mock_api_client):

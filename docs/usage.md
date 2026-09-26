@@ -21,7 +21,8 @@ maps to a functional area of the NextDNS API.
 List, create, get, update, or delete profiles. Use this first to discover the
 `profile_id` you need for other tools.
 
-- `operation="list"`
+- `operation="list"` (paginated: if the response includes a `cursor`, pass
+  it as `cursor="..."` to fetch the next page)
 - `operation="create" name="My Profile"`
 - `operation="get" profile_id="abc123"`
 - `operation="update" profile_id="abc123" name="New Name"`
