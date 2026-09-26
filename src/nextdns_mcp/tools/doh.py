@@ -76,9 +76,7 @@ async def doh_lookup(doh_url: str, domain: str, record_type: str, target_profile
         response = await client.get(doh_url, params=params, headers=headers)
         response.raise_for_status()
         result: dict[str, Any] = response.json()
-        result["_metadata"] = _build_doh_metadata(
-            target_profile, domain, record_type, doh_url, result.get("Status")
-        )
+        result["_metadata"] = _build_doh_metadata(target_profile, domain, record_type, doh_url, result.get("Status"))
         if result.get("Status") is not None:
             logger.debug(f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}")
         return result
