@@ -194,7 +194,7 @@ class TestDohLookupImpl:
 
         result = await _dohLookup_impl("example.com", "abc123", "A")
 
-        assert "Status" in result
+        assert "Status" in result["data"]
         assert "_metadata" in result
 
     @pytest.mark.asyncio

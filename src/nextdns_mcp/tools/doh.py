@@ -76,10 +76,10 @@ async def doh_lookup(doh_url: str, domain: str, record_type: str, target_profile
         response = await client.get(doh_url, params=params, headers=headers)
         response.raise_for_status()
         result: dict[str, Any] = response.json()
-        result["_metadata"] = _build_doh_metadata(target_profile, domain, record_type, doh_url, result.get("Status"))
+        metadata = _build_doh_metadata(target_profile, domain, record_type, doh_url, result.get("Status"))
         if result.get("Status") is not None:
-            logger.debug(f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}")
-        return result
+            logger.debug(f"DoH lookup result: {domain} -> {metadata['status_description']}")
+        return {"data": result, "_metadata": metadata}
     except httpx.HTTPError as e:
         logger.error(f"HTTP error during DoH lookup for {domain}: {e!s}")
         payload = http_error_payload(f"HTTP error during DoH lookup: {e!s}", e, fallback_code=ErrorCode.HTTP_ERROR)
@@ -138,6 +138,8 @@ async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_ty
         record_type: DNS record type to query (default "A").
 
     Returns:
-        dict: DNS response in JSON format plus a ``_metadata`` field.
+        dict: Wrapper with the raw DNS response under ``data`` and lookup
+        context under ``_metadata``, so the metadata can never collide with
+        a DNS answer whose name is literally ``_metadata``.
     """
     return await _dohLookup_impl(domain, profile_id, record_type)
