@@ -177,6 +177,11 @@ class TestStripExtraFieldsMiddleware:
         assert middleware._coerce_string_value("315244", {"string"}) == "315244"
         assert middleware._coerce_string_value("true", {"string"}) == "true"
         assert middleware._coerce_string_value("42", {"string"}) == "42"
+        # Unicode digit-like characters must not crash int() or float()
+        assert middleware._coerce_string_value("²", {"integer"}) == "²"
+        assert middleware._coerce_string_value("²", {"number"}) == "²"
+        assert middleware._coerce_string_value("-²", {"integer"}) == "-²"
+        assert middleware._coerce_string_value("1.²", {"number"}) == "1.²"
 
     def test_coerce_value_schema_aware_for_lists(self, middleware):
         """Test array items are coerced when items schema is provided."""

@@ -29,10 +29,14 @@ def test_coerce_helpers():
     assert server._is_integer("123") is True
     assert server._is_integer("-5") is True
     assert server._is_integer("1.2") is False
+    assert server._is_integer("²") is False
+    assert server._is_integer("-²") is False
 
     # float parsing
     assert server._try_parse_float("1.23") == 1.23
     assert server._try_parse_float("notfloat") is None
+    assert server._try_parse_float("²") is None
+    assert server._try_parse_float("1.²") is None
 
     # coerce number
     assert server._coerce_string_to_number("42") == 42

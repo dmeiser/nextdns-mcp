@@ -77,6 +77,18 @@ class TestCoerceStringToNumber:
         assert _coerce_string_to_number("5-") is None
         assert _coerce_string_to_number(".5") == 0.5  # Leading dot is valid float
 
+    def test_unicode_digit_like_strings(self):
+        """Test that Unicode digit-like characters return None and do not crash int() or float()."""
+        assert _coerce_string_to_number("²") is None
+        assert _coerce_string_to_number("³") is None
+        assert _coerce_string_to_number("¹") is None
+        assert _coerce_string_to_number("⁴") is None
+        assert _coerce_string_to_number("-²") is None
+        assert _coerce_string_to_number("1²") is None
+        assert _coerce_string_to_number("1.²") is None
+        assert _coerce_string_to_number("½") is None
+        assert _coerce_string_to_number("¼") is None
+
 
 class TestCoerceJsonTypes:
     """Test coerce_json_types function."""
@@ -150,6 +162,14 @@ class TestCoerceJsonTypes:
         assert coerce_json_types("hello") == "hello"
         assert coerce_json_types("") == ""
         assert coerce_json_types("not-a-bool") == "not-a-bool"
+
+    def test_unicode_digit_like_strings_remain_strings(self):
+        """Test that Unicode digit-like strings are left as plain strings and never crash."""
+        assert coerce_json_types("²") == "²"
+        assert coerce_json_types("³") == "³"
+        assert coerce_json_types("-²") == "-²"
+        assert coerce_json_types({"power": "²", "ratio": "³"}) == {"power": "²", "ratio": "³"}
+        assert coerce_json_types(["²", "42", "³"]) == ["²", 42, "³"]
 
     def test_non_string_primitives(self):
         """Test that non-string primitives pass through unchanged."""

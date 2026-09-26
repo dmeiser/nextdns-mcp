@@ -49,12 +49,16 @@ def _coerce_string_to_bool(value: str) -> bool | None:
 
 def _is_integer(value: str) -> bool:
     """Check if string represents an integer."""
-    return value.isdigit() or (value.startswith("-") and value[1:].isdigit())
+    try:
+        int(value)
+        return value.isdecimal() or (value.startswith("-") and value[1:].isdecimal())
+    except ValueError:
+        return False
 
 
 def _try_parse_float(value: str) -> float | None:
     """Try to parse string as float."""
-    if value.replace(".", "", 1).replace("-", "", 1).isdigit():
+    if value.replace(".", "", 1).replace("-", "", 1).isdecimal():
         try:
             return float(value)
         except ValueError:
