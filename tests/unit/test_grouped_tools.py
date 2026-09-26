@@ -392,6 +392,55 @@ class TestManageLists:
         assert "error" in result
 
     @pytest.mark.asyncio
+    async def test_replace_entry_missing_id(self, mock_api_client):
+        """A replace entry without the schema-required 'id' is rejected locally (issue #189)."""
+        result = await server.manageLists("denylist", "replace", "abc123", entries=[{"id": "ok.com"}, {"active": True}])
+        mock_api_client.request.assert_not_called()
+        assert result["code"] == "invalid_argument"
+        assert "entries[1]" in result["error"]
+        assert "id" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_replace_entry_with_non_string_id(self, mock_api_client):
+        result = await server.manageLists("denylist", "replace", "abc123", entries=[{"id": 7}])
+        mock_api_client.request.assert_not_called()
+        assert result["code"] == "invalid_argument"
+        assert "entries[0]" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_replace_entry_with_empty_id(self, mock_api_client):
+        result = await server.manageLists("denylist", "replace", "abc123", entries=[{"id": ""}])
+        mock_api_client.request.assert_not_called()
+        assert result["code"] == "invalid_argument"
+        assert "entries[0]" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_replace_entry_not_a_dict(self, mock_api_client):
+        result = await server.manageLists("denylist", "replace", "abc123", entries=["bad.com"])
+        mock_api_client.request.assert_not_called()
+        assert result["code"] == "invalid_argument"
+        assert "entries[0]" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_replace_empty_entries_list_is_allowed(self, mock_api_client):
+        """An empty array is a valid request (it clears the list), not a validation failure."""
+        mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
+        result = await server.manageLists("denylist", "replace", "abc123", entries=[])
+        mock_api_client.request.assert_called_once_with("PUT", "/profiles/abc123/denylist", params=None, json=[])
+        assert result == {"success": True}
+
+    @pytest.mark.asyncio
+    async def test_replace_valid_entries_with_json_string(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
+        result = await server.manageLists(
+            "privacy_blocklists", "replace", "abc123", entries='[{"id": "nextdns-recommended"}]'
+        )
+        mock_api_client.request.assert_called_once_with(
+            "PUT", "/profiles/abc123/privacy/blocklists", params=None, json=[{"id": "nextdns-recommended"}]
+        )
+        assert result == {"success": True}
+
+    @pytest.mark.asyncio
     async def test_update(self, mock_api_client):
         mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
         result = await server.manageLists("denylist", "update", "abc123", entry_id="bad.com", entry={"active": False})

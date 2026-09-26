@@ -55,6 +55,33 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
     return await _api_request("POST", base_url, json=body)
 
 
+def _validate_replace_entries(entries: list[Any]) -> dict[str, Any] | None:
+    """Return an error dict if a replace payload has a malformed entry (issue #189).
+
+    The OpenAPI schemas for every ``replace*`` list operation declare the body as an
+    array of objects with a required ``id`` field (e.g. ``[{"id": "blocked.com"}]``).
+    Nested body fields are not checked by ``StripExtraFieldsMiddleware``, so an entry
+    that is not an object, or that omits ``id``, used to be forwarded verbatim and
+    come back as an opaque upstream HTTP 400. Validate locally and report the
+    offending index so the caller gets a typed, actionable error instead.
+    """
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            return error_payload(
+                ErrorCode.INVALID_ARGUMENT,
+                f"entries[{index}] must be an object with an 'id' field for replace operation",
+                index=index,
+            )
+        entry_id = entry.get("id")
+        if not isinstance(entry_id, str) or not entry_id:
+            return error_payload(
+                ErrorCode.INVALID_ARGUMENT,
+                f"entries[{index}] is missing a non-empty string 'id' field for replace operation",
+                index=index,
+            )
+    return None
+
+
 async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | None) -> dict[str, Any]:
     """Replace the entire list with a new set of entries."""
     if entries is None:
@@ -62,6 +89,9 @@ async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | No
     entries = _coerce_json_arg(entries)
     if not isinstance(entries, list):
         return error_payload(ErrorCode.INVALID_ARGUMENT, "entries must be a JSON array")
+    entry_error = _validate_replace_entries(entries)
+    if entry_error:
+        return entry_error
     return await _api_request("PUT", base_url, json=entries)
 
 
