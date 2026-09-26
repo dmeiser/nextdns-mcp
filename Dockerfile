@@ -27,7 +27,7 @@ FROM python:3.14-slim
 # Update system packages for security
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
-# OCI labels for Docker MCP Gateway compatibility
+# OCI labels for container metadata
 LABEL org.opencontainers.image.title="NextDNS MCP Server"
 LABEL org.opencontainers.image.description="Model Context Protocol server for NextDNS API"
 LABEL org.opencontainers.image.authors="NextDNS MCP Contributors"
@@ -36,13 +36,8 @@ LABEL org.opencontainers.image.documentation="https://github.com/dmeiser/nextdns
 LABEL org.opencontainers.image.version="3.1.17"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# MCP-specific labels
-LABEL com.docker.mcp.server.type="stdio"
-LABEL com.docker.mcp.server.protocol="mcp"
-LABEL com.docker.mcp.server.category="dns,api,networking"
-
 # Transport modes:
-# - stdio (default): For Claude Desktop, MCP Gateway, CLI tools
+# - stdio (default): For Claude Desktop, CLI tools
 # - http: For network services, web-based clients, production deployments
 #   Set MCP_TRANSPORT=http, optionally MCP_HOST and MCP_PORT
 
