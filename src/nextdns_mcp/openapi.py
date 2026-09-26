@@ -100,7 +100,6 @@ class StripExtraFieldsMiddleware(Middleware):
                 return s
         return s
 
-
     def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
         """Coerce a value using its property schema.
 

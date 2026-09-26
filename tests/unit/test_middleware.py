@@ -145,9 +145,7 @@ class TestStripExtraFieldsMiddleware:
     @pytest.mark.asyncio
     async def test_not_found_error_passes_through_unwrapped(self, middleware, mock_context):
         """Test that NotFoundError (unknown tool) is re-raised, not wrapped as ToolError."""
-        mock_context.fastmcp_context.fastmcp.get_tool = AsyncMock(
-            side_effect=NotFoundError("Unknown tool: nope")
-        )
+        mock_context.fastmcp_context.fastmcp.get_tool = AsyncMock(side_effect=NotFoundError("Unknown tool: nope"))
         mock_context.message.arguments = {"domain": "test.com"}
         call_next = AsyncMock(return_value=MagicMock())
 
