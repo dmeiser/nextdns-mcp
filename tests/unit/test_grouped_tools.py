@@ -54,6 +54,11 @@ class TestCoerceJsonArg:
     def test_returns_invalid_json_string_unchanged(self):
         assert server._coerce_json_arg("not-json") == "not-json"
 
+    def test_returns_malformed_json_object_string_unchanged(self):
+        # Starts with '{' but is invalid JSON: must fall through the
+        # except clause instead of raising.
+        assert server._coerce_json_arg('{"enabled": true') == '{"enabled": true'
+
 
 class TestApiRequest:
     """Tests for the shared _api_request helper."""
