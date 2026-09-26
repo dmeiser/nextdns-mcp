@@ -149,19 +149,14 @@ Before claiming work is complete:
 
 ### 5. Quality Tools Configuration
 
-**isort** (import sorting):
-- Configured in `pyproject.toml` under `[tool.isort]` (if present)
-- Use defaults if no configuration exists
-- Ensures consistent import organization
-
-**black** (code formatting):
+**ruff** (code formatting and linting):
 - Line length: 120 characters
 - Target version: Python 3.12
 - Configuration in `pyproject.toml`:
   ```toml
-  [tool.black]
+  [tool.ruff]
   line-length = 120
-  target-version = ["py312"]
+  target-version = "py312"
   ```
 
 **mypy** (type checking):
@@ -181,7 +176,7 @@ Before claiming work is complete:
 
 **Failure Response Process**:
 
-1. **isort/black failures**: Should auto-fix, re-run all subsequent checks
+1. **ruff failures**: Should auto-fix, re-run all subsequent checks
 2. **mypy failures**: Add type hints, fix type errors, document `# type: ignore` if absolutely necessary, then restart quality checks
 3. **Test failures (unit or integration)**: 
    - Debug and fix the failing test or code
@@ -192,7 +187,7 @@ Before claiming work is complete:
 
 **Iteration Loop**:
 - Fix the issue identified
-- Run `isort` → `black` → `mypy`
+- Run `ruff` → `mypy`
 - Run all unit tests with coverage
 - Run all integration tests
 - If any check fails, repeat the loop
