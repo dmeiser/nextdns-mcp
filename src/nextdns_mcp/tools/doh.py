@@ -3,7 +3,6 @@
 SPDX-License-Identifier: MIT
 """
 
-import asyncio
 import logging
 from typing import Any
 
@@ -16,24 +15,15 @@ from ..utils import is_safe_profile_id
 logger = logging.getLogger(__name__)
 
 # Persistent DoH HTTP client, module-level for keep-alive connection reuse
-# (mirrors client.api_client). Created lazily inside the running event loop,
-# because httpx binds its connection pool to the loop it first uses.
+# (mirrors client.api_client).
 _doh_client: httpx.AsyncClient | None = None
-_doh_client_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _get_doh_client() -> httpx.AsyncClient:
-    """Return the persistent DoH HTTP client, creating it on first use.
-
-    If the running event loop has changed (e.g., across pytest test
-    functions) a fresh client is built so connections never cross closed
-    loops.
-    """
-    global _doh_client, _doh_client_loop
-    loop = asyncio.get_running_loop()
-    if _doh_client is None or _doh_client_loop is not loop:
+    """Return the persistent DoH HTTP client, creating it on first use."""
+    global _doh_client
+    if _doh_client is None:
         _doh_client = httpx.AsyncClient(timeout=get_http_timeout())
-        _doh_client_loop = loop
     return _doh_client
 
 

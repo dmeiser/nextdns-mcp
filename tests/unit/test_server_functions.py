@@ -1,6 +1,5 @@
 """Tests for server.py helper functions and tools."""
 
-import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock
 
@@ -45,7 +44,6 @@ async def mock_doh_client(monkeypatch):
     mock_response.json.return_value = {"Status": 0, "Answer": [{"data": "1.2.3.4"}]}
     mock_client.get.return_value = mock_response
     monkeypatch.setattr(doh_module, "_doh_client", mock_client)
-    monkeypatch.setattr(doh_module, "_doh_client_loop", asyncio.get_running_loop())
     return mock_client
 
 

@@ -1,6 +1,5 @@
 """Unit tests for the custom dohLookup tool."""
 
-import asyncio
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -37,7 +36,6 @@ async def mock_doh_client(monkeypatch):
     }
     mock_client.get.return_value = mock_response
     monkeypatch.setattr(doh_module, "_doh_client", mock_client)
-    monkeypatch.setattr(doh_module, "_doh_client_loop", asyncio.get_running_loop())
     return mock_client
 
 
@@ -92,7 +90,6 @@ class TestDohLookup:
         mock_response.json.return_value = {"Status": 0, "Answer": []}
         mock_client.get.return_value = mock_response
         monkeypatch.setattr(doh_module, "_doh_client", mock_client)
-        monkeypatch.setattr(doh_module, "_doh_client_loop", asyncio.get_running_loop())
 
         # Use the reloaded module's function
         result = await doh_module._dohLookup_impl("example.com")
@@ -225,7 +222,6 @@ class TestDohClientReuse:
             return client
 
         monkeypatch.setattr(doh_module, "_doh_client", None)
-        monkeypatch.setattr(doh_module, "_doh_client_loop", None)
         monkeypatch.setattr(doh_module.httpx, "AsyncClient", fake_client)
 
         first = doh_module._get_doh_client()
@@ -239,36 +235,11 @@ class TestDohClientReuse:
         """The persistent client must honor NEXTDNS_HTTP_TIMEOUT."""
         monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "7.5")
         monkeypatch.setattr(doh_module, "_doh_client", None)
-        monkeypatch.setattr(doh_module, "_doh_client_loop", None)
 
         client = doh_module._get_doh_client()
 
         assert client.timeout is not None
         assert client.timeout.connect == 7.5
-
-    def test_get_doh_client_rebuilds_for_new_event_loop(self, monkeypatch):
-        """A client bound to a previous event loop must be replaced."""
-        monkeypatch.setattr(doh_module, "_doh_client", None)
-        monkeypatch.setattr(doh_module, "_doh_client_loop", None)
-
-        # Each asyncio.run uses a fresh event loop, so the second call must
-        # see a different running loop and build a new client.
-        def get_client():
-            return doh_module._get_doh_client()
-
-        async def run_get_client():
-            return get_client()
-
-        first = asyncio.run(run_get_client())
-        second = asyncio.run(run_get_client())
-
-        assert first is not second
-        assert doh_module._doh_client is second
-
-        # Close the real clients created during this test.
-        asyncio.run(first.aclose())
-        asyncio.run(second.aclose())
-
 
 class TestOptionalProfileIdCoercion:
     """Test OptionalProfileId coerces int profile_id to str via FastMCP TypeAdapter."""
