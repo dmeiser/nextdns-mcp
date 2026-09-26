@@ -299,6 +299,33 @@ class TestAccessControlledClientRequestLogging:
         # DEBUG carries the full URL including the sensitive query string.
         assert any(sensitive_query in msg for msg in debug_messages)
 
+    @pytest.mark.asyncio
+    async def test_denied_request_query_string_not_logged_at_warning(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Fail-closed denial WARNING must log only method + path, never the query string."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+
+        sensitive_query = "search=secret-search-term&device=secret-device-id"
+        request_url = f"/profiles/abc.def/logs?{sensitive_query}"
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.client"):
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                response = await client.request("GET", request_url)
+
+        mock_super_request.assert_not_called()
+        assert response.status_code == 403
+        # Response body behavior is unchanged: the error still names the full URL.
+        assert response.json()["error"] == f"Forbidden URL: {request_url}"
+        # No WARNING record may contain the query string.
+        warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
+        assert warning_messages
+        for msg in warning_messages:
+            assert "secret-search-term" not in msg
+            assert "secret-device-id" not in msg
+            assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
+        assert any("/profiles/abc.def/logs" in msg for msg in warning_messages)
+
 
 class TestAccessControlledClientMethods:
     """Test different HTTP methods."""

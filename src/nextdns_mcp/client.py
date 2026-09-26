@@ -183,7 +183,7 @@ class AccessControlledClient(httpx.AsyncClient):
             # unclassifiable /profiles paths cannot be matched against the profile
             # ACL, so deny them instead of letting them bypass the check entirely.
             error_msg = f"Forbidden URL: {url!s}"
-            logger.warning(f"{error_msg} (method={method})")
+            logger.warning(f"Forbidden URL: {logged_path} (method={method})")
             return create_access_denied_response(method, url, error_msg, profile_id or "")
 
         # No body coercion here: string values in JSON bodies are passed through
