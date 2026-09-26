@@ -99,8 +99,13 @@ class TestApiRequest:
 
     @pytest.mark.asyncio
     async def test_success_204(self, mock_api_client):
+        # The 204 success path is exercised with a spec-shaped profile id. A
+        # non-spec id (e.g. "/profiles/abc") is refused by the access-controlled
+        # client with a fail-closed 403 (access_denied), so the old assertion that
+        # it returned a success codified the fail-open behavior this repo rejects
+        # (see TestFailClosedContract in test_grouped_tools_adversarial.py).
         mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
-        result = await server._api_request("DELETE", "/profiles/abc")
+        result = await server._api_request("DELETE", "/profiles/abc123")
         assert result == {"success": True}
 
     @pytest.mark.asyncio
