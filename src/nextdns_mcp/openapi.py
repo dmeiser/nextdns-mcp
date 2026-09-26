@@ -31,6 +31,7 @@ from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
+from .coercion import _is_integer
 from .config import get_default_profile
 
 logger = logging.getLogger(__name__)
@@ -91,8 +92,11 @@ class StripExtraFieldsMiddleware(Middleware):
         sl = s.lower()
         if "boolean" in schema_types and sl in ("true", "false"):
             return sl == "true"
-        if "integer" in schema_types and (s.isdecimal() or (s.startswith("-") and s[1:].isdecimal())):
-            return int(s)
+        if "integer" in schema_types and _is_integer(s):
+            try:
+                return int(s)
+            except ValueError:
+                return s
         if "number" in schema_types and s.replace(".", "", 1).replace("-", "", 1).isdecimal():
             try:
                 return float(s)
