@@ -16,8 +16,16 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.24@sha256:99ea34acedc870ba4ad11a1f540a1c04
 COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
 
-# Install dependencies into the project's .venv
-RUN uv sync --frozen --no-dev
+# Install dependencies into a version-independent directory
+# --frozen: use exact versions from uv.lock without updating
+# --no-dev: exclude development dependencies
+# --no-emit-project: skip installing nextdns-mcp itself; the runtime stage copies
+#   src/ onto PYTHONPATH directly
+# Installing into /install keeps the layout free of a python3.x path component, so
+# the runtime stage never has to name the builder's Python minor version.
+RUN uv export --frozen --no-dev --no-emit-project --output-file /tmp/requirements.txt && \
+    uv pip install --target /install --requirement /tmp/requirements.txt && \
+    rm -f /tmp/requirements.txt
 
 # Runtime stage
 FROM python:3.14-alpine
@@ -27,8 +35,8 @@ RUN apk upgrade --no-cache
 
 WORKDIR /app
 
-# Copy installed packages from the builder stage's virtual environment
-COPY --from=builder /app/.venv/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
+# Copy installed packages from the builder stage
+COPY --from=builder /install /install
 
 # Copy application code
 COPY src/ /app/src/
@@ -46,7 +54,7 @@ LABEL org.opencontainers.image.licenses="MIT"
 RUN adduser -D -s /sbin/nologin appuser
 USER appuser
 
-ENV PYTHONPATH=/app/src \
+ENV PYTHONPATH=/install:/app/src \
     FASTMCP_CHECK_FOR_UPDATES=off
 
 # Expose port for HTTP transport mode (optional)
