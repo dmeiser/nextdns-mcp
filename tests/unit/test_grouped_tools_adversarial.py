@@ -23,9 +23,9 @@ Threat classes covered
   redirect target.
 - **JSON body coercion corruption**: string body values (profile names, PINs,
   boolean-looking flags) must reach the transport unchanged as strings.
-- **Fail-closed contract**: grouped tools surface the client's synthetic 403 as
-  the typed ``read_access_denied`` / ``write_access_denied`` payloads, never as
-  a success.
+- **Fail-closed contract**: grouped tools surface the client's typed
+  ``AccessDeniedError`` as the ``read_access_denied`` /
+  ``write_access_denied`` payloads, never as a success.
 """
 
 import asyncio
@@ -38,7 +38,7 @@ import pytest
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server, utils
-from nextdns_mcp.client import AccessControlledClient
+from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
 from nextdns_mcp.tools import logs as logs_module
 
 API_BASE = "https://api.nextdns.io"
@@ -155,9 +155,9 @@ class TestTraversalAndAclBypass:
         """A traversal URL is refused (fail-closed) even with a wide-open ACL."""
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
-        response = await live_client.client.request("GET", "/profiles/abc123/../../profiles/xyz999/settings")
-        assert response.status_code == 403
-        assert response.json()["code"] == "access_denied"
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await live_client.client.request("GET", "/profiles/abc123/../../profiles/xyz999/settings")
+        assert exc_info.value.code == "access_denied"
         assert live_client.seen == []  # never reached the transport
 
     @pytest.mark.asyncio
@@ -173,9 +173,9 @@ class TestTraversalAndAclBypass:
         """Absolute and scheme-relative URLs targeting another host are refused."""
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
-        response = await live_client.client.request("GET", payload)
-        assert response.status_code == 403
-        assert response.json()["code"] == "access_denied"
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await live_client.client.request("GET", payload)
+        assert exc_info.value.code == "access_denied"
         assert live_client.seen == []
 
     @pytest.mark.asyncio
@@ -191,9 +191,9 @@ class TestTraversalAndAclBypass:
         """A /profiles path with no safe, spec-shaped id is refused (fail-closed)."""
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
-        response = await live_client.client.request("GET", payload)
-        assert response.status_code == 403
-        assert response.json()["code"] == "access_denied"
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await live_client.client.request("GET", payload)
+        assert exc_info.value.code == "access_denied"
         assert live_client.seen == []
 
     @pytest.mark.asyncio
@@ -264,7 +264,7 @@ class TestAclGatingEndToEnd:
 
     @pytest.mark.asyncio
     async def test_denial_carries_typed_code_and_profile(self, live_client, restricted_env):
-        """The synthetic 403 body preserves the denial class and the profile id."""
+        """The typed denial payload preserves the denial class and the profile id."""
         result = await server.manageProfiles("get", profile_id="xyz999")
         assert result["profile_id"] == "xyz999"
         assert result["status_code"] == 403
@@ -406,10 +406,10 @@ class TestDownloadAclAndRedirect:
     @pytest.mark.asyncio
     async def test_stream_denied_never_touches_transport(self, live_client, restricted_env):
         """The client's stream() enforces the same fail-closed denial as request()."""
-        async with live_client.client.stream("GET", "/profiles/xyz999/logs/download") as response:
-            assert response.status_code == 403
-            assert response.json()["code"] == "read_access_denied"
-            assert not response.has_redirect_location
+        with pytest.raises(AccessDeniedError) as exc_info:
+            async with live_client.client.stream("GET", "/profiles/xyz999/logs/download"):
+                pass
+        assert exc_info.value.code == "read_access_denied"
         assert live_client.seen == []
 
 
@@ -428,9 +428,9 @@ class TestFailClosedContract:
         """DELETE /profiles/abc (3-char, non-spec) is refused, never {"success": True}."""
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
-        response = await live_client.client.request("DELETE", "/profiles/abc")
-        assert response.status_code == 403
-        assert response.json()["code"] == "access_denied"
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await live_client.client.request("DELETE", "/profiles/abc")
+        assert exc_info.value.code == "access_denied"
         # And through the grouped tool the same shape is surfaced as a denial.
         result = await utils._api_request("DELETE", "/profiles/abc")
         assert result["code"] == "access_denied"

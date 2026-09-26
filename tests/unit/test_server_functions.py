@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from nextdns_mcp.client import create_access_denied_response, create_nextdns_client
+from nextdns_mcp.client import AccessDeniedError, create_nextdns_client
 from nextdns_mcp.tools import doh as doh_module
 from nextdns_mcp.tools.doh import (
     _build_doh_metadata,
@@ -69,27 +69,29 @@ class TestCreateNextDNSClient:
         assert client.headers["Content-Type"] == "application/json"
 
 
-class TestCreateAccessDeniedResponse:
-    """Tests for create_access_denied_response function."""
+class TestAccessDeniedError:
+    """Tests for the typed AccessDeniedError raised by the ACL layer (issue #178)."""
 
-    def test_creates_403_response(self):
-        """Test creates response with 403 status."""
-        response = create_access_denied_response("GET", "/profiles/abc123", "Access denied", "abc123")
+    def test_carries_reason_code_and_profile(self):
+        """The exception carries the denial reason, typed code, and profile id."""
+        error = AccessDeniedError("Write denied", code="write_access_denied", profile_id="abc123")
 
-        assert response.status_code == 403
-        assert response.headers["content-type"] == "application/json"
+        assert str(error) == "Write denied"
+        assert error.code == "write_access_denied"
+        assert error.profile_id == "abc123"
 
-    def test_response_contains_error_details(self):
-        """Test response contains error information."""
-        response = create_access_denied_response("POST", "/profiles/abc123/denylist", "Write denied", "abc123")
+    def test_default_code_and_profile(self):
+        """The typed code defaults to access_denied and profile_id to empty."""
+        error = AccessDeniedError("denied")
 
-        data = response.json()
-        assert "error" in data
-        assert data["error"] == "Write denied"
-        assert data["profile_id"] == "abc123"
-        # Method and URL are in the request, not the response body
-        assert response.request.method == "POST"
-        assert "/profiles/abc123/denylist" in str(response.request.url)
+        assert error.code == "access_denied"
+        assert error.profile_id == ""
+
+    def test_is_plain_exception_not_httpx(self):
+        """ACL denials are typed exceptions, not fake httpx responses."""
+        import httpx
+
+        assert not isinstance(AccessDeniedError("denied"), httpx.HTTPError)
 
 
 class TestValidateRecordType:
