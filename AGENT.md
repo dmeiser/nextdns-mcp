@@ -164,11 +164,13 @@ Before claiming work is complete:
 - Add type hints to all function signatures
 - Use `typing` module for complex types
 
-**radon** (complexity analysis):
+**radon** (complexity analysis) - the single complexity tool for this project:
 - Installed as dev dependency
 - Use `cc` (cyclomatic complexity) command
 - Use `-a` flag for average complexity
 - Use `-nc` flag to show only functions above grade B
+- Enforced in CI by the `complexity` job in `.github/workflows/unit-tests.yml`
+  (grade A project average, no function above grade B)
 
 ### 6. Handling Quality Failures
 
