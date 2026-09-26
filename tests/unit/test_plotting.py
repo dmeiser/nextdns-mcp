@@ -1,5 +1,7 @@
 """Tests for the analytics plotting helpers and tool wrappers."""
 
+import struct
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -7,6 +9,20 @@ import pytest
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
+
+
+def _png_is_complete(png: bytes) -> bool:
+    """Return True if the PNG bytes end with a proper IEND chunk."""
+    return png.endswith(b"IEND\xae\x42\x60\x82")
+
+
+def _png_image_size(png: bytes) -> tuple[int, int]:
+    """Return the (width, height) encoded in a PNG's IHDR chunk."""
+    assert png.startswith(b"\x89PNG")
+    length, chunk_type = struct.unpack(">I4s", png[8:16])
+    assert chunk_type == b"IHDR" and length == 13
+    width, height = struct.unpack(">II", png[16:24])
+    return width, height
 
 
 class TestExtractSeriesLabel:
@@ -82,6 +98,120 @@ class TestRenderSeriesChart:
         png = server._render_series_chart("reasons", times, series_data)
         assert isinstance(png, bytes)
         assert png.startswith(b"\x89PNG")
+
+    def test_renders_complete_png_with_labels(self):
+        times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
+        series_data = [
+            {"name": "blocked", "queries": [10, 20]},
+            {"name": "allowed", "queries": [5, 8]},
+        ]
+        png = server._render_series_chart("status", times, series_data)
+        assert _png_is_complete(png)
+        width, height = _png_image_size(png)
+        assert width > 0 and height > 0
+
+
+class TestRenderSeriesChartFigureSafety:
+    """Regression tests: rendering exceptions must not leak figure state."""
+
+    def _figure_registry_size(self) -> int:
+        # Figures registered with pyplot's global state. Rendering uses the
+        # object-oriented Figure API, so this registry must stay unchanged
+        # whether a render succeeds or raises.
+        import matplotlib
+
+        return len(matplotlib._pylab_helpers.Gcf.figs)
+
+    def test_render_exception_after_figure_creation_does_not_leak(self, monkeypatch):
+        # Force an exception inside the try block, after the Figure has been
+        # created and the axes added, so only the finally fig.clear() can
+        # keep global figure state from leaking. Patch the plots module's own
+        # global, which is where _render_series_chart resolves the name.
+        import nextdns_mcp.tools.plots as plots_module
+
+        def _raise(series, index):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(plots_module, "_extract_series_label", _raise)
+        times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
+        series_data = [{"name": "blocked", "queries": [1, 2]}]
+
+        before = self._figure_registry_size()
+        with pytest.raises(RuntimeError, match="boom"):
+            server._render_series_chart("status", times, series_data)
+        after = self._figure_registry_size()
+        assert after == before
+
+    def test_failed_render_does_not_register_figures(self):
+        # Corrupt a timestamp so the render raises before figure creation.
+        times = ["not-a-timestamp", "2024-01-15T11:00:00Z"]
+        series_data = [{"name": "blocked", "queries": [1, 2]}]
+
+        before = self._figure_registry_size()
+        with pytest.raises(ValueError):
+            server._render_series_chart("status", times, series_data)
+        after = self._figure_registry_size()
+        assert after == before
+
+    def test_successful_render_does_not_register_figures(self):
+        before = self._figure_registry_size()
+        times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
+        server._render_series_chart("status", times, [{"name": "blocked", "queries": [1, 2]}])
+        after = self._figure_registry_size()
+        assert after == before
+
+
+class TestConcurrentRenderIndependence:
+    """Concurrent renders (as under asyncio.to_thread) must not corrupt each other."""
+
+    def test_concurrent_renders_are_independent(self):
+        n_threads = 8
+        iterations = 5
+        errors: list[str] = []
+
+        def worker(worker_index: int) -> None:
+            try:
+                for i in range(iterations):
+                    times = [f"2024-01-15T{10 + i}:00:00Z", f"2024-01-15T{11 + i}:00:00Z"]
+                    series_data = [
+                        {
+                            "name": f"series-{worker_index}",
+                            "queries": [worker_index * 10 + i, worker_index * 10 + i + 1],
+                        },
+                    ]
+                    png = server._render_series_chart(f"metric-{worker_index}", times, series_data)
+                    if not png.startswith(b"\x89PNG") or not _png_is_complete(png):
+                        errors.append(f"worker {worker_index}: corrupt PNG")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"worker {worker_index}: {e!r}")
+
+        threads = [threading.Thread(target=worker, args=(idx,)) for idx in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+
+    def test_no_global_figures_accumulate_under_concurrency(self):
+        import matplotlib
+
+        def worker(worker_index: int) -> None:
+            for i in range(3):
+                times = [f"2024-01-15T{10 + i}:00:00Z", f"2024-01-15T{11 + i}:00:00Z"]
+                server._render_series_chart("status", times, [{"queries": [1, 2]}])
+
+        def count() -> int:
+            return len(matplotlib._pylab_helpers.Gcf.figs)
+
+        before = count()
+        threads = [threading.Thread(target=worker, args=(idx,)) for idx in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        after = count()
+        assert after == before
 
 
 @pytest.fixture
