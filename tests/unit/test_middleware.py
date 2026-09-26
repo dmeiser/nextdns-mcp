@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import NotFoundError, ToolError
 
 from nextdns_mcp.openapi import StripExtraFieldsMiddleware
 
@@ -143,18 +143,18 @@ class TestStripExtraFieldsMiddleware:
         assert "schema fetch failed" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_retries_transient_schema_fetch_failure(self, middleware, mock_context, mock_tool):
-        """Test that a transient schema-fetch failure is retried once before succeeding."""
-        get_tool = AsyncMock(side_effect=[Exception("transient"), mock_tool])
-        mock_context.fastmcp_context.fastmcp.get_tool = get_tool
-        mock_context.message.arguments = {"domain": "example.com", "extra": "dropped"}
+    async def test_not_found_error_passes_through_unwrapped(self, middleware, mock_context):
+        """Test that NotFoundError (unknown tool) is re-raised, not wrapped as ToolError."""
+        mock_context.fastmcp_context.fastmcp.get_tool = AsyncMock(
+            side_effect=NotFoundError("Unknown tool: nope")
+        )
+        mock_context.message.arguments = {"domain": "test.com"}
         call_next = AsyncMock(return_value=MagicMock())
 
-        await middleware.on_call_tool(mock_context, call_next)
+        with pytest.raises(NotFoundError, match="Unknown tool"):
+            await middleware.on_call_tool(mock_context, call_next)
 
-        assert mock_context.message.arguments == {"domain": "example.com"}
-        assert get_tool.await_count == 2
-        call_next.assert_called_once_with(mock_context)
+        call_next.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_logs_error_on_schema_fetch_failure(self, middleware, mock_context):

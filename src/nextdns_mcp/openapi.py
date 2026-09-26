@@ -22,22 +22,18 @@ this project's ``AccessControlledClient`` subclasses ``httpx.AsyncClient``
 SPDX-License-Identifier: MIT
 """
 
-import asyncio
 import logging
 from typing import Any
 
 import mcp.types
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from .config import get_default_profile
 
 logger = logging.getLogger(__name__)
-
-# Brief delay between schema-fetch attempts before a tool call fails closed.
-_SCHEMA_FETCH_RETRY_DELAY = 0.1
 
 
 class OpenApiSpecNotFound(FileNotFoundError):
@@ -104,29 +100,6 @@ class StripExtraFieldsMiddleware(Middleware):
                 return s
         return s
 
-    async def _fetch_tool_schema(self, fastmcp_server: Any, tool_name: str) -> dict[str, Any] | None:
-        """Fetch a tool's parameter schema once.
-
-        Returns the schema dict, or None if the tool is genuinely not found.
-        Raises the underlying error if the fetch fails.
-        """
-        tool = await fastmcp_server.get_tool(tool_name)
-        if tool is None:
-            return None
-        return tool.parameters
-
-    async def _get_tool_schema(self, fastmcp_server: Any, tool_name: str) -> dict[str, Any] | None:
-        """Fetch a tool's parameter schema, retrying briefly for transient failures.
-
-        Returns the schema dict, or None if the tool is genuinely not found.
-        After one retry, a failing fetch re-raises so the caller can fail
-        closed instead of passing unvalidated arguments through.
-        """
-        try:
-            return await self._fetch_tool_schema(fastmcp_server, tool_name)
-        except Exception:  # noqa: BLE001
-            await asyncio.sleep(_SCHEMA_FETCH_RETRY_DELAY)
-            return await self._fetch_tool_schema(fastmcp_server, tool_name)
 
     def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
         """Coerce a value using its property schema.
@@ -165,10 +138,11 @@ class StripExtraFieldsMiddleware(Middleware):
         if arguments and context.fastmcp_context:
             fastmcp_server = context.fastmcp_context.fastmcp
             try:
-                parameters = await self._get_tool_schema(fastmcp_server, tool_name)
-                if parameters is None:
+                tool = await fastmcp_server.get_tool(tool_name)
+                if tool is None:
                     # Tool not found, pass through
                     return await call_next(context)
+                parameters = tool.parameters
                 known_params = set(parameters.get("properties", {}).keys())
 
                 # Filter arguments to only include known parameters
@@ -188,6 +162,8 @@ class StripExtraFieldsMiddleware(Middleware):
 
                 # Update the arguments in place
                 context.message.arguments = coerced_args
+            except NotFoundError:
+                raise
             except Exception as e:
                 # Schema fetch/parse failure: fail closed so callers get a clear error
                 # instead of downstream validation failures from unstripped args.
