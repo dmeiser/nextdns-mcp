@@ -187,3 +187,14 @@ class TestRunServer:
         mock_configure.assert_called_once()
         mock_validate.assert_called_once()
         assert ran == [{}]
+
+    def test_run_server_raises_on_invalid_timeout(self, monkeypatch, mock_api_key):
+        """Invalid NEXTDNS_HTTP_TIMEOUT raises ConfigurationError when running server."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "invalid-timeout")
+
+        with pytest.raises(config.ConfigurationError) as exc_info:
+            server._run_server()
+
+        assert "NEXTDNS_HTTP_TIMEOUT" in str(exc_info.value)
+        assert "'invalid-timeout'" in str(exc_info.value)

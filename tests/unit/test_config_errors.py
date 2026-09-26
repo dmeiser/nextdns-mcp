@@ -6,7 +6,7 @@ from unittest.mock import Mock, call
 import pytest
 
 from nextdns_mcp import config
-from nextdns_mcp.config import MissingApiKeyError
+from nextdns_mcp.config import ConfigurationError, MissingApiKeyError
 
 
 @pytest.fixture(autouse=True)
@@ -176,3 +176,116 @@ def test_validate_configuration_logs_settings(monkeypatch, active_config, mock_l
         assert expected_call in mock_logger.critical.mock_calls, msg
 
     assert mock_logger.critical.call_count == 4
+
+
+@pytest.mark.parametrize(
+    ("env_val", "expected"),
+    [
+        ("10", 10.0),
+        ("0.5", 0.5),
+        ("45.5", 45.5),
+        ("  60  ", 60.0),
+        ("0.001", 0.001),
+        ("1e-4", 0.0001),
+        ("86400", 86400.0),
+    ],
+)
+def test_get_http_timeout_valid_values(monkeypatch, active_config, env_val, expected):
+    """Test get_http_timeout returns expected float for valid inputs."""
+    monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", env_val)
+    assert active_config.get_http_timeout() == expected
+
+
+def test_get_http_timeout_default_when_unset(monkeypatch, active_config):
+    """Test get_http_timeout returns 30.0 when NEXTDNS_HTTP_TIMEOUT is unset."""
+    monkeypatch.delenv("NEXTDNS_HTTP_TIMEOUT", raising=False)
+    assert active_config.get_http_timeout() == 30.0
+
+
+@pytest.mark.parametrize(
+    "invalid_val",
+    ["abc", "not-a-number", "10s", "True", "None"],
+)
+def test_get_http_timeout_invalid_raises_configuration_error(monkeypatch, active_config, invalid_val):
+    """Test get_http_timeout raises ConfigurationError with actionable message on invalid strings."""
+    monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", invalid_val)
+    with pytest.raises(ConfigurationError) as exc_info:
+        active_config.get_http_timeout()
+
+    err_msg = str(exc_info.value)
+    assert "NEXTDNS_HTTP_TIMEOUT" in err_msg
+    assert repr(invalid_val) in err_msg
+    assert "Expected a positive number of seconds." in err_msg
+    assert exc_info.value.__cause__ is None
+    assert isinstance(exc_info.value, ValueError)
+
+
+@pytest.mark.parametrize(
+    "empty_val",
+    ["", "   ", "\t", "\n", " \t \n "],
+)
+def test_get_http_timeout_empty_raises_configuration_error(monkeypatch, active_config, empty_val):
+    """Test get_http_timeout raises ConfigurationError with actionable message on empty/whitespace values."""
+    monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", empty_val)
+    with pytest.raises(ConfigurationError) as exc_info:
+        active_config.get_http_timeout()
+
+    err_msg = str(exc_info.value)
+    assert "NEXTDNS_HTTP_TIMEOUT" in err_msg
+    assert repr(empty_val) in err_msg
+    assert "Expected a positive number of seconds." in err_msg
+    assert exc_info.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    "boundary_val",
+    ["0", "0.0", "-0.0", "-1", "-0.001", "-30", "nan", "-nan", "inf", "-inf"],
+)
+def test_get_http_timeout_boundary_invalid_raises_configuration_error(monkeypatch, active_config, boundary_val):
+    """Test get_http_timeout raises ConfigurationError for non-positive or non-finite boundary values."""
+    monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", boundary_val)
+    with pytest.raises(ConfigurationError) as exc_info:
+        active_config.get_http_timeout()
+
+    err_msg = str(exc_info.value)
+    assert "NEXTDNS_HTTP_TIMEOUT" in err_msg
+    assert repr(boundary_val) in err_msg
+    assert "Expected a positive number of seconds." in err_msg
+    assert exc_info.value.__cause__ is None
+
+
+def test_validate_configuration_raises_on_invalid_timeout(monkeypatch, active_config):
+    """Test validate_configuration raises ConfigurationError when timeout is invalid."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", "test-key")
+    monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "invalid-timeout")
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        active_config.validate_configuration()
+
+    assert "NEXTDNS_HTTP_TIMEOUT" in str(exc_info.value)
+    assert "'invalid-timeout'" in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+
+
+def test_validate_configuration_raises_on_empty_timeout(monkeypatch, active_config):
+    """Test validate_configuration raises ConfigurationError when timeout is empty."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", "test-key")
+    monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "")
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        active_config.validate_configuration()
+
+    assert "NEXTDNS_HTTP_TIMEOUT" in str(exc_info.value)
+    assert "''" in str(exc_info.value)
+
+
+def test_validate_configuration_raises_on_boundary_zero_timeout(monkeypatch, active_config):
+    """Test validate_configuration raises ConfigurationError when timeout is zero."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", "test-key")
+    monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "0")
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        active_config.validate_configuration()
+
+    assert "NEXTDNS_HTTP_TIMEOUT" in str(exc_info.value)
+    assert "'0'" in str(exc_info.value)

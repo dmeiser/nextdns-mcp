@@ -1,6 +1,9 @@
 """Unit tests for HTTP client creation."""
 
 import httpx
+import pytest
+
+from nextdns_mcp.config import ConfigurationError
 
 
 class TestCreateNextdnsClient:
@@ -121,3 +124,78 @@ class TestCreateNextdnsClient:
 
         # Client should be created successfully with custom timeout
         assert isinstance(client, httpx.AsyncClient)
+
+    def test_create_client_raises_configuration_error_on_invalid_timeout(self, monkeypatch, mock_api_key):
+        """Regression test for #163: invalid NEXTDNS_HTTP_TIMEOUT raises ConfigurationError during client creation."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "not-a-number")
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            create_nextdns_client()
+
+        err = exc_info.value
+        assert "NEXTDNS_HTTP_TIMEOUT" in str(err)
+        assert "'not-a-number'" in str(err)
+        assert "Expected a positive number of seconds." in str(err)
+        # Verify no bare ValueError traceback from deep in client construction
+        assert err.__cause__ is None
+        assert type(err) is ConfigurationError
+
+    def test_create_client_raises_configuration_error_on_empty_timeout(self, monkeypatch, mock_api_key):
+        """Regression test for #163: empty NEXTDNS_HTTP_TIMEOUT raises ConfigurationError during client creation."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "")
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            create_nextdns_client()
+
+        err = exc_info.value
+        assert "NEXTDNS_HTTP_TIMEOUT" in str(err)
+        assert "''" in str(err)
+        assert "Expected a positive number of seconds." in str(err)
+        assert err.__cause__ is None
+
+    def test_create_client_raises_configuration_error_on_boundary_zero_timeout(self, monkeypatch, mock_api_key):
+        """Regression test for #163: boundary zero timeout raises ConfigurationError during client creation."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "0")
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            create_nextdns_client()
+
+        assert "NEXTDNS_HTTP_TIMEOUT" in str(exc_info.value)
+        assert "'0'" in str(exc_info.value)
+
+    def test_create_client_raises_configuration_error_on_boundary_negative_timeout(self, monkeypatch, mock_api_key):
+        """Regression test for #163: boundary negative timeout raises ConfigurationError during client creation."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "-5")
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            create_nextdns_client()
+
+        assert "NEXTDNS_HTTP_TIMEOUT" in str(exc_info.value)
+        assert "'-5'" in str(exc_info.value)
+
+    def test_get_api_client_raises_configuration_error_on_invalid_timeout(self, monkeypatch, mock_api_key):
+        """Regression test for #163: get_api_client raises ConfigurationError when timeout is invalid."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "bad-timeout")
+
+        import nextdns_mcp.client as client_module
+
+        monkeypatch.setattr(client_module, "_client", None)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            client_module.get_api_client()
+
+        assert "NEXTDNS_HTTP_TIMEOUT" in str(exc_info.value)
+        assert "'bad-timeout'" in str(exc_info.value)
