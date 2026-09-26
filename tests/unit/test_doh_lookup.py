@@ -64,8 +64,8 @@ class TestDohLookup:
         """Test basic DoH lookup."""
         result = await dohLookup("google.com", mock_profile_id, "A")
 
-        assert "Status" in result
-        assert result["Status"] == 0
+        assert "Status" in result["data"]
+        assert result["data"]["Status"] == 0
         assert "_metadata" in result
         assert result["_metadata"]["profile_id"] == mock_profile_id
         assert result["_metadata"]["query_domain"] == "google.com"
@@ -96,6 +96,7 @@ class TestDohLookup:
         # Use the reloaded module's function
         result = await doh_module._dohLookup_impl("example.com")
 
+        assert "data" in result
         assert "_metadata" in result
         assert result["_metadata"]["profile_id"] == test_profile
         assert result["_metadata"]["query_domain"] == "example.com"
@@ -130,6 +131,7 @@ class TestDohLookup:
         for record_type in valid_types:
             result = await dohLookup("example.com", mock_profile_id, record_type)
             assert "error" not in result
+            assert "_metadata" in result
             assert result["_metadata"]["query_type"] == record_type
 
     @pytest.mark.asyncio
@@ -159,7 +161,8 @@ class TestDohLookup:
 
             result = await dohLookup("example.com", mock_profile_id, "A")
 
-            assert result["_metadata"]["status_description"] == expected_desc
+            assert "_metadata" in result
+        assert result["_metadata"]["status_description"] == expected_desc
 
     @pytest.mark.asyncio
     async def test_doh_lookup_http_error(self, mock_profile_id, mock_doh_client):
@@ -193,6 +196,7 @@ class TestDohLookup:
         result = await dohLookup("example.com", mock_profile_id, "A")
 
         expected_url = f"https://dns.nextdns.io/{mock_profile_id}/dns-query?name=example.com&type=A"
+        assert "_metadata" in result
         assert result["_metadata"]["doh_endpoint"] == expected_url
 
     @pytest.mark.asyncio
@@ -200,11 +204,38 @@ class TestDohLookup:
         """Test that record type is case-insensitive."""
         # Test lowercase
         result = await dohLookup("example.com", mock_profile_id, "a")
+        assert "_metadata" in result
         assert result["_metadata"]["query_type"] == "A"
 
         # Test mixed case
         result = await dohLookup("example.com", mock_profile_id, "AaAa")
+        assert "_metadata" in result
         assert result["_metadata"]["query_type"] == "AAAA"
+
+
+class TestMetadataKeyCollision:
+    """Regression tests for issue #166: wrapper shape prevents collisions."""
+
+    @pytest.mark.asyncio
+    async def test_doh_response_with_metadata_record_does_not_collide(self, mock_profile_id, mock_doh_client):
+        """A DoH answer literally named ``_metadata`` must not be overwritten by injected metadata."""
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "Status": 0,
+            "Answer": [{"name": "_metadata.example.com.", "type": 16, "TTL": 60, "data": "opaque"}],
+            "_metadata": "attacker-supplied-value",
+        }
+        mock_doh_client.get.return_value = mock_response
+
+        result = await dohLookup("example.com", mock_profile_id, "A")
+
+        # The raw DoH payload is preserved verbatim under "data".
+        assert "_metadata" in result["data"]
+        assert result["data"]["_metadata"] == "attacker-supplied-value"
+        # Injected metadata lives in the wrapper and is intact.
+        assert result["_metadata"]["profile_id"] == mock_profile_id
+        assert result["_metadata"]["query_domain"] == "example.com"
+        assert result["_metadata"]["query_type"] == "A"
 
 
 class TestDohClientReuse:
