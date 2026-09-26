@@ -507,6 +507,8 @@ paths:
       summary: List all profiles
       description: Retrieves a list of all NextDNS profiles accessible with the provided API key.
       operationId: listProfiles
+      security:
+        - ApiKeyAuth: []
       tags:
         - Profiles
       parameters:
@@ -529,6 +531,8 @@ paths:
       summary: Create a new profile
       description: Creates a new NextDNS profile with the specified configuration.
       operationId: createProfile
+      security:
+        - ApiKeyAuth: []
       tags:
         - Profiles
       requestBody:
@@ -569,6 +573,8 @@ paths:
       summary: Get profile details
       description: Retrieves detailed information about a specific profile.
       operationId: getProfile
+      security:
+        - ApiKeyAuth: []
       tags:
         - Profiles
       parameters:
@@ -591,6 +597,8 @@ paths:
       summary: Update profile
       description: Updates profile properties such as name and configuration.
       operationId: updateProfile
+      security:
+        - ApiKeyAuth: []
       tags:
         - Profiles
       parameters:
@@ -625,6 +633,8 @@ paths:
 
         **Safety Warning**: Only delete profiles that you own and are certain you want to remove.
       operationId: deleteProfile
+      security:
+        - ApiKeyAuth: []
       tags:
         - Profiles
       parameters:
@@ -651,6 +661,8 @@ paths:
       summary: Get profile settings
       description: Retrieves the configuration settings for a profile.
       operationId: getSettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Settings
       parameters:
@@ -670,6 +682,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateSettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Settings
       parameters:
@@ -689,6 +703,8 @@ paths:
       summary: Get logs settings
       description: Retrieves log retention and configuration settings.
       operationId: getLogsSettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Settings
       parameters:
@@ -714,6 +730,8 @@ paths:
       summary: Update logs settings
       description: Updates log retention period and configuration.
       operationId: updateLogsSettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Settings
       parameters:
@@ -741,6 +759,8 @@ paths:
       summary: Get block page settings
       description: Retrieves block page configuration.
       operationId: getBlockPageSettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Settings
       parameters:
@@ -760,6 +780,8 @@ paths:
       summary: Update block page settings
       description: Enables or disables the block page for blocked domains.
       operationId: updateBlockPageSettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Settings
       parameters:
@@ -781,6 +803,8 @@ paths:
       summary: Get performance settings
       description: Retrieves performance optimization settings.
       operationId: getPerformanceSettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Settings
       parameters:
@@ -807,6 +831,8 @@ paths:
       summary: Update performance settings
       description: Updates performance optimization configuration.
       operationId: updatePerformanceSettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Settings
       parameters:
@@ -834,6 +860,8 @@ paths:
       description: |
         Returns all DNS rewrite entries for a profile. Rewrites let you override the DNS response for a domain.
       operationId: listRewrites
+      security:
+        - ApiKeyAuth: []
       tags:
         - Rewrites
       parameters:
@@ -856,6 +884,8 @@ paths:
       description: |
         Creates a new DNS rewrite entry. The type (A, AAAA, CNAME) is inferred from the content.
       operationId: addRewrite
+      security:
+        - ApiKeyAuth: []
       tags:
         - Rewrites
       parameters:
@@ -883,6 +913,8 @@ paths:
       description: |
         Deletes a DNS rewrite entry by its `id` (not its domain name).
       operationId: deleteRewrite
+      security:
+        - ApiKeyAuth: []
       tags:
         - Rewrites
       parameters:
@@ -903,6 +935,8 @@ paths:
       summary: Get query status analytics
       description: Retrieves analytics data about DNS query response status codes.
       operationId: getAnalyticsStatus
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -924,6 +958,8 @@ paths:
       summary: Get query status analytics time-series
       description: Retrieves time-series analytics data about DNS query response status codes for charting.
       operationId: getAnalyticsStatusSeries
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -950,6 +986,8 @@ paths:
       summary: Get top domains analytics
       description: Retrieves statistics about the most queried domains.
       operationId: getAnalyticsDomains
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -975,6 +1013,8 @@ paths:
       summary: Get query type analytics
       description: Retrieves statistics about DNS query types (A, AAAA, CNAME, etc).
       operationId: getAnalyticsQueryTypes
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -997,6 +1037,8 @@ paths:
       summary: Get query type analytics time-series
       description: Retrieves time-series statistics about DNS query types for charting.
       operationId: getAnalyticsQueryTypesSeries
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1023,6 +1065,8 @@ paths:
       summary: Get blocking reasons analytics
       description: Retrieves statistics about why queries were blocked.
       operationId: getAnalyticsReasons
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1045,6 +1089,8 @@ paths:
       summary: Get blocking reasons analytics time-series
       description: Retrieves time-series statistics about why queries were blocked for charting.
       operationId: getAnalyticsReasonsSeries
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1071,6 +1117,8 @@ paths:
       summary: Get client IP analytics
       description: Retrieves statistics about client IP addresses.
       operationId: getAnalyticsIPs
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1093,6 +1141,8 @@ paths:
       summary: Get client IP analytics time-series
       description: Retrieves time-series statistics about client IP addresses for charting.
       operationId: getAnalyticsIPsSeries
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1119,6 +1169,8 @@ paths:
       summary: Get DNSSEC analytics
       description: Retrieves statistics about DNSSEC validation.
       operationId: getAnalyticsDNSSEC
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1140,6 +1192,8 @@ paths:
       summary: Get DNSSEC analytics time-series
       description: Retrieves time-series statistics about DNSSEC validation for charting.
       operationId: getAnalyticsDNSSECSeries
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1166,6 +1220,8 @@ paths:
       summary: Get encryption analytics
       description: Retrieves statistics about encrypted vs unencrypted queries.
       operationId: getAnalyticsEncryption
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1187,6 +1243,8 @@ paths:
       summary: Get encryption analytics time-series
       description: Retrieves time-series statistics about encrypted vs unencrypted queries for charting.
       operationId: getAnalyticsEncryptionSeries
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1213,6 +1271,8 @@ paths:
       summary: Get IP version analytics
       description: Retrieves statistics about IPv4 vs IPv6 usage.
       operationId: getAnalyticsIPVersions
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1234,6 +1294,8 @@ paths:
       summary: Get IP version analytics time-series
       description: Retrieves time-series statistics about IPv4 vs IPv6 usage for charting.
       operationId: getAnalyticsIPVersionsSeries
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1260,6 +1322,8 @@ paths:
       summary: Get protocol analytics
       description: Retrieves statistics about DNS protocol usage (DoH, DoT, DoQ, UDP, TCP).
       operationId: getAnalyticsProtocols
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1281,6 +1345,8 @@ paths:
       summary: Get protocol analytics time-series
       description: Retrieves time-series statistics about DNS protocol usage for charting.
       operationId: getAnalyticsProtocolsSeries
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1307,6 +1373,8 @@ paths:
       summary: Get top destinations
       description: Retrieves the most queried destination domains.
       operationId: getAnalyticsDestinations
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1336,6 +1404,8 @@ paths:
       summary: Get top destinations analytics time-series
       description: Retrieves time-series statistics for the most queried destination domains for charting.
       operationId: getAnalyticsDestinationsSeries
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1369,6 +1439,8 @@ paths:
       summary: Get device analytics
       description: Retrieves query statistics by device.
       operationId: getAnalyticsDevices
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1391,6 +1463,8 @@ paths:
       summary: Get device analytics time-series
       description: Retrieves time-series query statistics by device for charting.
       operationId: getAnalyticsDevicesSeries
+      security:
+        - ApiKeyAuth: []
       tags:
         - Analytics
       parameters:
@@ -1417,6 +1491,8 @@ paths:
       summary: Get denylist entries
       description: Retrieves all domains in the profile's denylist.
       operationId: getDenylist
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1436,6 +1512,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: addToDenylist
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1459,6 +1537,8 @@ paths:
         **Safety Note**: Only use with designated test profiles.
 
       operationId: replaceDenylist
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1494,6 +1574,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateDenylistEntry
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1522,6 +1604,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: removeFromDenylist
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1537,6 +1621,8 @@ paths:
       summary: Get allowlist entries
       description: Retrieves all domains in the profile's allowlist.
       operationId: getAllowlist
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1556,6 +1642,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: addToAllowlist
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1579,6 +1667,8 @@ paths:
         **Safety Note**: Only use with designated test profiles.
 
       operationId: replaceAllowlist
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1614,6 +1704,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateAllowlistEntry
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1642,6 +1734,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: removeFromAllowlist
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1657,6 +1751,8 @@ paths:
       summary: Get parental control services
       description: Retrieves blocked services (e.g., TikTok, Facebook, etc.).
       operationId: getParentalControlServices
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1675,6 +1771,8 @@ paths:
         Replaces the entire list of blocked services.
 
       operationId: replaceParentalControlServices
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1704,6 +1802,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: addToParentalControlServices
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1726,6 +1826,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateParentalControlServiceEntry
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1759,6 +1861,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: removeFromParentalControlServices
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1779,6 +1883,8 @@ paths:
       summary: Get parental control categories
       description: Retrieves blocked content categories (e.g., gambling, adult content, etc.).
       operationId: getParentalControlCategories
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1797,6 +1903,8 @@ paths:
         Replaces the entire list of blocked categories.
 
       operationId: replaceParentalControlCategories
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1826,6 +1934,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: addToParentalControlCategories
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1848,6 +1958,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateParentalControlCategoryEntry
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1881,6 +1993,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: removeFromParentalControlCategories
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -1901,6 +2015,8 @@ paths:
       summary: Get security settings
       description: Retrieves security configuration including threat blocking and DNSSEC.
       operationId: getSecuritySettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Security
       parameters:
@@ -1940,6 +2056,8 @@ paths:
       summary: Update security settings
       description: Updates security configuration options.
       operationId: updateSecuritySettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Security
       parameters:
@@ -1982,6 +2100,8 @@ paths:
       summary: Get privacy settings
       description: Retrieves privacy protection configuration.
       operationId: getPrivacySettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Privacy
       parameters:
@@ -2003,6 +2123,8 @@ paths:
       summary: Update privacy settings
       description: Updates privacy protection options.
       operationId: updatePrivacySettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Privacy
       parameters:
@@ -2027,6 +2149,8 @@ paths:
       summary: Get parental control settings
       description: Retrieves parental control configuration.
       operationId: getParentalControlSettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -2050,6 +2174,8 @@ paths:
       summary: Update parental control settings
       description: Updates parental control configuration options.
       operationId: updateParentalControlSettings
+      security:
+        - ApiKeyAuth: []
       tags:
         - Content Lists
       parameters:
@@ -2076,6 +2202,8 @@ paths:
       summary: Get blocked TLDs for security
       description: Retrieves the list of top-level domains blocked for security reasons.
       operationId: getSecurityTLDs
+      security:
+        - ApiKeyAuth: []
       tags:
         - Security
       parameters:
@@ -2095,6 +2223,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: addSecurityTLD
+      security:
+        - ApiKeyAuth: []
       tags:
         - Security
       parameters:
@@ -2120,6 +2250,8 @@ paths:
         **Safety Note**: Only use with designated test profiles.
 
       operationId: replaceSecurityTLDs
+      security:
+        - ApiKeyAuth: []
       tags:
         - Security
       parameters:
@@ -2152,6 +2284,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: removeSecurityTLD
+      security:
+        - ApiKeyAuth: []
       tags:
         - Security
       parameters:
@@ -2167,6 +2301,8 @@ paths:
       summary: Get privacy blocklists
       description: Retrieves the list of privacy protection blocklists enabled for the profile.
       operationId: getPrivacyBlocklists
+      security:
+        - ApiKeyAuth: []
       tags:
         - Privacy
       parameters:
@@ -2186,6 +2322,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: addPrivacyBlocklist
+      security:
+        - ApiKeyAuth: []
       tags:
         - Privacy
       parameters:
@@ -2211,6 +2349,8 @@ paths:
         **Safety Note**: Only use with designated test profiles.
 
       operationId: replacePrivacyBlocklists
+      security:
+        - ApiKeyAuth: []
       tags:
         - Privacy
       parameters:
@@ -2243,6 +2383,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: removePrivacyBlocklist
+      security:
+        - ApiKeyAuth: []
       tags:
         - Privacy
       parameters:
@@ -2258,6 +2400,8 @@ paths:
       summary: Get native tracking protection settings
       description: Retrieves the list of native tracking protection blockers enabled for the profile.
       operationId: getPrivacyNatives
+      security:
+        - ApiKeyAuth: []
       tags:
         - Privacy
       parameters:
@@ -2277,6 +2421,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: addPrivacyNative
+      security:
+        - ApiKeyAuth: []
       tags:
         - Privacy
       parameters:
@@ -2302,6 +2448,8 @@ paths:
         **Safety Note**: Only use with designated test profiles.
 
       operationId: replacePrivacyNatives
+      security:
+        - ApiKeyAuth: []
       tags:
         - Privacy
       parameters:
@@ -2334,6 +2482,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: removePrivacyNative
+      security:
+        - ApiKeyAuth: []
       tags:
         - Privacy
       parameters:
@@ -2352,6 +2502,8 @@ paths:
 
         Supports filtering by date range, device, status, and text search.
       operationId: getLogs
+      security:
+        - ApiKeyAuth: []
       tags:
         - Logs
       parameters:
@@ -2413,6 +2565,8 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: clearLogs
+      security:
+        - ApiKeyAuth: []
       tags:
         - Logs
       parameters:
@@ -2435,6 +2589,8 @@ paths:
 
         This endpoint provides a continuous stream of query events as they occur.
       operationId: streamLogs
+      security:
+        - ApiKeyAuth: []
       # This endpoint is excluded from the MCP server via custom route mappings because
       # FastMCP does not support Server-Sent Events.
       tags:
@@ -2471,6 +2627,8 @@ paths:
         
         **Format**: Always returns CSV format (not configurable).
       operationId: downloadLogs
+      security:
+        - ApiKeyAuth: []
       tags:
         - Logs
       parameters:
