@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-import nextdns_mcp.config
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
 from nextdns_mcp.tools import logs as logs_module
@@ -717,8 +716,6 @@ class TestManageLogsDownloadRedirects:
         # readable (write implies read), so it must be narrowed too.
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "xyz999")
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "xyz999")
-        nextdns_mcp.config._readable_profiles_cache = None
-        nextdns_mcp.config._writable_profiles_cache = None
         real_client = client_module.AccessControlledClient(base_url="https://api.nextdns.io")
         monkeypatch.setattr(logs_module.client, "api_client", real_client)
         with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
@@ -739,8 +736,6 @@ class TestManageLogsDownloadRedirects:
         monkeypatch.delenv("NEXTDNS_READABLE_PROFILES")
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abc123")
         monkeypatch.setenv("NEXTDNS_READ_ONLY", "true")
-        nextdns_mcp.config._readable_profiles_cache = None
-        nextdns_mcp.config._writable_profiles_cache = None
         real_client = client_module.AccessControlledClient(base_url="https://api.nextdns.io")
         monkeypatch.setattr(logs_module.client, "api_client", real_client)
         with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:

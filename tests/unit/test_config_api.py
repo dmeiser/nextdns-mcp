@@ -99,11 +99,3 @@ def test_read_only_mode_enabled(patch_env):
     from nextdns_mcp import config
 
     assert config.is_read_only()
-
-
-def test_globally_allowed_operations():
-    """Test operations that bypass access control."""
-    from nextdns_mcp import config
-
-    assert "listProfiles" in config.GLOBALLY_ALLOWED_OPERATIONS
-    assert "dohLookup" in config.GLOBALLY_ALLOWED_OPERATIONS

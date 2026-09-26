@@ -37,16 +37,6 @@ NEXTDNS_BASE_URL = "https://api.nextdns.io"
 # Constants for profile access control
 ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
 
-# Cached profile access sets (populated after validation)
-_readable_profiles_cache: set[str] | None = None
-_writable_profiles_cache: set[str] | None = None
-
-# Operations that bypass profile access control
-GLOBALLY_ALLOWED_OPERATIONS = {
-    "listProfiles",  # Required to discover available profiles
-    "dohLookup",  # Custom DoH lookup tool
-}
-
 
 def get_api_key() -> str | None:
     """Get API key from environment."""
@@ -86,8 +76,6 @@ def get_readable_profiles() -> set[str] | None:
         None if empty/unset (deny all), empty set if "ALL" (allow all),
         or set of specific profile IDs
     """
-    global _readable_profiles_cache
-    _readable_profiles_cache = None  # Clear cache when env changes
     profiles = os.getenv("NEXTDNS_READABLE_PROFILES", "")
     return parse_profile_list(profiles)
 
@@ -99,8 +87,6 @@ def get_writable_profiles() -> set[str] | None:
         None if empty/unset (deny all), empty set if "ALL" (allow all),
         or set of specific profile IDs
     """
-    global _writable_profiles_cache
-    _writable_profiles_cache = None  # Clear cache when env changes
     if is_read_only():
         return None  # Read-only mode = deny all writes
     profiles = os.getenv("NEXTDNS_WRITABLE_PROFILES", "")
