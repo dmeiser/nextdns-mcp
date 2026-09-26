@@ -51,3 +51,27 @@ def test_resolve_schema_cycle_guard_still_works():
 
     assert resolved["type"] == "object"
     assert resolved["properties"]["child"] == {}
+
+
+def test_validate_tool_response_manage_logs_download():
+    """manageLogs download CSV envelope should validate successfully."""
+    from scripts.validate_schema import validate_tool_response
+
+    spec = {
+        "paths": {
+            "/profiles/{profile_id}/logs/download": {
+                "get": {
+                    "operationId": "downloadLogs",
+                    "responses": {"200": {"content": {"text/csv": {}}}},
+                }
+            }
+        }
+    }
+    response_data = {
+        "content_type": "text/csv",
+        "size": 128,
+        "data": "timestamp,domain,client\n1700000000,example.com,client-1",
+    }
+    status, errors = validate_tool_response("manageLogs", response_data, spec)
+    assert status == "VALID"
+    assert errors == []

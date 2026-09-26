@@ -24,51 +24,8 @@ This file contains repository-specific agent rules. Agents should follow these w
 - Docker: provide a `Dockerfile` (primary, `python:3.14-slim`) and `Dockerfile.alpine` (Alpine variant) that produce small, runnable images.
 - Keep `TODO.md` progress indicators in sync with the current phase while executing tasks.
 - **Write Operation Safety Rules:**
-  - When running Gateway E2E tests, set `NEXTDNS_WRITABLE_PROFILES=ALL` (or specific test profile ID)
   - Write operations (create, update) are only allowed against designated test profiles
   - Always verify the target profile ID before any write operation
-  - **Gateway E2E Test Safety:**
-    - E2E tests can create a dedicated validation profile or use existing test profile
-    - All write operations execute via Docker MCP Gateway CLI
-    - Set `ALLOW_LIVE_WRITES=true` to enable write operations (default: read-only)
-    - Profile cleanup is optional and user-controlled
-    - Tests produce JSONL reports in `artifacts/tools_report_slim.jsonl` (default) and `artifacts/tools_report_alpine.jsonl`
-- **Gateway E2E Testing Requirements:**
-  - **CRITICAL**: E2E tests MUST use Docker MCP Gateway CLI, NOT direct Python calls
-  - Test script locations: `scripts/gateway_e2e_run.sh`
-  - E2E tests verify all MCP tools work through the Docker MCP Gateway
-  - **Test Structure:**
-    1. Build Docker image with latest code
-    2. Import MCP server into Docker MCP Gateway
-    3. Start gateway container with environment configuration
-    4. Execute all tools via `docker mcp tools call` (or in-container `mcp` binary)
-    5. Produce machine-readable JSONL report
-    6. Optional: Clean up validation profile
-  - **How to Run E2E Tests:**
-    - Set environment variables in `.env` file (see `.env.example`)
-    - Required: `NEXTDNS_API_KEY`, `NEXTDNS_READABLE_PROFILES`, `NEXTDNS_WRITABLE_PROFILES`
-    - Optional: `ALLOW_LIVE_WRITES=true` (default: read-only mode)
-  - **When to Run E2E Tests:**
-    - When fixing bugs or adding features that affect any MCP tool
-    - Before reporting completion of any API changes
-    - After OpenAPI spec updates that add/modify operations
-    - Before major releases or production deployment
-  - **Running E2E Tests:**
-    ```bash
-    # Default (slim) variant
-    bash scripts/gateway_e2e_run.sh .env slim
-
-    # Alpine variant
-    bash scripts/gateway_e2e_run.sh .env alpine
-    ```
-  - **Analyzing Results:**
-    - Check `artifacts/tools_report_slim.jsonl` (default) or `artifacts/tools_report_alpine.jsonl` for per-tool results
-    - Parse JSONL to identify failures: `jq 'select(.exit_code != 0)' tools_report_slim.jsonl`
-    - Review stdout/stderr for error details
-    - **Required: 100% pass rate** - ALL tools must pass
-  - If validation fails, fix the issues and re-run until all tests pass
-  - Document validation failures and fixes in your response
-  - Fix Docker CLI parameter handling issues (use proper JSON encoding for typed parameters)
 - **Development Workflow:**
   - Phase 1: Create complete and accurate OpenAPI/Swagger documentation for the NextDNS API
   - Phase 2: Use `fastmcp.from_openapi()` to generate the MCP server from the OpenAPI spec
@@ -83,8 +40,6 @@ This file contains repository-specific agent rules. Agents should follow these w
 
 ## Testing Strategy
 
-### Two-Tier Testing Approach
-
 1. **Unit Tests** (`tests/unit/`)
    - Fast, isolated tests with mocked dependencies
    - Test individual functions and modules
@@ -92,14 +47,9 @@ This file contains repository-specific agent rules. Agents should follow these w
    - See "Code Quality Standards" section for coverage requirements
    - Must achieve 100% code coverage
 
-2. **Gateway E2E Tests** (`scripts/gateway_e2e_run.sh`)
-   - End-to-end testing via Docker MCP Gateway CLI
-   - Tests actual user workflow: `docker mcp tools call <tool> <params>`
-   - Verifies CLI parameter parsing, quoting, and execution
-   - Produces machine-readable JSONL reports
-   - See "Gateway E2E Testing Requirements" section above for complete details
-   - Run before major releases or when troubleshooting production issues
-   - **Required pass rate: 100%** - ALL tools must pass E2E validation
+2. **Integration Tests** (`tests/integration/`)
+   - Server initialization and creation tests
+   - Verify tool registration, OpenAPI loading, and access control initialization
 
 Merging policy: small, incremental PRs. Preserve existing README/CI content; when adding new top-level files, update README to reflect run/test/build instructions.
 
@@ -161,27 +111,7 @@ open htmlcov/index.html
 - Document any intentional gaps with inline comments explaining why they're untestable
 - **All tests must pass** - zero failures, zero errors
 
-### 3. Gateway E2E Test Requirements
-
-**CRITICAL**: Gateway E2E tests validate production-like behavior via Docker MCP CLI. **ALL tests must pass with 100% success rate.**
-
-**Running E2E Tests**:
-```bash
-# Default (slim) variant
-bash scripts/gateway_e2e_run.sh .env slim
-
-# Alpine variant
-bash scripts/gateway_e2e_run.sh .env alpine
-```
-
-**E2E Test Validation**:
-- **Required pass rate: 100%** - ALL tools must pass
-- Review `artifacts/tools_report_slim.jsonl` (default) or `artifacts/tools_report_alpine.jsonl` for detailed results
-- NO failures are acceptable - fix Docker CLI parameter handling issues
-- If tests fail due to parameter type conversion, fix the E2E scripts to use proper JSON encoding
-- See "Gateway E2E Testing Requirements" section for safety rules
-
-### 4. Cyclomatic Complexity Standards
+### 3. Cyclomatic Complexity Standards
 
 **Project Complexity**: Grade A
 - Measured using `radon` tool
@@ -203,9 +133,9 @@ bash scripts/gateway_e2e_run.sh .env alpine
 - D: 21-50 (very complex, very high risk) ❌ Not allowed
 - F: 51+ (extremely complex, extreme risk) ❌ Not allowed
 
-### 5. Pre-Commit Quality Checklist
+### 4. Pre-Commit Quality Checklist
 
-Before running E2E tests or claiming work is complete:
+Before claiming work is complete:
 
 - [ ] Run `uv run ruff check --fix src/ tests/`
 - [ ] Run `uv run ruff format src/ tests/`
@@ -214,76 +144,11 @@ Before running E2E tests or claiming work is complete:
 - [ ] Verify per-file coverage: all files 100% in `htmlcov/index.html`
 - [ ] Run `uv run radon cc src/ -a` (verify grade A)
 - [ ] Run `uv run radon cc src/ -nc` (verify no functions exceed grade B)
-- [ ] Run Gateway E2E tests: `bash scripts/gateway_e2e_run.sh .env slim` and `bash scripts/gateway_e2e_run.sh .env alpine` (**100% pass rate required**)
-- [ ] Review `artifacts/tools_report_slim.jsonl` and `artifacts/tools_report_alpine.jsonl` - zero failures allowed
 - [ ] Commit formatting changes as final commit before validation
 
 **CRITICAL**: If ANY check fails, fix the issues and restart from step 1. Continue iterating through all quality checks until every standard is met with zero failures.
 
-### 6. Gateway E2E Test Troubleshooting
-
-**E2E Tests MUST Achieve 100% Pass Rate**
-
-All Gateway E2E tests must pass. If tests fail, fix the underlying issues - do not accept failures as "known limitations."
-
-**Common E2E Failure Patterns and Fixes**:
-
-1. **Parameter Type Errors** (Boolean/Integer as String)
-   - Symptom: `HTTP 400: /enabled must be boolean`
-   - Cause: Docker CLI passes `enabled=true` as string `"true"` instead of boolean
-   - **Fix Required**: Update E2E scripts to encode parameters as proper JSON
-   - Example: Instead of `enabled=true`, pass `--param '{"enabled": true}'` or use JSON file
-   - Status: **MUST BE FIXED** - not acceptable
-
-2. **Duplicate Errors** (HTTP 400: duplicate)
-   - Symptom: `{'errors': [{'code': 'duplicate'}]}`
-   - Cause: Profile already has the item being added
-   - **Fix Required**: 
-     - Use fresh validation profile for each test run
-     - Clear lists before adding items (check if exists, remove first)
-     - Use unique test data (e.g., timestamped domains)
-   - Status: **MUST BE FIXED** - tests must be idempotent
-
-3. **Missing Required Parameters**
-   - Symptom: `HTTP 400: missing required parameter`
-   - Cause: E2E script doesn't pass all required parameters
-   - **Fix Required**: Review OpenAPI spec, update script to include all required params
-   - Status: **MUST BE FIXED** - ensure complete parameter coverage
-
-4. **Output Validation Errors**
-   - Symptom: Tool succeeds but Docker reports schema mismatch
-   - Cause: MCP tool returns different format than expected
-   - **Fix Required**: 
-     - Verify MCP tool output format matches OpenAPI spec
-     - Update OpenAPI response schema if needed
-     - Fix MCP tool implementation if output is incorrect
-   - Status: **MUST BE FIXED** - output must match spec
-
-**Fixing Parameter Type Issues**:
-
-The E2E scripts pass parameters as `key=value` strings. The server coerces primitive types, but **arrays and nested objects must be encoded explicitly**.
-
-```bash
-# OK for simple booleans and integers (server coerces types)
-docker mcp tools call manageSettings operation=update category=blockpage profile_id=abc123 settings='{"enabled":true}'
-
-# REQUIRED for array bodies in grouped list tools
-docker mcp tools call manageLists list_type=denylist operation=replace profile_id=abc123 entries='[{"id":"ads.example.com"}]'
-
-# REQUIRED for nested objects if needed
-docker mcp tools call manageSettings operation=update category=general profile_id=abc123 settings='{"blockPage":{"enabled":true}}'
-```
-
-**Action Items for 100% Pass Rate**:
-1. Ensure `run_all_tools.sh` passes correct parameter types for each grouped tool
-2. Use `entries=[{"id":"value"}]` for list `replace` operations
-3. Use `entry={"id":"value"}` for list `add` operations
-4. Verify all required parameters are passed for each operation
-5. Ensure output formats match OpenAPI spec definitions
-
-**Quality Gate**: Zero failures allowed. All grouped tools must pass E2E validation.
-
-### 7. Quality Tools Configuration
+### 5. Quality Tools Configuration
 
 **isort** (import sorting):
 - Configured in `pyproject.toml` under `[tool.isort]` (if present)
@@ -311,7 +176,7 @@ docker mcp tools call manageSettings operation=update category=general profile_i
 - Use `-a` flag for average complexity
 - Use `-nc` flag to show only functions above grade B
 
-### 7. Handling Quality Failures
+### 6. Handling Quality Failures
 
 **CRITICAL**: Code quality is non-negotiable. If any check fails, the quality pipeline must be rerun until ALL standards are met.
 

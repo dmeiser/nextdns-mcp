@@ -1,6 +1,6 @@
 # Configuration Reference
 
-All configuration is done via environment variables (or Docker MCP Gateway secrets/config).
+All configuration is done via environment variables.
 
 ## Extra Field Relaxation
 
