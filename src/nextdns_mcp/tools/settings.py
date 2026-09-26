@@ -41,14 +41,28 @@ async def _manage_settings_impl(
     url = f"/profiles/{target_profile}/{path}"
 
     if operation == "get":
-        return await _api_request("GET", url)
+        try:
+                    return await _api_request("GET", url)
+        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, httpx.HTTPError):
+                return http_error_payload(str(e), cause)
+            else:
+                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
     if operation == "update":
         if settings is None:
             return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "settings is required for update operation")
         settings = _coerce_json_arg(settings)
         if not isinstance(settings, dict):
             return error_payload(ErrorCode.INVALID_ARGUMENT, "settings must be a JSON object")
-        return await _api_request("PATCH", url, json=settings)
+        try:
+                    return await _api_request("PATCH", url, json=settings)
+        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, httpx.HTTPError):
+                return http_error_payload(str(e), cause)
+            else:
+                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 

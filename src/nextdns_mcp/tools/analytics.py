@@ -77,7 +77,14 @@ async def _query_analytics_impl(
     if metric == "domains":
         params.update(_build_query_params(status=status, root=root))
 
-    return await _api_request("GET", url, params=params)
+    try:
+            return await _api_request("GET", url, params=params)
+    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        cause = e.__cause__
+        if cause is not None and isinstance(cause, httpx.HTTPError):
+            return http_error_payload(str(e), cause)
+        else:
+            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
 
 async def queryAnalytics(
