@@ -30,6 +30,8 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .config import get_default_profile
 
@@ -211,4 +213,27 @@ def create_mcp_server(client: Any = None) -> FastMCP:
     if default_profile:
         logger.info(f"Default profile: {default_profile}")
 
+    _register_health_endpoint(mcp)
+
     return mcp
+
+
+def _register_health_endpoint(mcp: FastMCP) -> None:
+    """Register the minimal ``/health`` endpoint on the FastMCP HTTP app.
+
+    AGENT.md mandates a ``GET /health`` that returns ``200 OK`` with the JSON body
+    ``{"status": "ok"}``. It is registered with FastMCP's ``custom_route`` so it is
+    served alongside the ``/mcp`` streamable-HTTP endpoint when the server runs in
+    HTTP transport mode; in stdio mode there is no HTTP surface, so the route is
+    simply not reachable. The handler is intentionally a constant response: it
+    confirms the HTTP server is up without touching the NextDNS API.
+
+    Args:
+        mcp: The FastMCP server to attach the route to.
+    """
+
+    async def health_check(_request: Request) -> JSONResponse:
+        """Return a constant ``{"status": "ok"}`` health payload."""
+        return JSONResponse({"status": "ok"})
+
+    mcp.custom_route("/health", methods=["GET"])(health_check)
