@@ -1,10 +1,15 @@
 """Unit tests for the grouped CRUD tools in server.py."""
 
-from unittest.mock import AsyncMock, MagicMock
+import asyncio
+import logging
+import os
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+import nextdns_mcp.config
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
 from nextdns_mcp.tools import logs as logs_module
@@ -24,6 +29,29 @@ def open_profile_access(monkeypatch):
     """Allow all profile read/write access for grouped-tool tests."""
     monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
     monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+
+
+class _stream_ctx:
+    """Async context manager mimicking httpx.AsyncClient.stream()."""
+
+    def __init__(self, response):
+        self.response = response
+
+    async def __aenter__(self):
+        return self.response
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _async_chunks(chunks):
+    """Async iterator yielding the given text chunks (for streamed responses)."""
+
+    async def _gen():
+        for chunk in chunks:
+            yield chunk
+
+    return _gen()
 
 
 def _make_response(json_data=None, status_code=200, content=None):
@@ -401,57 +429,144 @@ class TestManageLogs:
 
     @pytest.mark.asyncio
     async def test_download(self, mock_api_client):
-        response = _make_download_response(b"csv,data")
-        mock_api_client.get.return_value = response
+        """Download streams to a temp file and returns a capped preview, not inline data."""
+        csv_text = "date,time,question,answer\n2024-01-01,12:00:00,example.com,A\n"
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([csv_text])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
         result = await server.manageLogs("download", "abc123")
+        mock_api_client.stream.assert_called_once_with("GET", "/profiles/abc123/logs/download")
         assert result["content_type"] == "text/csv"
-        assert result["size"] == 8
-        mock_api_client.get.assert_called_once_with("/profiles/abc123/logs/download")
+        assert result["size"] == len(csv_text.encode("utf-8"))
+        assert result["row_count"] == 2
+        assert "data" not in result
+        assert "text" not in result
+        assert os.path.isfile(result["file_path"])
+        assert await asyncio.to_thread(Path(result["file_path"]).read_text, encoding="utf-8") == csv_text
+        os.unlink(result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_download_large_is_capped_not_inline(self, mock_api_client):
+        """A large download is not double-buffered or inlined: only a bounded preview is returned."""
+        row = "x" * 1000 + "\n"
+        # ~10k rows, multi-MB — far beyond any sane inline payload.
+        chunks = [row * 500 for _ in range(20)]
+        total_text = "".join(chunks)
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks(chunks)
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert result["size"] == len(total_text.encode("utf-8"))
+        assert result["row_count"] == 10_000
+        # The preview is bounded and flagged truncated; the full body never appears inline.
+        assert len(result["preview"]["text"]) < len(total_text)
+        assert result["preview"]["truncated"] is True
+        assert result["preview"]["line_count"] <= 20
+        assert result["preview"]["bytes"] <= 256 * 1024
+        assert "x" * 1000 * 2 not in result["preview"]["text"]
+        await asyncio.to_thread(os.unlink, result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_download_empty_chunk_is_skipped(self, mock_api_client):
+        """An empty text chunk from the stream does not corrupt counts or preview."""
+        csv_text = "date,time,question,answer\n2024-01-01,12:00:00,example.com,A\n"
+        response = MagicMock()
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks(["", csv_text, ""])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert result["row_count"] == 2
+        assert result["preview"]["line_count"] == 2
+        assert result["preview"]["truncated"] is False
+        await asyncio.to_thread(os.unlink, result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_download_preview_capped_by_bytes(self, mock_api_client):
+        """A single line larger than the byte cap yields a truncated preview."""
+        header = "date,time,question,answer\n"
+        huge_line = "x" * (300 * 1024) + "\n"
+        response = MagicMock()
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([header + huge_line])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert result["preview"]["bytes"] <= 256 * 1024
+        assert result["preview"]["text"] == header
+        assert result["preview"]["truncated"] is True
+        assert result["row_count"] == 2
+        await asyncio.to_thread(os.unlink, result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_download_final_line_without_newline_counts_as_row(self, mock_api_client):
+        """A CSV whose last line has no trailing newline still counts that row."""
+        csv_text = "date,time,question,answer\n2024-01-01,12:00:00,example.com,A"
+        response = MagicMock()
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([csv_text])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert result["row_count"] == 2
+        assert result["preview"]["line_count"] == 2
+        await asyncio.to_thread(os.unlink, result["file_path"])
+
+    def test_unlink_temp_file_missing_path_logs_warning(self, caplog):
+        """A failed temp-file removal logs a warning and never raises."""
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"):
+            logs_module._unlink_temp_file("/nonexistent/nextdns_logs_missing.csv")
+        assert not os.path.exists("/nonexistent/nextdns_logs_missing.csv")
+        assert any("Failed to remove temp log file" in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
     async def test_download_does_not_pass_follow_redirects_to_authenticated_client(self, mock_api_client):
         """The authenticated client must never follow redirects (issue #130)."""
-        mock_api_client.get.return_value = _make_download_response(b"csv,data")
-        await server.manageLogs("download", "abc123")
-        args, kwargs = mock_api_client.get.call_args
+        response = MagicMock()
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks(["csv,data\n"])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        args, kwargs = mock_api_client.stream.call_args
         assert kwargs.get("follow_redirects") is not True
         assert all(arg is not True for arg in args)
-
-
-def _make_download_response(content: bytes, content_type: str = "text/csv") -> httpx.Response:
-    """Build a final (non-redirect) download response as httpx would return it."""
-    request = httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/logs/download")
-    return httpx.Response(200, content=content, request=request, headers={"content-type": content_type})
-
-
-class _FakeRedirectClient:
-    """Stands in for the unauthenticated httpx.AsyncClient used for redirected fetches."""
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    async def get(self, url) -> httpx.Response:
-        self.last_request = httpx.Request("GET", str(url))
-        return httpx.Response(
-            302,
-            request=self.last_request,
-            headers={"location": "https://cdn.example.com/again.csv"},
-        )
-
-    async def aclose(self) -> None:
-        pass
+        os.unlink(result["file_path"])
 
 
 class _FakeFinalClient:
-    """Unauthenticated stand-in whose redirected fetch returns the final CSV body."""
+    """Unauthenticated stand-in whose streamed fetch returns the final CSV body."""
 
     def __init__(self, *args, **kwargs):
-        pass
+        self.last_request = None
 
-    async def get(self, url) -> httpx.Response:
+    def stream(self, method, url, **kwargs):
         request = httpx.Request("GET", str(url))
         self.last_request = request
-        return httpx.Response(200, content=b"csv,data", request=request, headers={"content-type": "text/csv"})
+        response = httpx.Response(
+            200, request=request, headers={"content-type": "text/csv"}, content=b"csv,data"
+        )
+
+        class _Ctx:
+            async def __aenter__(self):
+                return response
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
 
     async def aclose(self) -> None:
         pass
@@ -460,62 +575,112 @@ class _FakeFinalClient:
 class TestManageLogsDownloadRedirects:
     """Regression tests for issue #130: the API key must not leak on log-download redirects."""
 
-    def _redirect_response(self, location: str) -> httpx.Request:
+    def _redirect_response(self, location: str) -> httpx.Response:
         """Build a 302 redirect response for the authenticated download request."""
         request = httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/logs/download")
         return httpx.Response(302, request=request, headers={"location": location})
 
-    @pytest.mark.asyncio
-    async def test_api_key_absent_on_redirected_request(self, mock_api_client, monkeypatch):
-        """Mock-302 key-leak scenario: the X-Api-Key must be absent on the redirected request."""
-        mock_api_client.get.return_value = self._redirect_response(
-            "https://cdn.example.com/profiles/abc123/logs.csv?sig=1"
-        )
-        fake = _FakeFinalClient()
+    def _route_through_redirect(self, mock_api_client, location: str, fake):
+        """Route the authenticated stream through a 302 and the unauthenticated client to ``fake``."""
+        redirect = self._redirect_response(location)
+
+        class _RedirectCtx:
+            async def __aenter__(self):
+                return redirect
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_api_client.stream = MagicMock(return_value=_RedirectCtx())
 
         def fake_client(*args, **kwargs):
             return fake
 
-        monkeypatch.setattr(logs_module.httpx, "AsyncClient", fake_client)
+        return fake_client
+
+    @pytest.mark.asyncio
+    async def test_api_key_absent_on_redirected_request(self, mock_api_client, monkeypatch):
+        """Mock-302 key-leak scenario: the X-Api-Key must be absent on the redirected request."""
+        fake = _FakeFinalClient()
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", self._route_through_redirect(
+            mock_api_client, "https://cdn.example.com/profiles/abc123/logs.csv?sig=1", fake
+        ))
 
         result = await server.manageLogs("download", "abc123")
         assert result["content_type"] == "text/csv"
-        assert result["data"] == "csv,data"
+        assert result["size"] == 8
+        assert result["row_count"] == 1
+        assert "data" not in result
 
         # The authenticated client was not asked to follow the redirect.
-        mock_api_client.get.assert_called_once_with("/profiles/abc123/logs/download")
-        assert mock_api_client.get.call_args.kwargs.get("follow_redirects") is not True
+        mock_api_client.stream.assert_called_once_with("GET", "/profiles/abc123/logs/download")
+        assert mock_api_client.stream.call_args.kwargs.get("follow_redirects") is not True
 
         # The redirected request went to the third-party host...
         assert str(fake.last_request.url) == "https://cdn.example.com/profiles/abc123/logs.csv?sig=1"
         # ...and it carried no API key header.
         assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
+        os.unlink(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_relative_location_resolved_against_origin(self, mock_api_client, monkeypatch):
         """A relative Location is resolved against the API origin and still sent unauthenticated."""
-        mock_api_client.get.return_value = self._redirect_response("/redirects/abc123.csv")
         fake = _FakeFinalClient()
-
-        def fake_client(*args, **kwargs):
-            return fake
-
-        monkeypatch.setattr(logs_module.httpx, "AsyncClient", fake_client)
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", self._route_through_redirect(
+            mock_api_client, "/redirects/abc123.csv", fake
+        ))
 
         result = await server.manageLogs("download", "abc123")
         assert result["size"] == 8
         assert str(fake.last_request.url) == "https://api.nextdns.io/redirects/abc123.csv"
         assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
+        os.unlink(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_redirect_loop_is_bounded(self, mock_api_client, monkeypatch):
         """A redirect loop must raise a bounded HTTP error instead of looping forever."""
-        mock_api_client.get.return_value = self._redirect_response("https://cdn.example.com/logs.csv")
 
-        def fake_client(*args, **kwargs):
-            return _FakeRedirectClient()
+        class _LoopClient:
+            def __init__(self, *args, **kwargs):
+                pass
 
-        monkeypatch.setattr(logs_module.httpx, "AsyncClient", fake_client)
+            def stream(self, method, url, **kwargs):
+                request = httpx.Request("GET", str(url))
+                response = httpx.Response(
+                    302, request=request, headers={"location": "https://cdn.example.com/again.csv"}
+                )
+
+                class _Ctx:
+                    async def __aenter__(self):
+                        return response
+
+                    async def __aexit__(self, *exc):
+                        return False
+
+                return _Ctx()
+
+            async def aclose(self) -> None:
+                pass
+
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", _LoopClient)
+
+        class _RedirectCtx:
+            async def __aenter__(self):
+                return self._redirect_response("https://cdn.example.com/logs.csv")
+
+            async def __aexit__(self, *exc):
+                return False
+
+        loop_redirect = self._redirect_response("https://cdn.example.com/logs.csv")
+
+        class _RedirectCtx:
+            async def __aenter__(self):
+                return loop_redirect
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_api_client.stream = MagicMock(return_value=_RedirectCtx())
 
         result = await server.manageLogs("download", "abc123")
         assert "error" in result
@@ -523,16 +688,76 @@ class TestManageLogsDownloadRedirects:
 
     @pytest.mark.asyncio
     async def test_download_http_error(self, mock_api_client):
-        mock_api_client.get.side_effect = httpx.HTTPError("boom")
+        response = MagicMock()
+        response.has_redirect_location = False
+        response.headers = {}
+        exc = httpx.HTTPStatusError("boom", request=MagicMock(), response=httpx.Response(500, headers={}))
+        response.raise_for_status.side_effect = exc
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
         result = await server.manageLogs("download", "abc123")
         assert "error" in result
-        assert "HTTP error" in result["error"]
+        assert result["code"] == "http_error"
+        assert result["status_code"] == 500
 
     @pytest.mark.asyncio
     async def test_download_unexpected_error(self, mock_api_client):
-        mock_api_client.get.side_effect = RuntimeError("boom")
+        mock_api_client.stream = MagicMock(side_effect=RuntimeError("boom"))
         result = await server.manageLogs("download", "abc123")
         assert result["code"] == "internal_error"
+
+    @pytest.mark.asyncio
+    async def test_download_denied_profile_returns_403(self, monkeypatch):
+        """A profile outside NEXTDNS_READABLE_PROFILES gets a 403 on download, not a file."""
+        # Restrict both read and write ACLs: the autouse fixture sets
+        # WRITABLE_PROFILES=ALL, which would otherwise make abc123 implicitly
+        # readable (write implies read), so it must be narrowed too.
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "xyz999")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "xyz999")
+        nextdns_mcp.config._readable_profiles_cache = None
+        nextdns_mcp.config._writable_profiles_cache = None
+        real_client = client_module.AccessControlledClient(base_url="https://api.nextdns.io")
+        monkeypatch.setattr(logs_module.client, "api_client", real_client)
+        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+            result = await server.manageLogs("download", "abc123")
+        await real_client.aclose()
+        mock_send.assert_not_called()
+        assert result["status_code"] == 403
+        assert "error" in result
+        assert "file_path" not in result
+
+    @pytest.mark.asyncio
+    async def test_download_denied_in_read_only_mode(self, monkeypatch):
+        """In read-only mode the write-implies-read fallback is gone, so download is denied.
+
+        Without read-only, NEXTDNS_WRITABLE_PROFILES=abc123 makes abc123 implicitly
+        readable; with read-only enabled the download must get a 403 instead.
+        """
+        monkeypatch.delenv("NEXTDNS_READABLE_PROFILES")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abc123")
+        monkeypatch.setenv("NEXTDNS_READ_ONLY", "true")
+        nextdns_mcp.config._readable_profiles_cache = None
+        nextdns_mcp.config._writable_profiles_cache = None
+        real_client = client_module.AccessControlledClient(base_url="https://api.nextdns.io")
+        monkeypatch.setattr(logs_module.client, "api_client", real_client)
+        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+            result = await server.manageLogs("download", "abc123")
+        await real_client.aclose()
+        mock_send.assert_not_called()
+        assert result["status_code"] == 403
+        assert "file_path" not in result
+
+    @pytest.mark.asyncio
+    async def test_get_limit_capped(self, mock_api_client):
+        """A limit above the server-side cap is clamped before reaching the API."""
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.manageLogs("get", "abc123", limit=10_000)
+        assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_get_limit_unchanged_under_cap(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.manageLogs("get", "abc123", limit=10)
+        assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 10
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
@@ -551,6 +776,19 @@ class TestQueryAnalytics:
         mock_api_client.request.assert_called_once_with(
             "GET", "/profiles/abc123/analytics/status", params={"from": "-1d", "limit": 5}, json=None
         )
+
+    @pytest.mark.asyncio
+    async def test_limit_capped(self, mock_api_client):
+        """A limit above the server-side cap is clamped before reaching the API."""
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.queryAnalytics("status", "abc123", limit=10_000)
+        assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 500
+
+    @pytest.mark.asyncio
+    async def test_limit_at_cap_unchanged(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.queryAnalytics("status", "abc123", limit=500)
+        assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 500
 
     @pytest.mark.asyncio
     async def test_series(self, mock_api_client):

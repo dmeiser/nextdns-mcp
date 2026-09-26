@@ -49,6 +49,20 @@ def _validate_entry_id(entry_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _cap_limit(value: int | None, cap: int) -> tuple[int | None, bool]:
+    """Clamp a caller-supplied limit to a server-side cap.
+
+    Returns the (possibly capped) value and whether capping occurred.
+    Values at or below the cap pass through untouched; values above the cap
+    are clamped down to it.
+    """
+    if value is None:
+        return None, False
+    if value > cap:
+        return cap, True
+    return value, False
+
+
 def _build_query_params(**kwargs: Any) -> dict[str, Any]:
     """Build a query-param dict, dropping None values and normalizing booleans."""
     params = {k: v for k, v in kwargs.items() if v is not None}

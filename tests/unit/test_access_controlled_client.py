@@ -207,6 +207,55 @@ class TestAccessControlledClientWriteAccess:
         assert response.status_code == 200
 
 
+class TestAccessControlledClientStreaming:
+    """Test that stream() enforces the same access control as request()."""
+
+    @pytest.mark.asyncio
+    async def test_stream_allows_read_when_permitted(self, clean_env: Callable[[str, str], None]) -> None:
+        """Test that streaming is allowed when the profile is readable."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123")
+
+        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = httpx.Response(200, content=b"date,time\n2024-01-01,12:00:00\n")
+            async with (
+                AccessControlledClient(base_url="https://api.nextdns.io") as client,
+                client.stream("GET", "/profiles/abc123/logs/download") as response,
+            ):
+                body = await response.aread()
+
+        mock_send.assert_called_once()
+        assert response.status_code == 200
+        assert body == b"date,time\n2024-01-01,12:00:00\n"
+
+    @pytest.mark.asyncio
+    async def test_stream_denies_read_when_not_permitted(self, clean_env: Callable[[str, str], None]) -> None:
+        """Test that streaming is denied (no network request) for unreadable profiles."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "xyz999")
+
+        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                async with client.stream("GET", "/profiles/abc123/logs/download") as response:
+                    assert response.status_code == 403
+                    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+                        response.raise_for_status()
+                    assert exc_info.value.response.status_code == 403
+
+        mock_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stream_denies_write_in_read_only_mode(self, clean_env: Callable[[str, str], None]) -> None:
+        """Test that streaming a write is denied in read-only mode."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+        clean_env("NEXTDNS_READ_ONLY", "true")
+
+        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                async with client.stream("DELETE", "/profiles/abc123/logs") as response:
+                    assert response.status_code == 403
+
+        mock_send.assert_not_called()
+
+
 class TestAccessControlledClientFailsClosed:
     """Test that the client fails closed (403) on URLs that bypass the profile ACL.
 

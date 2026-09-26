@@ -7,7 +7,10 @@ from typing import Any, Literal
 
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_query_params, _validate_profile_id
+from ..utils import _api_request, _build_query_params, _cap_limit, _validate_profile_id
+
+# Server-side cap for the ``limit`` parameter (maximum accepted by the NextDNS API).
+ANALYTICS_LIMIT_MAX = 500
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 AnalyticsMetric = Literal[
@@ -58,8 +61,9 @@ async def _query_analytics_impl(
     suffix = ";series" if series else ""
     url = f"/profiles/{profile_id}/analytics/{metric}{suffix}"
 
+    capped_limit, _ = _cap_limit(limit, ANALYTICS_LIMIT_MAX)
     params: dict[str, Any] = _build_query_params(
-        **{"from": from_time, "to": to_time, "limit": limit, "cursor": cursor, "device": device}
+        **{"from": from_time, "to": to_time, "limit": capped_limit, "cursor": cursor, "device": device}
     )
 
     if series:
@@ -120,6 +124,9 @@ async def queryAnalytics(
     Set ``series=true`` to fetch time-series data instead of aggregate totals.
     Time values can be Unix timestamps or relative strings like ``-1d``.
     Note: ``series=true`` is not supported when ``metric="domains"``.
+
+    ``limit`` is capped server-side at 500 (the maximum accepted by the
+    NextDNS API).
 
     Optional filters:
         - ``cursor``: Pagination cursor from a previous response.

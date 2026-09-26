@@ -211,7 +211,7 @@ class TestHttpErrorContract:
 
     @pytest.mark.asyncio
     async def test_manage_logs_download_http_error(self, mock_api_client):
-        mock_api_client.get.side_effect = _http_error(503)
+        mock_api_client.stream = MagicMock(side_effect=_http_error(503))
         result = await server.manageLogs("download", "abc123")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.HTTP_ERROR
