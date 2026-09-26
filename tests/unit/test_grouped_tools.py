@@ -977,3 +977,8 @@ class TestUsageGuidePrompt:
         assert "plotAnalytics" in guide
         assert "Block a domain" in guide
         assert "View blocked query trends" in guide
+        assert "parental_categories" in guide
+        assert "parental_services" in guide
+        assert 'entry_id="<id-from-list>"' in guide
+        assert "Delete a DNS rewrite" in guide
+        assert "router.home" in guide

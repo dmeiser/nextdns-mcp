@@ -69,6 +69,6 @@ async def manageRewrites(
     Examples:
         - list: ``manageRewrites(operation="list", profile_id="abc123")``
         - add: ``manageRewrites(operation="add", profile_id="abc123", name="router.home", content="192.168.1.1")``
-        - delete: ``manageRewrites(operation="delete", profile_id="abc123", entry_id="router.home")``
+        - delete: ``manageRewrites(operation="delete", profile_id="abc123", entry_id="<id-from-list>")``
     """
     return await _manage_rewrites_impl(operation, profile_id, name, content, entry_id)
