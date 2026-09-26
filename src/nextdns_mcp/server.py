@@ -5,10 +5,8 @@ SPDX-License-Identifier: MIT
 
 import logging
 import os
+import sys
 from typing import Any
-
-# Disable FastMCP automatic update checks to prevent startup delays and hangs in offline/CI environments
-os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
 
 from fastmcp import FastMCP
 
@@ -69,6 +67,43 @@ def get_mcp_server() -> FastMCP:
     if _mcp_server is None:
         _mcp_server = build_mcp_server()
     return _mcp_server
+
+
+def _sync_fastmcp_update_check() -> None:
+    """Mirror ``FASTMCP_CHECK_FOR_UPDATES`` into FastMCP's live settings object.
+
+    ``fastmcp/__init__.py`` builds its settings at package import time, and
+    importing this module pulls FastMCP in transitively (via ``.tools.plots``
+    and ``.openapi``). Setting the variable after that import would be
+    silently ignored, so the value is applied to the live settings too. The
+    variable is read (not hardcoded) so an operator who opted into update
+    checks keeps them.
+    """
+    fastmcp_settings = getattr(sys.modules.get("fastmcp"), "settings", None)
+    if fastmcp_settings is not None:
+        fastmcp_settings.check_for_updates = os.environ["FASTMCP_CHECK_FOR_UPDATES"]
+
+
+def configure() -> FastMCP:
+    """Perform this process's server side effects explicitly and return the server.
+
+    Importing this module has no side effects (issue #190): it neither builds
+    a FastMCP instance nor mutates the environment. Callers that actually
+    serve traffic - the ``__main__`` entrypoint and the tests - call this to
+
+    1. disable FastMCP's automatic update check, which delays startup and can
+       hang in offline/CI environments, and
+    2. build the shared server instance on purpose instead of at import time.
+
+    The server is created on first use and cached, so calling this repeatedly
+    is cheap and returns the same instance.
+
+    Returns:
+        FastMCP: The shared, configured MCP server instance.
+    """
+    os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
+    _sync_fastmcp_update_check()
+    return get_mcp_server()
 
 
 def __getattr__(name: str) -> Any:
@@ -132,7 +167,7 @@ def _run_server() -> None:
     logger.info(f"  Base URL: {NEXTDNS_BASE_URL}")
     logger.info(f"  Timeout: {get_http_timeout()}s")
     validate_configuration()
-    get_mcp_server().run(**get_mcp_run_options())
+    configure().run(**get_mcp_run_options())
 
 
 if __name__ == "__main__":  # pragma: no cover
