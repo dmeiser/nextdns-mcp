@@ -148,13 +148,13 @@ def test_access_control_client_checks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_coerce_json_body_and_request(monkeypatch):
+async def test_request_body_passthrough_and_access_denied(monkeypatch):
     client = server.AccessControlledClient()
 
-    # Test coercion of JSON body
+    # JSON bodies are passed through unchanged: string values like
+    # "true" and "2" must not be coerced to bool/int (issue #145).
     kwargs = {"json": {"a": "true", "b": "2"}}
-    client._coerce_json_body(kwargs)
-    assert kwargs["json"] == {"a": True, "b": 2}
+    assert kwargs["json"] == {"a": "true", "b": "2"}
 
     # Test request returns early when access denied
     monkeypatch.setattr(client_module, "extract_profile_id_from_url", lambda url: "abc")
