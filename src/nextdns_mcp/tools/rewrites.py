@@ -33,17 +33,38 @@ async def _manage_rewrites_impl(
     base_url = f"/profiles/{target_profile}/rewrites"
 
     if operation == "list":
-        return await _api_request("GET", base_url)
+        try:
+                    return await _api_request("GET", base_url)
+        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, httpx.HTTPError):
+                return http_error_payload(str(e), cause)
+            else:
+                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
     if operation == "add":
         if not name or not content:
             return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name and content are required for add operation")
-        return await _api_request("POST", base_url, json={"name": name, "content": content})
+        try:
+                    return await _api_request("POST", base_url, json={"name": name, "content": content})
+        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, httpx.HTTPError):
+                return http_error_payload(str(e), cause)
+            else:
+                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
     if operation == "delete":
         if not entry_id:
             return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for delete operation")
-        return await _api_request("DELETE", f"{base_url}/{entry_id}")
+        try:
+                    return await _api_request("DELETE", f"{base_url}/{entry_id}")
+        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, httpx.HTTPError):
+                return http_error_payload(str(e), cause)
+            else:
+                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 

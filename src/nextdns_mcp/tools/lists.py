@@ -43,7 +43,14 @@ _LIST_PATHS: dict[ListType, str] = {
 
 async def _lists_get(base_url: str) -> dict[str, Any]:
     """Fetch the current list entries."""
-    return await _api_request("GET", base_url)
+    try:
+        return await _api_request("GET", base_url)
+    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        cause = e.__cause__
+        if cause is not None and isinstance(cause, httpx.HTTPError):
+            return http_error_payload(str(e), cause)
+        else:
+            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
 
 async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[str, Any]:
@@ -55,7 +62,14 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
     entry_error = _validate_list_entry(body, "entry", "add")
     if entry_error:
         return entry_error
-    return await _api_request("POST", base_url, json=body)
+    try:
+        return await _api_request("POST", base_url, json=body)
+    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        cause = e.__cause__
+        if cause is not None and isinstance(cause, httpx.HTTPError):
+            return http_error_payload(str(e), cause)
+        else:
+            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
 
 def _validate_list_entry(entry: Any, label: str, operation: str, **extra: Any) -> dict[str, Any] | None:
@@ -103,7 +117,14 @@ async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | No
     entry_error = _validate_replace_entries(entries)
     if entry_error:
         return entry_error
-    return await _api_request("PUT", base_url, json=entries)
+    try:
+            return await _api_request("PUT", base_url, json=entries)
+    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        cause = e.__cause__
+        if cause is not None and isinstance(cause, httpx.HTTPError):
+            return http_error_payload(str(e), cause)
+        else:
+            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
 
 async def _lists_update(
@@ -124,14 +145,28 @@ async def _lists_update(
     entry = _coerce_json_arg(entry)
     if not isinstance(entry, dict):
         return error_payload(ErrorCode.INVALID_ARGUMENT, "entry must be a dict for update operation")
-    return await _api_request("PATCH", f"{base_url}/{entry_id}", json=entry)
+    try:
+            return await _api_request("PATCH", f"{base_url}/{entry_id}", json=entry)
+    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        cause = e.__cause__
+        if cause is not None and isinstance(cause, httpx.HTTPError):
+            return http_error_payload(str(e), cause)
+        else:
+            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
 
 async def _lists_remove(base_url: str, entry_id: str | None) -> dict[str, Any]:
     """Remove a single list entry by id."""
     if entry_id is None:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for remove operation")
-    return await _api_request("DELETE", f"{base_url}/{entry_id}")
+    try:
+            return await _api_request("DELETE", f"{base_url}/{entry_id}")
+    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        cause = e.__cause__
+        if cause is not None and isinstance(cause, httpx.HTTPError):
+            return http_error_payload(str(e), cause)
+        else:
+            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
 
 async def _manage_lists_impl(

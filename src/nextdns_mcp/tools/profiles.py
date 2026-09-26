@@ -8,7 +8,8 @@ from typing import Any, Literal
 from ..coercion import OptionalProfileId
 from ..config import load_profile_access_control
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_query_params, resolve_profile_id
+from ..utils import _api_request, _build_query_params, resolve_profile_id, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
+import httpx
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ProfileOperation = Literal["list", "create", "get", "update", "delete"]
@@ -21,7 +22,14 @@ async def _profiles_list(cursor: str | None = None) -> dict[str, Any]:
     if not access.any_readable:
         return error_payload(ErrorCode.READ_ACCESS_DENIED, "Read access denied: no profiles are readable")
     params = _build_query_params(cursor=cursor)
-    result = await _api_request("GET", "/profiles", params=params or None)
+    try:
+            result = await _api_request("GET", "/profiles", params=params or None)
+    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        cause = e.__cause__
+        if cause is not None and isinstance(cause, httpx.HTTPError):
+            result = http_error_payload(str(e), cause)
+        else:
+            result = error_payload(ErrorCode.INTERNAL_ERROR, str(e))
     if isinstance(result, dict) and "meta" in result and isinstance(result["meta"], dict):
         pagination = result["meta"].get("pagination")
         if isinstance(pagination, dict) and pagination.get("cursor"):
@@ -39,13 +47,27 @@ async def _profiles_create(name: str | None) -> dict[str, Any]:
         return error_payload(ErrorCode.WRITE_ACCESS_DENIED, "Write access denied: no profiles are writable")
     if not name:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for create operation")
-    return await _api_request("POST", "/profiles", json={"name": name})
+    try:
+            return await _api_request("POST", "/profiles", json={"name": name})
+    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        cause = e.__cause__
+        if cause is not None and isinstance(cause, httpx.HTTPError):
+            return http_error_payload(str(e), cause)
+        else:
+            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
 
 async def _profiles_update(url: str, name: str | None) -> dict[str, Any]:
     if not name:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for update operation")
-    return await _api_request("PATCH", url, json={"name": name})
+    try:
+            return await _api_request("PATCH", url, json={"name": name})
+    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        cause = e.__cause__
+        if cause is not None and isinstance(cause, httpx.HTTPError):
+            return http_error_payload(str(e), cause)
+        else:
+            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
 
 async def _manage_profiles_impl(
@@ -68,11 +90,25 @@ async def _manage_profiles_impl(
 
     url = f"/profiles/{target_profile}"
     if operation == "get":
-        return await _api_request("GET", url)
+        try:
+                    return await _api_request("GET", url)
+        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, httpx.HTTPError):
+                return http_error_payload(str(e), cause)
+            else:
+                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
     if operation == "update":
         return await _profiles_update(url, name)
     if operation == "delete":
-        return await _api_request("DELETE", url)
+        try:
+                    return await _api_request("DELETE", url)
+        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, httpx.HTTPError):
+                return http_error_payload(str(e), cause)
+            else:
+                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 

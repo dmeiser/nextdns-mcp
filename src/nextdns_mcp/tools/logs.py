@@ -337,10 +337,24 @@ async def _manage_logs_impl(
         params = _build_query_params(
             **{"from": from_time, "to": to_time, "limit": capped_limit, "device": device, "search": user, "raw": raw}
         )
-        return await _api_request("GET", base_url, params=params)
+        try:
+                    return await _api_request("GET", base_url, params=params)
+        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, httpx.HTTPError):
+                return http_error_payload(str(e), cause)
+            else:
+                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
     if operation == "clear":
-        return await _api_request("DELETE", base_url)
+        try:
+                    return await _api_request("DELETE", base_url)
+        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, httpx.HTTPError):
+                return http_error_payload(str(e), cause)
+            else:
+                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
     if operation == "download":
         return await _download_logs_to_tempfile(target_profile)
