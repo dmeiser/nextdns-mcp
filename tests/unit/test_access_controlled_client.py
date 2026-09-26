@@ -245,9 +245,7 @@ class TestAccessControlledClientBodyPassthrough:
         clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            await client.request(
-                "PUT", "/profiles/abc123/denylist", json=[{"id": "example.com", "blocked": True}]
-            )
+            await client.request("PUT", "/profiles/abc123/denylist", json=[{"id": "example.com", "blocked": True}])
 
         body = mock_super_request.call_args.kwargs["json"]
         assert body == [{"id": "example.com", "blocked": True}]
