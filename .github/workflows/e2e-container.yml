@@ -146,12 +146,12 @@ jobs:
             echo "⚠️ **Skipped**: NEXTDNS_API_KEY secret is not available (e.g. fork PR). Image build succeeded." >> $GITHUB_STEP_SUMMARY
           elif [ -f "$REPORT_FILE" ]; then
             TOTAL=$(wc -l < "$REPORT_FILE")
-            PASSED=$(grep -c '"status":"OK"' "$REPORT_FILE" || echo "0")
-            FAILED=$(grep -c '"status":"FAILED"' "$REPORT_FILE" || echo "0")
-            SKIPPED=$(grep -c '"status":"SKIPPED"' "$REPORT_FILE" || echo "0")
-            SCHEMA_VALID=$(grep -c '"schema_validation":"VALID"' "$REPORT_FILE" || echo "0")
-            SCHEMA_INVALID=$(grep -c '"schema_validation":"INVALID"' "$REPORT_FILE" || echo "0")
-            SCHEMA_SKIPPED=$(grep -c '"schema_validation":"SKIPPED"' "$REPORT_FILE" || echo "0")
+            PASSED=$(grep -c '"status":"OK"' "$REPORT_FILE" || true)
+            FAILED=$(grep -c '"status":"FAILED"' "$REPORT_FILE" || true)
+            SKIPPED=$(grep -c '"status":"SKIPPED"' "$REPORT_FILE" || true)
+            SCHEMA_VALID=$(grep -c '"schema_validation":"VALID"' "$REPORT_FILE" || true)
+            SCHEMA_INVALID=$(grep -c '"schema_validation":"INVALID"' "$REPORT_FILE" || true)
+            SCHEMA_SKIPPED=$(grep -c '"schema_validation":"SKIPPED"' "$REPORT_FILE" || true)
 
             echo "- **Total Calls**: $TOTAL" >> $GITHUB_STEP_SUMMARY
             echo "- **Passed**: ✅ $PASSED" >> $GITHUB_STEP_SUMMARY
