@@ -13,22 +13,6 @@ This directory contains integration tests for the NextDNS MCP server.
 uv run pytest tests/integration/test_server_init.py -v
 ```
 
-## End-to-End Testing
-
-For complete end-to-end testing with the live NextDNS API via Docker MCP Gateway, use the Gateway E2E script instead:
-
-```bash
-# Default (slim) variant
-cd scripts
-./gateway_e2e_run.sh
-
-# Alpine variant
-cd scripts
-./gateway_e2e_run.sh .env alpine
-```
-
-See `scripts/README.md` for complete Gateway E2E testing documentation.
-
 ## What These Tests Cover
 
 ### `test_server_init.py`
@@ -66,8 +50,6 @@ The integration tests verify:
 - ✅ Access control mechanisms work
 - ✅ Configuration validation functions correctly
 
-For complete API endpoint testing, use the Gateway E2E scripts in `scripts/`.
-
 ## Development
 
 ### Running Tests During Development
@@ -90,11 +72,9 @@ When adding new MCP server functionality:
 1. Add tests to `test_server_init.py` to verify server initialization
 2. Use mocked dependencies (see existing tests for examples)
 3. Do NOT make live API calls in integration tests
-4. For live API testing, add to Gateway E2E scripts in `scripts/`
 
 ## Notes
 
 - These tests do NOT require a NextDNS API key
 - These tests do NOT make network calls
 - These tests verify server initialization logic only
-- For full end-to-end validation, use Gateway E2E scripts

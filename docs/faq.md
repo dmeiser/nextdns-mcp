@@ -1,7 +1,7 @@
 # FAQ
 
 ## How do I find my profile_id?
-Run `docker mcp tools call manageProfiles operation=list` and copy the `id` of the desired profile.
+Run the `manageProfiles` tool with `operation="list"` (or check your NextDNS dashboard URL: `https://my.nextdns.io/<profile_id>`) and copy the `id` of the desired profile.
 
 ## Can I use the tools without specifying profile_id?
 Set `NEXTDNS_DEFAULT_PROFILE` to a profile ID; tools that accept `profile_id` will use it when omitted.
