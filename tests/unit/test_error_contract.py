@@ -182,7 +182,7 @@ class TestAccessControlErrorContract:
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.READ_ACCESS_DENIED
         assert result["status_code"] == 403
-        # The denial reason must survive the synthetic-403.
+        # The denial reason must survive the typed AccessDeniedError (issue #178).
         assert "Read access denied for profile: abc123" in result["error"]
 
     @pytest.mark.asyncio
@@ -194,6 +194,16 @@ class TestAccessControlErrorContract:
         assert result["code"] == ErrorCode.WRITE_ACCESS_DENIED
         assert result["status_code"] == 403
         assert "Write access denied for profile: abc123" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_upstream_403_is_http_error_not_acl_denial(self, mock_api_client):
+        """A genuine upstream 403 (raise_for_status) must NOT be mapped to an
+        ACL denial: it keeps the existing http_error path (issue #178)."""
+        mock_api_client.request.side_effect = _http_error(403)
+        result = await server.manageSettings("get", "general", "abc123")
+        _assert_error_contract(result)
+        assert result["code"] == ErrorCode.HTTP_ERROR
+        assert result["status_code"] == 403
 
 
 class TestHttpErrorContract:

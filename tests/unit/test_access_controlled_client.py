@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from nextdns_mcp.client import AccessControlledClient
+from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
 
 
 @pytest.fixture(autouse=True)
@@ -76,14 +76,15 @@ class TestAccessControlledClientReadAccess:
         clean_env("NEXTDNS_READABLE_PROFILES", "xyz999")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("GET", "/profiles/abc123/settings")
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "/profiles/abc123/settings")
 
         # Should NOT call the parent request method
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "error" in response.json()
-        assert response.json()["code"] == "read_access_denied"
-        assert "Read access denied" in response.json()["error"]
+        error = exc_info.value
+        assert error.code == "read_access_denied"
+        assert error.profile_id == "abc123"
+        assert "Read access denied for profile: abc123" in str(error)
 
     @pytest.mark.asyncio
     async def test_allows_list_profiles_without_check(
@@ -107,13 +108,13 @@ class TestAccessControlledClientReadAccess:
         # Mirrors the per-tool list check in tools/profiles.py: readable set is None only
         # when both readable and writable are unset (writable implies readable).
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("GET", "/profiles")
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "/profiles")
 
         # Should NOT call the parent request method
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "no profiles are readable" in response.json()["error"]
-        assert response.json()["code"] == "read_access_denied"
+        assert exc_info.value.code == "read_access_denied"
+        assert "no profiles are readable" in str(exc_info.value)
 
 
 class TestAccessControlledClientWriteAccess:
@@ -143,13 +144,15 @@ class TestAccessControlledClientWriteAccess:
         clean_env("NEXTDNS_WRITABLE_PROFILES", "xyz999")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("POST", "/profiles/abc123/denylist", json={"id": "example.com"})
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("POST", "/profiles/abc123/denylist", json={"id": "example.com"})
 
         # Should NOT call the parent request method
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "error" in response.json()
-        assert response.json()["code"] == "write_access_denied"
+        error = exc_info.value
+        assert error.code == "write_access_denied"
+        assert error.profile_id == "abc123"
+        assert "Write access denied for profile: abc123" in str(error)
 
     @pytest.mark.asyncio
     async def test_denies_all_writes_in_read_only_mode(
@@ -161,13 +164,13 @@ class TestAccessControlledClientWriteAccess:
         clean_env("NEXTDNS_READ_ONLY", "true")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("DELETE", "/profiles/abc123")
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("DELETE", "/profiles/abc123")
 
         # Should NOT call the parent request method
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "read-only mode" in response.json()["error"]
-        assert response.json()["code"] == "write_access_denied"
+        assert "read-only mode" in str(exc_info.value)
+        assert exc_info.value.code == "write_access_denied"
 
     @pytest.mark.asyncio
     async def test_denies_create_profile_when_no_writable_profiles(
@@ -176,13 +179,13 @@ class TestAccessControlledClientWriteAccess:
         """Test that POST /profiles is denied when no profiles are writable (issue #132)."""
         # Collection endpoint with no profile_id in the URL; writable set unset = deny all
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("POST", "/profiles", json={"name": "New Profile"})
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("POST", "/profiles", json={"name": "New Profile"})
 
         # Should NOT call the parent request method
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "error" in response.json()
-        assert response.json()["code"] == "write_access_denied"
+        assert exc_info.value.code == "write_access_denied"
+        assert "no profiles are writable" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_denies_create_profile_in_read_only_mode(
@@ -192,13 +195,13 @@ class TestAccessControlledClientWriteAccess:
         clean_env("NEXTDNS_READ_ONLY", "true")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("POST", "/profiles", json={"name": "New Profile"})
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("POST", "/profiles", json={"name": "New Profile"})
 
         # Should NOT call the parent request method
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "read-only mode" in response.json()["error"]
-        assert response.json()["code"] == "write_access_denied"
+        assert "read-only mode" in str(exc_info.value)
+        assert exc_info.value.code == "write_access_denied"
 
     @pytest.mark.asyncio
     async def test_allows_create_profile_when_writable_set_allows(
@@ -242,13 +245,12 @@ class TestAccessControlledClientStreaming:
 
         with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
             async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-                async with client.stream("GET", "/profiles/abc123/logs/download") as response:
-                    assert response.status_code == 403
-                    with pytest.raises(httpx.HTTPStatusError) as exc_info:
-                        response.raise_for_status()
-                    assert exc_info.value.response.status_code == 403
+                with pytest.raises(AccessDeniedError) as exc_info:
+                    async with client.stream("GET", "/profiles/abc123/logs/download"):
+                        pass
 
         mock_send.assert_not_called()
+        assert exc_info.value.code == "read_access_denied"
 
     @pytest.mark.asyncio
     async def test_stream_denies_write_in_read_only_mode(self, clean_env: Callable[[str, str], None]) -> None:
@@ -258,14 +260,17 @@ class TestAccessControlledClientStreaming:
 
         with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
             async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-                async with client.stream("DELETE", "/profiles/abc123/logs") as response:
-                    assert response.status_code == 403
+                with pytest.raises(AccessDeniedError) as exc_info:
+                    async with client.stream("DELETE", "/profiles/abc123/logs"):
+                        pass
 
         mock_send.assert_not_called()
+        assert exc_info.value.code == "write_access_denied"
+        assert "read-only mode" in str(exc_info.value)
 
 
 class TestAccessControlledClientFailsClosed:
-    """Test that the client fails closed (403) on URLs that bypass the profile ACL.
+    """Test that the client fails closed (AccessDeniedError) on URLs that bypass the profile ACL.
 
     Regression tests for issue #131: traversal payloads and absolute URLs used to
     skip the access check entirely because extract_profile_id_from_url returned
@@ -281,12 +286,12 @@ class TestAccessControlledClientFailsClosed:
         clean_env("NEXTDNS_READABLE_PROFILES", "allowed123")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("GET", "/profiles/allowed123/../../profiles/denied456/settings")
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "/profiles/allowed123/../../profiles/denied456/settings")
 
-        # The request must NOT reach the transport; it must be denied with 403.
+        # The request must NOT reach the transport; it must be denied.
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "error" in response.json()
+        assert exc_info.value.code == "access_denied"
 
     @pytest.mark.asyncio
     async def test_denies_absolute_url_with_profile_path(
@@ -296,11 +301,11 @@ class TestAccessControlledClientFailsClosed:
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("GET", "https://evil.example/profiles/abc123/settings")
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "https://evil.example/profiles/abc123/settings")
 
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "error" in response.json()
+        assert exc_info.value.code == "access_denied"
 
     @pytest.mark.asyncio
     async def test_denies_unclassifiable_profiles_path(
@@ -310,11 +315,11 @@ class TestAccessControlledClientFailsClosed:
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("GET", "/profiles/abc.def/settings")
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "/profiles/abc.def/settings")
 
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "error" in response.json()
+        assert exc_info.value.code == "access_denied"
 
     @pytest.mark.asyncio
     async def test_denies_relative_profile_path_when_not_readable(
@@ -324,11 +329,11 @@ class TestAccessControlledClientFailsClosed:
         clean_env("NEXTDNS_READABLE_PROFILES", "allowed123")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("GET", "profiles/denied456/settings")
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "profiles/denied456/settings")
 
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "error" in response.json()
+        assert exc_info.value.code == "access_denied"
 
     @pytest.mark.asyncio
     async def test_allows_relative_profile_path_when_readable(
@@ -351,11 +356,11 @@ class TestAccessControlledClientFailsClosed:
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
 
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.request("GET", "/profiles/allowed123/../../profiles/denied456/settings")
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "/profiles/allowed123/../../profiles/denied456/settings")
 
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        assert "error" in response.json()
+        assert exc_info.value.code == "access_denied"
 
 
 class TestAccessControlledClientRequestLogging:
@@ -420,12 +425,13 @@ class TestAccessControlledClientRequestLogging:
 
         with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.client"):
             async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-                response = await client.request("GET", request_url)
+                with pytest.raises(AccessDeniedError) as exc_info:
+                    await client.request("GET", request_url)
 
         mock_super_request.assert_not_called()
-        assert response.status_code == 403
-        # Response body behavior is unchanged: the error still names the full URL.
-        assert response.json()["error"] == f"Forbidden URL: {request_url}"
+        assert exc_info.value.code == "access_denied"
+        # The typed error's message still names the full URL.
+        assert str(exc_info.value) == f"Forbidden URL: {request_url}"
         # No WARNING record may contain the query string.
         warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
         assert warning_messages
@@ -434,6 +440,45 @@ class TestAccessControlledClientRequestLogging:
             assert "secret-device-id" not in msg
             assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
         assert any("/profiles/abc.def/logs" in msg for msg in warning_messages)
+
+
+class TestAccessDeniedError:
+    """The typed ACL denial exception raised instead of a synthetic 403 (issue #178)."""
+
+    def test_carries_reason_code_and_profile(self):
+        err = AccessDeniedError(
+            "Write operation denied: server is in read-only mode", code="write_access_denied", profile_id="abc123"
+        )
+        assert str(err) == "Write operation denied: server is in read-only mode"
+        assert err.code == "write_access_denied"
+        assert err.profile_id == "abc123"
+
+    def test_defaults(self):
+        err = AccessDeniedError("denied")
+        assert str(err) == "denied"
+        assert err.code == "access_denied"
+        assert err.profile_id == ""
+
+    def test_is_not_an_httpx_error(self):
+        # An ACL denial must stay distinguishable from an upstream HTTP failure.
+        assert not isinstance(AccessDeniedError("denied"), httpx.HTTPError)
+
+    @pytest.mark.asyncio
+    async def test_genuine_upstream_403_keeps_http_path(self, mock_super_request: Any, clean_env) -> None:
+        """A real upstream 403 raises httpx.HTTPStatusError, not AccessDeniedError."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        mock_super_request.return_value = httpx.Response(
+            403,
+            json={"error": "upstream says no"},
+            request=httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/settings"),
+        )
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("GET", "/profiles/abc123/settings")
+            with pytest.raises(httpx.HTTPStatusError):
+                response.raise_for_status()
+
+        mock_super_request.assert_called_once()
 
 
 class TestAccessControlledClientMethods:

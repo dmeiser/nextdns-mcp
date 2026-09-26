@@ -100,36 +100,31 @@ def is_write_operation(method: str) -> bool:
     return method.upper() in ("POST", "PUT", "PATCH", "DELETE")
 
 
-def create_access_denied_response(
-    method: str, url: str, error_msg: str, profile_id: str, code: str = ErrorCode.ACCESS_DENIED
-) -> httpx.Response:
-    """Create a 403 Forbidden response for access denied scenarios.
+class AccessDeniedError(Exception):
+    """Raised when the profile access-control layer denies a request (issue #178).
 
-    Args:
-        method: HTTP method
-        url: Request URL
-        error_msg: Error message to include in response
-        profile_id: The profile ID that was denied access
-        code: Typed error code identifying the denial class (read/write)
-
-    Returns:
-        403 Forbidden Response object
+    Carries the ACL denial reason as its message plus the typed error ``code``
+    (``read_access_denied`` / ``write_access_denied`` / ``access_denied``) and
+    the denied ``profile_id`` ("" for collection endpoints). This replaces the
+    synthetic 403 ``httpx.Response`` the ACL used to return, which had no
+    transport or stream and made an ACL denial indistinguishable from a real
+    upstream 403.
     """
-    response = httpx.Response(
-        status_code=403,
-        json={"error": error_msg, "code": code, "profile_id": profile_id},
-        request=httpx.Request(method, str(url)),
-    )
-    return response
+
+    def __init__(self, message: str, *, code: str = ErrorCode.ACCESS_DENIED, profile_id: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.profile_id = profile_id
+        self.message = message
 
 
 class AccessControlledClient(httpx.AsyncClient):
     """HTTP client wrapper that enforces profile access control."""
 
-    def _check_write_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
-        """Check write access and return error response if denied."""
+    def _check_write_access(self, profile_id: str, method: str, url: str) -> None:
+        """Check write access; raise AccessDeniedError if denied."""
         if can_write_profile(profile_id):
-            return None
+            return
 
         if is_read_only():
             error_msg = "Write operation denied: server is in read-only mode"
@@ -137,18 +132,18 @@ class AccessControlledClient(httpx.AsyncClient):
             error_msg = f"Write access denied for profile: {profile_id}"
 
         logger.warning(f"{error_msg} (method={method}, url={str(url).split('?', 1)[0]})")
-        return create_access_denied_response(method, url, error_msg, profile_id, code=ErrorCode.WRITE_ACCESS_DENIED)
+        raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED, profile_id=profile_id)
 
-    def _check_read_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
-        """Check read access and return error response if denied."""
+    def _check_read_access(self, profile_id: str, method: str, url: str) -> None:
+        """Check read access; raise AccessDeniedError if denied."""
         if can_read_profile(profile_id):
-            return None
+            return
 
         error_msg = f"Read access denied for profile: {profile_id}"
         logger.warning(f"{error_msg} (method={method}, url={str(url).split('?', 1)[0]})")
-        return create_access_denied_response(method, url, error_msg, profile_id, code=ErrorCode.READ_ACCESS_DENIED)
+        raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED, profile_id=profile_id)
 
-    def _check_collection_write_access(self, method: str, url: str) -> httpx.Response | None:
+    def _check_collection_write_access(self, method: str, url: str) -> None:
         """Enforce global write denials for collection endpoints (no profile_id in URL).
 
         Collection endpoints such as POST /profiles create resources that belong to a
@@ -158,16 +153,14 @@ class AccessControlledClient(httpx.AsyncClient):
         if is_read_only():
             error_msg = "Write operation denied: server is in read-only mode"
             logger.warning(f"{error_msg} (method={method}, url={url})")
-            return create_access_denied_response(method, url, error_msg, "", code=ErrorCode.WRITE_ACCESS_DENIED)
+            raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
         if get_writable_profiles_set() is None:
             error_msg = "Write access denied: no profiles are writable"
             logger.warning(f"{error_msg} (method={method}, url={url})")
-            return create_access_denied_response(method, url, error_msg, "", code=ErrorCode.WRITE_ACCESS_DENIED)
+            raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
-        return None
-
-    def _check_collection_read_access(self, method: str, url: str) -> httpx.Response | None:
+    def _check_collection_read_access(self, method: str, url: str) -> None:
         """Enforce global read denials for collection endpoints (no profile_id in URL).
 
         Collection endpoints such as GET /profiles list profile-scoped resources, so
@@ -177,21 +170,21 @@ class AccessControlledClient(httpx.AsyncClient):
         if get_readable_profiles_set() is None:
             error_msg = "Read access denied: no profiles are readable"
             logger.warning(f"{error_msg} (method={method}, url={url})")
-            return create_access_denied_response(method, url, error_msg, "", code=ErrorCode.READ_ACCESS_DENIED)
+            raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED)
 
-        return None
-
-    def _check_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
-        """Check access control for profile operations."""
+    def _check_access(self, profile_id: str, method: str, url: str) -> None:
+        """Check access control for profile operations; raise AccessDeniedError if denied."""
         if is_write_operation(method):
-            return self._check_write_access(profile_id, method, url)
-        return self._check_read_access(profile_id, method, url)
+            self._check_write_access(profile_id, method, url)
+        else:
+            self._check_read_access(profile_id, method, url)
 
-    def _check_collection_access(self, method: str, url: str) -> httpx.Response | None:
-        """Check access control for collection operations."""
+    def _check_collection_access(self, method: str, url: str) -> None:
+        """Check access control for collection operations; raise AccessDeniedError if denied."""
         if is_write_operation(method):
-            return self._check_collection_write_access(method, url)
-        return self._check_collection_read_access(method, url)
+            self._check_collection_write_access(method, url)
+        else:
+            self._check_collection_read_access(method, url)
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
         """Make an HTTP request with access control checks.
@@ -201,8 +194,13 @@ class AccessControlledClient(httpx.AsyncClient):
             url: Request URL
             **kwargs: Additional request arguments
 
+        Raises:
+            AccessDeniedError: If the request is denied by the profile access
+                control layer (read/write ACL, read-only mode, or fail-closed
+                URL classification). No network request is made.
+
         Returns:
-            Response from the API, or a 403 Forbidden response if access is denied
+            Response from the API
         """
         # Query strings can carry sensitive data (search terms, device IDs, cursor
         # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
@@ -219,20 +217,16 @@ class AccessControlledClient(httpx.AsyncClient):
         profile_id = _extract_profile_id_from_path(request_path)
 
         if profile_id:
-            error_response = self._check_access(profile_id, method, url)
-            if error_response:
-                return error_response
+            self._check_access(profile_id, method, url)
         elif is_absolute_url or contains_traversal or unclassifiable_profiles_path:
             # Fail closed: absolute/authority-bearing URLs, traversal payloads, and
             # unclassifiable /profiles paths cannot be matched against the profile
             # ACL, so deny them instead of letting them bypass the check entirely.
             error_msg = f"Forbidden URL: {url!s}"
             logger.warning(f"Forbidden URL: {logged_path} (method={method})")
-            return create_access_denied_response(method, url, error_msg, profile_id or "")
+            raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or "")
         else:
-            error_response = self._check_collection_access(method, url)
-            if error_response:
-                return error_response
+            self._check_collection_access(method, url)
 
         # No body coercion here: string values in JSON bodies are passed through
         # unchanged. Schema-aware coercion of tool arguments already happens in
@@ -245,18 +239,15 @@ class AccessControlledClient(httpx.AsyncClient):
         """Stream a response with access control checks.
 
         httpx's ``stream()`` does not call ``request()``, so the ACL guard is
-        applied here as well. When access is denied, the synthetic 403 response
-        is yielded without any network request, so the caller's
-        ``raise_for_status()`` surfaces the same 403-shaped error as request().
+        applied here as well. When access is denied, AccessDeniedError is raised
+        (propagating on ``__aenter__``) without any network request, exactly as
+        ``request()`` does.
         """
         logger.info(f"HTTP Stream: {method} {url}")
 
         profile_id = extract_profile_id_from_url(str(url))
         if profile_id:
-            error_response = self._check_access(profile_id, method, str(url))
-            if error_response:
-                yield error_response
-                return
+            self._check_access(profile_id, method, str(url))
 
         async with super().stream(method, url, **kwargs) as response:
             yield response

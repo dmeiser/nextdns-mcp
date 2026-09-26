@@ -11,9 +11,10 @@ from typing import Any, Literal
 import httpx
 
 from .. import client
+from ..client import AccessDeniedError
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload, http_error_payload
-from ..utils import _api_request, _build_query_params, _cap_limit, resolve_profile_id
+from ..utils import _api_request, _build_query_params, _cap_limit, access_denied_payload, resolve_profile_id
 
 logger = logging.getLogger(__name__)
 
@@ -137,14 +138,20 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
     path = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_"), "download.csv")
     try:
         async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download") as initial:
-            # A non-redirect response (including the synthetic 403 from the
-            # access-controlled client, which carries no real redirect target)
-            # is written straight to disk; _write_stream_to_tempfile surfaces
-            # any HTTP error via raise_for_status.
+            # A non-redirect response is written straight to disk;
+            # _write_stream_to_tempfile surfaces any HTTP error via
+            # raise_for_status.
             if not initial.has_redirect_location or initial.is_error:
                 return await _write_stream_to_tempfile(initial, path)
             redirect_url = initial.request.url.join(initial.headers["location"])
         return await _follow_redirects_to_tempfile(redirect_url, path)
+    except AccessDeniedError as e:
+        # Raised by the ACL layer (via stream()) before any network request;
+        # kept out of the httpx.HTTPError branch so a real upstream 403 keeps
+        # its existing http_error path.
+        _unlink_temp_file(path)
+        logger.warning(f"Access denied downloading logs: {e}")
+        return access_denied_payload(e)
     except httpx.HTTPError as e:
         _unlink_temp_file(path)
         logger.error(f"HTTP error downloading logs: {e}")

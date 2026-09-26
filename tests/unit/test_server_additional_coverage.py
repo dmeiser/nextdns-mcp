@@ -128,11 +128,11 @@ async def test_strip_extra_fields_middleware_basic_and_exception():
         await mw.on_call_tool(context_exc, _dummy_call_next)
 
 
-def test_create_access_denied_response():
-    resp = client_module.create_access_denied_response("PUT", "/profiles/abc/settings", "denied", "abc")
-    assert resp.status_code == 403
-    assert resp.json()["profile_id"] == "abc"
-    assert resp.request.method == "PUT"
+def test_access_denied_error_carries_reason():
+    err = client_module.AccessDeniedError("denied", code="write_access_denied", profile_id="abc")
+    assert str(err) == "denied"
+    assert err.code == "write_access_denied"
+    assert err.profile_id == "abc"
 
 
 def test_access_control_client_checks(monkeypatch):
@@ -142,15 +142,16 @@ def test_access_control_client_checks(monkeypatch):
     monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
     monkeypatch.setattr(client_module, "is_read_only", lambda: True)
 
-    r = client._check_write_access("abc", "PUT", "/profiles/abc")
-    assert isinstance(r, httpx.Response)
-    assert r.status_code == 403
-    assert "read-only" in r.json()["error"].lower()
+    with pytest.raises(client_module.AccessDeniedError) as exc_info:
+        client._check_write_access("abc", "PUT", "/profiles/abc")
+    assert exc_info.value.code == "write_access_denied"
+    assert "read-only" in str(exc_info.value).lower()
 
     # Deny read
     monkeypatch.setattr(client_module, "can_read_profile", lambda _id: False)
-    r2 = client._check_read_access("abc", "GET", "/profiles/abc")
-    assert r2.status_code == 403
+    with pytest.raises(client_module.AccessDeniedError) as exc_info2:
+        client._check_read_access("abc", "GET", "/profiles/abc")
+    assert exc_info2.value.code == "read_access_denied"
 
 
 @pytest.mark.asyncio
