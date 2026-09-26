@@ -35,9 +35,13 @@ class TestLazyApiClient:
     def test_module_getattr_exposes_api_client(self, monkeypatch, mock_api_key):
         """The backward-compatible client.api_client attribute is served lazily."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        # Clear any api_client module attribute left behind by other tests'
-        # monkeypatch.setattr(..., "api_client", ...) teardowns.
-        monkeypatch.delattr(client_module, "api_client", raising=False)
+        # Clear any real api_client entry left in the module namespace by other
+        # tests' monkeypatch.setattr(..., "api_client", ...) teardowns. Pop the
+        # module dict directly: monkeypatch.delattr would raise AttributeError
+        # here because its hasattr probe is answered by the module __getattr__
+        # (which lazily builds a client) while there is no real dict entry to
+        # delete, making this test order-dependent.
+        client_module.__dict__.pop("api_client", None)
         monkeypatch.setattr(client_module, "_client", None)
         sentinel = object()
         monkeypatch.setattr(client_module, "create_nextdns_client", lambda: sentinel)
