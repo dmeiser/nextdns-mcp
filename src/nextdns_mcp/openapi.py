@@ -27,6 +27,7 @@ from typing import Any
 
 import mcp.types
 from fastmcp import FastMCP
+from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
@@ -118,46 +119,71 @@ class StripExtraFieldsMiddleware(Middleware):
             return {k: self._coerce_value(v, None) for k, v in value.items()}
         return value
 
+    async def _prepare_arguments(
+        self,
+        fastmcp_server: FastMCP,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Fetch the tool schema, strip unknown fields, and coerce argument types.
+
+        Fails closed: if the tool's parameter schema cannot be fetched, the call
+        is aborted with a ToolError instead of passing arguments through
+        unstripped/un-coerced, so callers see a clear error rather than the
+        downstream validation failures the middleware exists to prevent.
+        """
+        try:
+            tool = await fastmcp_server.get_tool(tool_name)
+            if tool is None:
+                # Tool not found, pass arguments through untouched
+                return arguments
+
+            parameters = tool.parameters
+            known_params = set(parameters.get("properties", {}).keys())
+
+            # Filter arguments to only include known parameters
+            original_keys = set(arguments.keys())
+            filtered_args = {k: v for k, v in arguments.items() if k in known_params}
+
+            # Log if any fields were stripped (for debugging)
+            stripped_keys = original_keys - known_params
+            if stripped_keys:
+                logger.debug(f"Tool '{tool_name}': Stripped unknown fields: {stripped_keys}")
+
+            # Coerce string values to proper types based on the parameter schema
+            properties = parameters.get("properties", {})
+            coerced_args = {k: self._coerce_value(v, properties.get(k)) for k, v in filtered_args.items()}
+            if coerced_args != filtered_args:
+                logger.debug(f"Tool '{tool_name}': Coerced types in arguments")
+
+            return coerced_args
+        except NotFoundError:
+            raise
+        except Exception as e:
+            # Schema fetch/parse failure: fail closed so callers get a clear error
+            # instead of downstream validation failures from unstripped args.
+            logger.exception(f"Failed to prepare arguments for tool '{tool_name}'; aborting call")
+            raise ToolError(
+                f"Tool call for '{tool_name}' failed closed: could not fetch its parameter "
+                f"schema to validate arguments (root cause: {e})"
+            ) from e
+
     async def on_call_tool(
         self,
         context: MiddlewareContext[mcp.types.CallToolRequestParams],
         call_next: CallNext[mcp.types.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        """Filter tool arguments to only include known parameters and coerce types."""
-        tool_name = context.message.name
+        """Filter tool arguments to only include known parameters and coerce types.
+
+        Fails closed: if the tool's parameter schema cannot be fetched, the call
+        is aborted with a ToolError instead of passing arguments through
+        unstripped/un-coerced.
+        """
         arguments = context.message.arguments
-
         if arguments and context.fastmcp_context:
-            try:
-                # Get the tool's parameter schema
-                fastmcp_server = context.fastmcp_context.fastmcp
-                tool = await fastmcp_server.get_tool(tool_name)
-                if tool is None:
-                    # Tool not found, pass through
-                    return await call_next(context)
-                known_params = set(tool.parameters.get("properties", {}).keys())
-
-                # Filter arguments to only include known parameters
-                original_keys = set(arguments.keys())
-                filtered_args = {k: v for k, v in arguments.items() if k in known_params}
-
-                # Log if any fields were stripped (for debugging)
-                stripped_keys = original_keys - known_params
-                if stripped_keys:
-                    logger.debug(f"Tool '{tool_name}': Stripped unknown fields: {stripped_keys}")
-
-                # Coerce string values to proper types based on the parameter schema
-                properties = tool.parameters.get("properties", {})
-                coerced_args = {k: self._coerce_value(v, properties.get(k)) for k, v in filtered_args.items()}
-                if coerced_args != filtered_args:
-                    logger.debug(f"Tool '{tool_name}': Coerced types in arguments")
-
-                # Update the arguments in place
-                context.message.arguments = coerced_args
-            except Exception as e:  # noqa: BLE001
-                # If we can't get the tool schema, proceed with original arguments
-                # This should rarely happen, but we don't want to break the flow
-                logger.warning(f"Could not filter arguments for tool '{tool_name}': {e}")
+            context.message.arguments = await self._prepare_arguments(
+                context.fastmcp_context.fastmcp, context.message.name, arguments
+            )
 
         return await call_next(context)
 
