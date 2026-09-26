@@ -186,6 +186,12 @@ class AccessControlledClient(httpx.AsyncClient):
             return self._check_write_access(profile_id, method, url)
         return self._check_read_access(profile_id, method, url)
 
+    def _check_collection_access(self, method: str, url: str) -> httpx.Response | None:
+        """Check access control for collection operations."""
+        if is_write_operation(method):
+            return self._check_collection_write_access(method, url)
+        return self._check_collection_read_access(method, url)
+
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
         """Make an HTTP request with access control checks.
 
@@ -222,16 +228,10 @@ class AccessControlledClient(httpx.AsyncClient):
             error_msg = f"Forbidden URL: {url!s}"
             logger.warning(f"Forbidden URL: {logged_path} (method={method})")
             return create_access_denied_response(method, url, error_msg, profile_id or "")
-        elif is_write_operation(method):
-            # Collection endpoints (e.g., POST /profiles) carry no profile_id but
-            # still create profile-scoped resources; enforce global write denials.
-            error_response = self._check_collection_write_access(method, url)
         else:
-            # Collection reads (e.g., GET /profiles) carry no profile_id but must
-            # still respect the readable-profile deny-all default.
-            error_response = self._check_collection_read_access(method, url)
-        if error_response:
-            return error_response
+            error_response = self._check_collection_access(method, url)
+            if error_response:
+                return error_response
 
         # No body coercion here: string values in JSON bodies are passed through
         # unchanged. Schema-aware coercion of tool arguments already happens in

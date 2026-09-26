@@ -115,6 +115,65 @@ def _render_series_chart(
     return buffer.getvalue()
 
 
+def _validate_plot_params(
+    metric: str,
+    interval: int,
+    profile_id: OptionalProfileId,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Validate metric, interval, and profile ID parameters for plotting."""
+    if metric not in _PLOT_ANALYTICS_METRICS:
+        return None, error_payload(
+            ErrorCode.UNSUPPORTED_METRIC,
+            f"Unsupported metric: {metric}",
+            supported_metrics=sorted(_PLOT_ANALYTICS_METRICS),
+        )
+
+    if interval < 60:
+        return None, error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            "interval must be at least 60 seconds",
+            minimum_interval=60,
+        )
+
+    target_profile = profile_id if profile_id else get_default_profile()
+    if not target_profile:
+        return None, error_payload(
+            ErrorCode.MISSING_PROFILE_ID,
+            "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
+            hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
+        )
+
+    error = _validate_profile_id(target_profile)
+    if error:
+        return None, error
+
+    return target_profile, None
+
+
+async def _fetch_series_payload(
+    url: str,
+    params: dict[str, Any],
+    metric: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Fetch time-series payload from the API."""
+    try:
+        response = await client.api_client.get(url, params=params)
+        response.raise_for_status()
+        payload: dict[str, Any] = response.json()
+        return payload, None
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error while fetching analytics series {metric}: {e}")
+        return None, http_error_payload(
+            f"HTTP error while fetching analytics series {metric}: {e}", e, fallback_code=ErrorCode.HTTP_ERROR
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Unexpected error while fetching analytics series {metric}: {e}")
+        return None, error_payload(
+            ErrorCode.INTERNAL_ERROR,
+            f"Unexpected error while fetching analytics series {metric}: {e}",
+        )
+
+
 async def _plot_analytics_series_impl(
     metric: str,
     profile_id: OptionalProfileId = None,
@@ -127,31 +186,10 @@ async def _plot_analytics_series_impl(
     limit: int = 10,
 ) -> dict[str, Any] | mcp.types.ImageContent:
     """Generate a PNG line chart from a NextDNS analytics time-series endpoint."""
-    if metric not in _PLOT_ANALYTICS_METRICS:
-        return error_payload(
-            ErrorCode.UNSUPPORTED_METRIC,
-            f"Unsupported metric: {metric}",
-            supported_metrics=sorted(_PLOT_ANALYTICS_METRICS),
-        )
-
-    if interval < 60:
-        return error_payload(
-            ErrorCode.INVALID_ARGUMENT,
-            "interval must be at least 60 seconds",
-            minimum_interval=60,
-        )
-
-    target_profile = profile_id if profile_id else get_default_profile()
-    if not target_profile:
-        return error_payload(
-            ErrorCode.MISSING_PROFILE_ID,
-            "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
-            hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
-        )
-
-    error = _validate_profile_id(target_profile)
-    if error:
-        return error
+    target_profile, val_error = _validate_plot_params(metric, interval, profile_id)
+    if val_error:
+        return val_error
+    assert target_profile is not None
 
     params: dict[str, Any] = {
         "from": from_time,
@@ -166,21 +204,10 @@ async def _plot_analytics_series_impl(
     url = f"/profiles/{target_profile}/analytics/{metric};series"
     logger.info(f"Plotting analytics series: {metric} for profile {target_profile}")
 
-    try:
-        response = await client.api_client.get(url, params=params)
-        response.raise_for_status()
-        payload = response.json()
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error while fetching analytics series {metric}: {e}")
-        return http_error_payload(
-            f"HTTP error while fetching analytics series {metric}: {e}", e, fallback_code=ErrorCode.HTTP_ERROR
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Unexpected error while fetching analytics series {metric}: {e}")
-        return error_payload(
-            ErrorCode.INTERNAL_ERROR,
-            f"Unexpected error while fetching analytics series {metric}: {e}",
-        )
+    payload, fetch_error = await _fetch_series_payload(url, params, metric)
+    if fetch_error:
+        return fetch_error
+    assert payload is not None
 
     meta = payload.get("meta", {})
     series_meta = meta.get("series", {})

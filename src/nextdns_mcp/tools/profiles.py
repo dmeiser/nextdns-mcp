@@ -14,6 +14,28 @@ from ..utils import _api_request, _validate_profile_id
 ProfileOperation = Literal["list", "create", "get", "update", "delete"]
 
 
+async def _profiles_list() -> dict[str, Any]:
+    if get_readable_profiles_set() is None:
+        return error_payload(ErrorCode.READ_ACCESS_DENIED, "Read access denied: no profiles are readable")
+    return await _api_request("GET", "/profiles")
+
+
+async def _profiles_create(name: str | None) -> dict[str, Any]:
+    if is_read_only():
+        return error_payload(ErrorCode.WRITE_ACCESS_DENIED, "Write operation denied: server is in read-only mode")
+    if get_writable_profiles_set() is None:
+        return error_payload(ErrorCode.WRITE_ACCESS_DENIED, "Write access denied: no profiles are writable")
+    if not name:
+        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for create operation")
+    return await _api_request("POST", "/profiles", json={"name": name})
+
+
+async def _profiles_update(url: str, name: str | None) -> dict[str, Any]:
+    if not name:
+        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for update operation")
+    return await _api_request("PATCH", url, json={"name": name})
+
+
 async def _manage_profiles_impl(
     operation: ProfileOperation,
     profile_id: OptionalProfileId = None,
@@ -21,18 +43,10 @@ async def _manage_profiles_impl(
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for NextDNS profiles."""
     if operation == "list":
-        if get_readable_profiles_set() is None:
-            return error_payload(ErrorCode.READ_ACCESS_DENIED, "Read access denied: no profiles are readable")
-        return await _api_request("GET", "/profiles")
+        return await _profiles_list()
 
     if operation == "create":
-        if is_read_only():
-            return error_payload(ErrorCode.WRITE_ACCESS_DENIED, "Write operation denied: server is in read-only mode")
-        if get_writable_profiles_set() is None:
-            return error_payload(ErrorCode.WRITE_ACCESS_DENIED, "Write access denied: no profiles are writable")
-        if not name:
-            return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for create operation")
-        return await _api_request("POST", "/profiles", json={"name": name})
+        return await _profiles_create(name)
 
     if not profile_id:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "profile_id is required for this operation")
@@ -45,9 +59,7 @@ async def _manage_profiles_impl(
     if operation == "get":
         return await _api_request("GET", url)
     if operation == "update":
-        if not name:
-            return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for update operation")
-        return await _api_request("PATCH", url, json={"name": name})
+        return await _profiles_update(url, name)
     if operation == "delete":
         return await _api_request("DELETE", url)
 
