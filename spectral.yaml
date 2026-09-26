@@ -1,0 +1,27 @@
+# Spectral ruleset for the NextDNS OpenAPI specification.
+#
+# The spec declares a document-level (global) `security` requirement, which
+# today applies to every operation. A global requirement is convenient but
+# silent: a future unauthenticated operation would inherit it without
+# declaring anything. The rule below forces every operation to carry its own
+# explicit `security` declaration, so opting an operation out of
+# authentication is a deliberate `security: []` choice instead of an accident.
+#
+# Run locally with:
+#   npx @stoplight/spectral lint -r spectral.yaml src/nextdns_mcp/nextdns-openapi.yaml
+extends: []
+rules:
+  require-explicit-operation-security:
+    description: >-
+      Every operation must declare its security requirement explicitly
+      instead of relying on the document-level security keyword.
+    severity: error
+    message: >-
+      Operation is missing an explicit 'security' declaration. Add an explicit
+      requirement (e.g. '- ApiKeyAuth: []') or an intentional empty list
+      ('security: []') for a no-auth operation.
+    given:
+      - "$.paths[*][?(@property === 'get' || @property === 'post' || @property === 'put' || @property === 'patch' || @property === 'delete' || @property === 'options' || @property === 'head' || @property === 'trace')]"
+    then:
+      field: security
+      function: truthy

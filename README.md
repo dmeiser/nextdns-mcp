@@ -170,7 +170,7 @@ This server uses a modern, declarative approach:
 
 ### Key Components
 
-- `src/nextdns_mcp/nextdns-openapi.yaml`: OpenAPI 3.0 specification for NextDNS API (reference/validation only)
+- `src/nextdns_mcp/nextdns-openapi.yaml`: OpenAPI 3.0 specification for NextDNS API (reference/validation only); a Spectral lint workflow ([openapi-lint.yml](.github/workflows/openapi-lint.yml)) enforces explicit per-operation security declarations via [spectral.yaml](spectral.yaml), runnable locally with `npx @stoplight/spectral lint -r spectral.yaml src/nextdns_mcp/nextdns-openapi.yaml`
 - `src/nextdns_mcp/server.py`: FastMCP server implementation
 - `Dockerfile`: Container definition with OCI labels for container metadata
 - `AGENT.md`: Development guidelines and safety rules
