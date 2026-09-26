@@ -8,7 +8,7 @@ from typing import Any, Literal
 from ..coercion import OptionalProfileId
 from ..config import get_readable_profiles_set, get_writable_profiles_set, is_read_only
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_query_params, _validate_profile_id
+from ..utils import _api_request, _build_query_params, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ProfileOperation = Literal["list", "create", "get", "update", "delete"]
@@ -58,11 +58,12 @@ async def _manage_profiles_impl(
     if not profile_id:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "profile_id is required for this operation")
 
-    error = _validate_profile_id(profile_id)
+    target_profile, error = resolve_profile_id(profile_id, allow_default=False)
     if error:
         return error
+    assert target_profile is not None
 
-    url = f"/profiles/{profile_id}"
+    url = f"/profiles/{target_profile}"
     if operation == "get":
         return await _api_request("GET", url)
     if operation == "update":

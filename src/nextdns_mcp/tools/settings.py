@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _validate_profile_id
+from ..utils import _api_request, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 SettingsCategory = Literal["general", "privacy", "security", "parental", "performance", "logs", "blockpage"]
@@ -31,12 +31,13 @@ async def _manage_settings_impl(
     settings: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for profile settings categories."""
-    error = _validate_profile_id(profile_id)
+    target_profile, error = resolve_profile_id(profile_id, allow_default=False)
     if error:
         return error
+    assert target_profile is not None
 
     path = _SETTINGS_PATHS[category]
-    url = f"/profiles/{profile_id}/{path}"
+    url = f"/profiles/{target_profile}/{path}"
 
     if operation == "get":
         return await _api_request("GET", url)

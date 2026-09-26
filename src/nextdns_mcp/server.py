@@ -195,6 +195,7 @@ from .utils import (  # noqa: F401
     _validate_profile_id,
     is_safe_entry_id,
     is_safe_profile_id,
+    resolve_profile_id,
 )
 
 

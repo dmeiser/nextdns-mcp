@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _validate_entry_id, _validate_profile_id
+from ..utils import _api_request, _validate_entry_id, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ListType = Literal[
@@ -102,9 +102,10 @@ async def _manage_lists_impl(
     entries: str | list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for content/privacy/security/parental lists."""
-    error = _validate_profile_id(profile_id)
+    target_profile, error = resolve_profile_id(profile_id, allow_default=False)
     if error:
         return error
+    assert target_profile is not None
 
     if entry_id is not None:
         error = _validate_entry_id(entry_id)
@@ -112,7 +113,7 @@ async def _manage_lists_impl(
             return error
 
     path = _LIST_PATHS[list_type]
-    base_url = f"/profiles/{profile_id}/{path}"
+    base_url = f"/profiles/{target_profile}/{path}"
 
     if operation == "get":
         return await _lists_get(base_url)

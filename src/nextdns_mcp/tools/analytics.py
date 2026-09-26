@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_query_params, _cap_limit, _validate_profile_id
+from ..utils import _api_request, _build_query_params, _cap_limit, resolve_profile_id
 
 # Server-side cap for the ``limit`` parameter (maximum accepted by the NextDNS API).
 ANALYTICS_LIMIT_MAX = 500
@@ -46,9 +46,10 @@ async def _query_analytics_impl(
     root: bool | None = None,
 ) -> dict[str, Any]:
     """Grouped implementation for NextDNS analytics endpoints."""
-    error = _validate_profile_id(profile_id)
+    target_profile, error = resolve_profile_id(profile_id, allow_default=False)
     if error:
         return error
+    assert target_profile is not None
 
     if series and metric == "domains":
         return error_payload(
@@ -59,7 +60,7 @@ async def _query_analytics_impl(
         )
 
     suffix = ";series" if series else ""
-    url = f"/profiles/{profile_id}/analytics/{metric}{suffix}"
+    url = f"/profiles/{target_profile}/analytics/{metric}{suffix}"
 
     capped_limit, _ = _cap_limit(limit, ANALYTICS_LIMIT_MAX)
     params: dict[str, Any] = _build_query_params(

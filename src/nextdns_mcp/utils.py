@@ -5,12 +5,14 @@ SPDX-License-Identifier: MIT
 
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 
 from . import client
 from .client import SAFE_PROFILE_ID_PATTERN
+from .config import get_default_profile
 from .errors import ErrorCode, error_payload, http_error_payload
 
 logger = logging.getLogger(__name__)
@@ -35,11 +37,58 @@ def is_safe_entry_id(value: str) -> bool:
     return bool(SAFE_ENTRY_ID_PATTERN.match(value))
 
 
+def resolve_profile_id(
+    profile_id: str | int | None = None,
+    *,
+    allow_default: bool = True,
+    default_fn: Callable[[], str | None] | None = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve and validate a NextDNS profile ID with optional default fallback.
+
+    Args:
+        profile_id: The profile ID to resolve and validate, or None.
+        allow_default: If True (default), fall back to the configured default
+            profile when profile_id is None or empty. If False, profile_id is
+            mandatory.
+        default_fn: Optional callable returning a default profile string.
+            Defaults to ``get_default_profile``.
+
+    Returns:
+        A tuple of ``(resolved_profile_id, error_payload)``. On success, the
+        first element is the validated 6-character profile ID string and the
+        second is None. On failure, the first element is None and the second
+        is a standardized error payload dict.
+    """
+    if allow_default:
+        target_profile: str | int | None = profile_id
+        if not target_profile:
+            fn = default_fn if default_fn is not None else get_default_profile
+            target_profile = fn()
+        if not target_profile:
+            return None, error_payload(
+                ErrorCode.MISSING_PROFILE_ID,
+                "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
+                hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
+            )
+        if not is_safe_profile_id(target_profile):
+            return None, error_payload(
+                ErrorCode.INVALID_PROFILE_ID,
+                f"Invalid profile_id format: {target_profile}",
+            )
+        return str(target_profile), None
+
+    if profile_id is None or not is_safe_profile_id(profile_id):
+        return None, error_payload(
+            ErrorCode.INVALID_PROFILE_ID,
+            f"Invalid profile_id format: {profile_id}",
+        )
+    return str(profile_id), None
+
+
 def _validate_profile_id(profile_id: str | int) -> dict[str, Any] | None:
     """Return an error dict if profile_id is not a safe identifier."""
-    if not is_safe_profile_id(profile_id):
-        return error_payload(ErrorCode.INVALID_PROFILE_ID, f"Invalid profile_id format: {profile_id}")
-    return None
+    _, error = resolve_profile_id(profile_id, allow_default=False)
+    return error
 
 
 def _validate_entry_id(entry_id: str) -> dict[str, Any] | None:
