@@ -46,7 +46,7 @@ class StripExtraFieldsMiddleware(Middleware):
     """Middleware that strips unknown fields and coerces types in tool arguments.
 
     AI clients (like OpenAI) often send extra/unknown fields with tool calls
-    that don't match the tool's input schema. Docker MCP CLI also passes values
+    that don't match the tool's input schema. CLI tools may also pass values
     as strings (e.g., "true" instead of true). This middleware:
     1. Filters arguments to only include fields defined in the tool's parameter schema
     2. Coerces string values to proper types (booleans, integers, floats)
@@ -261,7 +261,7 @@ def create_mcp_server(api_client: httpx.AsyncClient) -> FastMCP:
 
     mcp = FastMCP.from_openapi(
         openapi_spec=openapi_spec,
-        client=api_client,
+        client=api_client,  # type: ignore[arg-type]  # fastmcp 4.0.4 types this as httpx2.AsyncClient but accepts httpx.AsyncClient at runtime
         route_maps=route_maps,
         name="NextDNS MCP Server",
         strict_input_validation=False,
