@@ -202,7 +202,7 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     monkeypatch.setattr(doh_module.httpx, "AsyncClient", DummyClient)
 
     # doh_lookup success
-    res = await server.doh_lookup("https://dns.nextdns.io/abc/dns-query", "google.com", "A", "abc")
+    res = await server.doh_lookup("https://dns.nextdns.io/abc123/dns-query", "google.com", "A", "abc123")
     assert "_metadata" in res
 
     # _dohLookup_impl: no default profile
@@ -211,7 +211,7 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     assert "error" in r and "No profile_id" in r["error"]
 
     # invalid record type
-    monkeypatch.setattr(doh_module, "get_default_profile", lambda: "abc")
+    monkeypatch.setattr(doh_module, "get_default_profile", lambda: "abc123")
     r2 = await server._dohLookup_impl("example.com", record_type="INVALID")
     assert "error" in r2 and "Invalid record type" in r2["error"]
 

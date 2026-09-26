@@ -10,16 +10,16 @@ from typing import Any
 import httpx
 
 from . import client
+from .client import SAFE_PROFILE_ID_PATTERN
 
 logger = logging.getLogger(__name__)
 
-# Safe identifier patterns to prevent path traversal and ACL bypass.
-SAFE_PROFILE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+# Entry IDs are domain-like identifiers with a looser safe-character set.
 SAFE_ENTRY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 
 
 def is_safe_profile_id(value: str | int) -> bool:
-    """Return True if value is a safe profile_id segment."""
+    """Return True if value is a spec-shaped profile_id (6 lowercase alphanumeric chars)."""
     return bool(SAFE_PROFILE_ID_PATTERN.match(str(value)))
 
 
