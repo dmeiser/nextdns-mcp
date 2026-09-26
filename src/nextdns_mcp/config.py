@@ -7,9 +7,14 @@ SPDX-License-Identifier: MIT
 """
 
 import logging
+import math
 import os
 
 logger = logging.getLogger(__name__)
+
+
+class ConfigurationError(ValueError):
+    """Raised when configuration values are invalid or malformed."""
 
 
 class MissingApiKeyError(RuntimeError):
@@ -33,6 +38,9 @@ def configure_logging() -> None:
 NEXTDNS_BASE_URL = "https://api.nextdns.io"
 
 # MCP Transport configuration
+
+# Default HTTP request timeout in seconds
+DEFAULT_HTTP_TIMEOUT: float = 30.0
 
 # Constants for profile access control
 ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
@@ -60,8 +68,28 @@ def get_api_key() -> str | None:
 
 
 def get_http_timeout() -> float:
-    """Get HTTP timeout from environment."""
-    return float(os.getenv("NEXTDNS_HTTP_TIMEOUT", "30"))
+    """Get HTTP timeout from environment.
+
+    Returns:
+        float: Configured HTTP timeout in seconds (default 30.0).
+
+    Raises:
+        ConfigurationError: If NEXTDNS_HTTP_TIMEOUT is not a positive finite number.
+    """
+    raw = os.getenv("NEXTDNS_HTTP_TIMEOUT")
+    if raw is None:
+        return DEFAULT_HTTP_TIMEOUT
+
+    try:
+        val = float(raw)
+        if not math.isfinite(val) or val <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise ConfigurationError(
+            f"Invalid NEXTDNS_HTTP_TIMEOUT: {raw!r}. Expected a positive number of seconds."
+        ) from None
+
+    return val
 
 
 def get_default_profile() -> str | None:
@@ -240,10 +268,11 @@ def _log_access_control_settings() -> None:
 
 
 def validate_configuration() -> None:
-    """Validate required configuration is present.
+    """Validate required configuration is present and valid.
 
     Raises:
-        MissingApiKeyError: If required configuration is missing
+        MissingApiKeyError: If required configuration is missing.
+        ConfigurationError: If configuration values are invalid.
     """
     if not get_api_key():
         _log_api_key_error()
@@ -252,6 +281,7 @@ def validate_configuration() -> None:
             "variable or NEXTDNS_API_KEY_FILE pointing to a Docker secret."
         )
 
+    get_http_timeout()
     _log_access_control_settings()
 
 
