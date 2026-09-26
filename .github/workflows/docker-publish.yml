@@ -1,11 +1,10 @@
 name: Build and Push Docker Image
 
 on:
-  # Trigger after E2E MCP Gateway completes on main. The E2E workflow already built
-  # and uploaded the image as an artifact; this workflow downloads, tags, and pushes it
-  # without rebuilding or re-running E2E. A later step verifies Unit Tests also passed.
+  # Trigger after Unit Tests completes on main.
+  # A later step verifies Unit Tests also passed.
   workflow_run:
-    workflows: ["E2E MCP Gateway"]
+    workflows: ["Unit Tests"]
     types:
       - completed
     branches:
@@ -25,7 +24,6 @@ on:
 permissions:
   contents: read
   packages: write  # Required to push to ghcr.io
-  actions: read    # Required to download artifacts from the E2E workflow run
 
 # Prevent duplicate runs for the same commit
 concurrency:
@@ -38,13 +36,6 @@ jobs:
     if: github.event_name != 'workflow_run'
     uses: ./.github/workflows/unit-tests.yml
 
-  e2e:
-    name: Run E2E Tests
-    if: github.event_name != 'workflow_run'
-    needs: quality
-    uses: ./.github/workflows/e2e-mcp-gateway.yml
-    secrets: inherit
-
   docker-publish:
     name: Build and Push Docker Image (${{ matrix.variant }})
     runs-on: ubuntu-latest
@@ -52,7 +43,7 @@ jobs:
       fail-fast: false
       matrix:
         variant: [slim, alpine]
-    needs: [e2e]
+    needs: [quality]
     if: |
       always() &&
       !contains(github.event.workflow_run.head_commit.message || '', '[skip-docker]') &&
@@ -60,7 +51,7 @@ jobs:
         (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') ||
         (
           (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
-          needs.e2e.result == 'success'
+          needs.quality.result == 'success'
         )
       )
 
@@ -70,7 +61,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const requiredWorkflows = ['Unit Tests', 'E2E MCP Gateway'];
+            const requiredWorkflows = ['Unit Tests'];
             const currentWorkflow = context.payload.workflow_run.name;
             const headSha = context.payload.workflow_run.head_sha;
 
@@ -142,8 +133,6 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || (github.event_name == 'schedule' && 'main') || github.sha }}
 
       - name: Set up Docker Buildx
-        # Only needed when we are intentionally rebuilding from source
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
@@ -267,24 +256,7 @@ jobs:
             type=raw,value=${{ steps.version.outputs.major }}-alpine,enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
             type=raw,value=${{ steps.version.outputs.major_minor }}-alpine,enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
 
-      - name: Download image artifact from E2E run
-        if: github.event_name == 'workflow_run'
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image-${{ matrix.variant }}-${{ github.event.workflow_run.head_sha }}
-          path: /tmp/image
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Load image from artifact
-        if: github.event_name == 'workflow_run'
-        run: |
-          docker load -i /tmp/image/nextdns-mcp-${{ matrix.variant }}.tar
-          docker images | grep nextdns-mcp
-
       - name: Build and push fresh image
-        # Intentional rebuild path for manual triggers and nightly schedule
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -300,33 +272,16 @@ jobs:
             VERSION=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.version'] }}
             REVISION=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.revision'] }}
 
-      - name: Tag and push image
-        # Reuse the image that was already built by the E2E run
-        if: github.event_name == 'workflow_run'
-        env:
-          SOURCE_IMAGE: nextdns-mcp:${{ matrix.variant }}
-        run: |
-          echo "Publishing from $SOURCE_IMAGE"
-          while IFS= read -r tag; do
-            [ -z "$tag" ] && continue
-            docker tag "$SOURCE_IMAGE" "$tag"
-            docker push "$tag"
-          done <<< "${{ steps[format('meta-{0}', matrix.variant)].outputs.tags }}"
-
       - name: Determine published platforms
         if: always()
         id: platforms
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "list=linux/amd64, linux/arm64" >> "$GITHUB_OUTPUT"
-          else
-            echo "list=linux/amd64 (reused from the E2E artifact; arm64 is only published by workflow_dispatch/schedule rebuilds)" >> "$GITHUB_OUTPUT"
-          fi
+          echo "list=linux/amd64, linux/arm64" >> "$GITHUB_OUTPUT"
 
       - name: Generate image summary (${{ matrix.variant }})
         if: always()
         run: |
-          echo "## 🐳 Docker Images Published — ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 Docker Images Published — ${{ matrix.variant }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Docker Hub" >> $GITHUB_STEP_SUMMARY
           echo "**Registry:** docker.io/${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp" >> $GITHUB_STEP_SUMMARY

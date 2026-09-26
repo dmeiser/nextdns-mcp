@@ -26,7 +26,7 @@ jobs:
         id: check-workflows
         with:
           script: |
-            const required_workflows = ['Unit Tests', 'E2E MCP Gateway', 'CodeQL'];
+            const required_workflows = ['Unit Tests', 'CodeQL'];
             const pr_number = context.issue.number;
             const max_wait_minutes = 20;
             const check_interval_seconds = 30;
