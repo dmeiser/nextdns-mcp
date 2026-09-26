@@ -10,19 +10,17 @@ from datetime import datetime
 from typing import Any, Literal
 
 import httpx
-import matplotlib
 import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
 import mcp.types
 from fastmcp.utilities.types import Image
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 
 from .. import client
 from ..coercion import OptionalProfileId
 from ..config import get_default_profile
 from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import _validate_profile_id
-
-matplotlib.use("Agg")
 
 logger = logging.getLogger(__name__)
 
@@ -82,26 +80,37 @@ def _render_series_chart(
     times: list[str],
     series_data: list[dict[str, Any]],
 ) -> bytes:
-    """Render a PNG line chart from time-series data and return the raw bytes."""
+    """Render a PNG line chart from time-series data and return the raw bytes.
+
+    Uses the object-oriented Figure API rather than pyplot global state, so
+    concurrent renders from multiple threads cannot interfere with each other.
+    The figure is cleared in a finally block so a rendering exception cannot
+    leak figure state in the long-running server.
+    """
     parsed_times = [_parse_series_timestamp(t) for t in times]
     numeric_times = mdates.date2num(parsed_times)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for index, series in enumerate(series_data):
-        label = _extract_series_label(series, index)
-        queries = series.get("queries", [])
-        ax.plot(numeric_times, queries, label=label, marker="o", markersize=3)
-
-    ax.set_title(f"NextDNS Analytics: {metric}")
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Queries")
-    ax.legend()
-    ax.tick_params(axis="x", rotation=30)
-    fig.autofmt_xdate()
-
+    fig = Figure(figsize=(10, 6))
+    FigureCanvasAgg(fig)
     buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", bbox_inches="tight")
-    plt.close(fig)
+    try:
+        ax = fig.add_subplot(111)
+        for index, series in enumerate(series_data):
+            label = _extract_series_label(series, index)
+            queries = series.get("queries", [])
+            ax.plot(numeric_times, queries, label=label, marker="o", markersize=3)
+
+        ax.set_title(f"NextDNS Analytics: {metric}")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Queries")
+        ax.legend()
+        ax.tick_params(axis="x", rotation=30)
+        fig.autofmt_xdate()
+
+        fig.savefig(buffer, format="png", bbox_inches="tight")
+    finally:
+        fig.clear()
+
     buffer.seek(0)
     return buffer.getvalue()
 
