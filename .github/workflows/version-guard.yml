@@ -68,14 +68,14 @@ jobs:
 
       - name: Checkout main (baseline)
         if: steps.bypass.outputs.has_label != 'true'
-        uses: actions/checkout@v4@11d5960a326750d5838078e36cf38b85af677262  # actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           ref: main
           path: main
 
       - name: Checkout PR branch
         if: steps.bypass.outputs.has_label != 'true'
-        uses: actions/checkout@v4@11d5960a326750d5838078e36cf38b85af677262  # actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           path: pr
 

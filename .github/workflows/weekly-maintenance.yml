@@ -50,12 +50,12 @@ jobs:
 
     steps:
       - name: Checkout (full history for tag comparison)
-        uses: actions/checkout@v4@11d5960a326750d5838078e36cf38b85af677262  # actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
 
       - name: Detect changes
         id: detect
@@ -131,12 +131,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4@11d5960a326750d5838078e36cf38b85af677262  # actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           activate-environment: "true"
 
@@ -486,7 +486,7 @@ jobs:
 
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4@11d5960a326750d5838078e36cf38b85af677262  # actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           ref: main
           fetch-depth: 0

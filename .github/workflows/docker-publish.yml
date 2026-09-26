@@ -58,7 +58,7 @@ jobs:
     steps:
       - name: Wait for all required workflows to complete
         if: github.event_name == 'workflow_run'
-        uses: actions/github-script@v7@f28e40c7f34bde8b3046d885e986cb6290c5673b  # actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         with:
           script: |
             const requiredWorkflows = ['Unit Tests'];
@@ -126,26 +126,26 @@ jobs:
             console.log('✅ All required workflows completed successfully');
 
       - name: Checkout code
-        uses: actions/checkout@v4@11d5960a326750d5838078e36cf38b85af677262  # actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           # For workflow_run events, checkout the commit that triggered the workflow
           # For schedule events, checkout main (stable release code)
           ref: ${{ github.event.workflow_run.head_sha || (github.event_name == 'schedule' && 'main') || github.sha }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3@c7c53464625b32c7a7e944ae62b3e17d2b600130  # docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3@c94ce9fb468520275223c153574b00df6fe4bcc9  # docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3@c94ce9fb468520275223c153574b00df6fe4bcc9  # docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -198,7 +198,7 @@ jobs:
       - name: Determine release status
         if: github.event_name == 'workflow_run'
         id: release
-        uses: actions/github-script@v7@f28e40c7f34bde8b3046d885e986cb6290c5673b  # actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         with:
           script: |
             const headSha = context.payload.workflow_run.head_sha;
@@ -222,7 +222,7 @@ jobs:
       - name: Extract metadata for Docker (slim)
         if: matrix.variant == 'slim'
         id: meta-slim
-        uses: docker/metadata-action@v5@c299e40c65443455700f0fdfc63efafe5b349051  # docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
         with:
           images: |
             ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
@@ -242,7 +242,7 @@ jobs:
       - name: Extract metadata for Docker (alpine)
         if: matrix.variant == 'alpine'
         id: meta-alpine
-        uses: docker/metadata-action@v5@c299e40c65443455700f0fdfc63efafe5b349051  # docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
         with:
           images: |
             ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
@@ -260,7 +260,7 @@ jobs:
             type=raw,value=${{ steps.version.outputs.major_minor }}-alpine,enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push Docker image (${{ matrix.variant }})
-        uses: docker/build-push-action@v6@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: ./Dockerfile${{ matrix.variant == 'alpine' && '.alpine' || '' }}

@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4@11d5960a326750d5838078e36cf38b85af677262  # actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
 
@@ -59,7 +59,7 @@ jobs:
           PY
 
       - name: Generate Release Notes and Create Release
-        uses: actions/github-script@v7@f28e40c7f34bde8b3046d885e986cb6290c5673b  # actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
