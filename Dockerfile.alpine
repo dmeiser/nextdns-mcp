@@ -33,7 +33,7 @@ COPY --from=builder /app/.venv/lib/python3.14/site-packages /usr/local/lib/pytho
 # Copy application code
 COPY src/ /app/src/
 
-# OCI labels for Docker MCP Gateway compatibility
+# OCI labels for container metadata
 LABEL org.opencontainers.image.title="NextDNS MCP Server (Alpine)"
 LABEL org.opencontainers.image.description="Model Context Protocol server for NextDNS API (Alpine variant)"
 LABEL org.opencontainers.image.authors="NextDNS MCP Contributors"
@@ -41,11 +41,6 @@ LABEL org.opencontainers.image.source="https://github.com/dmeiser/nextdns-mcp"
 LABEL org.opencontainers.image.documentation="https://github.com/dmeiser/nextdns-mcp/blob/main/README.md"
 LABEL org.opencontainers.image.version="3.1.17"
 LABEL org.opencontainers.image.licenses="MIT"
-
-# MCP-specific labels
-LABEL com.docker.mcp.server.type="stdio"
-LABEL com.docker.mcp.server.protocol="mcp"
-LABEL com.docker.mcp.server.category="dns,api,networking"
 
 # Create and switch to a non-root user for security
 RUN adduser -D -s /sbin/nologin appuser

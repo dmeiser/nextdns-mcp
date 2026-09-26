@@ -1,6 +1,6 @@
 # NextDNS MCP Server
 
-A Model Context Protocol (MCP) server that exposes the NextDNS API as tools for AI assistants and other MCP clients. Use it via Docker MCP Gateway (recommended) or run it locally with Python/uv.
+A Model Context Protocol (MCP) server that exposes the NextDNS API as tools for AI assistants and other MCP clients. Use it via Docker or run it locally with Python/uv.
 
 ## What you can do
 - Manage profiles (create, read, update, delete)
@@ -9,14 +9,12 @@ A Model Context Protocol (MCP) server that exposes the NextDNS API as tools for 
 - Configure security, privacy, and parental controls
 
 ## Runtimes
-- Docker MCP Gateway (recommended)
-- Docker CLI (stdin/stdout program)
+- Docker CLI (stdin/stdout container)
 - Local (Python 3.12+ with uv)
 
 ## Quick links
 - Getting Started: [getting-started.md](getting-started.md)
 - Configuration Reference: [configuration.md](configuration.md)
-- Docker MCP Gateway Guide: [docker-mcp-gateway.md](docker-mcp-gateway.md)
 - Usage and Examples: [usage.md](usage.md)
 - Safety Guidelines: [safety.md](safety.md)
 - Troubleshooting: [troubleshooting.md](troubleshooting.md)
