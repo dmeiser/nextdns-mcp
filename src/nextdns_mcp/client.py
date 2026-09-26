@@ -10,7 +10,6 @@ from typing import Any
 
 import httpx
 
-from .coercion import coerce_json_types
 from .config import (
     NEXTDNS_BASE_URL,
     can_read_profile,
@@ -144,17 +143,6 @@ class AccessControlledClient(httpx.AsyncClient):
             return self._check_write_access(profile_id, method, url)
         return self._check_read_access(profile_id, method, url)
 
-    def _coerce_json_body(self, kwargs: dict[str, Any]) -> None:
-        """Coerce string types in JSON request body.
-
-        This handles type coercion for parameters passed as strings by clients like
-        CLI tools. FastMCP's OpenAPI integration may pass string values for
-        boolean/integer fields which need to be coerced before sending to the API.
-        """
-        if "json" in kwargs and isinstance(kwargs["json"], dict):
-            kwargs["json"] = coerce_json_types(kwargs["json"])
-            logger.debug(f"Coerced JSON body: {kwargs['json']}")
-
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
         """Make an HTTP request with access control checks.
 
@@ -188,7 +176,10 @@ class AccessControlledClient(httpx.AsyncClient):
             logger.warning(f"{error_msg} (method={method})")
             return create_access_denied_response(method, url, error_msg, profile_id or "")
 
-        self._coerce_json_body(kwargs)
+        # No body coercion here: string values in JSON bodies are passed through
+        # unchanged. Schema-aware coercion of tool arguments already happens in
+        # StripExtraFieldsMiddleware, so blindly coercing body values would corrupt
+        # string fields such as profile names ("12345") or passwords ("0012").
         return await super().request(method, url, **kwargs)
 
 

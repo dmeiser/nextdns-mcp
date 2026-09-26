@@ -289,3 +289,58 @@ class TestAccessControlledClientMethods:
         # Should call the parent request method
         mock_super_request.assert_called_once()
         assert response.status_code == 200
+
+
+class TestAccessControlledClientBodyPassthrough:
+    """Regression tests for issue #145.
+
+    The client must NOT blindly coerce string values in JSON request bodies:
+    a profile name like ``"12345"`` or a password like ``"0012"`` would be
+    corrupted into numbers, and ``"true"`` into a boolean, causing upstream
+    400s. Schema-aware coercion already happens in
+    StripExtraFieldsMiddleware, so bodies pass through unchanged.
+    """
+
+    @pytest.mark.asyncio
+    async def test_numeric_string_body_values_unchanged(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Numeric-looking strings (names, passwords) must not become numbers."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            await client.request("PATCH", "/profiles/abc123", json={"name": "12345"})
+            await client.request("POST", "/profiles/abc123/denylist", json={"password": "0012"})
+
+        assert mock_super_request.call_args_list[0].kwargs["json"] == {"name": "12345"}
+        assert isinstance(mock_super_request.call_args_list[0].kwargs["json"]["name"], str)
+        assert mock_super_request.call_args_list[1].kwargs["json"] == {"password": "0012"}
+        assert isinstance(mock_super_request.call_args_list[1].kwargs["json"]["password"], str)
+
+    @pytest.mark.asyncio
+    async def test_boolean_string_body_values_unchanged(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """A string like ``"true"`` in a body must not become a boolean."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            await client.request("PATCH", "/profiles/abc123/settings", json={"web3": "true"})
+
+        body = mock_super_request.call_args.kwargs["json"]
+        assert body == {"web3": "true"}
+        assert isinstance(body["web3"], str)
+
+    @pytest.mark.asyncio
+    async def test_native_typed_body_values_unchanged(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Properly typed values must pass through as-is."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            await client.request("PUT", "/profiles/abc123/denylist", json=[{"id": "example.com", "blocked": True}])
+
+        body = mock_super_request.call_args.kwargs["json"]
+        assert body == [{"id": "example.com", "blocked": True}]
+        assert isinstance(body[0]["blocked"], bool)

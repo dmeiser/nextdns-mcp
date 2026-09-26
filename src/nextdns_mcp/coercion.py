@@ -1,8 +1,11 @@
 # ---
-# Type coercion helpers for MCP tool arguments and JSON request bodies.
+# Type coercion helpers for MCP tool arguments.
 #
 # CLI tools and some MCP clients pass values as strings (e.g. "true" instead of true). The
-# helpers here coerce those strings to proper Python types.
+# helpers here coerce those strings to proper Python types. JSON request
+# bodies are NOT coerced: the HTTP client passes string body values through
+# unchanged (see AccessControlledClient.request), and schema-aware coercion
+# of tool arguments already happens in StripExtraFieldsMiddleware.
 """Type coercion utilities for NextDNS MCP Server.
 
 SPDX-License-Identifier: MIT
@@ -100,8 +103,9 @@ def coerce_json_types(data: Any) -> Any:
     """Coerce string representations to proper JSON types.
 
     This handles type coercion for parameters passed as strings by CLI clients.
-    FastMCP's OpenAPI integration doesn't coerce types when making HTTP requests,
-    so we need to do it here.
+    It is not applied to JSON request bodies: the HTTP client passes string body
+    values through unchanged, and schema-aware coercion of tool arguments already
+    happens in StripExtraFieldsMiddleware.
 
     Args:
         data: Input data (dict, list, or primitive)
