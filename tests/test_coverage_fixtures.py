@@ -3,16 +3,10 @@
 from pathlib import Path
 
 
-def test_conftest_temp_files_exist(temp_api_key_file, temp_openapi_file, mock_openapi_spec):
+def test_conftest_temp_files_exist(temp_api_key_file):
     # Ensure temporary files created by fixtures exist and contain expected content
     assert isinstance(temp_api_key_file, Path)
     assert temp_api_key_file.exists()
-
-    assert isinstance(temp_openapi_file, Path)
-    assert temp_openapi_file.exists()
-
-    # Basic check of the provided mock spec dict
-    assert "openapi" in mock_openapi_spec
 
 
 def test_conftest_env_and_profiles(

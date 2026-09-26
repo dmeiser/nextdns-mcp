@@ -4,9 +4,7 @@ All configuration is done via environment variables.
 
 ## Extra Field Relaxation
 
-All tool input models (custom and OpenAPI-imported) are configured to ignore extra/unknown fields. This is achieved by:
-- Setting `strict_input_validation=False` in FastMCP
-- Patching OpenAPI-imported models with a custom `mcp_component_fn` (see troubleshooting.md)
+Unknown/extra fields in tool arguments are ignored by the `StripExtraFieldsMiddleware` (see troubleshooting.md), which filters each tool call to the fields defined in the tool's parameter schema before FastMCP validates the arguments.
 
 This allows AI/CLI clients to send extra fields without causing errors, while still enforcing required/typed fields.
 

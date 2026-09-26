@@ -1,10 +1,10 @@
 # NextDNS MCP Server
 
-A Model Context Protocol (MCP) server for the NextDNS API, built with FastMCP and generated from OpenAPI specifications.
+A Model Context Protocol (MCP) server for the NextDNS API, built with FastMCP and a small set of grouped CRUD tools.
 
 ## Overview
 
-This project provides an MCP server that exposes NextDNS API operations as tools that can be used by AI assistants and other MCP clients. The server is automatically generated from a comprehensive OpenAPI specification using the FastMCP library.
+This project provides an MCP server that exposes NextDNS API operations as tools that can be used by AI assistants and other MCP clients. The server registers a small set of domain-grouped CRUD tools directly; it does not generate tools from an OpenAPI spec.
 
 ## Features
 
@@ -19,7 +19,7 @@ This project provides an MCP server that exposes NextDNS API operations as tools
 - **Security**: Complete security settings and TLD blocking configuration
 - **Privacy**: Privacy settings, blocklists, and native tracking protection management
 - **Parental Control**: Settings management with safe search and YouTube restrictions
-- **OpenAPI-backed**: Tool behaviors are driven by [nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml)
+- **Reference OpenAPI spec**: The bundled [nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml) documents the NextDNS API surface for validation tooling
 - **Docker Support**: Containerized deployment with proper OCI labels
 - **Safety Mechanisms**: Write operation protections and validation
 
@@ -164,13 +164,13 @@ MCP_TRANSPORT=http MCP_HOST=0.0.0.0 uv run python -m nextdns_mcp.server
 This server uses a modern, declarative approach:
 
 1. **OpenAPI Specification** ([nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml)): Complete NextDNS API documentation
-2. **FastMCP Foundation**: Server initialized using `FastMCP.from_openapi()`, with atomic tools removed and replaced by grouped CRUD tools
+2. **FastMCP Foundation**: Server built from grouped CRUD tools registered in `src/nextdns_mcp/tools/`; the OpenAPI spec is a reference for validation only (issues #141/#146)
 3. **HTTP Client**: Authenticated `httpx.AsyncClient` with profile-level access control for NextDNS API calls
 4. **MCP Protocol**: Tools, resources, and prompts exposed via Model Context Protocol
 
 ### Key Components
 
-- `src/nextdns_mcp/nextdns-openapi.yaml`: OpenAPI 3.0 specification for NextDNS API
+- `src/nextdns_mcp/nextdns-openapi.yaml`: OpenAPI 3.0 specification for NextDNS API (reference/validation only)
 - `src/nextdns_mcp/server.py`: FastMCP server implementation
 - `Dockerfile`: Container definition with OCI labels for container metadata
 - `AGENT.md`: Development guidelines and safety rules

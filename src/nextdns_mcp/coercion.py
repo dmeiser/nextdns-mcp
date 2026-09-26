@@ -13,7 +13,7 @@ SPDX-License-Identifier: MIT
 
 from typing import Annotated, Any
 
-# Pydantic import for allow_extra_fields_component_fn and BeforeValidator
+# Pydantic import for BeforeValidator
 try:
     from pydantic import BeforeValidator
 except ImportError:  # pragma: no cover

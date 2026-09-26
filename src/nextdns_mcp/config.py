@@ -9,8 +9,6 @@ SPDX-License-Identifier: MIT
 import logging
 import os
 
-from fastmcp.server.providers.openapi import MCPType, RouteMap
-
 logger = logging.getLogger(__name__)
 
 
@@ -270,30 +268,6 @@ def validate_configuration() -> None:
 
     _log_access_control_settings()
 
-
-# Routes to exclude from MCP tool generation
-#
-# Unsupported endpoints (3 routes):
-# - GET /analytics/domains;series: NextDNS API returns 404 (API bug)
-# - GET /logs/stream: Uses Server-Sent Events (SSE), not supported by FastMCP
-# - GET /logs/download: Returns binary CSV file, FastMCP cannot validate binary responses
-EXCLUDED_ROUTES = [
-    RouteMap(
-        methods=["GET"],
-        pattern=r"^/profiles/\{profile_id\}/analytics/domains;series$",
-        mcp_type=MCPType.EXCLUDE,
-    ),
-    RouteMap(
-        methods=["GET"],
-        pattern=r"^/profiles/\{profile_id\}/logs/stream$",
-        mcp_type=MCPType.EXCLUDE,
-    ),
-    RouteMap(
-        methods=["GET"],
-        pattern=r"^/profiles/\{profile_id\}/logs/download$",
-        mcp_type=MCPType.EXCLUDE,
-    ),
-]
 
 # Valid DNS record types for DoH lookups
 VALID_DNS_RECORD_TYPES = [

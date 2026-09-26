@@ -117,36 +117,6 @@ class TestApiRequest:
         assert result["code"] == "internal_error"
 
 
-class TestGetOpenapiToolNames:
-    """Tests for get_openapi_tool_names."""
-
-    def test_extracts_operation_ids(self):
-        spec = {
-            "paths": {
-                "/profiles": {
-                    "get": {"operationId": "listProfiles"},
-                    "post": {"operationId": "createProfile"},
-                },
-                "/profiles/{id}": {
-                    "get": {"operationId": "getProfile"},
-                    "patch": {"operationId": "updateProfile"},
-                    "delete": {"operationId": "deleteProfile"},
-                },
-            }
-        }
-        assert server.get_openapi_tool_names(spec) == {
-            "listProfiles",
-            "createProfile",
-            "getProfile",
-            "updateProfile",
-            "deleteProfile",
-        }
-
-    def test_ignores_non_operations(self):
-        spec = {"paths": {"/x": {"parameters": []}}}
-        assert server.get_openapi_tool_names(spec) == set()
-
-
 class TestManageProfiles:
     """Tests for manageProfiles grouped tool."""
 
