@@ -78,14 +78,34 @@ class TestAccessControlledClientReadAccess:
         assert "Read access denied" in response.json()["error"]
 
     @pytest.mark.asyncio
-    async def test_allows_list_profiles_without_check(self, mock_super_request: Any) -> None:
-        """Test that /profiles without ID is allowed (listProfiles)."""
+    async def test_allows_list_profiles_without_check(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Test that /profiles without ID is allowed when reads are permitted (listProfiles)."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
             response = await client.request("GET", "/profiles")
 
         # Should call the parent request method without access checks
         mock_super_request.assert_called_once()
         assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_denies_list_profiles_when_no_readable_profiles(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Regression test: GET /profiles with readable set unset (deny-all reads) must be denied."""
+        # Mirrors the per-tool list check in tools/profiles.py: readable set is None only
+        # when both readable and writable are unset (writable implies readable).
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("GET", "/profiles")
+
+        # Should NOT call the parent request method
+        mock_super_request.assert_not_called()
+        assert response.status_code == 403
+        assert "no profiles are readable" in response.json()["error"]
+        assert response.json()["code"] == "read_access_denied"
 
 
 class TestAccessControlledClientWriteAccess:
@@ -142,15 +162,47 @@ class TestAccessControlledClientWriteAccess:
         assert response.json()["code"] == "write_access_denied"
 
     @pytest.mark.asyncio
-    async def test_allows_create_profile_without_check(
+    async def test_denies_create_profile_when_no_writable_profiles(
         self, mock_super_request: Any, clean_env: Callable[[str, str], None]
     ) -> None:
-        """Test that POST /profiles (createProfile) requires access check."""
-        # Creating a profile doesn't have a profile_id in the URL yet
+        """Test that POST /profiles is denied when no profiles are writable (issue #132)."""
+        # Collection endpoint with no profile_id in the URL; writable set unset = deny all
         async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
             response = await client.request("POST", "/profiles", json={"name": "New Profile"})
 
-        # Should call the parent request since URL doesn't contain profile_id
+        # Should NOT call the parent request method
+        mock_super_request.assert_not_called()
+        assert response.status_code == 403
+        assert "error" in response.json()
+        assert response.json()["code"] == "write_access_denied"
+
+    @pytest.mark.asyncio
+    async def test_denies_create_profile_in_read_only_mode(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Regression test for issue #132: POST /profiles under NEXTDNS_READ_ONLY=true must be denied."""
+        clean_env("NEXTDNS_READ_ONLY", "true")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("POST", "/profiles", json={"name": "New Profile"})
+
+        # Should NOT call the parent request method
+        mock_super_request.assert_not_called()
+        assert response.status_code == 403
+        assert "read-only mode" in response.json()["error"]
+        assert response.json()["code"] == "write_access_denied"
+
+    @pytest.mark.asyncio
+    async def test_allows_create_profile_when_writable_set_allows(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Test that POST /profiles is allowed when a writable profile set is configured."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("POST", "/profiles", json={"name": "New Profile"})
+
+        # Should call the parent request method
         mock_super_request.assert_called_once()
         assert response.status_code == 200
 

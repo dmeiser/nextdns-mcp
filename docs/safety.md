@@ -12,7 +12,8 @@ Reduce risk when operating on real NextDNS profiles.
 - Bulk PUT endpoints replace the entire list (denylist, allowlist, etc.); export/record current values first.
 
 ## Scope of global tools
-- `manageProfiles(operation="list")` and `dohLookup` bypass per-profile access checks; they are safe to use for discovery and testing.
+- Only `dohLookup` bypasses per-profile access checks; it is safe to use for discovery and testing.
+- `manageProfiles` collection operations (`list`, `create`) respect the global read/write denials; under the deny-all default (both profile sets unset) `list` is denied, and `create` is denied in read-only mode or when `NEXTDNS_WRITABLE_PROFILES` is unset. See configuration.md.
 
 ## CI credentials
 - GitHub Actions logs are world-readable on a public repository; never print the API key or any file that contains it to CI logs.

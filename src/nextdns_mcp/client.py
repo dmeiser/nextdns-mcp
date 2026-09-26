@@ -16,6 +16,8 @@ from .config import (
     can_write_profile,
     get_api_key,
     get_http_timeout,
+    get_readable_profiles_set,
+    get_writable_profiles_set,
     is_read_only,
 )
 from .errors import ErrorCode
@@ -143,6 +145,39 @@ class AccessControlledClient(httpx.AsyncClient):
         logger.warning(f"{error_msg} (method={method}, url={str(url).split('?', 1)[0]})")
         return create_access_denied_response(method, url, error_msg, profile_id, code=ErrorCode.READ_ACCESS_DENIED)
 
+    def _check_collection_write_access(self, method: str, url: str) -> httpx.Response | None:
+        """Enforce global write denials for collection endpoints (no profile_id in URL).
+
+        Collection endpoints such as POST /profiles create resources that belong to a
+        profile, so they must respect read-only mode and the writable-profile set even
+        though the URL carries no profile_id.
+        """
+        if is_read_only():
+            error_msg = "Write operation denied: server is in read-only mode"
+            logger.warning(f"{error_msg} (method={method}, url={url})")
+            return create_access_denied_response(method, url, error_msg, "", code=ErrorCode.WRITE_ACCESS_DENIED)
+
+        if get_writable_profiles_set() is None:
+            error_msg = "Write access denied: no profiles are writable"
+            logger.warning(f"{error_msg} (method={method}, url={url})")
+            return create_access_denied_response(method, url, error_msg, "", code=ErrorCode.WRITE_ACCESS_DENIED)
+
+        return None
+
+    def _check_collection_read_access(self, method: str, url: str) -> httpx.Response | None:
+        """Enforce global read denials for collection endpoints (no profile_id in URL).
+
+        Collection endpoints such as GET /profiles list profile-scoped resources, so
+        they must respect the readable-profile deny-all default even though the URL
+        carries no profile_id.
+        """
+        if get_readable_profiles_set() is None:
+            error_msg = "Read access denied: no profiles are readable"
+            logger.warning(f"{error_msg} (method={method}, url={url})")
+            return create_access_denied_response(method, url, error_msg, "", code=ErrorCode.READ_ACCESS_DENIED)
+
+        return None
+
     def _check_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
         """Check access control for profile operations."""
         if is_write_operation(method):
@@ -185,6 +220,16 @@ class AccessControlledClient(httpx.AsyncClient):
             error_msg = f"Forbidden URL: {url!s}"
             logger.warning(f"Forbidden URL: {logged_path} (method={method})")
             return create_access_denied_response(method, url, error_msg, profile_id or "")
+        elif is_write_operation(method):
+            # Collection endpoints (e.g., POST /profiles) carry no profile_id but
+            # still create profile-scoped resources; enforce global write denials.
+            error_response = self._check_collection_write_access(method, url)
+        else:
+            # Collection reads (e.g., GET /profiles) carry no profile_id but must
+            # still respect the readable-profile deny-all default.
+            error_response = self._check_collection_read_access(method, url)
+        if error_response:
+            return error_response
 
         # No body coercion here: string values in JSON bodies are passed through
         # unchanged. Schema-aware coercion of tool arguments already happens in
