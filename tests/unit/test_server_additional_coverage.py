@@ -151,11 +151,6 @@ def test_access_control_client_checks(monkeypatch):
 async def test_request_body_passthrough_and_access_denied(monkeypatch):
     client = server.AccessControlledClient()
 
-    # JSON bodies are passed through unchanged: string values like
-    # "true" and "2" must not be coerced to bool/int (issue #145).
-    kwargs = {"json": {"a": "true", "b": "2"}}
-    assert kwargs["json"] == {"a": "true", "b": "2"}
-
     # Test request returns early when access denied
     monkeypatch.setattr(client_module, "extract_profile_id_from_url", lambda url: "abc")
     monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
