@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from nextdns_mcp.server import get_mcp_run_options
+from nextdns_mcp.server import _is_loopback_host, get_mcp_run_options
 
 
 class TestGetMcpRunOptions:
@@ -27,7 +27,19 @@ class TestGetMcpRunOptions:
         """Test that HTTP mode returns dict with default host and port."""
         with patch.dict(os.environ, {"MCP_TRANSPORT": "http"}, clear=True):
             options = get_mcp_run_options()
-            assert options == {"transport": "http", "host": "0.0.0.0", "port": 8000}
+            assert options == {"transport": "http", "host": "127.0.0.1", "port": 8000}
+
+    def test_http_default_host_is_loopback_only(self):
+        """Regression test for #142: default HTTP bind must be loopback-only.
+
+        Without MCP_HOST set, the server must never bind a non-loopback
+        interface, because the HTTP endpoint has no authentication.
+        """
+        with patch.dict(os.environ, {"MCP_TRANSPORT": "http"}, clear=True):
+            options = get_mcp_run_options()
+            assert _is_loopback_host(options["host"]), (
+                f"Default HTTP bind must be loopback-only, got {options['host']!r}"
+            )
 
     def test_http_with_custom_host_and_port(self):
         """Test that HTTP mode respects custom host and port."""
@@ -63,7 +75,27 @@ class TestGetMcpRunOptions:
         """Test HTTP with only port customized."""
         with patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "3000"}, clear=True):
             options = get_mcp_run_options()
-            assert options == {"transport": "http", "host": "0.0.0.0", "port": 3000}
+            assert options == {"transport": "http", "host": "127.0.0.1", "port": 3000}
+
+    def test_http_non_loopback_host_emits_security_warning(self):
+        """Test that an explicit non-loopback bind logs a security warning."""
+        with (
+            patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_HOST": "0.0.0.0"}, clear=True),
+            patch("nextdns_mcp.server.logger.warning") as mock_warning,
+        ):
+            options = get_mcp_run_options()
+            assert options["host"] == "0.0.0.0"
+            mock_warning.assert_called_once()
+            assert "SECURITY" in mock_warning.call_args.args[0]
+
+    def test_http_loopback_host_emits_no_security_warning(self):
+        """Test that the default loopback bind emits no security warning."""
+        with (
+            patch.dict(os.environ, {"MCP_TRANSPORT": "http"}, clear=True),
+            patch("nextdns_mcp.server.logger.warning") as mock_warning,
+        ):
+            get_mcp_run_options()
+            mock_warning.assert_not_called()
 
     def test_invalid_port_raises_value_error(self):
         """Test that invalid port value raises ValueError."""
@@ -82,3 +114,17 @@ class TestGetMcpRunOptions:
             # Verify all keys are valid Python identifiers (can be used as kwargs)
             for key in options:
                 assert key.isidentifier(), f"Key '{key}' is not a valid identifier"
+
+
+class TestIsLoopbackHost:
+    """Test _is_loopback_host helper."""
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+    def test_loopback_hosts(self, host):
+        """Test that loopback addresses are recognized."""
+        assert _is_loopback_host(host) is True
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.10", "10.0.0.5"])
+    def test_non_loopback_hosts(self, host):
+        """Test that non-loopback addresses are not recognized as loopback."""
+        assert _is_loopback_host(host) is False

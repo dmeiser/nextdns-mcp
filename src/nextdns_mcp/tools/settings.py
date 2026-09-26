@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
+from ..errors import ErrorCode, error_payload
 from ..utils import _api_request, _validate_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
@@ -41,13 +42,13 @@ async def _manage_settings_impl(
         return await _api_request("GET", url)
     if operation == "update":
         if settings is None:
-            return {"error": "settings is required for update operation"}
+            return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "settings is required for update operation")
         settings = _coerce_json_arg(settings)
         if not isinstance(settings, dict):
-            return {"error": "settings must be a JSON object"}
+            return error_payload(ErrorCode.INVALID_ARGUMENT, "settings must be a JSON object")
         return await _api_request("PATCH", url, json=settings)
 
-    return {"error": f"Unsupported operation: {operation}"}
+    return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 
 
 async def manageSettings(

@@ -19,6 +19,7 @@ from fastmcp.utilities.types import Image
 from .. import client
 from ..coercion import OptionalProfileId
 from ..config import get_default_profile
+from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import _validate_profile_id
 
 matplotlib.use("Agg")
@@ -118,23 +119,26 @@ async def _plot_analytics_series_impl(
 ) -> dict[str, Any] | mcp.types.ImageContent:
     """Generate a PNG line chart from a NextDNS analytics time-series endpoint."""
     if metric not in _PLOT_ANALYTICS_METRICS:
-        return {
-            "error": f"Unsupported metric: {metric}",
-            "supported_metrics": sorted(_PLOT_ANALYTICS_METRICS),
-        }
+        return error_payload(
+            ErrorCode.UNSUPPORTED_METRIC,
+            f"Unsupported metric: {metric}",
+            supported_metrics=sorted(_PLOT_ANALYTICS_METRICS),
+        )
 
     if interval < 60:
-        return {
-            "error": "interval must be at least 60 seconds",
-            "minimum_interval": 60,
-        }
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            "interval must be at least 60 seconds",
+            minimum_interval=60,
+        )
 
     target_profile = profile_id if profile_id else get_default_profile()
     if not target_profile:
-        return {
-            "error": "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
-            "hint": "Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
-        }
+        return error_payload(
+            ErrorCode.MISSING_PROFILE_ID,
+            "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
+            hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
+        )
 
     error = _validate_profile_id(target_profile)
     if error:
@@ -159,15 +163,15 @@ async def _plot_analytics_series_impl(
         payload = response.json()
     except httpx.HTTPError as e:
         logger.error(f"HTTP error while fetching analytics series {metric}: {e}")
-        error_response = getattr(e, "response", None)
-        status_code = error_response.status_code if error_response is not None else None
-        body = error_response.text if error_response is not None else None
-        raise RuntimeError(
-            f"HTTP error {status_code} while fetching analytics series {metric}: {e} (response: {body})"
-        ) from e
-    except Exception as e:
+        return http_error_payload(
+            f"HTTP error while fetching analytics series {metric}: {e}", e, fallback_code=ErrorCode.HTTP_ERROR
+        )
+    except Exception as e:  # noqa: BLE001
         logger.error(f"Unexpected error while fetching analytics series {metric}: {e}")
-        raise RuntimeError(f"Unexpected error while fetching analytics series {metric}: {e}") from e
+        return error_payload(
+            ErrorCode.INTERNAL_ERROR,
+            f"Unexpected error while fetching analytics series {metric}: {e}",
+        )
 
     meta = payload.get("meta", {})
     series_meta = meta.get("series", {})
@@ -175,17 +179,18 @@ async def _plot_analytics_series_impl(
     series_data = payload.get("data", [])
 
     if not times or not series_data:
-        return {
-            "error": "No time-series data available to plot",
-            "metric": metric,
-            "profile_id": target_profile,
-        }
+        return error_payload(
+            ErrorCode.NO_DATA,
+            "No time-series data available to plot",
+            metric=metric,
+            profile_id=target_profile,
+        )
 
     try:
         png_bytes = await asyncio.to_thread(_render_series_chart, metric, times, series_data)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error rendering chart for {metric}: {e}")
-        return {"error": f"Error rendering chart: {e}"}
+        return error_payload(ErrorCode.INTERNAL_ERROR, f"Error rendering chart: {e}")
 
     return Image(data=png_bytes, format="png").to_image_content()
 

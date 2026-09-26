@@ -38,8 +38,11 @@ LABEL org.opencontainers.image.licenses="MIT"
 
 # Transport modes:
 # - stdio (default): For Claude Desktop, CLI tools
-# - http: For network services, web-based clients, production deployments
-#   Set MCP_TRANSPORT=http, optionally MCP_HOST and MCP_PORT
+# - http: For network services and web-based clients. The HTTP endpoint has NO
+#   built-in authentication. It binds to 127.0.0.1 (loopback-only) by default.
+#   To reach it across the network you must explicitly set MCP_HOST to a
+#   non-loopback address AND put an authenticating reverse proxy in front of it.
+#   Set MCP_TRANSPORT=http, optionally MCP_HOST and MCP_PORT (see README).
 
 # Expose port for HTTP transport mode (optional)
 EXPOSE 8000

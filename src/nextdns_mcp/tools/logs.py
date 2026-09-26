@@ -10,6 +10,7 @@ import httpx
 
 from .. import client
 from ..coercion import ProfileId
+from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import _api_request, _build_query_params, _validate_profile_id
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,7 @@ async def _manage_logs_impl(
 
     if operation == "download":
         try:
-            response = await client.api_client.get(f"{base_url}/download", follow_redirects=True)
+            response = await _fetch_log_download(profile_id)
             response.raise_for_status()
             return {
                 "content_type": response.headers.get("content-type"),
@@ -55,19 +56,44 @@ async def _manage_logs_impl(
             }
         except httpx.HTTPError as e:
             logger.error(f"HTTP error downloading logs: {e}")
-            error_response = getattr(e, "response", None)
-            status_code = error_response.status_code if error_response is not None else None
-            body = error_response.text if error_response is not None else None
-            return {
-                "error": f"HTTP error {status_code} while downloading logs: {e}",
-                "response_body": body,
-                "status_code": status_code,
-            }
-        except Exception as e:
+            return http_error_payload(f"HTTP error while downloading logs: {e}", e, fallback_code=ErrorCode.HTTP_ERROR)
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Unexpected error downloading logs: {e}")
-            raise RuntimeError(f"Unexpected error while downloading logs: {e}") from e
+            return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")
 
-    return {"error": f"Unsupported operation: {operation}"}
+    return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
+
+
+# Maximum number of redirects followed when downloading logs.
+_MAX_DOWNLOAD_REDIRECTS = 5
+
+
+async def _fetch_log_download(profile_id: ProfileId) -> httpx.Response:
+    """Fetch the log download, following redirects without leaking the API key.
+
+    The authenticated client is used only for the initial request to the
+    NextDNS API. If the download endpoint redirects (S3-style object storage),
+    the ``Location`` is fetched with an unauthenticated client so the
+    ``X-Api-Key`` header never crosses to the redirect target. Relative
+    ``Location`` headers are resolved against the origin of the download URL.
+    """
+    response = await client.api_client.get(f"/profiles/{profile_id}/logs/download")
+
+    redirects = 0
+    while response.has_redirect_location:
+        redirects += 1
+        if redirects > _MAX_DOWNLOAD_REDIRECTS:
+            raise httpx.TooManyRedirects(f"Exceeded {_MAX_DOWNLOAD_REDIRECTS} redirects", request=response.request)
+        url = response.request.url.join(response.headers["location"])
+        # Unauthenticated client: deliberately omits X-Api-Key so the key
+        # is never sent to a host outside the NextDNS API origin.
+        unauthenticated = httpx.AsyncClient(timeout=client.get_http_timeout())
+        try:
+            response = await unauthenticated.get(url)
+        finally:
+            await unauthenticated.aclose()
+
+    return response
 
 
 async def manageLogs(

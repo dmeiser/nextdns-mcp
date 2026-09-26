@@ -148,16 +148,11 @@ def test_access_control_client_checks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_coerce_json_body_and_request(monkeypatch):
+async def test_request_body_passthrough_and_access_denied(monkeypatch):
     client = server.AccessControlledClient()
 
-    # Test coercion of JSON body
-    kwargs = {"json": {"a": "true", "b": "2"}}
-    client._coerce_json_body(kwargs)
-    assert kwargs["json"] == {"a": True, "b": 2}
-
     # Test request returns early when access denied
-    monkeypatch.setattr(client_module, "extract_profile_id_from_url", lambda url: "abc")
+    monkeypatch.setattr(client_module, "extract_profile_id_from_url", lambda url: "abc123")
     monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
     monkeypatch.setattr(client_module, "is_read_only", lambda: False)
     # allow reads for this test
@@ -169,7 +164,7 @@ async def test_coerce_json_body_and_request(monkeypatch):
     # Patch the parent httpx.AsyncClient.request
     monkeypatch.setattr(httpx.AsyncClient, "request", fake_super_request)
 
-    r = await client.request("GET", "/profiles/abc/something")
+    r = await client.request("GET", "/profiles/abc123/something")
     assert r.status_code == 200
 
 
