@@ -264,7 +264,7 @@ class TestPlotAndDohErrorContract:
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         response = MagicMock()
         response.json.return_value = {"meta": {"series": {"times": []}}, "data": []}
-        mock_api_client.get.return_value = response
+        mock_api_client.request.return_value = response
         result = await _plot_analytics_series_impl("status")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.NO_DATA
@@ -272,7 +272,7 @@ class TestPlotAndDohErrorContract:
     @pytest.mark.asyncio
     async def test_plot_http_error(self, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.get.side_effect = _http_error(500)
+        mock_api_client.request.side_effect = _http_error(500)
         result = await server.plotAnalytics("status")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.HTTP_ERROR
