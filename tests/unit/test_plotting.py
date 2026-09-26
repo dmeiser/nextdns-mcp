@@ -135,18 +135,18 @@ class TestPlotAnalyticsSeriesImpl:
         assert "No profile_id provided" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_http_error_raises(self, clean_env, mock_api_client, monkeypatch):
+    async def test_http_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         mock_api_client.get.side_effect = httpx.HTTPError("boom")
-        with pytest.raises(RuntimeError, match="HTTP error"):
-            await server._plot_analytics_series_impl("status")
+        result = await server._plot_analytics_series_impl("status")
+        assert result["code"] == "http_error"
 
     @pytest.mark.asyncio
-    async def test_unexpected_error_raises(self, clean_env, mock_api_client, monkeypatch):
+    async def test_unexpected_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         mock_api_client.get.side_effect = RuntimeError("unexpected")
-        with pytest.raises(RuntimeError, match="Unexpected error"):
-            await server._plot_analytics_series_impl("status")
+        result = await server._plot_analytics_series_impl("status")
+        assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
     async def test_empty_data_returns_error(self, clean_env, mock_api_client, monkeypatch):
@@ -201,5 +201,5 @@ class TestPlotAnalyticsToolWrapper:
     async def test_plot_analytics_wrapper_with_default_profile(self, clean_env, monkeypatch, mock_api_client):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         mock_api_client.get.side_effect = httpx.HTTPError("boom")
-        with pytest.raises(RuntimeError, match="HTTP error"):
-            await server.plotAnalytics("status")
+        result = await server.plotAnalytics("status")
+        assert result["code"] == "http_error"

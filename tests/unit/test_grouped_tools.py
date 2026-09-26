@@ -83,14 +83,38 @@ class TestApiRequest:
         exc.response.status_code = 500
         exc.response.text = "internal server error"
         mock_api_client.request.side_effect = exc
-        with pytest.raises(RuntimeError, match="HTTP error 500"):
-            await server._api_request("GET", "/profiles")
+        result = await server._api_request("GET", "/profiles")
+        assert "error" in result
+        assert result["code"] == "http_error"
+        assert result["status_code"] == 500
+
+    @pytest.mark.asyncio
+    async def test_http_error_status_distinguishable(self, mock_api_client):
+        """401/403/429/5xx failures all surface as http_error with distinct status_code."""
+        for status in (401, 403, 429, 503):
+            exc = httpx.HTTPError("boom")
+            exc.response = MagicMock()
+            exc.response.status_code = status
+            exc.response.text = None
+            mock_api_client.request.side_effect = exc
+            result = await server._api_request("GET", "/profiles")
+            assert result["code"] == "http_error"
+            assert result["status_code"] == status
+
+    @pytest.mark.asyncio
+    async def test_http_error_no_response(self, mock_api_client):
+        mock_api_client.request.side_effect = httpx.ConnectError("network down")
+        result = await server._api_request("GET", "/profiles")
+        assert result["code"] == "http_error"
+        assert result["status_code"] is None
+        assert "response_body" not in result
 
     @pytest.mark.asyncio
     async def test_unexpected_error(self, mock_api_client):
         mock_api_client.request.side_effect = RuntimeError("unexpected")
-        with pytest.raises(RuntimeError, match="Unexpected error"):
-            await server._api_request("GET", "/profiles")
+        result = await server._api_request("GET", "/profiles")
+        assert "error" in result
+        assert result["code"] == "internal_error"
 
 
 class TestGetOpenapiToolNames:
@@ -537,8 +561,8 @@ class TestManageLogsDownloadRedirects:
     @pytest.mark.asyncio
     async def test_download_unexpected_error(self, mock_api_client):
         mock_api_client.get.side_effect = RuntimeError("boom")
-        with pytest.raises(RuntimeError, match="Unexpected error"):
-            await server.manageLogs("download", "abc123")
+        result = await server.manageLogs("download", "abc123")
+        assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
@@ -621,8 +645,9 @@ class TestQueryAnalytics:
 
     @pytest.mark.asyncio
     async def test_domains_series_rejected(self, mock_api_client):
-        with pytest.raises(ValueError, match="series=true is not supported"):
-            await server.queryAnalytics("domains", "abc123", series=True)
+        result = await server.queryAnalytics("domains", "abc123", series=True)
+        assert result["code"] == "unsupported_parameter"
+        assert "series=true is not supported" in result["error"]
 
 
 class TestManageProfilesAccessAndValidation:

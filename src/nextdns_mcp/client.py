@@ -18,6 +18,7 @@ from .config import (
     get_http_timeout,
     is_read_only,
 )
+from .errors import ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,9 @@ def is_write_operation(method: str) -> bool:
     return method.upper() in ("POST", "PUT", "PATCH", "DELETE")
 
 
-def create_access_denied_response(method: str, url: str, error_msg: str, profile_id: str) -> httpx.Response:
+def create_access_denied_response(
+    method: str, url: str, error_msg: str, profile_id: str, code: str = ErrorCode.ACCESS_DENIED
+) -> httpx.Response:
     """Create a 403 Forbidden response for access denied scenarios.
 
     Args:
@@ -100,13 +103,14 @@ def create_access_denied_response(method: str, url: str, error_msg: str, profile
         url: Request URL
         error_msg: Error message to include in response
         profile_id: The profile ID that was denied access
+        code: Typed error code identifying the denial class (read/write)
 
     Returns:
         403 Forbidden Response object
     """
     response = httpx.Response(
         status_code=403,
-        json={"error": error_msg, "profile_id": profile_id},
+        json={"error": error_msg, "code": code, "profile_id": profile_id},
         request=httpx.Request(method, str(url)),
     )
     return response
@@ -126,7 +130,7 @@ class AccessControlledClient(httpx.AsyncClient):
             error_msg = f"Write access denied for profile: {profile_id}"
 
         logger.warning(f"{error_msg} (method={method}, url={url})")
-        return create_access_denied_response(method, url, error_msg, profile_id)
+        return create_access_denied_response(method, url, error_msg, profile_id, code=ErrorCode.WRITE_ACCESS_DENIED)
 
     def _check_read_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
         """Check read access and return error response if denied."""
@@ -135,7 +139,7 @@ class AccessControlledClient(httpx.AsyncClient):
 
         error_msg = f"Read access denied for profile: {profile_id}"
         logger.warning(f"{error_msg} (method={method}, url={url})")
-        return create_access_denied_response(method, url, error_msg, profile_id)
+        return create_access_denied_response(method, url, error_msg, profile_id, code=ErrorCode.READ_ACCESS_DENIED)
 
     def _check_access(self, profile_id: str, method: str, url: str) -> httpx.Response | None:
         """Check access control for profile operations."""

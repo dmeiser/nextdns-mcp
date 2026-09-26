@@ -45,6 +45,7 @@ class TestDohLookup:
         result = await dohLookup("example.com", mock_profile_id, "A")
         assert "error" in result
         assert "Read access denied" in result["error"]
+        assert result["code"] == "read_access_denied"
 
     @pytest.mark.asyncio
     async def test_doh_lookup_rejects_invalid_profile_id(self, monkeypatch):
@@ -52,6 +53,7 @@ class TestDohLookup:
         result = await dohLookup("example.com", "abc/def", "A")
         assert "error" in result
         assert "Invalid profile_id format" in result["error"]
+        assert result["code"] == "invalid_profile_id"
 
     @pytest.mark.asyncio
     async def test_doh_lookup_basic_query(self, mock_profile_id):
@@ -132,6 +134,7 @@ class TestDohLookup:
 
         assert "error" in result
         assert "Invalid record type" in result["error"]
+        assert result["code"] == "invalid_record_type"
         assert "valid_types" in result
 
     @pytest.mark.asyncio
@@ -199,11 +202,13 @@ class TestDohLookup:
 
     @pytest.mark.asyncio
     async def test_doh_lookup_http_error(self, mock_profile_id):
-        """Test error handling for HTTP errors."""
+        """Test error handling for HTTP errors surfaces a typed http_error payload."""
         # Patch at the doh tool module level where httpx is imported
         with patch("nextdns_mcp.tools.doh.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
-            mock_client.get.side_effect = httpx.HTTPError("Connection failed")
+            http_exc = httpx.HTTPError("Connection failed")
+            http_exc.response = Mock(status_code=500)
+            mock_client.get.side_effect = http_exc
             mock_client.__aenter__.return_value = mock_client
 
             # __aexit__ should return False to not suppress exceptions
@@ -217,6 +222,8 @@ class TestDohLookup:
 
             assert "error" in result
             assert "HTTP error" in result["error"]
+            assert result["code"] == "http_error"
+            assert result["status_code"] == 500
             assert result["profile_id"] == mock_profile_id
 
     @pytest.mark.asyncio
@@ -239,6 +246,7 @@ class TestDohLookup:
 
             assert "error" in result
             assert "Unexpected error" in result["error"]
+            assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
     async def test_doh_lookup_correct_url_format(self, mock_profile_id):

@@ -10,6 +10,7 @@ import httpx
 
 from .. import client
 from ..coercion import ProfileId
+from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import _api_request, _build_query_params, _validate_profile_id
 
 logger = logging.getLogger(__name__)
@@ -55,19 +56,12 @@ async def _manage_logs_impl(
             }
         except httpx.HTTPError as e:
             logger.error(f"HTTP error downloading logs: {e}")
-            error_response = getattr(e, "response", None)
-            status_code = error_response.status_code if error_response is not None else None
-            body = error_response.text if error_response is not None else None
-            return {
-                "error": f"HTTP error {status_code} while downloading logs: {e}",
-                "response_body": body,
-                "status_code": status_code,
-            }
-        except Exception as e:
+            return http_error_payload(f"HTTP error while downloading logs: {e}", e, fallback_code=ErrorCode.HTTP_ERROR)
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Unexpected error downloading logs: {e}")
-            raise RuntimeError(f"Unexpected error while downloading logs: {e}") from e
+            return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")
 
-    return {"error": f"Unsupported operation: {operation}"}
+    return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 
 
 # Maximum number of redirects followed when downloading logs.

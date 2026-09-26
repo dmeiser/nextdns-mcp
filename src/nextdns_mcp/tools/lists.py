@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
+from ..errors import ErrorCode, error_payload
 from ..utils import _api_request, _validate_entry_id, _validate_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
@@ -48,7 +49,7 @@ async def _lists_get(base_url: str) -> dict[str, Any]:
 async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[str, Any]:
     """Add a single entry to a list."""
     if entry is None:
-        return {"error": "entry is required for add operation"}
+        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry is required for add operation")
     entry = _coerce_json_arg(entry)
     body = entry if isinstance(entry, dict) else {"id": entry}
     return await _api_request("POST", base_url, json=body)
@@ -57,10 +58,10 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
 async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | None) -> dict[str, Any]:
     """Replace the entire list with a new set of entries."""
     if entries is None:
-        return {"error": "entries is required for replace operation"}
+        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entries is required for replace operation")
     entries = _coerce_json_arg(entries)
     if not isinstance(entries, list):
-        return {"error": "entries must be a JSON array"}
+        return error_payload(ErrorCode.INVALID_ARGUMENT, "entries must be a JSON array")
     return await _api_request("PUT", base_url, json=entries)
 
 
@@ -72,22 +73,23 @@ async def _lists_update(
 ) -> dict[str, Any]:
     """Update a single list entry by id (only for supported list types)."""
     if list_type not in _LIST_UPDATEABLE_TYPES:
-        return {
-            "error": f"update is not supported for list_type={list_type}",
-            "supported_list_types": sorted(_LIST_UPDATEABLE_TYPES),
-        }
+        return error_payload(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            f"update is not supported for list_type={list_type}",
+            supported_list_types=sorted(_LIST_UPDATEABLE_TYPES),
+        )
     if entry_id is None:
-        return {"error": "entry_id is required for update operation"}
+        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for update operation")
     entry = _coerce_json_arg(entry)
     if not isinstance(entry, dict):
-        return {"error": "entry must be a dict for update operation"}
+        return error_payload(ErrorCode.INVALID_ARGUMENT, "entry must be a dict for update operation")
     return await _api_request("PATCH", f"{base_url}/{entry_id}", json=entry)
 
 
 async def _lists_remove(base_url: str, entry_id: str | None) -> dict[str, Any]:
     """Remove a single list entry by id."""
     if entry_id is None:
-        return {"error": "entry_id is required for remove operation"}
+        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for remove operation")
     return await _api_request("DELETE", f"{base_url}/{entry_id}")
 
 
@@ -123,7 +125,7 @@ async def _manage_lists_impl(
     if operation == "remove":
         return await _lists_remove(base_url, entry_id)
 
-    return {"error": f"Unsupported operation: {operation}"}
+    return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 
 
 async def manageLists(
