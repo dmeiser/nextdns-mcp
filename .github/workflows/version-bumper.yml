@@ -88,7 +88,7 @@ jobs:
           PY
           
           NEXT_V=$(cat new_version.txt)
-          echo "next_version=$NEXT_V" >> $GITHUB_OUTPUT
+          echo "next_version=$NEXT_V" >> "$GITHUB_OUTPUT"
 
       - name: Commit and Push
         env:
