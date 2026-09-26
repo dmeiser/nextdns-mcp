@@ -3,6 +3,7 @@
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -13,6 +14,27 @@ from ..config import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES, can_read_profile,
 from ..utils import is_safe_profile_id
 
 logger = logging.getLogger(__name__)
+
+# Persistent DoH HTTP client, module-level for keep-alive connection reuse
+# (mirrors client.api_client). Created lazily inside the running event loop,
+# because httpx binds its connection pool to the loop it first uses.
+_doh_client: httpx.AsyncClient | None = None
+_doh_client_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_doh_client() -> httpx.AsyncClient:
+    """Return the persistent DoH HTTP client, creating it on first use.
+
+    If the running event loop has changed (e.g., across pytest test
+    functions) a fresh client is built so connections never cross closed
+    loops.
+    """
+    global _doh_client, _doh_client_loop
+    loop = asyncio.get_running_loop()
+    if _doh_client is None or _doh_client_loop is not loop:
+        _doh_client = httpx.AsyncClient(timeout=get_http_timeout())
+        _doh_client_loop = loop
+    return _doh_client
 
 
 def _get_target_profile(profile_id: str | None) -> str | None:
@@ -58,17 +80,15 @@ async def doh_lookup(doh_url: str, domain: str, record_type: str, target_profile
     params = {"name": domain, "type": record_type}
     headers = {"accept": "application/dns-json"}
 
+    client = _get_doh_client()
     try:
-        async with httpx.AsyncClient(timeout=get_http_timeout()) as client:
-            response = await client.get(doh_url, params=params, headers=headers)
-            response.raise_for_status()
-            result: dict[str, Any] = response.json()
-            result["_metadata"] = _build_doh_metadata(
-                target_profile, domain, record_type, doh_url, result.get("Status")
-            )
-            if result.get("Status") is not None:
-                logger.debug(f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}")
-            return result
+        response = await client.get(doh_url, params=params, headers=headers)
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        result["_metadata"] = _build_doh_metadata(target_profile, domain, record_type, doh_url, result.get("Status"))
+        if result.get("Status") is not None:
+            logger.debug(f"DoH lookup result: {domain} -> {result['_metadata']['status_description']}")
+        return result
     except Exception as e:  # noqa: BLE001
         error_type = "HTTP error" if isinstance(e, httpx.HTTPError) else "Unexpected error"
         logger.error(f"{error_type} during DoH lookup for {domain}: {e!s}")

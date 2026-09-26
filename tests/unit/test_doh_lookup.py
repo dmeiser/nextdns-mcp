@@ -1,10 +1,12 @@
 """Unit tests for the custom dohLookup tool."""
 
-from unittest.mock import AsyncMock, Mock, patch
+import asyncio
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 
+import nextdns_mcp.tools.doh as doh_module
 from nextdns_mcp.tools.doh import _dohLookup_impl as dohLookup
 
 
@@ -18,9 +20,14 @@ def allow_doh_read_access(monkeypatch):
     monkeypatch.setitem(dohLookup.__globals__, "can_read_profile", lambda _profile_id: True)
 
 
-@pytest.fixture
-def mock_httpx_client():
-    """Mock httpx.AsyncClient for DoH tests."""
+@pytest.fixture(autouse=True)
+async def mock_doh_client(monkeypatch):
+    """Install a mock persistent DoH client so no test hits the network.
+
+    doh.py keeps a single module-level AsyncClient for connection reuse
+    (see issue #149), so tests swap that cached client out rather than
+    patching httpx.AsyncClient.
+    """
     mock_client = AsyncMock(spec=httpx.AsyncClient)
     mock_response = Mock()
     mock_response.json.return_value = {
@@ -29,9 +36,8 @@ def mock_httpx_client():
         "Answer": [{"name": "google.com.", "type": 1, "TTL": 300, "data": "142.250.190.46"}],
     }
     mock_client.get.return_value = mock_response
-    # Make it usable as an async context manager
-    mock_client.__aenter__.return_value = mock_client
-    mock_client.__aexit__.return_value = AsyncMock()
+    monkeypatch.setattr(doh_module, "_doh_client", mock_client)
+    monkeypatch.setattr(doh_module, "_doh_client_loop", asyncio.get_running_loop())
     return mock_client
 
 
@@ -56,27 +62,14 @@ class TestDohLookup:
     @pytest.mark.asyncio
     async def test_doh_lookup_basic_query(self, mock_profile_id):
         """Test basic DoH lookup."""
-        # Mock httpx.AsyncClient
-        with patch("httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_response = Mock()
-            mock_response.json.return_value = {
-                "Status": 0,
-                "Answer": [{"name": "google.com.", "data": "142.250.190.46"}],
-            }
-            mock_client.get.return_value = mock_response
-            mock_client.__aenter__.return_value = mock_client
-            mock_client.__aexit__.return_value = AsyncMock()
-            mock_client_class.return_value = mock_client
+        result = await dohLookup("google.com", mock_profile_id, "A")
 
-            result = await dohLookup("google.com", mock_profile_id, "A")
-
-            assert "Status" in result
-            assert result["Status"] == 0
-            assert "_metadata" in result
-            assert result["_metadata"]["profile_id"] == mock_profile_id
-            assert result["_metadata"]["query_domain"] == "google.com"
-            assert result["_metadata"]["query_type"] == "A"
+        assert "Status" in result
+        assert result["Status"] == 0
+        assert "_metadata" in result
+        assert result["_metadata"]["profile_id"] == mock_profile_id
+        assert result["_metadata"]["query_domain"] == "google.com"
+        assert result["_metadata"]["query_type"] == "A"
 
     @pytest.mark.asyncio
     async def test_doh_lookup_uses_default_profile(self, monkeypatch):
@@ -89,32 +82,25 @@ class TestDohLookup:
 
         import importlib
 
-        import nextdns_mcp.tools.doh
-
-        importlib.reload(nextdns_mcp.tools.doh)
+        importlib.reload(doh_module)
 
         # Re-apply access bypass after module reload.
-        monkeypatch.setattr(nextdns_mcp.tools.doh, "can_read_profile", lambda _profile_id: True)
+        monkeypatch.setattr(doh_module, "can_read_profile", lambda _profile_id: True)
+        # The reload reset the module-level client cache; reinstall the mock.
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_response = Mock()
+        mock_response.json.return_value = {"Status": 0, "Answer": []}
+        mock_client.get.return_value = mock_response
+        monkeypatch.setattr(doh_module, "_doh_client", mock_client)
+        monkeypatch.setattr(doh_module, "_doh_client_loop", asyncio.get_running_loop())
 
-        with patch("httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_response = Mock()
-            mock_response.json.return_value = {
-                "Status": 0,
-                "Answer": [],
-            }
-            mock_client.get.return_value = mock_response
-            mock_client.__aenter__.return_value = mock_client
-            mock_client.__aexit__.return_value = AsyncMock()
-            mock_client_class.return_value = mock_client
+        # Use the reloaded module's function
+        result = await doh_module._dohLookup_impl("example.com")
 
-            # Use the reloaded module's function
-            result = await nextdns_mcp.tools.doh._dohLookup_impl("example.com")
-
-            assert "_metadata" in result
-            assert result["_metadata"]["profile_id"] == test_profile
-            assert result["_metadata"]["query_domain"] == "example.com"
-            assert result["_metadata"]["query_type"] == "A"
+        assert "_metadata" in result
+        assert result["_metadata"]["profile_id"] == test_profile
+        assert result["_metadata"]["query_domain"] == "example.com"
+        assert result["_metadata"]["query_type"] == "A"
 
     @pytest.mark.skip(reason="Module-level constant binding prevents reliable testing")
     @pytest.mark.asyncio
@@ -139,42 +125,24 @@ class TestDohLookup:
         """Test all valid DNS record types are accepted."""
         valid_types = ["A", "AAAA", "CNAME", "MX", "NS", "PTR", "SOA", "TXT", "SRV", "CAA"]
 
-        with patch("httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_response = Mock()
-            mock_response.json.return_value = {"Status": 0, "Answer": []}
-            mock_client.get.return_value = mock_response
-            mock_client.__aenter__.return_value = mock_client
-            mock_client.__aexit__.return_value = AsyncMock()
-            mock_client_class.return_value = mock_client
-
-            for record_type in valid_types:
-                result = await dohLookup("example.com", mock_profile_id, record_type)
-                assert "error" not in result
-                assert result["_metadata"]["query_type"] == record_type
+        for record_type in valid_types:
+            result = await dohLookup("example.com", mock_profile_id, record_type)
+            assert "error" not in result
+            assert result["_metadata"]["query_type"] == record_type
 
     @pytest.mark.asyncio
     async def test_doh_lookup_adds_metadata(self, mock_profile_id):
         """Test that dohLookup adds helpful metadata to response."""
-        with patch("httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_response = Mock()
-            mock_response.json.return_value = {"Status": 0, "Answer": []}
-            mock_client.get.return_value = mock_response
-            mock_client.__aenter__.return_value = mock_client
-            mock_client.__aexit__.return_value = AsyncMock()
-            mock_client_class.return_value = mock_client
+        result = await dohLookup("example.com", mock_profile_id, "A")
 
-            result = await dohLookup("example.com", mock_profile_id, "A")
-
-            assert "_metadata" in result
-            assert "profile_id" in result["_metadata"]
-            assert "query_domain" in result["_metadata"]
-            assert "query_type" in result["_metadata"]
-            assert "doh_endpoint" in result["_metadata"]
+        assert "_metadata" in result
+        assert "profile_id" in result["_metadata"]
+        assert "query_domain" in result["_metadata"]
+        assert "query_type" in result["_metadata"]
+        assert "doh_endpoint" in result["_metadata"]
 
     @pytest.mark.asyncio
-    async def test_doh_lookup_status_descriptions(self, mock_profile_id):
+    async def test_doh_lookup_status_descriptions(self, mock_profile_id, mock_doh_client):
         """Test that status codes get human-readable descriptions."""
         status_tests = [
             (0, "NOERROR - Success"),
@@ -182,109 +150,124 @@ class TestDohLookup:
             (3, "NXDOMAIN - Non-existent domain"),
         ]
 
-        with patch("httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_client.__aenter__.return_value = mock_client
-            mock_client.__aexit__.return_value = AsyncMock()
-            mock_client_class.return_value = mock_client
+        for status_code, expected_desc in status_tests:
+            mock_response = Mock()
+            mock_response.json.return_value = {"Status": status_code, "Answer": []}
+            mock_doh_client.get.return_value = mock_response
 
-            for status_code, expected_desc in status_tests:
-                mock_response = Mock()
-                mock_response.json.return_value = {"Status": status_code, "Answer": []}
-                mock_client.get.return_value = mock_response
+            result = await dohLookup("example.com", mock_profile_id, "A")
 
-                result = await dohLookup("example.com", mock_profile_id, "A")
-
-                assert result["_metadata"]["status_description"] == expected_desc
+            assert result["_metadata"]["status_description"] == expected_desc
 
     @pytest.mark.asyncio
-    async def test_doh_lookup_http_error(self, mock_profile_id):
+    async def test_doh_lookup_http_error(self, mock_profile_id, mock_doh_client):
         """Test error handling for HTTP errors."""
-        # Patch at the doh tool module level where httpx is imported
-        with patch("nextdns_mcp.tools.doh.httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_client.get.side_effect = httpx.HTTPError("Connection failed")
-            mock_client.__aenter__.return_value = mock_client
+        mock_doh_client.get.side_effect = httpx.HTTPError("Connection failed")
 
-            # __aexit__ should return False to not suppress exceptions
-            async def aexit_mock(*args):
-                return False
+        result = await dohLookup("example.com", mock_profile_id, "A")
 
-            mock_client.__aexit__ = aexit_mock
-            mock_client_class.return_value = mock_client
-
-            result = await dohLookup("example.com", mock_profile_id, "A")
-
-            assert "error" in result
-            assert "HTTP error" in result["error"]
-            assert result["profile_id"] == mock_profile_id
+        assert "error" in result
+        assert "HTTP error" in result["error"]
+        assert result["profile_id"] == mock_profile_id
 
     @pytest.mark.asyncio
-    async def test_doh_lookup_generic_exception(self, mock_profile_id):
+    async def test_doh_lookup_generic_exception(self, mock_profile_id, mock_doh_client):
         """Test error handling for unexpected exceptions."""
-        # Patch at the doh tool module level where httpx is imported
-        with patch("nextdns_mcp.tools.doh.httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_client.get.side_effect = Exception("Unexpected error")
-            mock_client.__aenter__.return_value = mock_client
+        mock_doh_client.get.side_effect = Exception("Unexpected error")
 
-            # __aexit__ should return False to not suppress exceptions
-            async def aexit_mock(*args):
-                return False
+        result = await dohLookup("example.com", mock_profile_id, "A")
 
-            mock_client.__aexit__ = aexit_mock
-            mock_client_class.return_value = mock_client
-
-            result = await dohLookup("example.com", mock_profile_id, "A")
-
-            assert "error" in result
-            assert "Unexpected error" in result["error"]
+        assert "error" in result
+        assert "Unexpected error" in result["error"]
 
     @pytest.mark.asyncio
     async def test_doh_lookup_correct_url_format(self, mock_profile_id):
         """Test that DoH endpoint URL is correctly formatted."""
-        with patch("httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_response = Mock()
-            mock_response.json.return_value = {"Status": 0, "Answer": []}
-            mock_client.get.return_value = mock_response
-            mock_client.__aenter__.return_value = mock_client
-            mock_client.__aexit__.return_value = AsyncMock()
-            mock_client_class.return_value = mock_client
+        result = await dohLookup("example.com", mock_profile_id, "A")
 
-            result = await dohLookup("example.com", mock_profile_id, "A")
-
-            expected_url = f"https://dns.nextdns.io/{mock_profile_id}/dns-query?name=example.com&type=A"
-            assert result["_metadata"]["doh_endpoint"] == expected_url
+        expected_url = f"https://dns.nextdns.io/{mock_profile_id}/dns-query?name=example.com&type=A"
+        assert result["_metadata"]["doh_endpoint"] == expected_url
 
     @pytest.mark.asyncio
     async def test_doh_lookup_case_insensitive_record_type(self, mock_profile_id):
         """Test that record type is case-insensitive."""
-        with patch("httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_response = Mock()
-            mock_response.json.return_value = {"Status": 0, "Answer": []}
-            mock_client.get.return_value = mock_response
-            mock_client.__aenter__.return_value = mock_client
-            mock_client.__aexit__.return_value = AsyncMock()
-            mock_client_class.return_value = mock_client
+        # Test lowercase
+        result = await dohLookup("example.com", mock_profile_id, "a")
+        assert result["_metadata"]["query_type"] == "A"
 
-            # Test lowercase
-            result = await dohLookup("example.com", mock_profile_id, "a")
-            assert result["_metadata"]["query_type"] == "A"
-
-            # Test mixed case
-            result = await dohLookup("example.com", mock_profile_id, "AaAa")
-            assert result["_metadata"]["query_type"] == "AAAA"
+        # Test mixed case
+        result = await dohLookup("example.com", mock_profile_id, "AaAa")
+        assert result["_metadata"]["query_type"] == "AAAA"
 
 
-@pytest.mark.asyncio
-async def test_mock_httpx_client_fixture_usage(mock_httpx_client, mock_profile_id):
-    """Ensure the reusable mock_httpx_client fixture can be used by tests."""
-    with patch("httpx.AsyncClient") as mock_client_class:
-        mock_client_class.return_value = mock_httpx_client
-        result = await dohLookup("google.com", mock_profile_id, "A")
-        assert result["Status"] == 0
+class TestDohClientReuse:
+    """Regression tests for issue #149: the DoH tool must reuse one client."""
+
+    @pytest.mark.asyncio
+    async def test_doh_lookup_reuses_client_across_calls(self, mock_profile_id, mock_doh_client):
+        """Consecutive lookups must share the single persistent client."""
+        first = await dohLookup("example.com", mock_profile_id, "A")
+        second = await dohLookup("example.org", mock_profile_id, "A")
+
+        assert "error" not in first
+        assert "error" not in second
+        assert mock_doh_client.get.await_count == 2
+        assert doh_module._doh_client is mock_doh_client
+
+    @pytest.mark.asyncio
+    async def test_get_doh_client_creates_one_client_per_loop(self, monkeypatch):
+        """_get_doh_client must build exactly one client and reuse it."""
+        created = []
+
+        def fake_client(timeout):
+            client = AsyncMock()
+            created.append(client)
+            return client
+
+        monkeypatch.setattr(doh_module, "_doh_client", None)
+        monkeypatch.setattr(doh_module, "_doh_client_loop", None)
+        monkeypatch.setattr(doh_module.httpx, "AsyncClient", fake_client)
+
+        first = doh_module._get_doh_client()
+        second = doh_module._get_doh_client()
+
+        assert first is second
+        assert len(created) == 1
+
+    @pytest.mark.asyncio
+    async def test_get_doh_client_applies_configured_timeout(self, monkeypatch):
+        """The persistent client must honor NEXTDNS_HTTP_TIMEOUT."""
+        monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "7.5")
+        monkeypatch.setattr(doh_module, "_doh_client", None)
+        monkeypatch.setattr(doh_module, "_doh_client_loop", None)
+
+        client = doh_module._get_doh_client()
+
+        assert client.timeout is not None
+        assert client.timeout.connect == 7.5
+
+    def test_get_doh_client_rebuilds_for_new_event_loop(self, monkeypatch):
+        """A client bound to a previous event loop must be replaced."""
+        monkeypatch.setattr(doh_module, "_doh_client", None)
+        monkeypatch.setattr(doh_module, "_doh_client_loop", None)
+
+        # Each asyncio.run uses a fresh event loop, so the second call must
+        # see a different running loop and build a new client.
+        def get_client():
+            return doh_module._get_doh_client()
+
+        async def run_get_client():
+            return get_client()
+
+        first = asyncio.run(run_get_client())
+        second = asyncio.run(run_get_client())
+
+        assert first is not second
+        assert doh_module._doh_client is second
+
+        # Close the real clients created during this test.
+        asyncio.run(first.aclose())
+        asyncio.run(second.aclose())
 
 
 class TestOptionalProfileIdCoercion:
