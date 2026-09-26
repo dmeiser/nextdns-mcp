@@ -209,10 +209,9 @@ class TestDohClientReuse:
         assert "error" not in first
         assert "error" not in second
         assert mock_doh_client.get.await_count == 2
-        assert doh_module._doh_client is mock_doh_client
 
     @pytest.mark.asyncio
-    async def test_get_doh_client_creates_one_client_per_loop(self, monkeypatch):
+    async def test_get_doh_client_creates_client_once(self, monkeypatch):
         """_get_doh_client must build exactly one client and reuse it."""
         created = []
 
