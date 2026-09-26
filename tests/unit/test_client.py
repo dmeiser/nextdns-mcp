@@ -199,3 +199,94 @@ class TestCreateNextdnsClient:
 
         assert "NEXTDNS_HTTP_TIMEOUT" in str(exc_info.value)
         assert "'bad-timeout'" in str(exc_info.value)
+
+    def test_create_client_raises_configuration_error_on_absent_api_key(self, monkeypatch):
+        """Regression test for #185: create_nextdns_client raises ConfigurationError when key is absent."""
+        monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+        monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            create_nextdns_client()
+
+        assert "NEXTDNS_API_KEY is required" in str(exc_info.value)
+        assert issubclass(ConfigurationError, ValueError)
+
+    def test_create_client_raises_configuration_error_on_empty_api_key(self, monkeypatch):
+        """Regression test for #185: create_nextdns_client raises ConfigurationError when key is empty string."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "")
+        monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            create_nextdns_client()
+
+        assert "NEXTDNS_API_KEY is required" in str(exc_info.value)
+
+    def test_create_client_raises_configuration_error_on_whitespace_api_key(self, monkeypatch):
+        """Regression test for #185: create_nextdns_client raises ConfigurationError when key is only whitespace."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "   ")
+        monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            create_nextdns_client()
+
+        assert "NEXTDNS_API_KEY is required" in str(exc_info.value)
+
+    def test_create_client_with_valid_key_constructs_normally(self, monkeypatch, mock_api_key):
+        """Regression test for #185: create_nextdns_client constructs normally when key is valid."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        client = create_nextdns_client()
+
+        assert isinstance(client, httpx.AsyncClient)
+        assert client.headers["X-Api-Key"] == mock_api_key
+
+    def test_get_api_client_raises_configuration_error_on_absent_api_key(self, monkeypatch):
+        """Regression test for #185: get_api_client raises ConfigurationError when key is absent."""
+        monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+        monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
+
+        import nextdns_mcp.client as client_module
+
+        monkeypatch.setattr(client_module, "_client", None)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            client_module.get_api_client()
+
+        assert "NEXTDNS_API_KEY is required" in str(exc_info.value)
+
+    def test_get_api_client_raises_configuration_error_on_empty_api_key(self, monkeypatch):
+        """Regression test for #185: get_api_client raises ConfigurationError when key is empty."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "")
+        monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
+
+        import nextdns_mcp.client as client_module
+
+        monkeypatch.setattr(client_module, "_client", None)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            client_module.get_api_client()
+
+        assert "NEXTDNS_API_KEY is required" in str(exc_info.value)
+
+    def test_module_getattr_api_client_raises_configuration_error_on_absent_api_key(self, monkeypatch):
+        """Regression test for #185: client.api_client attribute raises ConfigurationError when key is absent."""
+        monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+        monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
+
+        import nextdns_mcp.client as client_module
+
+        client_module.__dict__.pop("api_client", None)
+        monkeypatch.setattr(client_module, "_client", None)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            _ = client_module.api_client
+
+        assert "NEXTDNS_API_KEY is required" in str(exc_info.value)

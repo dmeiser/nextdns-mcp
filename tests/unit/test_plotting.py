@@ -253,6 +253,7 @@ class TestConcurrentRenderIndependence:
 @pytest.fixture
 def mock_api_client(monkeypatch):
     """Patch the module-level api_client.get used by plotting helpers."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", "test-api-key")
     client = AsyncMock()
     monkeypatch.setattr(client_module, "api_client", client)
     return client

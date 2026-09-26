@@ -60,9 +60,9 @@ class TestLazyApiClient:
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
         monkeypatch.setattr(client_module, "_client", None)
 
-        # Create without a key: header must be absent
-        no_key_client = client_module.get_api_client()
-        assert "X-Api-Key" not in no_key_client.headers
+        # Calling without a key must fail fast with ConfigurationError
+        with pytest.raises(config.ConfigurationError):
+            client_module.get_api_client()
 
         # Recreate with a key set later: header must be present
         monkeypatch.setattr(client_module, "_client", None)
