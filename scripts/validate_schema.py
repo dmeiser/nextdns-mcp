@@ -321,6 +321,16 @@ def validate_tool_response(
     if response_data == {"success": True}:
         return "SKIPPED", []
 
+    # downloadLogs returns CSV data wrapped in a JSON envelope because MCP tools return JSON.
+    if (
+        tool_name == "manageLogs"
+        and isinstance(response_data, dict)
+        and "content_type" in response_data
+        and "size" in response_data
+        and isinstance(response_data.get("data"), str)
+    ):
+        return "VALID", []
+
     operation_ids = [tool_name]
     if tool_name in GROUPED_TOOL_OPERATIONS:
         operation_ids = GROUPED_TOOL_OPERATIONS[tool_name]
