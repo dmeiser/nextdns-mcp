@@ -19,6 +19,7 @@ maps to a functional area of the NextDNS API.
   optional `profile_id` will use it automatically.
 - **Access control**: The server reads `NEXTDNS_READABLE_PROFILES` and
   `NEXTDNS_WRITABLE_PROFILES`. Reads/writes outside those profiles are rejected.
+- **Read-only mode**: If `NEXTDNS_READ_ONLY=true`, write operations are blocked.
 
 ## Available tools
 
@@ -53,20 +54,22 @@ Manage allow/deny/block lists:
 - `privacy_blocklists` — subscribed blocklists
 - `privacy_natives` — native tracking blockers
 - `security_tlds` — dangerous TLDs
-- `parental_categories` — content categories
-- `parental_services` — specific apps/services
+- `parental_categories` — content categories (e.g., `gambling`, `porn`)
+- `parental_services` — specific apps/services (e.g., `tiktok`, `youtube`)
 
 Operations: `get`, `add`, `remove`, `update`, `replace`.
 
 For `add`, pass `entry={"id": "value"}`. For `remove`/`update`, pass
-`entry_id`. For `replace`, pass `entries=[{"id": "value"}, ...]`.
+`entry_id`. `update` (toggle `entry={"active": True|False}`) is supported for
+`allowlist`, `denylist`, `parental_categories`, and `parental_services`. For
+`replace`, pass `entries=[{"id": "value"}, ...]`.
 
 ### manageRewrites
 Create custom DNS responses for a hostname:
 
 - `operation="list"`
 - `operation="add" name="router.home" content="192.168.1.1"`
-- `operation="delete" entry_id="router.home"`
+- `operation="delete" entry_id="<id-from-list>"` (`entry_id` is the opaque rewrite ID from `list`, not the hostname)
 
 ### manageLogs
 Inspect or export query logs:
@@ -103,10 +106,21 @@ Perform a DNS-over-HTTPS lookup through NextDNS:
 ### Allow a domain
 1. `manageLists(list_type="allowlist", operation="add", profile_id="abc123", entry={"id": "safe.example.com"})`
 
+### Block a parental control category
+1. `manageLists(list_type="parental_categories", operation="add", profile_id="abc123", entry={"id": "gambling"})`
+
+### Block or toggle a service in parental control
+1. `manageLists(list_type="parental_services", operation="add", profile_id="abc123", entry={"id": "tiktok"})`
+2. `manageLists(list_type="parental_services", operation="update", profile_id="abc123", entry_id="tiktok", entry={"active": False})`
+
 ### View blocked query trends
 1. `queryAnalytics(metric="status", profile_id="abc123", from_time="-1d", series=true)`
 2. `plotAnalytics(metric="status", profile_id="abc123", from_time="-1d")`
 
 ### Add a DNS rewrite
 1. `manageRewrites(operation="add", profile_id="abc123", name="router.home", content="192.168.1.1")`
+
+### Delete a DNS rewrite
+1. `manageRewrites(operation="list", profile_id="abc123")` — find the entry's opaque `id`
+2. `manageRewrites(operation="delete", profile_id="abc123", entry_id="<id-from-list>")`
 """

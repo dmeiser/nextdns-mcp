@@ -6,6 +6,7 @@ This directory contains helper scripts and validation prompts for the NextDNS MC
 
 - **`run_container_e2e.py`** - Executes the full NextDNS MCP tool suite against a running MCP server container over MCP (HTTP streamable transport), with response schema validation.
 - **`validate_schema.py`** - Validates JSON responses against OpenAPI schema definitions to ensure responses conform to expected schemas for the grouped tools.
+- **`generate_usage_doc.py`** - Generates `docs/usage.md` from `src/nextdns_mcp/usage.py` to keep prompt and static documentation synchronized.
 - **`ai_agent_e2e_prompt.md`** - End-to-end testing prompt for an AI agent (e.g. Claude Desktop, Cursor) to exercise the full NextDNS MCP server tool surface against a dedicated test profile.
 
 ## Usage
@@ -32,6 +33,17 @@ uv run python scripts/validate_schema.py <tool_name> <json_response>
 Example:
 ```bash
 uv run python scripts/validate_schema.py manageProfiles '{"data":[{"id":"abc123","name":"My Profile"}]}'
+```
+
+### Usage Documentation Generation
+
+```bash
+uv run python scripts/generate_usage_doc.py
+```
+
+Use `--check` to verify that `docs/usage.md` matches `nextdns_usage_guide()` without modifying the file:
+```bash
+uv run python scripts/generate_usage_doc.py --check
 ```
 
 ### AI Agent E2E Validation

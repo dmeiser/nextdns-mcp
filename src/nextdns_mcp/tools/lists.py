@@ -160,5 +160,7 @@ async def manageLists(
         - add: ``manageLists(list_type="denylist", operation="add", profile_id="abc123", entry={"id": "example.com"})``
         - remove: ``manageLists(list_type="denylist", operation="remove", profile_id="abc123", entry_id="example.com")``
         - replace: ``manageLists(list_type="privacy_blocklists", operation="replace", profile_id="abc123", entries=[{"id": "nextdns-recommended"}])``
+        - add parental category: ``manageLists(list_type="parental_categories", operation="add", profile_id="abc123", entry={"id": "gambling"})``
+        - update parental service: ``manageLists(list_type="parental_services", operation="update", profile_id="abc123", entry_id="tiktok", entry={"active": False})``
     """
     return await _manage_lists_impl(list_type, operation, profile_id, entry_id, entry, entries)
