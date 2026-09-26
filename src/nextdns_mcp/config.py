@@ -159,6 +159,8 @@ def get_readable_profiles_set() -> set[str] | None:
     # Handle case where writable might be None
     if writable is None:
         return readable
+    if not writable:
+        return ALLOW_ALL_PROFILES  # Writable ALL implies readable ALL
     return readable | writable
 
 
