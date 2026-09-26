@@ -162,7 +162,7 @@ class TestDohLookup:
             result = await dohLookup("example.com", mock_profile_id, "A")
 
             assert "_metadata" in result
-        assert result["_metadata"]["status_description"] == expected_desc
+            assert result["_metadata"]["status_description"] == expected_desc
 
     @pytest.mark.asyncio
     async def test_doh_lookup_http_error(self, mock_profile_id, mock_doh_client):
