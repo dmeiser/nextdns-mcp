@@ -67,6 +67,9 @@ async def _api_request(method: str, url: str, params: dict[str, Any] | None = No
     try:
         response = await client.api_client.request(method, url, params=params, json=json)
         response.raise_for_status()
+        if response.status_code == 204 or not response.content:
+            return {"success": True}
+        return response.json()
     except httpx.HTTPError as e:
         logger.error(f"HTTP error in {method} {url}: {e}")
         message = f"HTTP error in {method} {url}: {e}"
@@ -74,7 +77,3 @@ async def _api_request(method: str, url: str, params: dict[str, Any] | None = No
     except Exception as e:  # noqa: BLE001
         logger.error(f"Unexpected error in {method} {url}: {e}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error in {method} {url}: {e}")
-
-    if response.status_code == 204 or not response.content:
-        return {"success": True}
-    return response.json()
