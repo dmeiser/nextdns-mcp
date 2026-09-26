@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from nextdns_mcp.openapi import StripExtraFieldsMiddleware
 
@@ -124,18 +125,51 @@ class TestStripExtraFieldsMiddleware:
         call_next.assert_called_once_with(mock_context)
 
     @pytest.mark.asyncio
-    async def test_handles_tool_manager_exception(self, middleware, mock_context):
-        """Test graceful handling when get_tool raises exception."""
-        mock_context.fastmcp_context.fastmcp.get_tool = AsyncMock(side_effect=Exception("Tool not found"))
+    async def test_fails_closed_when_schema_fetch_fails(self, middleware, mock_context, caplog):
+        """Test that a schema-fetch failure aborts the call instead of passing args through."""
+        mock_context.fastmcp_context.fastmcp.get_tool = AsyncMock(side_effect=Exception("schema fetch failed"))
         mock_context.message.arguments = {"domain": "test.com", "extra": "field"}
         call_next = AsyncMock(return_value=MagicMock())
 
-        # Should not raise, should proceed with original arguments
+        with pytest.raises(ToolError, match="failed closed"):
+            await middleware.on_call_tool(mock_context, call_next)
+
+        # The call must not proceed with unstripped/un-coerced arguments
+        call_next.assert_not_called()
+        assert mock_context.message.arguments == {"domain": "test.com", "extra": "field"}
+
+        # The error is logged at error level and carries the root cause
+        assert any(record.levelno >= 40 for record in caplog.records)
+        assert "schema fetch failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_retries_transient_schema_fetch_failure(self, middleware, mock_context, mock_tool):
+        """Test that a transient schema-fetch failure is retried once before succeeding."""
+        get_tool = AsyncMock(side_effect=[Exception("transient"), mock_tool])
+        mock_context.fastmcp_context.fastmcp.get_tool = get_tool
+        mock_context.message.arguments = {"domain": "example.com", "extra": "dropped"}
+        call_next = AsyncMock(return_value=MagicMock())
+
         await middleware.on_call_tool(mock_context, call_next)
 
-        # Arguments should remain unchanged due to exception handling
-        assert mock_context.message.arguments == {"domain": "test.com", "extra": "field"}
+        assert mock_context.message.arguments == {"domain": "example.com"}
+        assert get_tool.await_count == 2
         call_next.assert_called_once_with(mock_context)
+
+    @pytest.mark.asyncio
+    async def test_logs_error_on_schema_fetch_failure(self, middleware, mock_context):
+        """Test that schema-fetch failures are logged at error level, not warning."""
+        mock_context.fastmcp_context.fastmcp.get_tool = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_context.message.arguments = {"domain": "test.com", "extra": "field"}
+        call_next = AsyncMock(return_value=MagicMock())
+
+        with patch("nextdns_mcp.openapi.logger") as mock_logger, pytest.raises(ToolError):
+            await middleware.on_call_tool(mock_context, call_next)
+
+        mock_logger.exception.assert_called_once()
+        msg = mock_logger.exception.call_args.args[0]
+        assert "testTool" in msg
+        mock_logger.warning.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_logs_stripped_fields(self, middleware, mock_context):

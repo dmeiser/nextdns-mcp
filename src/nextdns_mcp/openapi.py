@@ -22,17 +22,22 @@ this project's ``AccessControlledClient`` subclasses ``httpx.AsyncClient``
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
 import logging
 from typing import Any
 
 import mcp.types
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from .config import get_default_profile
 
 logger = logging.getLogger(__name__)
+
+# Brief delay between schema-fetch attempts before a tool call fails closed.
+_SCHEMA_FETCH_RETRY_DELAY = 0.1
 
 
 class OpenApiSpecNotFound(FileNotFoundError):
@@ -99,6 +104,30 @@ class StripExtraFieldsMiddleware(Middleware):
                 return s
         return s
 
+    async def _fetch_tool_schema(self, fastmcp_server: Any, tool_name: str) -> dict[str, Any] | None:
+        """Fetch a tool's parameter schema once.
+
+        Returns the schema dict, or None if the tool is genuinely not found.
+        Raises the underlying error if the fetch fails.
+        """
+        tool = await fastmcp_server.get_tool(tool_name)
+        if tool is None:
+            return None
+        return tool.parameters
+
+    async def _get_tool_schema(self, fastmcp_server: Any, tool_name: str) -> dict[str, Any] | None:
+        """Fetch a tool's parameter schema, retrying briefly for transient failures.
+
+        Returns the schema dict, or None if the tool is genuinely not found.
+        After one retry, a failing fetch re-raises so the caller can fail
+        closed instead of passing unvalidated arguments through.
+        """
+        try:
+            return await self._fetch_tool_schema(fastmcp_server, tool_name)
+        except Exception:  # noqa: BLE001
+            await asyncio.sleep(_SCHEMA_FETCH_RETRY_DELAY)
+            return await self._fetch_tool_schema(fastmcp_server, tool_name)
+
     def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
         """Coerce a value using its property schema.
 
@@ -123,19 +152,24 @@ class StripExtraFieldsMiddleware(Middleware):
         context: MiddlewareContext[mcp.types.CallToolRequestParams],
         call_next: CallNext[mcp.types.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        """Filter tool arguments to only include known parameters and coerce types."""
+        """Filter tool arguments to only include known parameters and coerce types.
+
+        Fails closed: if the tool's parameter schema cannot be fetched, the call
+        is aborted with a ToolError instead of passing arguments through
+        unstripped/un-coerced, so callers see a clear error rather than the
+        downstream validation failures the middleware exists to prevent.
+        """
         tool_name = context.message.name
         arguments = context.message.arguments
 
         if arguments and context.fastmcp_context:
+            fastmcp_server = context.fastmcp_context.fastmcp
             try:
-                # Get the tool's parameter schema
-                fastmcp_server = context.fastmcp_context.fastmcp
-                tool = await fastmcp_server.get_tool(tool_name)
-                if tool is None:
+                parameters = await self._get_tool_schema(fastmcp_server, tool_name)
+                if parameters is None:
                     # Tool not found, pass through
                     return await call_next(context)
-                known_params = set(tool.parameters.get("properties", {}).keys())
+                known_params = set(parameters.get("properties", {}).keys())
 
                 # Filter arguments to only include known parameters
                 original_keys = set(arguments.keys())
@@ -147,17 +181,21 @@ class StripExtraFieldsMiddleware(Middleware):
                     logger.debug(f"Tool '{tool_name}': Stripped unknown fields: {stripped_keys}")
 
                 # Coerce string values to proper types based on the parameter schema
-                properties = tool.parameters.get("properties", {})
+                properties = parameters.get("properties", {})
                 coerced_args = {k: self._coerce_value(v, properties.get(k)) for k, v in filtered_args.items()}
                 if coerced_args != filtered_args:
                     logger.debug(f"Tool '{tool_name}': Coerced types in arguments")
 
                 # Update the arguments in place
                 context.message.arguments = coerced_args
-            except Exception as e:  # noqa: BLE001
-                # If we can't get the tool schema, proceed with original arguments
-                # This should rarely happen, but we don't want to break the flow
-                logger.warning(f"Could not filter arguments for tool '{tool_name}': {e}")
+            except Exception as e:
+                # Schema fetch/parse failure: fail closed so callers get a clear error
+                # instead of downstream validation failures from unstripped args.
+                logger.exception(f"Failed to prepare arguments for tool '{tool_name}'; aborting call")
+                raise ToolError(
+                    f"Tool call for '{tool_name}' failed closed: could not fetch its parameter "
+                    f"schema to validate arguments (root cause: {e})"
+                ) from e
 
         return await call_next(context)
 

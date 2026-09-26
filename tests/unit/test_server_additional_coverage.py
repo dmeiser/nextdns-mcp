@@ -3,6 +3,7 @@ from typing import ClassVar
 
 import httpx
 import pytest
+from fastmcp.exceptions import ToolError
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
@@ -116,10 +117,10 @@ async def test_strip_extra_fields_middleware_basic_and_exception():
     result = await mw.on_call_tool(string_context, _dummy_call_next)
     assert result == {"profile_id": "315244"}
 
-    # Exception handling in get_tool: should proceed and return original args
+    # Exception handling in get_tool: fail closed with ToolError, args untouched
     context_exc = DummyContext("tool", {"keep": "true"}, raise_exc=True)
-    res2 = await mw.on_call_tool(context_exc, _dummy_call_next)
-    assert res2 == {"keep": "true"}
+    with pytest.raises(ToolError, match="failed closed"):
+        await mw.on_call_tool(context_exc, _dummy_call_next)
 
 
 def test_create_access_denied_response():
