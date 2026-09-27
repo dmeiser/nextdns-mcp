@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _validate_entry_id, resolve_profile_id
+from ..utils import _api_request, _optional_entry_id_error, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ListType = Literal[
@@ -149,10 +149,9 @@ async def _manage_lists_impl(
     if target_profile is None:
         return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
 
-    if entry_id is not None:
-        error = _validate_entry_id(entry_id)
-        if error:
-            return error
+    error = _optional_entry_id_error(entry_id)
+    if error:
+        return error
 
     path = _LIST_PATHS[list_type]
     base_url = f"/profiles/{target_profile}/{path}"
