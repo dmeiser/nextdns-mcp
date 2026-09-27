@@ -70,34 +70,21 @@ def get_mcp_server() -> FastMCP:
     return _mcp_server
 
 
-# Runtime settings this server defaults and then mirrors into FastMCP's live
-# settings object, as ``env var name -> (settings attribute, default)``.
-_FASTMCP_RUNTIME_DEFAULTS: tuple[tuple[str, str, str], ...] = (
-    ("FASTMCP_CHECK_FOR_UPDATES", "check_for_updates", "off"),
-    # FastMCP defaults this to False, which leaves the unauthenticated loopback
-    # HTTP transport open to DNS rebinding (issue #269). ``auto`` enables the
-    # Host/Origin guard exactly where it applies, i.e. on loopback binds.
-    ("FASTMCP_HTTP_HOST_ORIGIN_PROTECTION", "http_host_origin_protection", "auto"),
-)
-
-
-def _sync_fastmcp_settings() -> None:
-    """Mirror this server's ``FASTMCP_*`` runtime defaults into FastMCP's live settings.
+def _sync_fastmcp_update_check() -> None:
+    """Mirror ``FASTMCP_CHECK_FOR_UPDATES`` into FastMCP's live settings object.
 
     ``fastmcp/__init__.py`` builds its settings at package import time, and
     importing this module pulls FastMCP in transitively (via ``.tools.plots``
-    and ``.openapi``). Setting the variables after that import would be
-    silently ignored, so the values are applied to the live settings too. The
-    variables are read (not hardcoded) so an operator's explicit choice is
-    preserved, and an unset variable falls back to the same default
-    ``configure()`` applies, so calling this helper on its own cannot raise
-    ``KeyError`` (issue #291).
+    and ``.openapi``). Setting the variable after that import would be
+    silently ignored, so the value is applied to the live settings too. The
+    variable is read (not hardcoded) so an operator who opted into update
+    checks keeps them, and an unset variable falls back to the same ``"off"``
+    default ``configure()`` applies, so calling this helper on its own cannot
+    raise ``KeyError`` (issue #291).
     """
     fastmcp_settings = getattr(sys.modules.get("fastmcp"), "settings", None)
-    if fastmcp_settings is None:
-        return
-    for env_var, attribute, default in _FASTMCP_RUNTIME_DEFAULTS:
-        setattr(fastmcp_settings, attribute, os.environ.get(env_var, default))
+    if fastmcp_settings is not None:
+        fastmcp_settings.check_for_updates = os.environ.get("FASTMCP_CHECK_FOR_UPDATES", "off")
 
 
 def configure() -> FastMCP:
@@ -108,21 +95,17 @@ def configure() -> FastMCP:
     serve traffic - the ``__main__`` entrypoint and the tests - call this to
 
     1. disable FastMCP's automatic update check, which delays startup and can
-       hang in offline/CI environments,
-    2. turn on FastMCP's HTTP Host/Origin protection in ``auto`` mode, so the
-       loopback HTTP transport is not open to DNS rebinding (issue #269), and
-    3. build the shared server instance on purpose instead of at import time.
+       hang in offline/CI environments, and
+    2. build the shared server instance on purpose instead of at import time.
 
-    Only defaults are applied: an operator who set either variable keeps their
-    value. The server is created on first use and cached, so calling this
-    repeatedly is cheap and returns the same instance.
+    The server is created on first use and cached, so calling this repeatedly
+    is cheap and returns the same instance.
 
     Returns:
         FastMCP: The shared, configured MCP server instance.
     """
-    for env_var, _attribute, default in _FASTMCP_RUNTIME_DEFAULTS:
-        os.environ.setdefault(env_var, default)
-    _sync_fastmcp_settings()
+    os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
+    _sync_fastmcp_update_check()
     return get_mcp_server()
 
 

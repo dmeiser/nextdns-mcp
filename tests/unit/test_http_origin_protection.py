@@ -1,11 +1,10 @@
 """Regression tests for FastMCP HTTP host/origin protection (issue #269).
 
-The documented local setup binds the streamable-HTTP transport to 127.0.0.1,
-but FastMCP's ``http_host_origin_protection`` defaults to ``False`` -- the one
-free control that mitigates DNS rebinding against that unauthenticated loopback
-endpoint is switched off. ``configure()`` must therefore turn on ``auto`` mode,
-and a request that carries a foreign ``Host`` or ``Origin`` must be rejected
-before it reaches the MCP endpoint.
+The documented local setup binds the streamable-HTTP transport to 127.0.0.1
+and, unauthenticated, is exposed to DNS rebinding unless FastMCP's
+``http_host_origin_protection`` is turned on. In ``auto`` mode it rejects a
+request that carries a foreign ``Host`` or ``Origin`` before it reaches the MCP
+endpoint, while leaving a legitimate local client untouched.
 """
 
 import os
@@ -23,19 +22,15 @@ LOOPBACK_BASE_URL = "http://127.0.0.1:8000"
 
 
 @pytest.fixture
-def http_app(monkeypatch):
-    """Return the ASGI app ``configure()`` produces, with ambient settings cleared."""
-    import fastmcp
-
+def build_app(monkeypatch):
+    """Return a builder for the ASGI app ``configure()`` produces."""
     from nextdns_mcp import server
 
-    monkeypatch.delenv(ENV_VAR, raising=False)
-    monkeypatch.setattr(fastmcp.settings, "http_host_origin_protection", False)
     monkeypatch.setattr(server, "_mcp_server", None)
 
-    def build():
+    def build(**kwargs):
         server.configure()
-        return server.get_mcp_server().http_app(transport="http", path=MCP_ENDPOINT)
+        return server.get_mcp_server().http_app(transport="http", path=MCP_ENDPOINT, **kwargs)
 
     return build
 
@@ -59,45 +54,43 @@ def test_env_var_enables_auto_mode_in_fastmcp() -> None:
     assert result.stdout.strip() == PROTECTION_AUTO
 
 
-def test_configure_enables_auto_mode_by_default(http_app) -> None:
-    """The local loopback deployment the issue describes is the one guard covers."""
+def test_configure_does_not_enable_origin_protection_implicitly(build_app) -> None:
+    """Enabling it by default would 421 a reverse proxy fronting a loopback bind.
+
+    ``auto`` also turns on Host allowlisting, so an implicit default would make
+    every request from the proxy's own hostname a Misdirected Request. Operators
+    opt in, and set the allowed hosts that go with it.
+    """
     import fastmcp
 
-    http_app()
+    build_app()
 
-    assert os.environ[ENV_VAR] == PROTECTION_AUTO
-    assert fastmcp.settings.http_host_origin_protection == PROTECTION_AUTO
-
-
-def test_configure_keeps_an_explicit_operator_choice(http_app, monkeypatch) -> None:
-    """An operator who set the variable keeps it, as with the update check."""
-    import fastmcp
-
-    monkeypatch.setenv(ENV_VAR, "false")
-    http_app()
-
+    assert ENV_VAR not in os.environ
     assert fastmcp.settings.http_host_origin_protection is False
 
 
-def test_loopback_endpoint_rejects_a_rebound_host_header(http_app) -> None:
+def test_loopback_endpoint_rejects_a_rebound_host_header(build_app) -> None:
     """DNS rebinding sends a foreign Host for a loopback socket: reject it."""
-    response = _get(http_app(), {"host": "evil.example"})
+    response = _get(build_app(host_origin_protection=PROTECTION_AUTO), {"host": "evil.example"})
 
     assert response.status_code == 421
 
 
-def test_loopback_endpoint_rejects_a_foreign_origin_header(http_app) -> None:
+def test_loopback_endpoint_rejects_a_foreign_origin_header(build_app) -> None:
     """A cross-origin browser request to the loopback endpoint is forbidden."""
     response = _get(
-        http_app(),
+        build_app(host_origin_protection=PROTECTION_AUTO),
         {"host": "127.0.0.1:8000", "origin": "http://evil.example"},
     )
 
     assert response.status_code == 403
 
 
-def test_loopback_endpoint_serves_its_own_host(http_app) -> None:
+def test_loopback_endpoint_serves_its_own_host(build_app) -> None:
     """The guard must not break the legitimate local client it is meant to protect."""
-    response = _get(http_app(), {"host": "127.0.0.1:8000"})
+    headers = {"host": "127.0.0.1:8000"}
 
-    assert response.status_code != 421
+    guarded = _get(build_app(host_origin_protection=PROTECTION_AUTO), headers)
+    unguarded = _get(build_app(host_origin_protection=False), headers)
+
+    assert guarded.status_code == unguarded.status_code
