@@ -6,6 +6,7 @@ from unittest.mock import Mock, call
 import pytest
 
 from nextdns_mcp import config
+from nextdns_mcp.client import create_nextdns_client
 from nextdns_mcp.config import ConfigurationError, MissingApiKeyError
 
 
@@ -289,3 +290,18 @@ def test_validate_configuration_raises_on_boundary_zero_timeout(monkeypatch, act
 
     assert "NEXTDNS_HTTP_TIMEOUT" in str(exc_info.value)
     assert "'0'" in str(exc_info.value)
+
+
+def test_missing_api_key_is_catchable_as_configuration_error(active_config):
+    """Regression test for #288: one ConfigurationError except covers both call sites.
+
+    A missing NEXTDNS_API_KEY has a single remediation message but is raised
+    twice: by validate_configuration() at startup and by
+    create_nextdns_client() on first use. Callers catching the documented
+    ConfigurationError contract must catch both.
+    """
+    with pytest.raises(ConfigurationError):
+        active_config.validate_configuration()
+
+    with pytest.raises(ConfigurationError):
+        create_nextdns_client()

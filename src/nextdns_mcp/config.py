@@ -18,8 +18,13 @@ class ConfigurationError(ValueError):
     """Raised when configuration values are invalid or malformed."""
 
 
-class MissingApiKeyError(RuntimeError):
-    """Raised when required NextDNS configuration is missing."""
+class MissingApiKeyError(ConfigurationError):
+    """Raised when a NextDNS API key has not been configured yet.
+
+    Subclasses ``ConfigurationError`` so that a single ``except
+    ConfigurationError`` covers both "no key configured yet" and "the value
+    you configured is invalid".
+    """
 
 
 def configure_logging() -> None:
