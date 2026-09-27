@@ -97,10 +97,31 @@ jobs:
               
               if (all_completed && all_successful) {
                 console.log('✅ All required workflows passed!');
+                // The approval body is built here, by the gate, from the same
+                // required_workflows list that just decided success, so the
+                // comment cannot claim a check the gate never required
+                // (issue #271). The gate only observes a workflow's conclusion,
+                // so the body states that and nothing more: no coverage or
+                // tool-coverage parentheticals the gate cannot back.
+                //
+                // 'E2E Container' is deliberately NOT in required_workflows: it
+                // cannot run for a fork or Dependabot PR (NEXTDNS_API_KEY is
+                // unavailable, so its live validation step is skipped while the
+                // run still concludes 'success'), so requiring it here would be
+                // unsatisfiable by design. The body says so rather than claim an
+                // E2E pass that did not happen.
+                const e2e_note = '- E2E Container: not among the checks that ran (it is not gated here, and for fork or Dependabot PRs its MCP tool suite is not exercised, so no E2E result is claimed)';
+                const approval_body = [
+                  '✅ Auto-approved: every required check passed',
+                  '',
+                  ...required_workflows.map(name => `- ${name}: ✅ Passed`),
+                  e2e_note
+                ].join('\n');
                 return { 
                   success: true, 
                   pr_number, 
-                  pr_title: pr.data.title 
+                  pr_title: pr.data.title,
+                  approval_body
                 };
               }
               
@@ -135,16 +156,15 @@ jobs:
         run: |
           PR_NUMBER='${{ fromJSON(steps.check-workflows.outputs.result).pr_number }}'
           
-          echo "✅ All checks passed for PR #$PR_NUMBER"
+          echo "✅ All required checks passed for PR #$PR_NUMBER"
           echo "Approving and enabling auto-merge..."
           
-          # Approve the PR
+          # Approve the PR. The body was written by the gate from the same
+          # required_workflows list that decided success, so the comment cannot
+          # drift from the gate and cannot claim a check that did not run
+          # (issue #271).
           gh pr review "$PR_NUMBER" --repo ${{ github.repository }} --approve \
-            --body "✅ Auto-approved: All workflows passed
-          
-          - Unit Tests: ✅ Passed (100% overall coverage of statements and branches, all files 100% statement and branch coverage)
-          - E2E Tests: ✅ Passed (100% of tools tested)
-          - CodeQL: ✅ Passed"
+            --body '${{ fromJSON(steps.check-workflows.outputs.result).approval_body }}'
           
           # Enable auto-merge
           gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --auto --squash
