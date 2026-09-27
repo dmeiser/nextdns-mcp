@@ -243,7 +243,11 @@ class AccessControlledClient(httpx.AsyncClient):
         (propagating on ``__aenter__``) without any network request, exactly as
         ``request()`` does.
         """
-        logger.info(f"HTTP Stream: {method} {url}")
+        # Query strings can carry sensitive data (search terms, device IDs, cursor
+        # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
+        logged_path = str(url).split("?", 1)[0]
+        logger.info(f"HTTP Stream: {method} {logged_path}")
+        logger.debug(f"HTTP Stream: {method} {url}")
 
         profile_id = extract_profile_id_from_url(str(url))
         if profile_id:
