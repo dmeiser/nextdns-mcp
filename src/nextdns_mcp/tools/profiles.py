@@ -55,9 +55,6 @@ async def _manage_profiles_impl(
     if operation == "create":
         return await _profiles_create(name)
 
-    if not profile_id:
-        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "profile_id is required for this operation")
-
     target_profile, error = resolve_profile_id(profile_id, allow_default=False)
     if error:
         return error
