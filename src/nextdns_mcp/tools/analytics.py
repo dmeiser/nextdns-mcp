@@ -40,7 +40,7 @@ async def _query_analytics_impl(
     if series and metric in NON_SERIES_METRICS:
         return error_payload(
             ErrorCode.UNSUPPORTED_PARAMETER,
-            "series=true is not supported for the 'domains' metric",
+            f"series=true is not supported for the '{metric}' metric",
             metric=metric,
             series=series,
         )
@@ -97,6 +97,7 @@ async def queryAnalytics(
 
     Metrics:
         - ``status``: Query resolution status (default, blocked, allowed, relayed).
+        - ``domains``: Top domains; supports the ``status`` and ``root`` filters.
         - ``devices``: Queries per device.
         - ``protocols``: DNS transport protocol (DoH, DoT, Do53 UDP/TCP, DoQ).
         - ``queryTypes``: DNS record types requested (A, AAAA, CNAME, etc.).
