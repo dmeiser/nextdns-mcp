@@ -16,7 +16,7 @@ import pytest
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
-from nextdns_mcp.errors import ErrorCode, error_payload, http_error_payload
+from nextdns_mcp.errors import MAX_RESPONSE_BODY_CHARS, ErrorCode, error_payload, http_error_payload
 from nextdns_mcp.tools.logs import _manage_logs_impl
 from nextdns_mcp.tools.plots import _plot_analytics_series_impl
 from nextdns_mcp.tools.profiles import _manage_profiles_impl
@@ -97,6 +97,40 @@ class TestErrorPayloadShape:
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert payload["status_code"] == 500
         assert payload["response_body"] == "<html>500 Bad Gateway</html>"
+        assert payload["response_body_truncated"] is False
+
+    def test_http_error_payload_structured_json_fields_are_never_bounded(self):
+        # Structured error documents are surfaced verbatim (issue #148): the
+        # response_body cap applies only to unparseable bodies, so a large
+        # upstream field must survive intact and no truncation keys appear.
+        details = "d" * (100 * 1024)
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 400
+        exc.response.json.return_value = {"error": "Bad Request", "details": details}
+        exc.response.text = '{"error": "Bad Request", "details": "' + details + '"}'
+        payload = http_error_payload("msg", exc)
+        assert payload["error"] == "Bad Request"
+        assert payload["details"] == details
+        assert payload["code"] == ErrorCode.HTTP_ERROR
+        assert payload["status_code"] == 400
+        assert "response_body" not in payload
+        assert "response_body_truncated" not in payload
+
+    def test_http_error_payload_truncates_oversized_body(self):
+        # A huge non-JSON body (HTML error page, captive portal) must not be
+        # inlined into the tool result the LLM reads.
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 502
+        exc.response.json.side_effect = ValueError("not json")
+        exc.response.text = "<html>" + ("x" * (1024 * 1024)) + "</html>"
+        payload = http_error_payload("msg", exc)
+        assert payload["code"] == ErrorCode.HTTP_ERROR
+        assert payload["response_body_truncated"] is True
+        assert payload["response_body"].startswith("<html>")
+        assert payload["response_body"].endswith("... [truncated]")
+        assert len(payload["response_body"]) <= MAX_RESPONSE_BODY_CHARS + len("... [truncated]")
 
     def test_http_error_payload_json_without_error_field(self):
         # A JSON body that is not a structured error falls back to the generic shape.
