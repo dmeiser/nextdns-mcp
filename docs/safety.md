@@ -20,6 +20,13 @@ Reduce risk when operating on real NextDNS profiles.
 - This check does not depend on a profile id being extractable from the URL, so a URL that names no profile cannot carry the account API key off-site.
 - `dohLookup` uses its own client against `dns.nextdns.io` and sends no API key, so the allow-list above governs the authenticated API client only.
 
+## Log download redirects
+- `manageLogs(operation="download")` normally receives a redirect from the download endpoint. The chain is followed with a separate **unauthenticated** client, so the `X-Api-Key` header never crosses to a redirect target; the destination allow-list above therefore does not apply to those hops.
+- Every hop, the first `Location` included, is checked before any request is made to it (`src/nextdns_mcp/tools/logs.py`): the scheme must be https, and the host must resolve to a globally routable unicast address. Loopback, private, link-local, unique-local, multicast and reserved addresses are refused, which is what covers `127.0.0.1`, `10/8`-style ranges and the `169.254.169.254` metadata endpoint. The chain is also bounded by `_MAX_DOWNLOAD_REDIRECTS`.
+- This is a reachability check, not a host allow-list: any other public https destination is followed, including a host other than `api.nextdns.io`. `ALLOWED_DOWNLOAD_HOSTS` in the same module is the (currently empty) place to pin a verified download host; a pin exempts only the address check, never the scheme check.
+- A refused hop returns the `http_error` payload `Refusing log download redirect to a non-public or non-https destination` before the target is contacted, so no foreign body is written to the temporary CSV or returned to the caller. See troubleshooting.md.
+- Documented limits of the check: the name is resolved here and again by the HTTP client when it connects (DNS rebinding is not closed), and a name that fails to resolve is let through, since it cannot be connected to anyway and the resulting connection error is reported through the normal HTTP-error path.
+
 ## CI credentials
 - GitHub Actions logs are world-readable on a public repository; never print the API key or any file that contains it to CI logs.
 - The container E2E workflow (`.github/workflows/e2e-container.yml`) injects `NEXTDNS_API_KEY` into the test container via `docker run -e` from a GitHub Actions secret; it does not write the key to a catalog or other file, so there is no secret-bearing artifact to dump.

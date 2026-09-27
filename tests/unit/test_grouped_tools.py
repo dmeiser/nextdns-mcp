@@ -1,8 +1,11 @@
 """Unit tests for the grouped CRUD tools in server.py."""
 
 import asyncio
+import ipaddress
+import json
 import logging
 import os
+import socket
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -651,6 +654,26 @@ class TestManageLogs:
         os.unlink(result["file_path"])
 
 
+def _fake_dns(monkeypatch, public_address: str = "93.184.216.34") -> list[str]:
+    """Resolve redirect targets without DNS: numeric hosts to themselves, names to a public address.
+
+    Returns the list of hosts resolution was asked about, so tests can assert
+    which destinations were checked.
+    """
+    resolved: list[str] = []
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        resolved.append(host)
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (public_address, port))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, port))]
+
+    monkeypatch.setattr(logs_module.socket, "getaddrinfo", fake_getaddrinfo)
+    return resolved
+
+
 class _FakeFinalClient:
     """Unauthenticated stand-in whose streamed fetch returns the final CSV body."""
 
@@ -677,6 +700,10 @@ class _FakeFinalClient:
 
 class TestManageLogsDownloadRedirects:
     """Regression tests for issue #130: the API key must not leak on log-download redirects."""
+
+    @pytest.fixture(autouse=True)
+    def _offline_dns(self, monkeypatch):
+        _fake_dns(monkeypatch)
 
     def _redirect_response(self, location: str) -> httpx.Response:
         """Build a 302 redirect response for the authenticated download request."""
@@ -708,9 +735,7 @@ class TestManageLogsDownloadRedirects:
         monkeypatch.setattr(
             logs_module.httpx,
             "AsyncClient",
-            self._route_through_redirect(
-                mock_api_client, "https://cdn.example.com/profiles/abc123/logs.csv?sig=1", fake
-            ),
+            self._route_through_redirect(mock_api_client, "https://api.nextdns.io/logs/abc123/signed.csv?sig=1", fake),
         )
 
         result = await server.manageLogs("download", "abc123")
@@ -723,8 +748,8 @@ class TestManageLogsDownloadRedirects:
         mock_api_client.stream.assert_called_once_with("GET", "/profiles/abc123/logs/download")
         assert mock_api_client.stream.call_args.kwargs.get("follow_redirects") is not True
 
-        # The redirected request went to the third-party host...
-        assert str(fake.last_request.url) == "https://cdn.example.com/profiles/abc123/logs.csv?sig=1"
+        # The redirected request went to the same-host signed object URL...
+        assert str(fake.last_request.url) == "https://api.nextdns.io/logs/abc123/signed.csv?sig=1"
         # ...and it carried no API key header.
         assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
         os.unlink(result["file_path"])
@@ -756,7 +781,7 @@ class TestManageLogsDownloadRedirects:
             def stream(self, method, url, **kwargs):
                 request = httpx.Request("GET", str(url))
                 response = httpx.Response(
-                    302, request=request, headers={"location": "https://cdn.example.com/again.csv"}
+                    302, request=request, headers={"location": "https://api.nextdns.io/again.csv"}
                 )
 
                 class _Ctx:
@@ -775,12 +800,12 @@ class TestManageLogsDownloadRedirects:
 
         class _RedirectCtx:
             async def __aenter__(self):
-                return self._redirect_response("https://cdn.example.com/logs.csv")
+                return self._redirect_response("https://api.nextdns.io/logs.csv")
 
             async def __aexit__(self, *exc):
                 return False
 
-        loop_redirect = self._redirect_response("https://cdn.example.com/logs.csv")
+        loop_redirect = self._redirect_response("https://api.nextdns.io/logs.csv")
 
         class _RedirectCtx:
             async def __aenter__(self):
@@ -868,6 +893,250 @@ class TestManageLogsDownloadRedirects:
     async def test_unsupported_operation(self):
         result = await logs_module._manage_logs_impl("nope", "abc123")
         assert "Unsupported operation" in result["error"]
+
+
+class _RecordingUnauthClient:
+    """Unauthenticated follow-up client that records every URL it was asked to fetch."""
+
+    def __init__(self, *args, **kwargs):
+        self.requested: list[str] = []
+
+    def stream(self, method, url, **kwargs):
+        self.requested.append(str(url))
+        request = httpx.Request("GET", str(url))
+        response = httpx.Response(200, request=request, headers={"content-type": "text/csv"}, content=b"csv,data")
+
+        class _Ctx:
+            async def __aenter__(self):
+                return response
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+    async def aclose(self) -> None:
+        pass
+
+
+class TestManageLogsDownloadRedirectSsrf:
+    """Regression tests for issue #266: a log-download ``Location`` must stay a public https URL.
+
+    A compromised or malicious API origin could otherwise point the unauthenticated
+    fetch at a destination only this server can reach (a cloud IMDS endpoint, an
+    RFC1918 service) and read the body back through the tool payload.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _offline_dns(self, monkeypatch):
+        self.resolved = _fake_dns(monkeypatch)
+
+    def _redirect_initial(self, mock_api_client, location: str):
+        request = httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/logs/download")
+        redirect = httpx.Response(302, request=request, headers={"location": location})
+
+        class _RedirectCtx:
+            async def __aenter__(self):
+                return redirect
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_api_client.stream = MagicMock(return_value=_RedirectCtx())
+
+    def _patch_unauth(self, monkeypatch, fake):
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", lambda *a, **k: fake)
+        return fake
+
+    @pytest.mark.asyncio
+    async def test_metadata_service_location_is_refused(self, mock_api_client, monkeypatch):
+        """A ``Location`` aimed at a link-local IMDS endpoint is never fetched."""
+        self._redirect_initial(
+            mock_api_client,
+            "https://169.254.169.254/latest/meta-data/iam/security-credentials/?role=admin",
+        )
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == []
+        assert result["code"] == "http_error"
+        assert "non-public or non-https" in result["error"]
+        assert "file_path" not in result
+        # The signed/credentialed part of the URL never reaches the payload.
+        assert "role=admin" not in json.dumps(result)
+
+    @pytest.mark.asyncio
+    async def test_loopback_location_is_refused(self, mock_api_client, monkeypatch):
+        """A ``Location`` aimed at loopback is never fetched."""
+        self._redirect_initial(mock_api_client, "https://127.0.0.1:8080/latest/meta-data/")
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == []
+        assert result["code"] == "http_error"
+        assert "file_path" not in result
+
+    @pytest.mark.asyncio
+    async def test_rfc1918_location_is_refused(self, mock_api_client, monkeypatch):
+        """A ``Location`` aimed at a private-range address is never fetched."""
+        self._redirect_initial(mock_api_client, "https://10.0.0.5/admin/creds")
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == []
+        assert result["code"] == "http_error"
+        assert "file_path" not in result
+
+    @pytest.mark.asyncio
+    async def test_scheme_downgrade_to_http_is_refused(self, mock_api_client, monkeypatch):
+        """Even a public host is refused when the redirect downgrades to http://."""
+        self._redirect_initial(mock_api_client, "http://files.example.com/logs/abc123/signed.csv")
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == []
+        assert result["code"] == "http_error"
+        assert "non-public or non-https" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_pinned_host_still_requires_https(self, mock_api_client, monkeypatch):
+        """A host pinned in ALLOWED_DOWNLOAD_HOSTS does not unlock a non-https scheme."""
+        monkeypatch.setattr(logs_module, "ALLOWED_DOWNLOAD_HOSTS", frozenset({"files.example.com"}))
+        self._redirect_initial(mock_api_client, "http://files.example.com/logs/abc123/signed.csv")
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == []
+        assert result["code"] == "http_error"
+
+    @pytest.mark.asyncio
+    async def test_public_host_on_another_origin_is_followed(self, mock_api_client, monkeypatch):
+        """A public https download host is followed even when it is not the API origin."""
+        self._redirect_initial(mock_api_client, "https://files.example.com/logs/abc123/signed.csv?sig=1")
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == ["https://files.example.com/logs/abc123/signed.csv?sig=1"]
+        assert self.resolved == ["files.example.com"]
+        assert result["content_type"] == "text/csv"
+        assert "error" not in result
+        os.unlink(result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_link_local_hop_in_a_chain_is_refused(self, mock_api_client, monkeypatch):
+        """A later hop that turns inward is refused, even after a valid public first hop."""
+        self._redirect_initial(mock_api_client, "https://files.example.com/logs/abc123/hop1.csv")
+
+        class _ChainedClient:
+            def __init__(self, *args, **kwargs):
+                self.requested: list[str] = []
+
+            def stream(self, method, url, **kwargs):
+                self.requested.append(str(url))
+                request = httpx.Request("GET", str(url))
+                if len(self.requested) == 1:
+                    response = httpx.Response(
+                        302,
+                        request=request,
+                        headers={"location": "https://169.254.169.254/latest/meta-data/"},
+                    )
+                else:
+                    response = httpx.Response(
+                        200, request=request, headers={"content-type": "text/csv"}, content=b"csv,data"
+                    )
+
+                class _Ctx:
+                    async def __aenter__(self):
+                        return response
+
+                    async def __aexit__(self, *exc):
+                        return False
+
+                return _Ctx()
+
+            async def aclose(self) -> None:
+                pass
+
+        fake = self._patch_unauth(monkeypatch, _ChainedClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == ["https://files.example.com/logs/abc123/hop1.csv"]
+        assert result["code"] == "http_error"
+        assert "file_path" not in result
+
+    @pytest.mark.asyncio
+    async def test_pinned_host_is_followed_without_resolution(self, mock_api_client, monkeypatch):
+        """A pinned host is followed even when its address is not publicly routable."""
+
+        def _unresolvable(host, port, *args, **kwargs):
+            raise AssertionError("pinned hosts must not be resolved")
+
+        monkeypatch.setattr(logs_module.socket, "getaddrinfo", _unresolvable)
+        monkeypatch.setattr(logs_module, "ALLOWED_DOWNLOAD_HOSTS", frozenset({"169.254.169.254"}))
+        self._redirect_initial(mock_api_client, "https://169.254.169.254/logs/abc123/signed.csv")
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == ["https://169.254.169.254/logs/abc123/signed.csv"]
+        assert "error" not in result
+        os.unlink(result["file_path"])
+
+
+class TestHostResolvesToPublicAddress:
+    """Address classification behind the download SSRF guard."""
+
+    def _patch_getaddrinfo(self, monkeypatch, *addresses, error=None):
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            if error is not None:
+                raise error
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port)) for address in addresses]
+
+        monkeypatch.setattr(logs_module.socket, "getaddrinfo", fake_getaddrinfo)
+
+    @pytest.mark.asyncio
+    async def test_public_addresses_are_accepted(self, monkeypatch):
+        self._patch_getaddrinfo(monkeypatch, "93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946")
+        assert await logs_module._host_resolves_to_public_address("files.example.com") is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "private",
+        [
+            "10.0.0.5",
+            "172.16.0.1",
+            "192.168.1.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "224.0.0.1",
+            "240.0.0.1",
+        ],
+    )
+    async def test_non_public_addresses_are_refused(self, monkeypatch, private):
+        self._patch_getaddrinfo(monkeypatch, private)
+        assert await logs_module._host_resolves_to_public_address("files.example.com") is False
+
+    @pytest.mark.asyncio
+    async def test_mixed_answers_are_refused(self, monkeypatch):
+        """A name with one public and one private answer is refused."""
+        self._patch_getaddrinfo(monkeypatch, "93.184.216.34", "10.0.0.5")
+        assert await logs_module._host_resolves_to_public_address("files.example.com") is False
+
+    @pytest.mark.asyncio
+    async def test_resolution_failure_is_not_a_refusal(self, monkeypatch):
+        """An unresolvable name is left to httpx instead of being refused here."""
+        self._patch_getaddrinfo(monkeypatch, error=socket.gaierror("Name or service not known"))
+        assert await logs_module._host_resolves_to_public_address("files.invalid") is True
 
 
 class TestQueryAnalytics:

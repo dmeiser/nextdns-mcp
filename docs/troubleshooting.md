@@ -34,6 +34,9 @@ The middleware only filters top-level tool arguments; fields nested inside an ar
 - Ensure the `profile_id` you call is permitted.
 - If the message is `Blocked request to non-NextDNS host: <host>`, the request targeted a host outside the client's destination allow-list and was refused before any request was sent. See [safety.md](safety.md).
 
+## Log download refused
+- If `manageLogs(operation="download")` returns `Refusing log download redirect to a non-public or non-https destination`, the download endpoint pointed its redirect at a destination that is not https on a globally routable host, and the redirect was refused before that target was contacted. See [safety.md](safety.md).
+
 ## Invalid JSON or array expected
 - Bulk tools require the parameter to be a JSON array string (e.g., `'["ads.example.com","tracker.net"]'`).
 - Use single quotes to avoid escaping inner quotes in shells.

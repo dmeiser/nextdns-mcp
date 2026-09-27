@@ -3,8 +3,11 @@
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
+import ipaddress
 import logging
 import os
+import socket
 import tempfile
 from typing import Any, Literal
 
@@ -42,6 +45,88 @@ DOWNLOAD_PREVIEW_MAX_BYTES = 256 * 1024
 
 # Maximum number of redirects followed when downloading logs.
 _MAX_DOWNLOAD_REDIRECTS = 5
+
+# SSRF guard for the download redirect chain (issue #266). The follow-up fetch
+# is unauthenticated, so a ``Location`` from the API response is checked before
+# any request is made to it: a hop is refused when its scheme is not https, or
+# when its host resolves to a non-globally-routable address (loopback, private,
+# link-local and unique-local ranges, which is what covers 127.0.0.1,
+# 10/8-style ranges and the 169.254.169.254 metadata endpoint). Any other
+# public https destination is followed, including a host other than the API
+# origin. The scheme check applies to pinned hosts too, so a pin can never
+# allow a plaintext fetch.
+#
+# Known limitations of this reachability check, not bugs to fix here:
+# - The host is resolved here and resolved again by httpx when it connects, so
+#   a name whose answer changes in between (DNS rebinding) is not closed by it.
+# - A resolution failure (offline, unresolvable name) allows the hop through:
+#   such a host cannot be connected to anyway, and httpx reports the failure
+#   through the normal HTTP-error path.
+ALLOWED_DOWNLOAD_SCHEMES = {"https"}
+
+# Verified public hosts allowed to serve log downloads even though they do not
+# resolve to a globally routable address. Intentionally empty: the real NextDNS
+# download host is not yet verified, so nothing is pinned here. To pin one, add
+# its hostname to this set with a comment saying why it is trusted.
+ALLOWED_DOWNLOAD_HOSTS: frozenset[str] = frozenset()
+
+
+class DownloadRedirectRefusedError(Exception):
+    """Raised when a log-download ``Location`` is not a public https destination.
+
+    SSRF guard for the redirect chain: the unauthenticated follow-up fetch is
+    never aimed at a non-https or non-globally-routable destination, so a
+    compromised or malicious API response cannot use it to reach an internal
+    service such as a cloud metadata endpoint (issue #266). Public destinations
+    on any host remain reachable.
+    """
+
+
+def _is_public_address(address: str | int) -> bool:
+    """Return whether a resolved address is a globally routable unicast address."""
+    parsed = ipaddress.ip_address(address)
+    return parsed.is_global and not parsed.is_multicast and not parsed.is_reserved
+
+
+async def _host_resolves_to_public_address(host: str) -> bool:
+    """Return whether every address ``host`` resolves to is globally routable.
+
+    Resolution runs off the event loop because it can block on DNS. A name that
+    does not resolve is not treated as a refusal: such a host cannot be
+    connected to anyway, and httpx surfaces the connection error through the
+    normal HTTP-error path. The address vetted here is not the address httpx
+    dials, since httpx resolves the name again when it connects.
+    """
+    try:
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return True
+    return all(_is_public_address(info[4][0]) for info in infos)
+
+
+async def _check_download_redirect_target(next_url: httpx.URL) -> None:
+    """Raise :class:`DownloadRedirectRefusedError` unless ``next_url`` is a public https destination.
+
+    Args:
+        next_url: The resolved URL about to be fetched (the first hop's
+            ``Location`` or a later hop's).
+
+    Raises:
+        DownloadRedirectRefusedError: If the scheme is not in
+            :data:`ALLOWED_DOWNLOAD_SCHEMES`, or the host is not pinned in
+            :data:`ALLOWED_DOWNLOAD_HOSTS` and does not resolve to a globally
+            routable address.
+    """
+    if next_url.scheme not in ALLOWED_DOWNLOAD_SCHEMES:
+        raise DownloadRedirectRefusedError(
+            f"Refusing log download redirect to {next_url.scheme}://{next_url.host}: scheme not allowed"
+        )
+    if next_url.host in ALLOWED_DOWNLOAD_HOSTS:
+        return
+    if not await _host_resolves_to_public_address(next_url.host):
+        raise DownloadRedirectRefusedError(
+            f"Refusing log download redirect to {next_url.scheme}://{next_url.host}: host is not publicly routable"
+        )
 
 
 async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict[str, Any]:
@@ -101,12 +186,17 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
     The ``Location`` chain is fetched with an unauthenticated client so the
     ``X-Api-Key`` header never crosses to a redirect target. Relative
     ``Location`` headers are resolved against the origin of the current URL.
-    Redirects are bounded so a loop cannot hang the call.
+    Redirects are bounded so a loop cannot hang the call, and every hop (the
+    first included) is checked to be https on a globally routable host, so a
+    redirect cannot aim the fetch at an internal or metadata service.
     """
     redirects = 0
     unauthenticated = httpx.AsyncClient(timeout=client.get_http_timeout(), follow_redirects=False)
     try:
         while True:
+            # Checked before every fetch, so the first ``Location`` is covered
+            # by the same rule as the rest of the chain.
+            await _check_download_redirect_target(next_url)
             async with unauthenticated.stream("GET", next_url) as response:
                 if response.has_redirect_location:
                     redirects += 1
@@ -131,9 +221,11 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
 
     The authenticated client is used only for the initial request to the
     NextDNS API, and never follows redirects: if the download endpoint
-    redirects (S3-style object storage), the ``Location`` is fetched with an
-    unauthenticated client so the ``X-Api-Key`` header is never sent to a
-    host outside the NextDNS API origin.
+    redirects (for example to object storage), the ``Location`` is fetched with
+    an unauthenticated client so the ``X-Api-Key`` header is never sent to
+    another host. That unauthenticated fetch only visits https destinations on
+    globally routable hosts, so a hostile ``Location`` cannot turn the download
+    into a probe of an internal service.
     """
     path = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_"), "download.csv")
     try:
@@ -145,6 +237,16 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
                 return await _write_stream_to_tempfile(initial, path)
             redirect_url = initial.request.url.join(initial.headers["location"])
         return await _follow_redirects_to_tempfile(redirect_url, path)
+    except DownloadRedirectRefusedError as e:
+        # A redirect to a non-public or plaintext destination is refused
+        # before any request is made to the target, so no foreign body is ever
+        # written or returned. The message carries only scheme and host: the
+        # signed part of the URL never reaches the log or the payload.
+        _unlink_temp_file(path)
+        logger.warning(f"Refusing log download redirect: {e}")
+        return error_payload(
+            ErrorCode.HTTP_ERROR, "Refusing log download redirect to a non-public or non-https destination"
+        )
     except AccessDeniedError as e:
         # Raised by the ACL layer (via stream()) before any network request;
         # kept out of the httpx.HTTPError branch so a real upstream 403 keeps
