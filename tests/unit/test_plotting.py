@@ -3,7 +3,6 @@
 import struct
 import threading
 from datetime import datetime, timedelta
-from typing import get_args
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -333,21 +332,6 @@ class TestPlotAnalyticsSeriesImpl:
     @pytest.mark.asyncio
     async def test_domains_metric_returns_error(self, clean_env):
         result = await plots_module._plot_analytics_series_impl("domains")
-        assert "error" in result
-        assert "Unsupported metric" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_drifted_runtime_set_rejects_schema_metric(self, clean_env, monkeypatch):
-        # issue #292 failure mode: a metric advertised in the plotAnalytics
-        # schema by the PlotMetric literal but missing from the runtime set
-        # is rejected with unsupported_metric, so the request looks like a
-        # client bug. Simulated by dropping a metric from the runtime set.
-        monkeypatch.setattr(
-            plots_module,
-            "_PLOT_ANALYTICS_METRICS",
-            frozenset(get_args(plots_module.PlotMetric)) - {"ips"},
-        )
-        result = await plots_module._plot_analytics_series_impl("ips")
         assert "error" in result
         assert "Unsupported metric" in result["error"]
 

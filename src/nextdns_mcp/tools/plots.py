@@ -28,11 +28,6 @@ mdates: Any = None
 Figure: Any = None
 FigureCanvasAgg: Any = None
 
-# Metrics supported by the analytics time-series plotting tools (issue #292):
-# the shared set derived from the PlotMetric literal, so the advertised schema
-# and the runtime validator share one truth.
-_PLOT_ANALYTICS_METRICS = PLOT_METRICS
-
 
 def _extract_series_label(series: dict[str, Any], index: int) -> str:
     """Return a human-readable label for a time-series data entry."""
@@ -142,11 +137,11 @@ def _validate_plot_params(
     profile_id: OptionalProfileId,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Validate metric, interval, and profile ID parameters for plotting."""
-    if metric not in _PLOT_ANALYTICS_METRICS:
+    if metric not in PLOT_METRICS:
         return None, error_payload(
             ErrorCode.UNSUPPORTED_METRIC,
             f"Unsupported metric: {metric}",
-            supported_metrics=sorted(_PLOT_ANALYTICS_METRICS),
+            supported_metrics=sorted(PLOT_METRICS),
         )
 
     if interval < 60:
