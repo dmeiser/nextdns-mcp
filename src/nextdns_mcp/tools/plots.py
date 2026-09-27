@@ -376,12 +376,13 @@ async def plotAnalytics(
 
     Time values can be Unix timestamps or relative strings like ``-1d``.
 
-    The ``;series`` endpoint takes no ``limit`` parameter, so the requested
-    range is the only thing that bounds the response. Two server-side limits are
-    enforced before the request is built, and each is rejected with an
-    ``invalid_argument`` error naming the limit rather than silently adjusted:
+    ``interval`` is the bucket width in seconds. The ``;series`` endpoint takes
+    no ``limit`` parameter, so the requested range is the only thing that bounds
+    the response. Two server-side limits are enforced before the request is
+    built, and each is rejected with an ``invalid_argument`` error naming the
+    limit rather than silently adjusted:
 
-    - ``interval`` must be between 60 and 86400 seconds.
+    - ``interval`` must be between 60 and 86400 seconds (one day).
     - The range spans at most 2000 intervals (at most 2000 points per series),
       so a wide range needs a proportionally larger ``interval``.
 
