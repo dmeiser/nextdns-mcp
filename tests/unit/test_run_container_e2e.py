@@ -1,6 +1,7 @@
 """Unit tests for the container E2E runner script."""
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,6 +11,7 @@ from mcp.types import ImageContent, TextContent, Tool
 
 from scripts.run_container_e2e import (
     EXPECTED_TOOLS,
+    LIST_WRITE_CASES,
     ContainerE2ERunner,
     check_health_endpoint,
     parse_args,
@@ -201,6 +203,124 @@ async def test_run_success_read_only(runner: ContainerE2ERunner):
         assert exit_code == 0
         assert runner.failed_count == 0
         assert runner.executed_count > 0
+
+
+# Independent oracle for the write-phase list sweep: the exact manageLists
+# sequence the runner must issue per list type. entry_id is a regex for the two
+# timestamped entries and a literal for the fixed ones. Kept hardcoded (not
+# derived from LIST_WRITE_CASES) so a bad edit to the table fails here.
+LIST_WRITE_ORACLE = [
+    ("allowlist", r"e2e-\d+-allow\.example\.com", ("replace", "update", "remove", "add", "remove")),
+    ("denylist", r"e2e-\d+-deny\.example\.com", ("replace", "update", "remove", "add", "remove")),
+    ("privacy_blocklists", "nextdns-recommended", ("replace", "remove", "add", "remove")),
+    ("privacy_natives", "apple", ("replace", "remove", "add", "remove")),
+    ("security_tlds", "zip", ("replace", "remove", "add", "remove")),
+    ("parental_categories", "gambling", ("replace", "update", "remove", "add", "remove")),
+    ("parental_services", "tiktok", ("replace", "update", "remove", "add", "remove")),
+]
+
+
+def test_list_write_cases_table_matches_the_documented_sequence():
+    """LIST_WRITE_CASES is the single source of truth for the write-phase list sweep."""
+    assert [case[0] for case in LIST_WRITE_CASES] == [entry[0] for entry in LIST_WRITE_ORACLE]
+    assert {case[0]: case[2] for case in LIST_WRITE_CASES} == {
+        list_type: "update" in operations for list_type, _, operations in LIST_WRITE_ORACLE
+    }
+
+
+def _entry_id_from_args(args: dict) -> str:
+    if "entry_id" in args:
+        return args["entry_id"]
+    if "entry" in args:
+        return args["entry"]["id"]
+    return args["entries"][0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_run_write_checks_issues_the_documented_sequence_per_list_type(runner: ContainerE2ERunner):
+    """The write phase drives every list type through replace -> [update] -> remove -> add -> remove."""
+    session = AsyncMock()
+    mock_call_res = MagicMock()
+    mock_call_res.is_error = False
+    mock_call_res.content = [TextContent(type="text", text='{"data":{"id":"rewrite-1"}}')]
+    session.call_tool.return_value = mock_call_res
+
+    await runner._run_write_checks(session, "profile-123")
+
+    list_calls = [c for c in session.call_tool.call_args_list if c.args[0] == "manageLists"]
+    actual_sequence = [(c.kwargs["arguments"]["list_type"], c.kwargs["arguments"]["operation"]) for c in list_calls]
+    expected_sequence = [
+        (list_type, operation) for list_type, _, operations in LIST_WRITE_ORACLE for operation in operations
+    ]
+    assert actual_sequence == expected_sequence
+
+    entry_ids = {c.kwargs["arguments"]["list_type"]: _entry_id_from_args(c.kwargs["arguments"]) for c in list_calls}
+    for list_type, entry_pattern, _ in LIST_WRITE_ORACLE:
+        assert re.fullmatch(entry_pattern, entry_ids[list_type]), entry_ids[list_type]
+
+    update_calls = [c for c in list_calls if c.kwargs["arguments"]["operation"] == "update"]
+    assert {c.kwargs["arguments"]["list_type"] for c in update_calls} == {
+        list_type for list_type, _, operations in LIST_WRITE_ORACLE if "update" in operations
+    }
+    assert all(c.kwargs["arguments"]["entry"] == {"active": True} for c in update_calls)
+
+    tool_sequence = [c.args[0] for c in session.call_tool.call_args_list]
+    assert tool_sequence.count("manageLists") == len(expected_sequence)
+    assert tool_sequence.count("manageSettings") == 7
+    assert tool_sequence.count("manageProfiles") == 1
+    # The rewrite add succeeds against the mock, so its delete runs too.
+    assert tool_sequence.count("manageRewrites") == 2
+    assert tool_sequence.count("manageLogs") == 1
+    assert tool_sequence[-2:] == ["manageRewrites", "manageLogs"]
+
+
+@pytest.mark.asyncio
+async def test_run_stops_when_preflight_fails(runner: ContainerE2ERunner):
+    """A failed preflight returns 1 without provisioning a profile."""
+    mock_session = AsyncMock()
+    mock_preflight = AsyncMock(return_value=False)
+
+    with (
+        patch.object(runner, "check_endpoint_readiness", return_value=True),
+        patch.object(runner, "check_health", return_value=True),
+        patch("scripts.run_container_e2e.streamable_http_client") as mock_client,
+        patch("scripts.run_container_e2e.ClientSession") as mock_session_cls,
+        patch.object(runner, "_preflight", new=mock_preflight),
+        patch.object(runner, "_provision_profile") as mock_provision,
+    ):
+        mock_client.return_value.__aenter__.return_value = (AsyncMock(), AsyncMock())
+        mock_session_cls.return_value.__aenter__.return_value = mock_session
+
+        exit_code = await runner.run()
+
+    assert exit_code == 1
+    mock_preflight.assert_called_once()
+    mock_provision.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_stops_when_profile_provisioning_fails(runner: ContainerE2ERunner):
+    """Failed provisioning returns 1 without running any check phase."""
+    mock_session = AsyncMock()
+    mock_preflight = AsyncMock(return_value=True)
+    mock_provision = AsyncMock(return_value=("", ""))
+
+    with (
+        patch.object(runner, "check_endpoint_readiness", return_value=True),
+        patch.object(runner, "check_health", return_value=True),
+        patch("scripts.run_container_e2e.streamable_http_client") as mock_client,
+        patch("scripts.run_container_e2e.ClientSession") as mock_session_cls,
+        patch.object(runner, "_preflight", new=mock_preflight),
+        patch.object(runner, "_provision_profile", new=mock_provision),
+        patch.object(runner, "_run_read_checks") as mock_read_checks,
+    ):
+        mock_client.return_value.__aenter__.return_value = (AsyncMock(), AsyncMock())
+        mock_session_cls.return_value.__aenter__.return_value = mock_session
+
+        exit_code = await runner.run()
+
+    assert exit_code == 1
+    mock_read_checks.assert_not_called()
 
 
 def test_parse_args(monkeypatch):
