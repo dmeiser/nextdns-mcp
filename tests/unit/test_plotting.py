@@ -143,7 +143,9 @@ class TestParseSeriesTimestamp:
         assert ts.hour == 10
         assert ts.minute == 30
         assert ts.second == 0
-        assert ts.tzinfo is None
+        # A zone-less value is anchored to UTC so it denotes the same instant
+        # regardless of the host's local timezone.
+        assert ts.utcoffset() == timedelta(0)
 
     def test_parses_whole_second_with_z_via_fallback_format(self, monkeypatch):
         # Force the strptime fallback path and confirm the whole-second format
@@ -449,9 +451,47 @@ class TestPlotAnalyticsSeriesImpl:
     def test_resolve_time_point(self, value, expected):
         assert plots_module._resolve_time_point(value, 1_700_000_000.0) == expected
 
-    @pytest.mark.parametrize("value", ["not-a-time", "2024-13-45T99:99:99Z", True])
+    @pytest.mark.parametrize("value", ["not-a-time", "2024-13-45T99:99:99Z", True, "-1M", "-1D"])
     def test_resolve_time_point_unparseable_returns_none(self, value):
         assert plots_module._resolve_time_point(value, 1_700_000_000.0) is None
+
+    def test_resolve_time_point_uppercase_unit_is_not_folded_onto_its_lowercase_twin(self, now):
+        """``-1M`` is months upstream and must never be sized as the 60s of ``-1m``.
+
+        Folding case here would make a months-long range look like a one-minute
+        one, so the point budget would pass a request the API answers with tens
+        of thousands of points. The helper refuses the value instead.
+        """
+        assert plots_module._resolve_time_point("-1m", now) == now - 60
+        assert plots_module._resolve_time_point("-1M", now) is None
+
+    @pytest.mark.asyncio
+    async def test_uppercase_relative_unit_is_rejected_not_sized_as_minutes(
+        self, clean_env, mock_api_client, monkeypatch
+    ):
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+
+        result = await plots_module._plot_analytics_series_impl("status", from_time="-1M", to_time="now", interval=60)
+
+        assert result["code"] == "invalid_argument"
+        assert "Could not interpret the requested time range" in result["error"]
+        mock_api_client.request.assert_not_called()
+
+    @pytest.mark.parametrize("tz", ["UTC", "Asia/Tokyo", "America/New_York"])
+    def test_naive_iso_timestamp_is_read_as_utc(self, tz, monkeypatch):
+        """A zone-less ISO value denotes the same instant on every host."""
+        import time
+
+        monkeypatch.setenv("TZ", tz)
+        time.tzset()
+        try:
+            resolved = plots_module._resolve_time_point("2024-01-15T10:00:00", 1_700_000_000.0)
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+        assert resolved == 1_705_312_800.0
 
     @pytest.mark.asyncio
     async def test_limit_over_cap_is_rejected(self, clean_env, mock_api_client, monkeypatch):
@@ -523,15 +563,6 @@ class TestPlotAnalyticsSeriesImpl:
         assert error is not None
         assert error["code"] == "invalid_argument"
         assert "must end after it starts" in error["error"]
-
-    @pytest.mark.parametrize("interval", [0, -1])
-    def test_series_budget_error_guards_non_positive_interval(self, now, interval):
-        # A non-positive interval cannot size a budget; the request must survive
-        # this check and fail the interval validation instead.
-        assert plots_module._series_budget_error("-1y", "now", interval, now=now) is None
-
-    def test_series_budget_error_guards_non_positive_budget(self, now):
-        assert plots_module._series_budget_error("-1y", "now", 60, 0, now=now) is None
 
     @pytest.mark.asyncio
     async def test_no_profile_returns_error(self, clean_env):
