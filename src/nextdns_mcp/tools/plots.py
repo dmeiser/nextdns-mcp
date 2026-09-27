@@ -269,6 +269,13 @@ async def plotAnalytics(
 
     Time values can be Unix timestamps or relative strings like ``-1d``.
 
+    ``interval`` is the bucket width in seconds: it must be at least 60 and is
+    clamped server-side to at most 86400 (one day), so asking for coarser
+    buckets than one day is rendered at one-day granularity. ``limit`` is
+    clamped server-side to the range 1-500 (the range the NextDNS API accepts).
+    Both clamps are silent, so choose an interval whose bucket count matches
+    the requested time range.
+
     Examples:
         - ``plotAnalytics(metric="status", profile_id="abc123", from_time="-1d")``
         - ``plotAnalytics(metric="devices", profile_id="abc123", from_time="-7d", interval=86400)``
