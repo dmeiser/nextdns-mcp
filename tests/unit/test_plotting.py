@@ -371,6 +371,42 @@ class TestPlotAnalyticsSeriesImpl:
         assert "error" in result
         assert "No time-series data available" in result["error"]
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"data": [{"name": "x", "queries": [1]}], "meta": None},
+            {"data": [{"name": "x", "queries": [1]}], "meta": {"series": None}},
+            {"data": [{"name": "x", "queries": [1]}], "meta": {"series": {"times": None}}},
+        ],
+        ids=["meta-null", "series-null", "times-null"],
+    )
+    @pytest.mark.asyncio
+    async def test_null_payload_fields_return_error_payload(self, payload, clean_env, mock_api_client, monkeypatch):
+        # Regression (issue #286): ``dict.get(key, default)`` only falls back
+        # when a key is absent, so a JSON ``null`` from the API used to make
+        # ``meta.get(...)`` raise AttributeError out of the tool, breaking the
+        # standardized {"error", "code"} contract every other failure path uses.
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        response = MagicMock()
+        response.json.return_value = payload
+        mock_api_client.request.return_value = response
+        result = await plots_module._plot_analytics_series_impl("status")
+        assert result["code"] == "no_data"
+
+    @pytest.mark.asyncio
+    async def test_unexpected_payload_shape_returns_internal_error(self, clean_env, mock_api_client, monkeypatch):
+        # A future upstream schema change must degrade to the same typed error
+        # payload rather than escaping as a raw exception (issue #286).
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        response = MagicMock()
+        response.json.return_value = {
+            "meta": ["not-a-mapping"],
+            "data": [{"name": "x", "queries": [1]}],
+        }
+        mock_api_client.request.return_value = response
+        result = await plots_module._plot_analytics_series_impl("status")
+        assert result["code"] == "internal_error"
+
     @pytest.mark.asyncio
     async def test_rendering_error_returns_error(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")

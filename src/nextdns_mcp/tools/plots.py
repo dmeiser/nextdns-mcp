@@ -199,6 +199,20 @@ async def _fetch_series_payload(
     return payload, None
 
 
+def _validate_series_payload(payload: dict[str, Any]) -> tuple[list[Any], list[Any]]:
+    """Extract the time axis and data rows from a time-series payload.
+
+    Nulls are normalized with ``or`` rather than ``dict.get(key, default)``:
+    the default only applies when a key is *absent*, so a JSON ``null`` from
+    the API would otherwise reach ``.get()`` and raise ``AttributeError``
+    (issue #286). Any other unexpected shape raises and is normalized to an
+    ``internal_error`` payload by the caller, like every other failure path.
+    """
+    meta = payload.get("meta") or {}
+    series_meta = meta.get("series") or {}
+    return series_meta.get("times") or [], payload.get("data") or []
+
+
 async def _plot_analytics_series_impl(
     metric: str,
     profile_id: OptionalProfileId = None,
@@ -234,20 +248,17 @@ async def _plot_analytics_series_impl(
         return fetch_error
     assert payload is not None
 
-    meta = payload.get("meta", {})
-    series_meta = meta.get("series", {})
-    times = series_meta.get("times", [])
-    series_data = payload.get("data", [])
-
-    if not times or not series_data:
-        return error_payload(
-            ErrorCode.NO_DATA,
-            "No time-series data available to plot",
-            metric=metric,
-            profile_id=target_profile,
-        )
-
     try:
+        times, series_data = _validate_series_payload(payload)
+
+        if not times or not series_data:
+            return error_payload(
+                ErrorCode.NO_DATA,
+                "No time-series data available to plot",
+                metric=metric,
+                profile_id=target_profile,
+            )
+
         png_bytes = await asyncio.to_thread(_render_series_chart, metric, times, series_data)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error rendering chart for {metric}: {e}")
