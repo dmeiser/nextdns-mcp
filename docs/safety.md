@@ -30,7 +30,7 @@ Reduce risk when operating on real NextDNS profiles.
 ## Local log downloads
 - `manageLogs(operation="download")` streams the CSV to a file in the OS temp directory and returns the path; the full log text is never inlined into the tool payload.
 - A successful download is not cleaned up: the CSV (mode 0600) and its `nextdns_logs_*` parent directory stay on disk, and the returned path is the only record of them. There is no retention TTL or automatic sweep, so delete the file when it is no longer needed.
-- Failed downloads (access denied, HTTP error, unexpected error) do remove the temp file and its parent directory.
+- Every non-successful download removes the temp file and its parent directory, including access denial, HTTP error, unexpected error, and cancellation or timeout of the awaiting client.
 
 ## CI credentials
 - GitHub Actions logs are world-readable on a public repository; never print the API key or any file that contains it to CI logs.
