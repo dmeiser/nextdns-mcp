@@ -95,11 +95,14 @@ def test_shipped_image_environment_turns_the_guard_on(dockerfile: str) -> None:
     The image environment is the change's only functional artifact, so it is run
     through the real server rather than matched as text: the subprocess builds
     the HTTP app the way the entrypoint does and reports what a request carrying
-    a foreign ``Host`` gets.
+    a foreign ``Host`` gets. ``FASTMCP_ENV_FILE`` points at a path that does not
+    exist so a developer ``.env`` in the working directory cannot supply the
+    value the images are responsible for.
     """
     image_env = _image_environment(dockerfile)
     env = {key: value for key, value in image_env.items() if key != "PYTHONPATH"}
     env["PATH"] = os.environ.get("PATH", "")
+    env["FASTMCP_ENV_FILE"] = str(REPO_ROOT / "tests" / "no-such-env-file")
 
     result = subprocess.run(
         [sys.executable, "-c", _IMAGE_PROBE],
