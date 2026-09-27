@@ -15,7 +15,7 @@ import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp.client import AccessControlledClient, AccessDeniedError, allowed_destination_hosts
+from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
 
 API_KEY = "test-key-12345"
 API_BASE = "https://api.nextdns.io"
@@ -50,29 +50,6 @@ def recorder() -> Callable[..., list[httpx.Request]]:
         return client, seen
 
     return build
-
-
-class TestAllowedHosts:
-    """The allow-list is exactly the NextDNS hosts the code legitimately calls."""
-
-    def test_contains_the_api_and_doh_hosts(self) -> None:
-        hosts = allowed_destination_hosts()
-        assert "api.nextdns.io" in hosts
-        assert "dns.nextdns.io" in hosts
-
-    def test_includes_the_configured_base_url_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """NEXTDNS_BASE_URL stays consistent: pointing it at a proxy widens the allow-list.
-
-        This is the existing base-URL knob, so a self-hosted/proxy deployment
-        needs no second configuration mechanism; no new escape hatch is added.
-        """
-        monkeypatch.setattr(client_module, "NEXTDNS_BASE_URL", "https://nextdns.internal.example.com")
-        assert "nextdns.internal.example.com" in allowed_destination_hosts()
-
-    def test_loopback_is_allowed_for_local_test_doubles(self) -> None:
-        """Loopback hosts are allowed so local test servers / mock servers keep working."""
-        hosts = allowed_destination_hosts()
-        assert {"localhost", "127.0.0.1", "::1"} <= hosts
 
 
 class TestApprovedDestinationsProceed:
@@ -121,15 +98,44 @@ class TestApprovedDestinationsProceed:
         assert len(seen) == 1
         assert seen[0].url.host == "api.nextdns.io"
 
-    @pytest.mark.parametrize("base_url", ["http://127.0.0.1:8080", "http://localhost:8080", "http://[::1]:8080"])
-    async def test_loopback_base_url_proceeds(self, base_url: str, recorder: Callable[..., object]) -> None:
-        """Local test doubles (loopback mock servers) stay testable."""
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            DOH_HOST,
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "http://[::1]:8080",
+        ],
+    )
+    async def test_approved_base_url_proceeds(self, base_url: str, recorder: Callable[..., object]) -> None:
+        """Every approved host serves a request, including loopback test doubles.
+
+        Loopback is allowed so local test servers keep working; no shipped tool
+        ever targets it.
+        """
         client, seen = recorder(base_url=base_url)
         async with client:
             response = await client.request("GET", "/profiles/abc123/settings")
 
         assert response.status_code == 200
         assert len(seen) == 1
+
+    async def test_configured_base_url_host_is_approved(
+        self, monkeypatch: pytest.MonkeyPatch, recorder: Callable[..., object]
+    ) -> None:
+        """NEXTDNS_BASE_URL stays consistent: pointing it at a proxy widens the allow-list.
+
+        This is the existing base-URL knob, so a self-hosted/proxy deployment
+        needs no second configuration mechanism; no new escape hatch is added.
+        """
+        proxy_base = "https://nextdns.internal.example.com"
+        monkeypatch.setattr(client_module, "NEXTDNS_BASE_URL", proxy_base)
+        client, seen = recorder(base_url=proxy_base)
+        async with client:
+            response = await client.request("GET", "/profiles/abc123/settings")
+
+        assert response.status_code == 200
+        assert seen[0].url.host == "nextdns.internal.example.com"
 
 
 class TestNonApprovedDestinationsRefused:
