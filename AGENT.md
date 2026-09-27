@@ -100,7 +100,7 @@ The last commits before a successful validation run MUST be formatting/type-chec
 **Minimum Coverage Standards**:
 - **Project-wide**: 100% code coverage
 - **Per-file**: No single file may have <100% coverage
-- **Branch**: The 100% target covers statements *and* branches (`[tool.coverage.run] branch = true` in `pyproject.toml`). A statement-only report cannot see an untested branch.
+- **Branch**: The 100% target covers statements *and* branches (`[tool.coverage.run] branch = true` in `pyproject.toml`). A statement-only report cannot see an untested branch, and the `Cover` column is rounded to whole percent, so it can read `100%` while a branch is untaken: check that the `Miss` and `BrPart` columns are `0`, as the CI gate does.
 - **Exceptions**: Only for truly untestable code (e.g., `if __name__ == "__main__"`, module-level `sys.exit()`). Every exception must be covered by an explicit `# pragma: no cover` with a comment explaining why, or `# pragma: no branch` for a branch that cannot be taken.
 
 **Running Coverage**:
@@ -194,7 +194,7 @@ Before claiming work is complete:
    - Debug and fix the failing test or code
    - **NEVER ignore, skip, or comment out failing tests**
    - Restart quality checks from step 1 after fixes
-4. **Coverage <100%**: Add missing test cases, remove dead code, or document why code is untestable with `# pragma: no cover`, then restart quality checks
+4. **Coverage <100%**: Add missing test cases, remove dead code, or document why code is untestable with the exclusion markers listed in section 2, then restart quality checks
 5. **Complexity >B**: Refactor function into smaller units, extract methods, simplify logic, then restart quality checks
 
 **Iteration Loop**:
