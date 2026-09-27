@@ -475,3 +475,24 @@ def test_parse_args_health_overrides(monkeypatch):
         assert args.health_only is True
         # The command line wins over the environment.
         assert args.expect_health == "ok"
+
+
+def test_runner_startup_fails_when_mapping_unresolvable(tmp_path: Path, monkeypatch):
+    """A spec whose mapped operations do not resolve is a hard error at startup.
+
+    Before the coverage assertion, an unresolvable operationId degraded to
+    SKIPPED at validation time, which the E2E workflow counts as neither pass
+    nor fail.
+    """
+    empty_spec = tmp_path / "empty-spec.yaml"
+    empty_spec.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr("scripts.run_container_e2e.SPEC_PATH", empty_spec)
+
+    with pytest.raises(ValueError, match="resolve to no response schema"):
+        ContainerE2ERunner(
+            endpoint="http://127.0.0.1:8000/mcp",
+            variant="slim",
+            allow_live_writes=False,
+            plot_profile="",
+            artifacts_dir=tmp_path,
+        )
