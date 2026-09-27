@@ -56,7 +56,8 @@ HEALTH_CACHE_TTL = 30.0
 """Seconds a probe result is reused, so health polling cannot hammer the API."""
 
 HEALTH_FAILURE_AUTH = "auth"
-"""Failure class: NextDNS rejected the configured credentials."""
+"""Failure class: NextDNS rejected the configured credentials, or no usable API key is
+configured locally (missing or empty NEXTDNS_API_KEY, unreadable NEXTDNS_API_KEY_FILE)."""
 
 HEALTH_FAILURE_UNREACHABLE = "unreachable"
 """Failure class: NextDNS could not be probed, or answered unusably."""
@@ -68,8 +69,9 @@ class HealthFailure(NamedTuple):
     Attributes:
         failure_class: ``"auth"`` or ``"unreachable"``.
         reason: Short operator-facing explanation. Built only from the HTTP
-            status code and the exception type name, so it can never carry API
-            key material, auth headers, or the upstream response body.
+            status code, the exception type name, and configuration state, so it
+            can never carry API key material, auth headers, or the upstream
+            response body.
     """
 
     failure_class: str
