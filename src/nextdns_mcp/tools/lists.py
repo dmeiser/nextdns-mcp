@@ -121,7 +121,7 @@ async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | No
     if entry_error:
         return entry_error
     try:
-            return await _api_request("PUT", base_url, json_body=entries)
+        return await _api_request("PUT", base_url, json_body=entries)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
         return _handle_api_error(e)
 
@@ -145,7 +145,7 @@ async def _lists_update(
     if not isinstance(entry, dict):
         return error_payload(ErrorCode.INVALID_ARGUMENT, "entry must be a dict for update operation")
     try:
-            return await _api_request("PATCH", f"{base_url}/{entry_id}", json_body=entry)
+        return await _api_request("PATCH", f"{base_url}/{entry_id}", json_body=entry)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
         return _handle_api_error(e)
 
@@ -155,7 +155,7 @@ async def _lists_remove(base_url: str, entry_id: str | None) -> dict[str, Any]:
     if entry_id is None:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for remove operation")
     try:
-            return await _api_request("DELETE", f"{base_url}/{entry_id}")
+        return await _api_request("DELETE", f"{base_url}/{entry_id}")
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
         return _handle_api_error(e)
 

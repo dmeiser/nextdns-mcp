@@ -17,7 +17,7 @@ import mcp.types
 from fastmcp.utilities.types import Image
 
 from ..coercion import OptionalProfileId
-from ..errors import ErrorCode, error_payload, http_error_payload
+from ..errors import ErrorCode, error_payload
 from ..utils import (
     NextDNSAuthError,
     NextDNSError,

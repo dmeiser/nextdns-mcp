@@ -8,7 +8,6 @@ import re
 from typing import Any
 
 import httpx
-import json
 
 from . import client
 from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError, _log_safe_error, _redacted
@@ -174,13 +173,14 @@ def access_denied_payload(exc: AccessDeniedError) -> dict[str, Any]:
 def _handle_api_error(e: NextDNSError) -> dict[str, Any]:
     """Convert a NextDNSError into a standardized error payload.
 
-    If the exception carries an error_payload (e.g., from an API-level error),
-    return it directly. Otherwise, if the exception wraps an httpx.HTTPError,
-    use http_error_payload to preserve the original error structure.
-    For any other case, fall back to a generic internal error.
+    If the exception carries a pre-built error_payload, return it directly.
+    Otherwise, if the exception wraps an httpx.HTTPError, use http_error_payload
+    to preserve the original error structure. For any other case, fall back to a
+    generic internal error.
     """
-    if getattr(e, "error_payload", None) is not None:
-        return e.error_payload
+    payload = getattr(e, "error_payload", None)
+    if payload is not None:
+        return payload
     cause = getattr(e, "__cause__", None)
     if cause is not None and isinstance(cause, httpx.HTTPError):
         return http_error_payload(str(e), cause)
@@ -216,9 +216,9 @@ async def _api_request(
     except httpx.HTTPError as e:
         logger.error(f"HTTP error in {method} {_redacted(url)}: {_log_safe_error(e)}")
         message = f"HTTP error in {method} {url}: {e}"
-        response = getattr(e, 'response', None)
-        status_code = getattr(response, 'status_code', None) if response is not None else None
-        response_body = getattr(response, 'text', None) if response is not None else None
+        response = getattr(e, "response", None)
+        status_code = getattr(response, "status_code", None) if response is not None else None
+        response_body = getattr(response, "text", None) if response is not None else None
         if status_code in (401, 403):
             raise NextDNSAuthError(message, status_code=status_code, response_body=response_body) from e
         elif status_code == 429:
