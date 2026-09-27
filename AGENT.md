@@ -23,7 +23,7 @@ This file contains repository-specific agent rules. Agents should follow these w
   - See "Code Quality Standards" section below for coverage requirements and quality metrics
 - Docker: provide a `Dockerfile` (primary, `python:3.14-slim`) and `Dockerfile.alpine` (Alpine variant) that produce small, runnable images.
 - **Write Operation Safety Rules:**
-  - Write scoping is enforced by the environment: `NEXTDNS_WRITABLE_PROFILES` limits writes to the listed profile ids (unset means writes are denied), and `NEXTDNS_READ_ONLY=true` denies every write. See `docs/safety.md`.
+  - Write scoping is enforced by the environment: `NEXTDNS_WRITABLE_PROFILES` limits writes to the listed profile ids (unset means writes are denied), the special value `ALL` removes per-profile scoping and grants writes to every profile in the account, production ones included, so it belongs only to a dev account, and `NEXTDNS_READ_ONLY=true` denies every write. See `docs/safety.md`.
   - Always verify the target profile ID before any write operation
 - **Development Workflow:**
   - The server is built from the grouped CRUD tools in `src/nextdns_mcp/tools/`; `create_mcp_server()` (src/nextdns_mcp/openapi.py) creates a plain `FastMCP` instance, and server.py registers the tools on it.
