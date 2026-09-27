@@ -18,40 +18,44 @@ def allow_doh_read_access(monkeypatch):
     monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
 
-def test_coerce_helpers():
-    # bool
-    assert coercion._coerce_string_to_bool("true") is True
-    assert coercion._coerce_string_to_bool("false") is False
-    assert coercion._coerce_string_to_bool("maybe") is None
+def test_coercion_module_exposes_no_blind_json_type_coercion():
+    """The blind JSON type-coercion subtree was removed (issue #273).
 
-    # integer
-    assert coercion._is_integer("123") is True
-    assert coercion._is_integer("-5") is True
-    assert coercion._is_integer("1.2") is False
-    assert coercion._is_integer("²") is False
-    assert coercion._is_integer("-²") is False
+    It had no production caller and it corrupted identifier-like strings
+    (``{"password": "0012"}`` -> ``{"password": 12}``), the exact hazard the
+    live schema-aware coercion in StripExtraFieldsMiddleware avoids.
+    """
+    for name in (
+        "coerce_json_types",
+        "_coerce_dict",
+        "_coerce_list",
+        "_coerce_string",
+        "_coerce_string_to_bool",
+        "_coerce_string_to_number",
+        "_try_parse_float",
+        "_is_integer",
+    ):
+        assert not hasattr(coercion, name), f"coercion.{name} should have been removed"
+    assert not hasattr(openapi, "_is_integer")
+    assert not hasattr(openapi, "coerce_json_types")
 
-    # float parsing
-    assert coercion._try_parse_float("1.23") == 1.23
-    assert coercion._try_parse_float("notfloat") is None
-    assert coercion._try_parse_float("²") is None
-    assert coercion._try_parse_float("1.²") is None
 
-    # coerce number
-    assert coercion._coerce_string_to_number("42") == 42
-    assert coercion._coerce_string_to_number("3.14") == 3.14
-    assert coercion._coerce_string_to_number("no") is None
+def test_shape_helpers():
+    # integer shape
+    assert utils_module.is_integer_shaped("123") is True
+    assert utils_module.is_integer_shaped("-5") is True
+    assert utils_module.is_integer_shaped("1.2") is False
+    assert utils_module.is_integer_shaped("²") is False
+    assert utils_module.is_integer_shaped("-²") is False
 
-    # general string coercion
-    assert coercion._coerce_string("true") is True
-    assert coercion._coerce_string("10") == 10
-    assert coercion._coerce_string("3.5") == 3.5
-    assert coercion._coerce_string("x") == "x"
-
-    # dict and list coercion
-    assert coercion.coerce_json_types({"a": "true", "b": "2"}) == {"a": True, "b": 2}
-    assert coercion.coerce_json_types(["1", "2.2"]) == [1, 2.2]
-    assert coercion.coerce_json_types(123) == 123
+    # float shape
+    assert utils_module.is_float_shaped("1.23") is True
+    assert utils_module.is_float_shaped("-1.23") is True
+    assert utils_module.is_float_shaped("3") is True
+    assert utils_module.is_float_shaped("notfloat") is False
+    assert utils_module.is_float_shaped("²") is False
+    assert utils_module.is_float_shaped("1.²") is False
+    assert utils_module.is_float_shaped("") is False
 
 
 def test_coerce_json_arg_invalid_json_returns_value():
