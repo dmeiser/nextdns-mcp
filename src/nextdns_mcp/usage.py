@@ -3,10 +3,26 @@
 SPDX-License-Identifier: MIT
 """
 
+import textwrap
+
+from .tools.metrics import ANALYTICS_METRICS
+
+
+def _analytics_metric_bullets() -> str:
+    """Render the queryAnalytics metric list from the shared metric definition.
+
+    Derived from ``ANALYTICS_METRICS`` — the same literal FastMCP turns into the
+    tool's input schema — so the guide cannot drift from the metrics the server
+    actually accepts (issue #292).
+    """
+    listed = ", ".join(f"`{metric}`" for metric in sorted(ANALYTICS_METRICS))
+    return textwrap.fill(listed, width=72, initial_indent="- ", subsequent_indent="  ")
+
 
 def nextdns_usage_guide() -> str:
     """Return a detailed usage guide for the NextDNS MCP tools."""
-    return """# NextDNS MCP Server Usage Guide
+    return (
+        """# NextDNS MCP Server Usage Guide
 
 This MCP server exposes NextDNS through a small set of grouped tools. Each tool
 maps to a functional area of the NextDNS API.
@@ -84,8 +100,9 @@ Time values can be Unix timestamps or relative strings such as `-1d`.
 ### queryAnalytics
 Fetch analytics for a profile. Metrics:
 
-- `status`, `devices`, `protocols`, `queryTypes`, `ipVersions`, `dnssec`,
-  `encryption`, `reasons`, `ips`, `destinations`
+"""
+        + _analytics_metric_bullets()
+        + """
 
 Set `series=true` for time-series data. The `destinations` metric requires
 `destination_type` (e.g., `countries` or `gafam`).
@@ -125,3 +142,4 @@ Perform a DNS-over-HTTPS lookup through NextDNS:
 1. `manageRewrites(operation="list", profile_id="abc123")` — find the entry's opaque `id`
 2. `manageRewrites(operation="delete", profile_id="abc123", entry_id="<id-from-list>")`
 """
+    )

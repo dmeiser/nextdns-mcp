@@ -7,7 +7,7 @@ import asyncio
 import io
 import logging
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
 import mcp.types
 from fastmcp.utilities.types import Image
@@ -15,21 +15,9 @@ from fastmcp.utilities.types import Image
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
 from ..utils import _api_request, resolve_profile_id
+from .metrics import PLOT_METRICS, PlotMetric
 
 logger = logging.getLogger(__name__)
-
-# Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
-PlotMetric = Literal[
-    "status",
-    "devices",
-    "protocols",
-    "queryTypes",
-    "ipVersions",
-    "dnssec",
-    "encryption",
-    "reasons",
-    "ips",
-]
 
 # matplotlib is imported lazily inside _render_series_chart (issue #165): the
 # import alone costs ~2s and every stdio cold start would pay it even though
@@ -39,21 +27,6 @@ PlotMetric = Literal[
 mdates: Any = None
 Figure: Any = None
 FigureCanvasAgg: Any = None
-
-# Metrics supported by the analytics time-series plotting tools.
-_PLOT_ANALYTICS_METRICS = frozenset(
-    {
-        "status",
-        "devices",
-        "protocols",
-        "queryTypes",
-        "ipVersions",
-        "dnssec",
-        "encryption",
-        "reasons",
-        "ips",
-    }
-)
 
 
 def _extract_series_label(series: dict[str, Any], index: int) -> str:
@@ -164,11 +137,11 @@ def _validate_plot_params(
     profile_id: OptionalProfileId,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Validate metric, interval, and profile ID parameters for plotting."""
-    if metric not in _PLOT_ANALYTICS_METRICS:
+    if metric not in PLOT_METRICS:
         return None, error_payload(
             ErrorCode.UNSUPPORTED_METRIC,
             f"Unsupported metric: {metric}",
-            supported_metrics=sorted(_PLOT_ANALYTICS_METRICS),
+            supported_metrics=sorted(PLOT_METRICS),
         )
 
     if interval < 60:

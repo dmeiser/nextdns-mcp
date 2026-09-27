@@ -78,8 +78,8 @@ Time values can be Unix timestamps or relative strings such as `-1d`.
 ### queryAnalytics
 Fetch analytics for a profile. Metrics:
 
-- `status`, `devices`, `protocols`, `queryTypes`, `ipVersions`, `dnssec`,
-  `encryption`, `reasons`, `ips`, `destinations`
+- `destinations`, `devices`, `dnssec`, `domains`, `encryption`,
+  `ipVersions`, `ips`, `protocols`, `queryTypes`, `reasons`, `status`
 
 Set `series=true` for time-series data. The `destinations` metric requires
 `destination_type` (e.g., `countries` or `gafam`).
