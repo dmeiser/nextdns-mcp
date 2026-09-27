@@ -31,6 +31,7 @@ Threat classes covered
 import asyncio
 import json
 import os
+import socket
 from collections.abc import AsyncGenerator, Callable
 
 import httpx
@@ -380,6 +381,14 @@ class TestDownloadAclAndRedirect:
 
         # Re-point the authenticated client's transport to the 302 handler.
         live_client.handler_for(initial_handler)
+
+        # The download SSRF guard resolves the redirect target; resolve it here
+        # so the test stays offline.
+        monkeypatch.setattr(
+            logs_module.socket,
+            "getaddrinfo",
+            lambda host, port, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))],
+        )
 
         # Capture the real class before patching: logs_module.httpx is the global
         # httpx module, so httpx.AsyncClient is exactly the symbol the tool calls.
