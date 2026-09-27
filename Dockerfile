@@ -12,14 +12,19 @@ WORKDIR /app
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy dependency files and source code for build
-COPY pyproject.toml uv.lock README.md ./
-COPY src/ ./src/
+# Copy only the dependency files: the export and install below read nothing else,
+# so src/ stays out of the builder and its dependency layer cache
+COPY pyproject.toml uv.lock ./
 
-# Install dependencies into the project's .venv
+# Install dependencies into a version-independent directory
 # --frozen: use exact versions from uv.lock without updating
 # --no-dev: exclude development dependencies
-RUN uv sync --frozen --no-dev
+# --no-emit-project: skip installing nextdns-mcp itself; the runtime stage copies
+#   src/ onto PYTHONPATH directly
+# Installing into /install keeps the layout free of a python3.x path component, so
+# the runtime stage never has to name the builder's Python minor version.
+RUN uv export --frozen --no-dev --no-emit-project --output-file /tmp/requirements.txt && \
+    uv pip install --target /install --requirement /tmp/requirements.txt
 
 # 2. Final stage: Create the runtime image
 FROM python:3.14-slim
@@ -50,8 +55,8 @@ EXPOSE 8000
 # Set working directory
 WORKDIR /app
 
-# Copy installed packages from the builder stage's virtual environment
-COPY --from=builder /app/.venv/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
+# Copy installed packages from the builder stage
+COPY --from=builder /install /install
 
 # Copy application code
 COPY src/ /app/src/
@@ -60,8 +65,9 @@ COPY src/ /app/src/
 RUN useradd --create-home appuser
 USER appuser
 
-# Set PYTHONPATH to include /app/src so Python can find the nextdns_mcp module
-ENV PYTHONPATH=/app/src \
+# Set PYTHONPATH to include the dependency install dir and /app/src so Python can
+# find the installed packages and the nextdns_mcp module
+ENV PYTHONPATH=/install:/app/src \
     FASTMCP_CHECK_FOR_UPDATES=off
 
 # Command to run the application
