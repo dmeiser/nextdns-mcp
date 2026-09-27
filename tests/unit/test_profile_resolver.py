@@ -4,9 +4,12 @@ SPDX-License-Identifier: MIT
 """
 
 import os
+from unittest.mock import AsyncMock
 
 import pytest
 
+from nextdns_mcp import client as client_module
+from nextdns_mcp import server
 from nextdns_mcp.errors import ErrorCode
 from nextdns_mcp.utils import resolve_profile_id
 
@@ -17,6 +20,41 @@ def clean_env(monkeypatch):
     for key in list(os.environ.keys()):
         monkeypatch.delenv(key, raising=False)
     return monkeypatch.setenv
+
+
+@pytest.fixture
+def mock_api_client(monkeypatch):
+    """Replace the module-level api_client with a mock."""
+    client = AsyncMock()
+    monkeypatch.setattr(client_module, "api_client", client)
+    return client
+
+
+@pytest.fixture(autouse=True)
+def open_profile_access(monkeypatch):
+    """Allow all profile read/write access for the call-site tests."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", "test-api-key")
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+
+
+# Every grouped tool that resolves a profile with ``allow_default=False``. The
+# third element is the code each tool reports when profile_id is omitted:
+# ``manageProfiles`` screens the omission with its own pre-check (profile_id is
+# the *target* of that operation) before the resolver is reached, the other five
+# pass None straight to the resolver.
+_MANDATORY_PROFILE_SITES = [
+    ("analytics", lambda pid: server.queryAnalytics("status", profile_id=pid), ErrorCode.MISSING_PROFILE_ID),
+    ("lists", lambda pid: server.manageLists("allowlist", "get", pid), ErrorCode.MISSING_PROFILE_ID),
+    ("logs", lambda pid: server.manageLogs("get", pid), ErrorCode.MISSING_PROFILE_ID),
+    (
+        "profiles",
+        lambda pid: server.manageProfiles("get", profile_id=pid),
+        ErrorCode.MISSING_REQUIRED_ARGUMENT,
+    ),
+    ("rewrites", lambda pid: server.manageRewrites("list", pid), ErrorCode.MISSING_PROFILE_ID),
+    ("settings", lambda pid: server.manageSettings("get", "general", pid), ErrorCode.MISSING_PROFILE_ID),
+]
 
 
 class TestResolveProfileIdWithDefault:
@@ -102,13 +140,13 @@ class TestResolveProfileIdMandatory:
         assert resolved == "123456"
         assert error is None
 
-    def test_rejects_none_even_if_default_profile_is_configured(self, clean_env):
+    def test_reports_none_as_missing_even_if_default_profile_is_configured(self, clean_env):
         clean_env("NEXTDNS_DEFAULT_PROFILE", "def456")
         resolved, error = resolve_profile_id(None, allow_default=False)
         assert resolved is None
         assert error is not None
-        assert error["code"] == ErrorCode.INVALID_PROFILE_ID
-        assert error["error"] == "Invalid profile_id format: None"
+        assert error["code"] == ErrorCode.MISSING_PROFILE_ID
+        assert error["error"] == "profile_id is required and NEXTDNS_DEFAULT_PROFILE is not set"
 
     def test_rejects_empty_string_even_if_default_profile_is_configured(self, clean_env):
         clean_env("NEXTDNS_DEFAULT_PROFILE", "def456")
@@ -138,3 +176,33 @@ class TestResolveProfileIdMandatory:
         assert error is not None
         assert error["code"] == ErrorCode.INVALID_PROFILE_ID
         assert error["error"] == f"Invalid profile_id format: {invalid_id}"
+
+
+class TestMandatoryProfileIdCallSites:
+    """Every allow_default=False call site must distinguish absent from malformed.
+
+    An omitted ``profile_id`` is an absent argument (``missing_profile_id``),
+    not a malformed one: the resolver must never quote a value the caller never
+    sent back at the LLM driving the tool.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("call", "expected_code"),
+        [(site[1], site[2]) for site in _MANDATORY_PROFILE_SITES],
+        ids=[site[0] for site in _MANDATORY_PROFILE_SITES],
+    )
+    async def test_omitted_profile_id_reports_missing(self, call, expected_code, mock_api_client):
+        result = await call(None)
+        assert result["code"] == expected_code
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "call",
+        [site[1] for site in _MANDATORY_PROFILE_SITES],
+        ids=[site[0] for site in _MANDATORY_PROFILE_SITES],
+    )
+    async def test_malformed_profile_id_reports_invalid(self, call, mock_api_client):
+        result = await call("nope!")
+        assert result["code"] == ErrorCode.INVALID_PROFILE_ID
+        assert result["error"] == "Invalid profile_id format: nope!"
