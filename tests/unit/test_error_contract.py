@@ -99,6 +99,24 @@ class TestErrorPayloadShape:
         assert payload["response_body"] == "<html>500 Bad Gateway</html>"
         assert payload["response_body_truncated"] is False
 
+    def test_http_error_payload_structured_json_fields_are_never_bounded(self):
+        # Structured error documents are surfaced verbatim (issue #148): the
+        # response_body cap applies only to unparseable bodies, so a large
+        # upstream field must survive intact and no truncation keys appear.
+        details = "d" * (100 * 1024)
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 400
+        exc.response.json.return_value = {"error": "Bad Request", "details": details}
+        exc.response.text = '{"error": "Bad Request", "details": "' + details + '"}'
+        payload = http_error_payload("msg", exc)
+        assert payload["error"] == "Bad Request"
+        assert payload["details"] == details
+        assert payload["code"] == ErrorCode.HTTP_ERROR
+        assert payload["status_code"] == 400
+        assert "response_body" not in payload
+        assert "response_body_truncated" not in payload
+
     def test_http_error_payload_truncates_oversized_body(self):
         # A huge non-JSON body (HTML error page, captive portal) must not be
         # inlined into the tool result the LLM reads.
