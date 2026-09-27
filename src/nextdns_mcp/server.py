@@ -77,11 +77,13 @@ def _sync_fastmcp_update_check() -> None:
     and ``.openapi``). Setting the variable after that import would be
     silently ignored, so the value is applied to the live settings too. The
     variable is read (not hardcoded) so an operator who opted into update
-    checks keeps them.
+    checks keeps them, and an unset variable falls back to the same ``"off"``
+    default ``configure()`` applies, so calling this helper on its own cannot
+    raise ``KeyError`` (issue #291).
     """
     fastmcp_settings = getattr(sys.modules.get("fastmcp"), "settings", None)
     if fastmcp_settings is not None:
-        fastmcp_settings.check_for_updates = os.environ["FASTMCP_CHECK_FOR_UPDATES"]
+        fastmcp_settings.check_for_updates = os.environ.get("FASTMCP_CHECK_FOR_UPDATES", "off")
 
 
 def configure() -> FastMCP:

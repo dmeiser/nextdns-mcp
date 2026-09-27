@@ -9,6 +9,10 @@ Issue #190: the same module also set ``FASTMCP_CHECK_FOR_UPDATES`` in the
 environment and built the server singleton at import time, so merely importing
 the module changed the importing process. Both now live in the explicit
 ``configure()`` factory that the entrypoint and the tests call deliberately.
+
+Issue #291: ``_sync_fastmcp_update_check()`` read the variable with a bare
+``os.environ[...]`` subscript, so calling it without ``configure()`` having set
+it first raised ``KeyError``. It now falls back to the same ``"off"`` default.
 """
 
 import os
@@ -104,6 +108,19 @@ class TestImportHasNoServerSideEffects:
         assert os.environ["FASTMCP_CHECK_FOR_UPDATES"] == "off"
         assert fastmcp.settings.check_for_updates == "off"
         assert built is server.get_mcp_server()
+
+    def test_sync_update_check_does_not_require_the_env_var_to_be_set(self, monkeypatch):
+        """The helper must not crash when it is called on its own (issue #291)."""
+        import fastmcp
+
+        from nextdns_mcp import server
+
+        monkeypatch.delenv("FASTMCP_CHECK_FOR_UPDATES", raising=False)
+        monkeypatch.setattr(fastmcp.settings, "check_for_updates", "stable")
+
+        server._sync_fastmcp_update_check()
+
+        assert fastmcp.settings.check_for_updates == "off"
 
     def test_configure_respects_an_explicit_update_check_opt_in(self, monkeypatch):
         """An operator who set FASTMCP_CHECK_FOR_UPDATES keeps their choice."""
