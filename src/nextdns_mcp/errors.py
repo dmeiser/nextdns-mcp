@@ -100,9 +100,10 @@ def _bound_structured_fields(payload: dict[str, Any]) -> bool:
     Every free-form string is capped at ``MAX_RESPONSE_BODY_CHARS`` (nested in
     dicts and lists too) and cut values are flagged with ``TRUNCATION_MARKER``,
     so a multi-hundred-KB upstream ``details`` field cannot crowd the LLM
-    context for a request that already failed (issue #297). Typed fields
-    (``code``, ``error``, ``status_code``) are exempt: the issue #148 contract
-    has callers branch on them, so they are surfaced verbatim.
+    context for a request that already failed (issue #297). The typed string
+    fields (``code``, ``error``) are exempt: the issue #148 contract has callers
+    branch on them, so their text is surfaced verbatim. A container under one of
+    those keys is *not* exempt - a whole document can be hidden there.
 
     Args:
         payload: The structured error document; bounded in place.
@@ -112,7 +113,7 @@ def _bound_structured_fields(payload: dict[str, Any]) -> bool:
     """
     truncated = False
     for key, value in payload.items():
-        if key in _UNBOUNDED_STRUCTURED_FIELDS:
+        if key in _UNBOUNDED_STRUCTURED_FIELDS and isinstance(value, str):
             continue
         payload[key], cut = _bound_value(value)
         truncated = truncated or cut

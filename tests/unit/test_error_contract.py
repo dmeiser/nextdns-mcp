@@ -145,6 +145,24 @@ class TestErrorPayloadShape:
         assert payload["details"] == "d" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER
         assert payload["response_body_truncated"] is True
 
+    def test_http_error_payload_bounds_containers_under_typed_error_field(self):
+        # The #148 exemption covers a top-level ``error`` *string* message, not a
+        # container: when the upstream document puts a huge blob inside
+        # ``{"error": {...}}``, the exemption must not let the whole 1 MB
+        # document into the tool result. Contents are bounded and flagged.
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 400
+        exc.response.json.return_value = {
+            "error": {"message": "z" * (100 * 1024), "code": "upstream_boom"},
+        }
+        payload = http_error_payload("msg", exc)
+        assert payload["error"] == {
+            "message": "z" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER,
+            "code": "upstream_boom",
+        }
+        assert payload["response_body_truncated"] is True
+
     def test_http_error_payload_bounds_nested_structured_values(self):
         # Issue #297: nested containers are bounded too - a huge list or nested
         # object of free-form strings is cut just like a top-level field, and
