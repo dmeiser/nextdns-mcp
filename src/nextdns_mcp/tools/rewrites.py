@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _validate_entry_id, resolve_profile_id
+from ..utils import _api_request, _optional_entry_id_error, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 RewriteOperation = Literal["list", "add", "delete"]
@@ -24,11 +24,12 @@ async def _manage_rewrites_impl(
     target_profile, error = resolve_profile_id(profile_id, allow_default=False)
     if error:
         return error
+    if target_profile is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
 
-    if entry_id is not None:
-        error = _validate_entry_id(entry_id)
-        if error:
-            return error
+    error = _optional_entry_id_error(entry_id)
+    if error:
+        return error
 
     base_url = f"/profiles/{target_profile}/rewrites"
 

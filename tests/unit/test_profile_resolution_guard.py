@@ -21,6 +21,7 @@ from nextdns_mcp.tools import lists as lists_module
 from nextdns_mcp.tools import logs as logs_module
 from nextdns_mcp.tools import plots as plots_module
 from nextdns_mcp.tools import profiles as profiles_module
+from nextdns_mcp.tools import rewrites as rewrites_module
 from nextdns_mcp.tools import settings as settings_module
 
 # One entry per tool site that narrows the resolved profile id before use.
@@ -36,6 +37,9 @@ TOOL_CALLS = [
         settings_module, lambda: settings_module._manage_settings_impl("get", "general", "abc123"), id="settings"
     ),
     pytest.param(lists_module, lambda: lists_module._manage_lists_impl("denylist", "get", "abc123"), id="lists"),
+    pytest.param(
+        rewrites_module, lambda: rewrites_module._manage_rewrites_impl("list", profile_id="abc123"), id="rewrites"
+    ),
 ]
 
 
@@ -54,9 +58,12 @@ async def test_tool_fails_closed_when_profile_resolution_yields_no_id(monkeypatc
 
     api_client = AsyncMock()
     monkeypatch.setattr(client_module, "api_client", api_client)
+    doh_client = AsyncMock()
+    monkeypatch.setattr(doh_module, "_get_doh_client", lambda: doh_client)
 
     result = await call()
 
     assert api_client.request.await_count == 0
+    assert doh_client.get.await_count == 0
     assert result["code"] == ErrorCode.INTERNAL_ERROR
     assert "profiles/None" not in result["error"]
