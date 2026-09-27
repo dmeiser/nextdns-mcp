@@ -1,5 +1,6 @@
 """Unit tests for the custom dohLookup tool."""
 
+import logging
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -194,6 +195,33 @@ class TestDohLookup:
         assert result["code"] == "http_error"
         assert result["status_code"] == 500
         assert result["profile_id"] == mock_profile_id
+
+    @pytest.mark.asyncio
+    async def test_doh_lookup_status_error_log_hides_the_merged_query_string(
+        self, mock_profile_id, mock_doh_client, caplog
+    ):
+        """A failing DoH status must not log the merged query string built from the domain."""
+        domain = "alice-bank.com"
+        request = httpx.Request(
+            "GET", f"https://dns.nextdns.io/{mock_profile_id}/dns-query", params={"name": domain, "type": "A"}
+        )
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            httpx.Response(429, request=request).raise_for_status()
+        assert f"?name={domain}" in str(exc_info.value)
+
+        mock_doh_client.get.return_value.raise_for_status.side_effect = exc_info.value
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.tools.doh"):
+            result = await dohLookup(domain, mock_profile_id, "A")
+
+        assert result["code"] == "http_error"
+        assert result["status_code"] == 429
+        assert result["domain"] == domain
+        error_messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
+        assert error_messages
+        for msg in error_messages:
+            assert "?" not in msg, f"Query string leaked into the DoH error log: {msg}"
+        assert any("429" in msg for msg in error_messages)
 
     @pytest.mark.asyncio
     async def test_doh_lookup_generic_exception(self, mock_profile_id, mock_doh_client):

@@ -37,6 +37,7 @@ This file contains repository-specific agent rules. Agents should follow these w
   - Do not use legacy `update*` custom tools (they no longer exist).
 - When in doubt, ask the repo owner for permission before making large design changes.
 - API Key: Ensure that a valid API key is not in any files that will be committed to git.
+- Logging: no log record at INFO or above may contain a query string or httpx's merged-URL exception text; use `_redacted()` / `_log_safe_error()` from `src/nextdns_mcp/client.py` at any new log site, and keep the `httpx`/`httpcore` loggers at WARNING. See docs/safety.md.
 
 ## Testing Strategy
 

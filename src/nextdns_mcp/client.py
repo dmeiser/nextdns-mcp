@@ -59,6 +59,30 @@ def allowed_destination_hosts() -> frozenset[str]:
     return frozenset(hosts)
 
 
+def _redacted(url: str) -> str:
+    """Return the URL with any query string removed (issue #139).
+
+    Query strings can carry sensitive data (DNS search terms, device IDs, cursor
+    tokens), so every log site that runs at INFO or above must use this helper
+    instead of the raw URL. Use the full URL only at DEBUG.
+    """
+    return str(url).split("?", 1)[0]
+
+
+def _log_safe_error(error: Exception) -> str:
+    """Return exception text that is safe to log at INFO or above (issue #139).
+
+    httpx builds ``HTTPStatusError`` messages from the fully merged request
+    URL, so only the status is logged for those. Every other message keeps its
+    wording but goes through :func:`_redacted`, because an exception raised by
+    the ACL layer names the URL the caller asked for verbatim. The exception
+    itself is never rewritten: the caller still receives the full text.
+    """
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"{error.response.status_code} {error.response.reason_phrase}"
+    return _redacted(str(error))
+
+
 # Match the first path segment case-insensitively; anything under a
 # /profiles segment that does not yield a safe id is unclassifiable (issue #285).
 _PROFILE_PREFIX = re.compile(r"^/profiles/([^/]+)(?:/|$)", re.IGNORECASE)
@@ -185,7 +209,7 @@ class AccessControlledClient(httpx.AsyncClient):
         else:
             error_msg = f"Write access denied for profile: {profile_id}"
 
-        logger.warning(f"{error_msg} (method={method}, url={str(url).split('?', 1)[0]})")
+        logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
         raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED, profile_id=profile_id)
 
     def _check_read_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -194,7 +218,7 @@ class AccessControlledClient(httpx.AsyncClient):
             return
 
         error_msg = f"Read access denied for profile: {profile_id}"
-        logger.warning(f"{error_msg} (method={method}, url={str(url).split('?', 1)[0]})")
+        logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
         raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED, profile_id=profile_id)
 
     def _check_collection_write_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -206,12 +230,12 @@ class AccessControlledClient(httpx.AsyncClient):
         """
         if access.read_only:
             error_msg = "Write operation denied: server is in read-only mode"
-            logger.warning(f"{error_msg} (method={method}, url={url})")
+            logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
         if not access.any_writable:
             error_msg = "Write access denied: no profiles are writable"
-            logger.warning(f"{error_msg} (method={method}, url={url})")
+            logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
     def _check_collection_read_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -223,7 +247,7 @@ class AccessControlledClient(httpx.AsyncClient):
         """
         if not access.any_readable:
             error_msg = "Read access denied: no profiles are readable"
-            logger.warning(f"{error_msg} (method={method}, url={url})")
+            logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
             raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED)
 
     def _check_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -331,8 +355,7 @@ class AccessControlledClient(httpx.AsyncClient):
             # Fail closed: absolute/authority-bearing URLs, traversal payloads, and
             # unclassifiable /profiles paths cannot be matched against the profile
             # ACL, so deny them instead of letting them bypass the check entirely.
-            logged_path = url_str.split("?", 1)[0]
-            logger.warning(f"Forbidden URL: {logged_path} (method={method})")
+            logger.warning(f"Forbidden URL: {_redacted(url_str)} (method={method})")
             raise AccessDeniedError(
                 f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or ""
             )
@@ -358,7 +381,7 @@ class AccessControlledClient(httpx.AsyncClient):
         """
         # Query strings can carry sensitive data (search terms, device IDs, cursor
         # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
-        logged_path = str(url).split("?", 1)[0]
+        logged_path = _redacted(url)
         logger.info(f"HTTP Request: {method} {logged_path}")
         logger.debug(f"HTTP Request: {method} {url}")
 
@@ -382,7 +405,7 @@ class AccessControlledClient(httpx.AsyncClient):
         """
         # Query strings can carry sensitive data (search terms, device IDs, cursor
         # tokens). Log only the path. (issue #249)
-        logged_path = str(url).split("?", 1)[0]
+        logged_path = _redacted(url)
         logger.info(f"HTTP Stream: {method} {logged_path}")
 
         # _authorize() applies the destination allow-list and the profile ACL
