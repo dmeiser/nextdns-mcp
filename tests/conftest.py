@@ -1,5 +1,6 @@
 """Pytest configuration and fixtures for NextDNS MCP Server tests."""
 
+import os
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,17 +20,18 @@ def mock_profile_id() -> str:
     return "abc123"
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def clean_env(monkeypatch) -> None:
-    """Clean environment variables before tests."""
-    # Remove NextDNS-related env vars
-    for key in [
-        "NEXTDNS_API_KEY",
-        "NEXTDNS_API_KEY_FILE",
-        "NEXTDNS_DEFAULT_PROFILE",
-        "NEXTDNS_HTTP_TIMEOUT",
-    ]:
-        monkeypatch.delenv(key, raising=False)
+    """Remove every NextDNS/MCP/FastMCP env var so tests do not inherit ambient config.
+
+    Autouse, and prefix-based, so the access-control variables
+    (NEXTDNS_READ_ONLY, NEXTDNS_READABLE_PROFILES, NEXTDNS_WRITABLE_PROFILES)
+    cannot leak in from the developer's shell and flip a test's code path, and
+    so a key added to config.py later is covered without editing this file.
+    """
+    for key in list(os.environ):
+        if key.startswith(("NEXTDNS_", "MCP_", "FASTMCP_")):
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture
