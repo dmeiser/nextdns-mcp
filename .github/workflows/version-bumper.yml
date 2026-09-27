@@ -31,6 +31,14 @@ jobs:
           ref: main
           path: main-ref
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.14
+
       - name: Calculate and Update Version
         id: update_version
         env:
@@ -90,6 +98,11 @@ jobs:
           NEXT_V=$(cat new_version.txt)
           echo "next_version=$NEXT_V" >> "$GITHUB_OUTPUT"
 
+      # uv.lock pins this package's own version, so it must be re-locked after
+      # the version edits or `uv lock --check` fails in every unit-tests.yml job.
+      - name: Refresh Lockfile
+        run: uv lock
+
       - name: Commit and Push
         env:
           HEAD_REF: ${{ github.head_ref }}
@@ -98,7 +111,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml src/nextdns_mcp/__init__.py Dockerfile Dockerfile.alpine
+          git add pyproject.toml src/nextdns_mcp/__init__.py Dockerfile Dockerfile.alpine uv.lock
           
           # Check if there are any staged changes before committing
           if git diff --cached --quiet; then
