@@ -15,7 +15,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 | NEXTDNS_API_KEY | string | - | Yes | API key used for authenticated NextDNS API calls |
 | NEXTDNS_API_KEY_FILE | string (path) | - | No | Path to a file containing only the API key (e.g., Docker secret) |
 | NEXTDNS_DEFAULT_PROFILE | string | - | No | Default profile ID to use when a tool parameter omits profile_id |
-| NEXTDNS_HTTP_TIMEOUT | number (seconds) | 30 | No | HTTP timeout for API and DoH requests |
+| NEXTDNS_HTTP_TIMEOUT | number (seconds) | 30 | No | HTTP timeout for API and DoH requests. Captured at client construction; changing this setting requires a process restart |
 | NEXTDNS_DOWNLOAD_MAX_BYTES | number (bytes) | 1073741824 (1 GiB) | No | Hard cap on the total bytes a single `manageLogs(operation="download")` may stream to disk; the download is aborted mid-stream when it would be exceeded |
 | NEXTDNS_READ_ONLY | bool (true/false/1/0/yes/no) | false | No | Disables all write operations when true |
 | NEXTDNS_READABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for reads; special value "ALL" allows reads of all profiles; empty/unset denies all reads |
@@ -39,7 +39,7 @@ Notes
   - **Leaving it off** keeps FastMCP's `false` default: the loopback endpoint then serves any `Host` and `Origin` a browser can be tricked into sending, which is the DNS-rebinding exposure. The remaining mitigation is the network or reverse-proxy layer (an authenticating proxy, an allowlist, or not exposing the port at all).
 - `auto` on a non-loopback bind (e.g. the `MCP_HOST=0.0.0.0` the container images are usually published on) leaves FastMCP's guard largely inert: no `Host` checking happens on that bind, and `Origin` checking happens only for a request that itself presents a loopback `Host`. So the shipped `auto` in those images does not protect the published port; protect it at the network or reverse-proxy layer.
 - `NEXTDNS_API_KEY` (or `NEXTDNS_API_KEY_FILE`) is required. An absent or empty key fails fast instead of creating an unauthenticated client: at startup as `MissingApiKeyError`, and again on first client construction as `ConfigurationError`. `MissingApiKeyError` is a subclass of `ConfigurationError`, so a single `except ConfigurationError` covers both.
-- `NEXTDNS_HTTP_TIMEOUT` must be a positive number of seconds. Invalid values (e.g. `abc`, `0`, empty) fail fast at startup with a clear `ConfigurationError` instead of a confusing crash deep in client construction.
+- `NEXTDNS_HTTP_TIMEOUT` must be a positive number of seconds. Invalid values (e.g. `abc`, `0`, empty) fail fast at startup with a clear `ConfigurationError` instead of a confusing crash deep in client construction. The timeout is captured once when the HTTP clients are constructed; changing this variable requires a full process restart.
 - `MCP_TRANSPORT` must be `stdio` or `http` (case-insensitive, trimmed). An unrecognized value (e.g. `https`, `sse`, a typo, or a stray trailing space) fails fast at startup with a clear `ConfigurationError` instead of silently downgrading to a stdio server that speaks no HTTP.
 - `MCP_PORT` must be an integer in 1-65535. A non-numeric or out-of-range value (e.g. `abc`, an empty value, `0`, `65536`) fails fast at startup with a clear `ConfigurationError` naming `MCP_PORT`, like the timeout above.
 - `NEXTDNS_DOWNLOAD_MAX_BYTES` must be a positive integer of bytes. Invalid values (e.g. `abc`, `0`, `-5`) raise `ConfigurationError`, like the timeout above. See "Local log downloads" in safety.md.

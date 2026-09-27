@@ -325,6 +325,27 @@ class TestDohClientReuse:
         assert client.timeout is not None
         assert client.timeout.connect == 7.5
 
+    @pytest.mark.asyncio
+    async def test_close_doh_client_closes_and_resets(self, monkeypatch):
+        """close_doh_client closes the active client and resets _doh_client to None."""
+        monkeypatch.setattr(doh_module, "_doh_client", None)
+
+        client = doh_module._get_doh_client()
+        assert not client.is_closed
+        assert doh_module._doh_client is client
+
+        await doh_module.close_doh_client()
+        assert client.is_closed
+        assert doh_module._doh_client is None
+
+    @pytest.mark.asyncio
+    async def test_close_doh_client_noop_when_none(self, monkeypatch):
+        """close_doh_client is a safe no-op when no client was created."""
+        monkeypatch.setattr(doh_module, "_doh_client", None)
+
+        await doh_module.close_doh_client()
+        assert doh_module._doh_client is None
+
 
 class TestOptionalProfileIdCoercion:
     """Test OptionalProfileId coerces int profile_id to str via FastMCP TypeAdapter."""

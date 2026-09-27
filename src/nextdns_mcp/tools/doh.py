@@ -35,6 +35,19 @@ def _get_doh_client() -> httpx.AsyncClient:
     return _doh_client
 
 
+async def close_doh_client() -> None:
+    """Close the persistent DoH HTTP client if one exists and reset the singleton.
+
+    Subsequent calls to :func:`_get_doh_client` will construct a fresh client,
+    picking up any updated configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+    """
+    global _doh_client
+    if _doh_client is not None:
+        client = _doh_client
+        _doh_client = None
+        await client.aclose()
+
+
 def _validate_record_type(record_type: str) -> tuple[bool, str]:
     """Validate DNS record type.
 

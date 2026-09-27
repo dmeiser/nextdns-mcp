@@ -465,6 +465,19 @@ def get_api_client() -> AccessControlledClient:
     return _client
 
 
+async def close_api_client() -> None:
+    """Close the shared authenticated API client if one exists and reset the singleton.
+
+    Subsequent calls to :func:`get_api_client` will construct a fresh client,
+    picking up any updated configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+    """
+    global _client
+    if _client is not None:
+        client = _client
+        _client = None
+        await client.aclose()
+
+
 def __getattr__(name: str) -> Any:
     """Lazily expose the ``api_client`` singleton for backward compatibility."""
     if name == "api_client":
