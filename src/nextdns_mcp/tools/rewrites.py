@@ -71,4 +71,10 @@ async def manageRewrites(
         - add: ``manageRewrites(operation="add", profile_id="abc123", name="router.home", content="192.168.1.1")``
         - delete: ``manageRewrites(operation="delete", profile_id="abc123", entry_id="<id-from-list>")``
     """
-    return await _manage_rewrites_impl(operation, profile_id, name, content, entry_id)
+    return await _manage_rewrites_impl(
+        operation=operation,
+        profile_id=profile_id,
+        name=name,
+        content=content,
+        entry_id=entry_id,
+    )

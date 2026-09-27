@@ -154,4 +154,4 @@ async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_ty
         context under ``_metadata``, so the metadata can never collide with
         a DNS answer whose name is literally ``_metadata``.
     """
-    return await _dohLookup_impl(domain, profile_id, record_type)
+    return await _dohLookup_impl(domain=domain, profile_id=profile_id, record_type=record_type)
