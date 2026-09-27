@@ -135,7 +135,7 @@ By default the server uses **stdio**, which is what MCP clients (Claude Desktop,
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MCP_TRANSPORT` | `stdio` | Set to `http` to serve over streamable-HTTP |
+| `MCP_TRANSPORT` | `stdio` | Set to `http` to serve over streamable-HTTP. Any other value fails startup; see [configuration](docs/configuration.md) |
 | `MCP_HOST` | `127.0.0.1` | Interface to bind. Loopback-only by default |
 | `MCP_PORT` | `8000` | Port to listen on |
 
