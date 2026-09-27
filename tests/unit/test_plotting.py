@@ -2,6 +2,7 @@
 
 import struct
 import threading
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -106,14 +107,53 @@ class TestParseSeriesTimestamp:
         assert ts.day == 15
         assert ts.hour == 10
         assert ts.minute == 30
+        assert ts.tzinfo is not None
+        assert ts.utcoffset() == timedelta(0)
 
     def test_parses_offset_timestamp(self):
         ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00+00:00")
         assert ts.year == 2024
 
+    def test_parses_microseconds_with_z(self):
+        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00.123456Z")
+        assert ts.microsecond == 123456
+        assert ts.tzinfo is not None
+        assert ts.utcoffset() == timedelta(0)
+
     def test_parses_microseconds_fallback(self):
         ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00.123456+00:00")
         assert ts.year == 2024
+        assert ts.microsecond == 123456
+
+    def test_parses_whole_second_without_timezone(self):
+        # Regression (issue #186): the old single %f-bearing strptime fallback
+        # could not match a whole-second timestamp, so it leaked a bare
+        # ValueError from strptime.
+        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00")
+        assert ts.year == 2024
+        assert ts.hour == 10
+        assert ts.minute == 30
+        assert ts.second == 0
+        assert ts.tzinfo is None
+
+    def test_parses_whole_second_with_z_via_fallback_format(self, monkeypatch):
+        # Force the strptime fallback path and confirm the whole-second format
+        # is reachable when fromisoformat fails (issue #186). The datetime C
+        # type is immutable, so the module-level name is swapped for a subclass.
+        class _NoIsoFrom(datetime):
+            @classmethod
+            def fromisoformat(cls, value: str):
+                raise ValueError("fromisoformat unavailable")
+
+        monkeypatch.setattr(plots_module, "datetime", _NoIsoFrom)
+        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00Z")
+        assert ts.hour == 10
+        assert ts.tzinfo is not None
+        assert ts.utcoffset() == timedelta(0)
+
+    def test_malformed_timestamp_raises_value_error(self):
+        with pytest.raises(ValueError):
+            plots_module._parse_series_timestamp("not-a-timestamp")
 
 
 class TestRenderSeriesChart:
@@ -376,6 +416,82 @@ class TestPlotAnalyticsToolWrapper:
         mock_api_client.request.side_effect = httpx.HTTPError("boom")
         result = await server.plotAnalytics("status")
         assert result["code"] == "http_error"
+
+
+class TestPlotAnalyticsEndToEndRendering:
+    """End-to-end coverage of the public ``plotAnalytics`` tool (issue #186).
+
+    These drive the tool the way a user/agent does: the NextDNS API returns a
+    series payload, the tool parses the timestamps and returns a rendered PNG
+    chart. The assertion is on the user-visible result - an ``image`` result
+    whose bytes decode to a complete PNG - not on any internal detail.
+    """
+
+    @staticmethod
+    def _decode_png(result) -> bytes:
+        import base64
+
+        content = result
+        if isinstance(content, dict):
+            assert content.get("type") == "image"
+            data = content["data"]
+        else:
+            assert content.type == "image"
+            data = content.data
+        assert isinstance(data, str)
+        return base64.b64decode(data)
+
+    @pytest.mark.asyncio
+    async def test_renders_chart_for_non_microsecond_timestamps(self, clean_env, mock_api_client, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        # Real series payloads are not guaranteed to carry fractional seconds:
+        # a mix of whole-second, timezone-offset, fractional and 'Z' stamps
+        # must all render a chart rather than surfacing a parse error.
+        response = MagicMock()
+        response.json.return_value = {
+            "meta": {
+                "series": {
+                    "times": [
+                        "2024-01-15T10:00:00",
+                        "2024-01-15T11:00:00Z",
+                        "2024-01-15T12:00:00+00:00",
+                        "2024-01-15T13:00:00.250",
+                    ],
+                },
+            },
+            "data": [
+                {"status": "blocked", "queries": [12, 20, 15, 9]},
+                {"status": "allowed", "queries": [88, 80, 85, 91]},
+            ],
+        }
+        mock_api_client.request.return_value = response
+
+        result = await server.plotAnalytics("status")
+
+        png = self._decode_png(result)
+        assert png.startswith(b"\x89PNG")
+        assert _png_is_complete(png)
+        width, height = _png_image_size(png)
+        assert width > 0 and height > 0
+
+    @pytest.mark.asyncio
+    async def test_unparseable_timestamp_returns_error_not_exception(self, clean_env, mock_api_client, monkeypatch):
+        # A genuinely malformed stamp must not escape as an unhandled
+        # ValueError from deep inside the tool: the user gets a structured
+        # error payload back.
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        response = MagicMock()
+        response.json.return_value = {
+            "meta": {"series": {"times": ["15 January 2024"]}},
+            "data": [{"status": "blocked", "queries": [1]}],
+        }
+        mock_api_client.request.return_value = response
+
+        result = await server.plotAnalytics("status")
+
+        assert isinstance(result, dict)
+        assert result["code"] == "internal_error"
+        assert "Error rendering chart" in result["error"]
 
 
 class TestPlotFetchUsesSharedWrapper:
