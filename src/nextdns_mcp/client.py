@@ -59,6 +59,15 @@ def allowed_destination_hosts() -> frozenset[str]:
     return frozenset(hosts)
 
 
+# Match the first path segment case-insensitively; anything under a
+# /profiles segment that does not yield a safe id is unclassifiable (issue #285).
+_PROFILE_PREFIX = re.compile(r"^/profiles/([^/]+)(?:/|$)", re.IGNORECASE)
+# The bare collection root ("/profiles", with or without a trailing slash) names
+# no profile and keeps its collection-endpoint handling, so only paths with a
+# segment after the prefix are unclassifiable.
+_PROFILE_ROOT = re.compile(r"^/profiles/", re.IGNORECASE)
+
+
 def _normalized_request_path(url: str) -> str | None:
     """Return the request path with a guaranteed leading slash.
 
@@ -92,7 +101,7 @@ def _extract_profile_id_from_path(path: str | None) -> str | None:
     # Normalize the path so that equivalent paths are treated consistently.
     normalized = posixpath.normpath(path)
     # Match /profiles/{profile_id}/... pattern
-    match = re.match(r"^/profiles/([^/]+)(?:/|$)", normalized)
+    match = _PROFILE_PREFIX.match(normalized)
     if match:
         profile_id = match.group(1)
         if SAFE_PROFILE_ID_PATTERN.match(profile_id):
@@ -142,6 +151,25 @@ class AccessDeniedError(Exception):
         self.code = code
         self.profile_id = profile_id
         self.message = message
+
+
+def _is_unclassifiable_profiles_path(path: str | None) -> bool:
+    """Return True when a /profiles/... path names no safe, spec-shaped profile id.
+
+    Classification is case-insensitive, so ``/PROFILES/def456/settings`` is
+    treated exactly like ``/profiles/def456/settings``. Case-sensitive matching
+    left the case variant with no extracted profile id *and* no unclassifiable
+    verdict, so it fell through to the collection checks, which enforce only
+    the global any_readable/any_writable gates and never per-profile
+    membership, silently bypassing the profile ACL (issue #285).
+
+    Called from the single ``_authorize()`` decision point that both
+    ``request()`` and ``stream()`` go through, so the two entry points cannot
+    diverge again.
+    """
+    if path is None:
+        return False
+    return _PROFILE_ROOT.search(path.rstrip("/")) is not None
 
 
 class AccessControlledClient(httpx.AsyncClient):
@@ -289,7 +317,7 @@ class AccessControlledClient(httpx.AsyncClient):
         contains_traversal = request_path is not None and ".." in request_path
         # /profiles paths that name something after the prefix but do not carry a
         # safe, extractable profile id (e.g. /profiles/abc.def/settings).
-        unclassifiable_profiles_path = request_path is not None and request_path.rstrip("/").startswith("/profiles/")
+        unclassifiable_profiles_path = _is_unclassifiable_profiles_path(request_path)
         profile_id = _extract_profile_id_from_path(request_path)
 
         # One snapshot per request: every check below, and the decision to send
@@ -357,6 +385,10 @@ class AccessControlledClient(httpx.AsyncClient):
         logged_path = str(url).split("?", 1)[0]
         logger.info(f"HTTP Stream: {method} {logged_path}")
 
+        # _authorize() applies the destination allow-list and the profile ACL
+        # (including the case-insensitive fail-closed /profiles classification
+        # from _is_unclassifiable_profiles_path), so both entry points share one
+        # decision and cannot drift apart again (issues #262, #285).
         self._authorize(method, url)
 
         async with super().stream(method, url, **kwargs) as response:
