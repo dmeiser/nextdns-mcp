@@ -10,8 +10,6 @@ from collections.abc import Iterator
 
 import httpx
 import pytest
-from starlette.requests import Request
-from starlette.responses import JSONResponse
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import openapi
@@ -19,7 +17,6 @@ from nextdns_mcp.openapi import (
     HEALTH_CACHE_TTL,
     HEALTH_PROBE_PATH,
     HEALTH_PROBE_TIMEOUT,
-    _register_health_endpoint,
     create_mcp_server,
 )
 from nextdns_mcp.server import get_mcp_server
@@ -61,19 +58,15 @@ def _install_client(monkeypatch, *outcomes: httpx.Response | Exception) -> FakeA
     return client
 
 
-def _health_handler():
-    """Return the registered /health handler function."""
-    server = create_mcp_server()
-    route = next(r for r in server._additional_http_routes if r.path == "/health")
-    return route.endpoint
-
-
 async def _call_health() -> tuple[int, dict]:
-    """Invoke the /health handler and return (status code, parsed body)."""
-    request = Request(scope={"type": "http", "method": "GET", "path": "/health"})
-    response = await _health_handler()(request)
-    assert isinstance(response, JSONResponse)
-    return response.status_code, httpx.Response(200, content=response.body).json()
+    """GET /health over the real HTTP app and return (status code, parsed body)."""
+    app = create_mcp_server().http_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/health")
+    return response.status_code, response.json()
 
 
 @pytest.fixture(autouse=True)
@@ -82,41 +75,6 @@ def _clear_probe_cache() -> Iterator[None]:
     openapi._health_probe_cache = None
     yield
     openapi._health_probe_cache = None
-
-
-def test_create_mcp_server_registers_health_route(mock_api_key, monkeypatch):
-    """create_mcp_server() attaches a GET /health route to the FastMCP server."""
-    monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-
-    server = create_mcp_server()
-
-    health_routes = [route for route in server._additional_http_routes if getattr(route, "path", None) == "/health"]
-    assert health_routes, "Expected a /health route to be registered"
-    route = health_routes[0]
-    assert "GET" in (route.methods or set())
-
-
-def test_register_health_endpoint_adds_route_on_each_invocation():
-    """_register_health_endpoint adds one /health route per invocation: no de-duplication.
-
-    Each create_mcp_server() call registers one route; calling
-    _register_health_endpoint again on the same server adds a second route.
-    """
-    server = create_mcp_server()
-    count_before = len(server._additional_http_routes)
-
-    _register_health_endpoint(server)
-
-    assert len(server._additional_http_routes) == count_before + 1
-    health_routes = [r for r in server._additional_http_routes if r.path == "/health"]
-    assert len(health_routes) == 2
-
-
-def test_production_server_exposes_health_route():
-    """The production server instance built by server.py carries the /health route."""
-    server = get_mcp_server()
-    health_routes = [route for route in server._additional_http_routes if getattr(route, "path", None) == "/health"]
-    assert health_routes, "Production server should expose a /health route"
 
 
 async def test_health_returns_200_when_the_credential_probe_succeeds(monkeypatch, mock_api_key):

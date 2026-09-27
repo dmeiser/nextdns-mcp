@@ -353,14 +353,21 @@ class ContainerE2ERunner:
         log_info(f"Artifacts report: {self.report_file}")
         log_info("================================")
 
-        if not self.check_health():
-            return 1
-
         if self.health_only:
+            # Nothing listens on the /mcp endpoint in this mode, so the health
+            # check is the only thing to run and there is no boot wait for it.
+            if not self.check_health():
+                return 1
             log_success("/health readiness probe validated over HTTP")
             return 0
 
+        # Wait for the container to accept connections first: the health probe
+        # is a single un-retried request, so it must only run once the server
+        # is actually listening.
         if not await self.check_endpoint_readiness():
+            return 1
+
+        if not self.check_health():
             return 1
 
         created_profile_id = ""

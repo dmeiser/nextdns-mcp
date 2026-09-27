@@ -415,16 +415,39 @@ async def test_health_only_mode_skips_the_mcp_tool_suite(tmp_path):
     mock_ready.assert_not_called()
 
 
-async def test_health_failure_aborts_before_the_mcp_tool_suite(runner):
-    """A failing /health check returns non-zero without touching /mcp."""
+async def test_run_waits_for_the_mcp_endpoint_before_probing_health(runner):
+    """The retrying /mcp wait runs first, so the single-shot health probe never races startup."""
+    order: list[str] = []
+
+    async def _ready(*_args, **_kwargs) -> bool:
+        order.append("readiness")
+        return True
+
+    def _health(*_args, **_kwargs) -> tuple[bool, str]:
+        order.append("health")
+        return False, "stop here"
+
+    with (
+        patch.object(runner, "check_endpoint_readiness", side_effect=_ready),
+        patch("scripts.run_container_e2e.check_health_endpoint", side_effect=_health),
+    ):
+        assert await runner.run() == 1
+
+    assert order == ["readiness", "health"]
+
+
+async def test_health_failure_aborts_the_mcp_tool_suite(runner):
+    """A failing /health check returns non-zero without running the tool suite."""
     with (
         patch("scripts.run_container_e2e.check_health_endpoint", return_value=(False, "boom")),
-        patch.object(runner, "check_endpoint_readiness") as mock_ready,
+        patch.object(runner, "check_endpoint_readiness", return_value=True) as mock_ready,
+        patch("scripts.run_container_e2e.streamable_http_client") as mock_client,
     ):
         exit_code = await runner.run()
 
     assert exit_code == 1
-    mock_ready.assert_not_called()
+    mock_ready.assert_called_once()
+    mock_client.assert_not_called()
 
 
 def test_parse_args_health_defaults(monkeypatch):
