@@ -32,12 +32,18 @@ def configure_logging() -> None:
 
     Called only from the ``__main__`` entrypoint so that importing this
     module has no logging side effects.
+
+    The ``httpx`` and ``httpcore`` loggers are pinned to WARNING: httpx logs
+    every request at INFO with the fully merged URL, whose query string can
+    carry the PII the client redacts from its own request line (issue #139).
     """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    for library_logger in ("httpx", "httpcore"):
+        logging.getLogger(library_logger).setLevel(logging.WARNING)
 
 
 # Core API configuration

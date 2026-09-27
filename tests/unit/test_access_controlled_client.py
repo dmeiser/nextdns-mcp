@@ -4,7 +4,7 @@ import copy
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +13,8 @@ import pytest
 
 from nextdns_mcp import utils
 from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
+from nextdns_mcp.config import configure_logging
+from nextdns_mcp.tools import logs as logs_module
 
 
 @pytest.fixture(autouse=True)
@@ -643,6 +645,71 @@ class TestAccessControlledClientStreamLogging:
 
         info_messages = [record.message for record in caplog.records if record.levelno == logging.INFO]
         assert any("GET /profiles/abc123/logs/download" in msg for msg in info_messages)
+
+
+class TestLibraryLoggerRedaction:
+    """The library loggers must not print request URLs at INFO (issue #263)."""
+
+    @pytest.fixture
+    def configured_logging(self) -> Iterator[None]:
+        root = logging.getLogger()
+        saved = (root.level, {name: logging.getLogger(name).level for name in ("httpx", "httpcore")})
+        configure_logging()
+        yield
+        root.setLevel(saved[0])
+        for name, level in saved[1].items():
+            logging.getLogger(name).setLevel(level)
+
+    @pytest.mark.asyncio
+    async def test_client_request_query_string_never_reaches_the_log(
+        self, configured_logging: None, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True})
+
+        with caplog.at_level(logging.INFO):
+            async with AccessControlledClient(
+                base_url="https://api.nextdns.io", transport=httpx.MockTransport(handler)
+            ) as client:
+                response = await client.get("/profiles/abc123/logs", params={"search": "secret-search-term"})
+
+        assert response.status_code == 200
+        messages = [record.getMessage() for record in caplog.records]
+        assert "HTTP Request: GET /profiles/abc123/logs" in messages
+        for msg in messages:
+            assert "secret-search-term" not in msg, f"Query string leaked into the log: {msg}"
+
+    @pytest.mark.asyncio
+    async def test_presigned_download_url_never_reaches_the_log(
+        self, configured_logging: None, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        signed_url = (
+            "https://cdn.example.com/profiles/abc123/logs.csv?X-Amz-Credential=AKIAEXAMPLE"
+            "&X-Amz-Signature=deadbeef&X-Amz-Expires=1"
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"date,time\n", headers={"content-type": "text/csv"})
+
+        real_async_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            logs_module.httpx,
+            "AsyncClient",
+            lambda *args, **kwargs: real_async_client(transport=httpx.MockTransport(handler)),
+        )
+
+        path = str(tmp_path / "download.csv")
+        with caplog.at_level(logging.INFO):
+            result = await logs_module._follow_redirects_to_tempfile(httpx.URL(signed_url), path)
+
+        assert result["content_type"] == "text/csv"
+        assert result["row_count"] == 1
+        for record in caplog.records:
+            msg = record.getMessage()
+            assert "X-Amz-Signature" not in msg, f"Pre-signed URL leaked into the log: {msg}"
+            assert "deadbeef" not in msg, f"Pre-signed URL leaked into the log: {msg}"
 
 
 class TestAccessDeniedError:
