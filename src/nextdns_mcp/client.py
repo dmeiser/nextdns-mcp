@@ -276,12 +276,6 @@ class AccessControlledClient(httpx.AsyncClient):
             AccessDeniedError: If the destination host is not an approved
                 NextDNS host. No network request is made.
         """
-        # Query strings can carry sensitive data (search terms, device IDs, cursor
-        # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
-        logged_path = _redacted(url)
-        logger.info(f"HTTP Request: {method} {logged_path}")
-        logger.debug(f"HTTP Request: {method} {url}")
-
         self._check_destination(method, url)
         return await super().request(method, url, **kwargs)
 
@@ -347,10 +341,9 @@ class AccessControlledClient(httpx.AsyncClient):
             # Fail closed: absolute/authority-bearing URLs, traversal payloads, and
             # unclassifiable /profiles paths cannot be matched against the profile
             # ACL, so deny them instead of letting them bypass the check entirely.
-            logged_path = url_str.split("?", 1)[0]
-            logger.warning(f"Forbidden URL: {logged_path} (method={method})")
+            logger.warning(f"Forbidden URL: {_redacted(url_str)} (method={method})")
             raise AccessDeniedError(
-                f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or ""
+                f"Forbidden URL: {_redacted(url_str)}", code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or ""
             )
         else:
             self._check_collection_access(method, url_str, access)
@@ -374,7 +367,7 @@ class AccessControlledClient(httpx.AsyncClient):
         """
         # Query strings can carry sensitive data (search terms, device IDs, cursor
         # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
-        logged_path = str(url).split("?", 1)[0]
+        logged_path = _redacted(url)
         logger.info(f"HTTP Request: {method} {logged_path}")
         logger.debug(f"HTTP Request: {method} {url}")
 
