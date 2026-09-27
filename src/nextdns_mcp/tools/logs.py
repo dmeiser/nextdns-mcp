@@ -16,7 +16,6 @@ import httpx
 from .. import client
 from ..client import AccessDeniedError, _log_safe_error
 from ..coercion import ProfileId
-import httpx
 
 from ..config import get_download_max_bytes
 from ..errors import (
@@ -28,7 +27,14 @@ from ..errors import (
     error_payload,
     http_error_payload,
 )
-from ..utils import _api_request, _build_query_params, _cap_limit, access_denied_payload, resolve_profile_id
+from ..utils import (
+    _api_request,
+    _build_query_params,
+    _cap_limit,
+    _handle_api_error,
+    access_denied_payload,
+    resolve_profile_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -350,25 +356,13 @@ async def _manage_logs_impl(
         try:
                     return await _api_request("GET", base_url, params=params)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-            if hasattr(e, 'error_payload') and e.error_payload is not None:
-                return e.error_payload
-            cause = e.__cause__
-            if cause is not None and isinstance(cause, httpx.HTTPError):
-                return http_error_payload(str(e), cause)
-            else:
-                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+        return _handle_api_error(e)
 
     if operation == "clear":
         try:
                     return await _api_request("DELETE", base_url)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-            if hasattr(e, 'error_payload') and e.error_payload is not None:
-                return e.error_payload
-            cause = e.__cause__
-            if cause is not None and isinstance(cause, httpx.HTTPError):
-                return http_error_payload(str(e), cause)
-            else:
-                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+        return _handle_api_error(e)
 
     if operation == "download":
         return await _download_logs_to_tempfile(target_profile)

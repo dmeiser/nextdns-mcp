@@ -22,6 +22,7 @@ from nextdns_mcp.tools import logs as logs_module
 from nextdns_mcp.tools import profiles as profiles_module
 from nextdns_mcp.tools import rewrites as rewrites_module
 from nextdns_mcp.tools import settings as settings_module
+from nextdns_mcp.errors import NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
 
 
 @pytest.fixture
@@ -125,10 +126,11 @@ class TestApiRequest:
         exc.response.status_code = 500
         exc.response.text = "internal server error"
         mock_api_client.request.side_effect = exc
-        result = await utils._api_request("GET", "/profiles")
-        assert "error" in result
-        assert result["code"] == "http_error"
-        assert result["status_code"] == 500
+        with pytest.raises(NextDNSServerError) as exc_info:
+            await utils._api_request("GET", "/profiles")
+        raised_exc = exc_info.value
+        assert raised_exc.status_code == 500
+        assert raised_exc.response_body == "internal server error"
 
     @pytest.mark.asyncio
     async def test_http_error_status_distinguishable(self, mock_api_client):
@@ -139,9 +141,21 @@ class TestApiRequest:
             exc.response.status_code = status
             exc.response.text = None
             mock_api_client.request.side_effect = exc
-            result = await utils._api_request("GET", "/profiles")
-            assert result["code"] == "http_error"
-            assert result["status_code"] == status
+            if status in (401, 403):
+                with pytest.raises(NextDNSAuthError) as exc_info:
+                    await utils._api_request("GET", "/profiles")
+                raised_exc = exc_info.value
+                assert raised_exc.status_code == status
+            elif status == 429:
+                with pytest.raises(NextDNSRateLimitError) as exc_info:
+                    await utils._api_request("GET", "/profiles")
+                raised_exc = exc_info.value
+                assert raised_exc.status_code == status
+            else:  # 503
+                with pytest.raises(NextDNSServerError) as exc_info:
+                    await utils._api_request("GET", "/profiles")
+                raised_exc = exc_info.value
+                assert raised_exc.status_code == status
 
     @pytest.mark.asyncio
     async def test_http_error_no_response(self, mock_api_client):
@@ -154,9 +168,11 @@ class TestApiRequest:
     @pytest.mark.asyncio
     async def test_unexpected_error(self, mock_api_client):
         mock_api_client.request.side_effect = RuntimeError("unexpected")
-        result = await utils._api_request("GET", "/profiles")
-        assert "error" in result
-        assert result["code"] == "internal_error"
+        with pytest.raises(NextDNSError) as exc_info:
+            await utils._api_request("GET", "/profiles")
+        raised_exc = exc_info.value
+        assert raised_exc.status_code is None
+        assert raised_exc.response_body == "unexpected"
 
 
 class TestManageProfiles:
