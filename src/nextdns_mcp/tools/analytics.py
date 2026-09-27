@@ -1,3 +1,10 @@
+"""Grouped analytics query tool for NextDNS MCP Server.
+
+SPDX-License-Identifier: MIT
+"""
+
+from typing import Any
+
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload
 from ..utils import _api_request_payload, _build_query_params, _build_series_params, _cap_limit, resolve_profile_id
