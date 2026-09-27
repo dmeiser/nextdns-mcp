@@ -22,6 +22,14 @@ These tests do not grep the workflow source. They:
 A fake API call is rejected exactly the way GitHub rejects a token missing a
 scope: HTTP 403 with a ``Resource not accessible by integration`` body, and
 octokit raises a ``HttpError`` for JS callers.
+
+Issue #271 extends the harness to the gate's honesty about E2E: the fake
+``actions.listWorkflowRunsForRepo`` response includes an ``E2E Container`` run
+and ``checks.listForRef`` reports the validation step's own check run, so the
+tests can prove that (a) the approval body is derived from the same
+``required_workflows`` list that gated the merge, and (b) a green E2E
+Container run whose validation step was *skipped* (no ``NEXTDNS_API_KEY``)
+does not satisfy the gate.
 """
 
 from __future__ import annotations
@@ -534,9 +542,21 @@ def probe_token(permissions: dict[str, str]) -> int:
 
 
 def run_workflow(
-    workflow: Workflow, job_id: str, *, check_conclusion: str = "success", context: dict | None = None
+    workflow: Workflow,
+    job_id: str,
+    *,
+    check_conclusion: str = "success",
+    context: dict | None = None,
+    e2e_validation_conclusion: str | None = None,
 ) -> WorkflowRun:
-    """Execute the job the way a runner would, against a permission-enforcing API."""
+    """Execute the job the way a runner would, against a permission-enforcing API.
+
+    ``check_conclusion`` sets the conclusion of every workflow run the gate
+    polls. ``e2e_validation_conclusion`` sets the conclusion of the E2E
+    validation step's check run independently, so a test can model a green
+    ``E2E Container`` run whose validation step was skipped (issue #271);
+    it defaults to ``check_conclusion``.
+    """
     job = workflow.job(job_id)
     permissions = effective_permissions(workflow, job)
     context = context or {
@@ -545,6 +565,7 @@ def run_workflow(
         "actor": "dependabot[bot]",
     }
     head_sha = "deadbeefcafe"
+    validation_conclusion = e2e_validation_conclusion or check_conclusion
     responses = {
         "pulls.get": {"head": {"sha": head_sha}, "title": "chore(deps): bump pyyaml to 6.0.3"},
         "actions.listWorkflowRunsForRepo": {
@@ -556,7 +577,18 @@ def run_workflow(
                     "conclusion": check_conclusion,
                     "created_at": "2024-01-01T00:00:00Z",
                 }
-                for name in ("Unit Tests", "CodeQL")
+                for name in ("Unit Tests", "CodeQL", "E2E Container")
+            ]
+        },
+        "checks.listForRef": {
+            "check_runs": [
+                {
+                    "name": f"Run E2E validation against container ({variant})",
+                    "head_sha": head_sha,
+                    "status": "completed",
+                    "conclusion": validation_conclusion,
+                }
+                for variant in ("slim", "alpine")
             ]
         },
         "pulls.createReview": {"id": 1, "state": "APPROVED"},
@@ -645,6 +677,52 @@ def test_failure_path_comments_without_write_token(workflow: Workflow) -> None:
     assert run.denied == [], "least-privilege token blocked a required operation:\n" + _report(run)
     assert [c.operation for c in run.calls if c.source == "gh"] == ["gh pr comment"], _report(run)
     assert run.push_probe_status == 403, _report(run)
+
+
+def _approval_body(run: WorkflowRun) -> str:
+    """Extract the review body the workflow posted via ``gh pr review --body``."""
+    approve_step = next(s for s in run.steps if s.name == "Approve and enable auto-merge")
+    match = re.search(r"---8<---\s*(.*?)\s*--->8---", approve_step.stdout, re.DOTALL)
+    assert match, f"approve step printed no review body:\n{approve_step.stdout}"
+    return match.group(1)
+
+
+@requires_node
+def test_approval_body_is_derived_from_required_workflows(workflow: Workflow) -> None:
+    """The approval comment may only claim the workflows the gate required.
+
+    Issue #271: the body used to hardcode an ``E2E Tests`` line the gate never
+    required, with parentheticals (``100% of tools tested``) the gate could not
+    back. The body must be derived from the same ``required_workflows`` list
+    that gated the merge, so the two cannot drift.
+    """
+    run = run_workflow(workflow, "auto-merge", check_conclusion="success")
+    assert run.denied == [], "least-privilege token blocked a required operation:\n" + _report(run)
+    body = _approval_body(run)
+    for line in ("- Unit Tests: ✅ Passed", "- E2E Container: ✅ Passed", "- CodeQL: ✅ Passed"):
+        assert line in body, f"approval body is missing {line!r}:\n{body}"
+    assert "100% of tools tested" not in body, f"approval body keeps the unbacked tools claim:\n{body}"
+    assert "E2E Tests" not in body, f"approval body keeps the ungated E2E label:\n{body}"
+
+
+@requires_node
+def test_skipped_e2e_validation_does_not_satisfy_the_gate(workflow: Workflow) -> None:
+    """A green E2E Container run whose validation step was skipped must not pass.
+
+    Issue #271: when ``NEXTDNS_API_KEY`` is unavailable (e.g. fork PRs) the
+    E2E Container job skips its live validation step, but the workflow run
+    still concludes ``success``. The gate must require the validation step's
+    own check run to have concluded ``success`` -- a skip is not an E2E pass.
+    """
+    run = run_workflow(
+        workflow, "auto-merge", check_conclusion="success", e2e_validation_conclusion="skipped"
+    )
+    assert run.denied == [], "least-privilege token blocked a required operation:\n" + _report(run)
+    gh_ops = [c.operation for c in run.calls if c.source == "gh"]
+    assert "gh pr review" not in gh_ops and "gh pr merge" not in gh_ops, (
+        f"a skipped E2E validation satisfied the gate:\n{gh_ops}"
+    )
+    assert "gh pr comment" in gh_ops, f"the failure comment was not posted:\n{gh_ops}"
 
 
 @requires_node
