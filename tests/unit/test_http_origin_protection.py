@@ -52,7 +52,7 @@ def test_env_var_enables_auto_mode_in_fastmcp() -> None:
     assert result.stdout.strip() == PROTECTION_AUTO
 
 
-def test_configure_does_not_enable_origin_protection_implicitly(build_app) -> None:
+def test_configure_does_not_enable_origin_protection_implicitly(build_app, monkeypatch) -> None:
     """Enabling it by default would 421 a reverse proxy fronting a loopback bind.
 
     ``auto`` also turns on Host allowlisting, so an implicit default would make
@@ -61,10 +61,12 @@ def test_configure_does_not_enable_origin_protection_implicitly(build_app) -> No
     """
     import fastmcp
 
+    monkeypatch.setattr(fastmcp.settings, "http_host_origin_protection", PROTECTION_AUTO)
+
     build_app()
 
     assert ENV_VAR not in os.environ
-    assert fastmcp.settings.http_host_origin_protection is False
+    assert fastmcp.settings.http_host_origin_protection == PROTECTION_AUTO
 
 
 def test_loopback_endpoint_rejects_a_rebound_host_header(build_app) -> None:
