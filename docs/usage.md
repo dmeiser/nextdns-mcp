@@ -91,6 +91,8 @@ history. Returns an MCP image or an error if no data is available.
 A series is capped server-side at 2000 points (the requested range divided by
 `interval`) with `interval` between 60 and 86400 seconds. A request past either
 limit is rejected with an `invalid_argument` error rather than silently adjusted.
+`limit` is capped at 500 and rejected above that; the `;series` endpoints
+consume no `limit`, so it is validated but never sent.
 
 ### dohLookup
 Perform a DNS-over-HTTPS lookup through NextDNS:

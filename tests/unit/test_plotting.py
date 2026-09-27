@@ -453,16 +453,76 @@ class TestPlotAnalyticsSeriesImpl:
     def test_resolve_time_point_unparseable_returns_none(self, value):
         assert plots_module._resolve_time_point(value, 1_700_000_000.0) is None
 
+    @pytest.mark.asyncio
+    async def test_limit_over_cap_is_rejected(self, clean_env, mock_api_client, monkeypatch):
+        """An over-cap ``limit`` is rejected, never clamped into the request.
+
+        ``limit`` stays on the published tool surface, so a caller passing the
+        old unbounded value gets a typed error naming the cap instead of a
+        silently different request.
+        """
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+
+        result = await plots_module._plot_analytics_series_impl("status", limit=501)
+
+        assert result["code"] == "invalid_argument"
+        assert result["max_limit"] == plots_module.PLOT_LIMIT_MAX
+        assert result["limit"] == 501
+        mock_api_client.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_limit_at_cap_is_accepted_and_not_forwarded(self, clean_env, mock_api_client, monkeypatch):
+        """A valid ``limit`` is accepted and never reaches the ``;series`` endpoint."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+
+        await plots_module._plot_analytics_series_impl("status", from_time="-1d", limit=plots_module.PLOT_LIMIT_MAX)
+
+        params = mock_api_client.request.call_args.kwargs["params"]
+        assert "limit" not in params
+
+    @pytest.mark.asyncio
+    async def test_uninterpretable_range_is_rejected(self, clean_env, mock_api_client, monkeypatch):
+        """A range the tool cannot size is rejected, not forwarded unchecked.
+
+        Failing open here would issue the very unbounded request the point
+        budget exists to stop, so an unparseable ``from``/``to`` value is a
+        typed error rather than a pass-through.
+        """
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+
+        result = await plots_module._plot_analytics_series_impl("status", from_time="-1 month", to_time="now")
+
+        assert result["code"] == "invalid_argument"
+        assert "Could not interpret the requested time range" in result["error"]
+        mock_api_client.request.assert_not_called()
+
     @pytest.mark.parametrize(
         ("from_time", "to_time", "interval"),
         [
-            ("not-a-time", "now", 60),  # range unknown: left to the API
+            ("not-a-time", "now", 60),
             ("now", "not-a-time", 60),
-            ("now", "-1d", 60),  # non-positive span: left to the API
         ],
     )
-    def test_series_budget_error_unknown_range_is_none(self, now, from_time, to_time, interval):
-        assert plots_module._series_budget_error(from_time, to_time, interval, now=now) is None
+    def test_series_budget_error_unparseable_range_is_rejected(self, now, from_time, to_time, interval):
+        error = plots_module._series_budget_error(from_time, to_time, interval, now=now)
+        assert error is not None
+        assert error["code"] == "invalid_argument"
+        assert "-7d" in error["error"]
+        assert error["from_time"] == from_time
+        assert error["to_time"] == to_time
+
+    @pytest.mark.parametrize(("from_time", "to_time"), [("now", "-1d"), ("-1d", "-1d"), ("now", "now")])
+    def test_series_budget_error_non_positive_span_is_rejected(self, now, from_time, to_time):
+        error = plots_module._series_budget_error(from_time, to_time, 60, now=now)
+        assert error is not None
+        assert error["code"] == "invalid_argument"
+        assert "must end after it starts" in error["error"]
 
     @pytest.mark.parametrize("interval", [0, -1])
     def test_series_budget_error_guards_non_positive_interval(self, now, interval):
