@@ -183,7 +183,9 @@ async def manageLists(
         - ``update``: Toggle an existing entry by ``entry_id`` (pass ``entry={"active": True|False}``).
           Only supported for ``allowlist``, ``denylist``, ``parental_categories``, and
           ``parental_services``.
-        - ``replace``: Replace the entire list with ``entries`` (list of dicts).
+        - ``replace``: Replace the entire list with ``entries`` (list of dicts). Each entry must be
+          an object with a string ``id``; a malformed entry is rejected locally with
+          ``invalid_argument`` naming its index, rather than sent upstream.
 
     Examples:
         - get: ``manageLists(list_type="denylist", operation="get", profile_id="abc123")``

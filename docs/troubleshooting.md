@@ -22,6 +22,7 @@ The middleware inspects each tool's parameter schema and removes any arguments t
 ```
 
 See `src/nextdns_mcp/openapi.py` for implementation details (class `StripExtraFieldsMiddleware`).
+The middleware only filters top-level tool arguments; fields nested inside an argument value are not checked.
 
 ## "NEXTDNS_API_KEY is required" or 401 errors
 - Set `NEXTDNS_API_KEY` in your environment.
@@ -35,6 +36,9 @@ See `src/nextdns_mcp/openapi.py` for implementation details (class `StripExtraFi
 ## Invalid JSON or array expected
 - Bulk tools require the parameter to be a JSON array string (e.g., `'["ads.example.com","tracker.net"]'`).
 - Use single quotes to avoid escaping inner quotes in shells.
+- `manageLists(operation="replace", ...)` validates each entry before forwarding: every entry must be an
+  object with a string `id`, otherwise it returns `invalid_argument` naming the offending `entries[<index>]`.
+  Extra keys inside an entry are forwarded as-is.
 
 ## Network/DNS issues
 - Ensure outbound HTTPS to `api.nextdns.io` and `dns.nextdns.io`.
