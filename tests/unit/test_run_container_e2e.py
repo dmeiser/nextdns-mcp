@@ -28,6 +28,17 @@ def runner(tmp_path: Path) -> ContainerE2ERunner:
     )
 
 
+def test_expected_tools_match_registered_and_schema_tools():
+    """The E2E tool list, the server's registered tools, and the schema
+    operation map must name the same tools (issue #271)."""
+    from nextdns_mcp.server import _GROUPED_TOOLS
+
+    from scripts.validate_schema import GROUPED_TOOL_OPERATIONS
+
+    assert EXPECTED_TOOLS == sorted(t.__name__ for t in _GROUPED_TOOLS)
+    assert set(EXPECTED_TOOLS) == set(GROUPED_TOOL_OPERATIONS)
+
+
 def test_record_result(runner: ContainerE2ERunner, tmp_path: Path):
     """Test that record_result appends valid JSON lines."""
     runner.record_result(
