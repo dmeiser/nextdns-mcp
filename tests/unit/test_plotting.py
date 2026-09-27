@@ -418,6 +418,82 @@ class TestPlotAnalyticsToolWrapper:
         assert result["code"] == "http_error"
 
 
+class TestPlotAnalyticsEndToEndRendering:
+    """End-to-end coverage of the public ``plotAnalytics`` tool (issue #186).
+
+    These drive the tool the way a user/agent does: the NextDNS API returns a
+    series payload, the tool parses the timestamps and returns a rendered PNG
+    chart. The assertion is on the user-visible result - an ``image`` result
+    whose bytes decode to a complete PNG - not on any internal detail.
+    """
+
+    @staticmethod
+    def _decode_png(result) -> bytes:
+        import base64
+
+        content = result
+        if isinstance(content, dict):
+            assert content.get("type") == "image"
+            data = content["data"]
+        else:
+            assert content.type == "image"
+            data = content.data
+        assert isinstance(data, str)
+        return base64.b64decode(data)
+
+    @pytest.mark.asyncio
+    async def test_renders_chart_for_non_microsecond_timestamps(self, clean_env, mock_api_client, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        # Real series payloads are not guaranteed to carry fractional seconds:
+        # a mix of whole-second, timezone-offset, fractional and 'Z' stamps
+        # must all render a chart rather than surfacing a parse error.
+        response = MagicMock()
+        response.json.return_value = {
+            "meta": {
+                "series": {
+                    "times": [
+                        "2024-01-15T10:00:00",
+                        "2024-01-15T11:00:00Z",
+                        "2024-01-15T12:00:00+00:00",
+                        "2024-01-15T13:00:00.250",
+                    ],
+                },
+            },
+            "data": [
+                {"status": "blocked", "queries": [12, 20, 15, 9]},
+                {"status": "allowed", "queries": [88, 80, 85, 91]},
+            ],
+        }
+        mock_api_client.request.return_value = response
+
+        result = await server.plotAnalytics("status")
+
+        png = self._decode_png(result)
+        assert png.startswith(b"\x89PNG")
+        assert _png_is_complete(png)
+        width, height = _png_image_size(png)
+        assert width > 0 and height > 0
+
+    @pytest.mark.asyncio
+    async def test_unparseable_timestamp_returns_error_not_exception(self, clean_env, mock_api_client, monkeypatch):
+        # A genuinely malformed stamp must not escape as an unhandled
+        # ValueError from deep inside the tool: the user gets a structured
+        # error payload back.
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        response = MagicMock()
+        response.json.return_value = {
+            "meta": {"series": {"times": ["15 January 2024"]}},
+            "data": [{"status": "blocked", "queries": [1]}],
+        }
+        mock_api_client.request.return_value = response
+
+        result = await server.plotAnalytics("status")
+
+        assert isinstance(result, dict)
+        assert result["code"] == "internal_error"
+        assert "Error rendering chart" in result["error"]
+
+
 class TestPlotFetchUsesSharedWrapper:
     """Regression (issue #183): the plot series fetch must route through ``_api_request``.
 
