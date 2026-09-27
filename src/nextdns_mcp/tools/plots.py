@@ -360,7 +360,8 @@ async def _plot_analytics_series_impl(
     target_profile, val_error = _validate_plot_params(metric, interval, profile_id, from_time, to_time, limit)
     if val_error:
         return val_error
-    assert target_profile is not None
+    if target_profile is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
 
     params: dict[str, Any] = _build_series_params(
         from_time=from_time,

@@ -92,6 +92,13 @@ def _validate_entry_id(entry_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _optional_entry_id_error(entry_id: str | None) -> dict[str, Any] | None:
+    """Validate an entry id that is only required by some operations."""
+    if entry_id is None:
+        return None
+    return _validate_entry_id(entry_id)
+
+
 def _cap_limit(value: int | None, cap: int) -> int | None:
     """Clamp a caller-supplied limit to the server-side range ``[1, cap]``.
 

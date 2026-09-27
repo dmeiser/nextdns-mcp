@@ -32,6 +32,7 @@ This file contains repository-specific agent rules. Agents should follow these w
   - `src/nextdns_mcp/nextdns-openapi.yaml` is a reference specification (used by `scripts/validate_schema.py`); it is NOT used for tool generation.
   - The fastmcp library handles MCP protocol implementation, routing, and tool registration
   - Each public tool in `src/nextdns_mcp/tools/` keeps a thin wrapper over a private `_impl` so the MCP-facing signature and docstring stay separate from the request logic. The wrapper must re-declare the exact parameter list of its `_impl` and forward every argument **by keyword**; a positional forward can bind to the wrong parameter silently. Both invariants are enforced by `tests/unit/test_tool_wrapper_forwarding.py`, so register any new wrapper there.
+  - A tool that resolves a profile id with `resolve_profile_id()` and then builds a request URL must fail closed: when resolution returns no id and no error, return an `internal_error` payload instead of narrowing with `assert`, which `python -O` strips and which would let a literal `/profiles/None/...` URL be built. Enforced for every tool site by `tests/unit/test_profile_resolution_guard.py`, so add any new tool that narrows a resolved profile id there.
 - **Array-body Endpoints (FastMCP 3.x):**
   - FastMCP 3.x supports array bodies natively via the `body` parameter.
   - Use `body=[{"id":"value"}]` for list replacement tools (e.g., `replaceDenylist`, `replaceAllowlist`).

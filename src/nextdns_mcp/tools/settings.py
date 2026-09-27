@@ -34,7 +34,8 @@ async def _manage_settings_impl(
     target_profile, error = resolve_profile_id(profile_id, allow_default=False)
     if error:
         return error
-    assert target_profile is not None
+    if target_profile is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
 
     path = _SETTINGS_PATHS[category]
     url = f"/profiles/{target_profile}/{path}"
