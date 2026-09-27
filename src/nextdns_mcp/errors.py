@@ -100,3 +100,29 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
         payload["response_body"] = body[:MAX_RESPONSE_BODY_CHARS] + (TRUNCATION_MARKER if truncated else "")
         payload["response_body_truncated"] = truncated
     return payload
+
+
+class NextDNSError(RuntimeError):
+    """Base exception for NextDNS API errors."""
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        response_body: str | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
+
+
+class NextDNSAuthError(NextDNSError):
+    """Raised for 401 and 403 errors."""
+
+
+class NextDNSRateLimitError(NextDNSError):
+    """Raised for 429 errors."""
+
+
+class NextDNSServerError(NextDNSError):
+    """Raised for 5xx errors."""

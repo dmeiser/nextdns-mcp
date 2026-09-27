@@ -7,7 +7,7 @@ from typing import Any
 
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_query_params, _build_series_params, _cap_limit, resolve_profile_id
+from ..utils import _api_request_payload, _build_query_params, _build_series_params, _cap_limit, resolve_profile_id
 from .metrics import NON_SERIES_METRICS, AnalyticsMetric
 
 # Server-side cap for the ``limit`` parameter (maximum accepted by the NextDNS API).
@@ -77,7 +77,7 @@ async def _query_analytics_impl(
     if metric == "domains":
         params.update(_build_query_params(status=status, root=root))
 
-    return await _api_request("GET", url, params=params)
+    return await _api_request_payload("GET", url, params=params)
 
 
 async def queryAnalytics(

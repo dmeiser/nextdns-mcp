@@ -7,8 +7,11 @@ from typing import Any, Literal
 
 from ..coercion import OptionalProfileId
 from ..config import load_profile_access_control
-from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_query_params, resolve_profile_id
+from ..errors import (
+    ErrorCode,
+    error_payload,
+)
+from ..utils import _api_request_payload, _build_query_params, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ProfileOperation = Literal["list", "create", "get", "update", "delete"]
@@ -21,7 +24,7 @@ async def _profiles_list(cursor: str | None = None) -> dict[str, Any]:
     if not access.any_readable:
         return error_payload(ErrorCode.READ_ACCESS_DENIED, "Read access denied: no profiles are readable")
     params = _build_query_params(cursor=cursor)
-    result = await _api_request("GET", "/profiles", params=params or None)
+    result = await _api_request_payload("GET", "/profiles", params=params or None)
     if isinstance(result, dict) and "meta" in result and isinstance(result["meta"], dict):
         pagination = result["meta"].get("pagination")
         if isinstance(pagination, dict) and pagination.get("cursor"):
@@ -39,13 +42,13 @@ async def _profiles_create(name: str | None) -> dict[str, Any]:
         return error_payload(ErrorCode.WRITE_ACCESS_DENIED, "Write access denied: no profiles are writable")
     if not name:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for create operation")
-    return await _api_request("POST", "/profiles", json={"name": name})
+    return await _api_request_payload("POST", "/profiles", json_body={"name": name})
 
 
 async def _profiles_update(url: str, name: str | None) -> dict[str, Any]:
     if not name:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for update operation")
-    return await _api_request("PATCH", url, json={"name": name})
+    return await _api_request_payload("PATCH", url, json_body={"name": name})
 
 
 async def _manage_profiles_impl(
@@ -69,11 +72,11 @@ async def _manage_profiles_impl(
 
     url = f"/profiles/{target_profile}"
     if operation == "get":
-        return await _api_request("GET", url)
+        return await _api_request_payload("GET", url)
     if operation == "update":
         return await _profiles_update(url, name)
     if operation == "delete":
-        return await _api_request("DELETE", url)
+        return await _api_request_payload("DELETE", url)
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 

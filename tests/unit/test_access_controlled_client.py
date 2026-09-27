@@ -503,12 +503,21 @@ class TestAccessControlledClientRequestLogging:
         monkeypatch: pytest.MonkeyPatch,
         raised: Exception,
     ) -> None:
-        """_api_request's warning/error wrapper must log method + path, never the query string."""
+        """_api_request's warning/error wrapper must log method + path, never the query string.
+
+        Upstream failures are raised as typed ``NextDNSError`` subclasses (issue #181);
+        the access-control denial is still returned as a payload. Either way the
+        redaction contract of the log record is what this asserts.
+        """
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
         monkeypatch.setattr(AccessControlledClient, "request", AsyncMock(side_effect=raised))
 
         with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"):
-            await utils._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
+            if isinstance(raised, AccessDeniedError):
+                await utils._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
+            else:
+                with pytest.raises(utils.NextDNSError):
+                    await utils._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
 
         log_messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
         assert log_messages
@@ -546,7 +555,11 @@ class TestAccessControlledClientRequestLogging:
         monkeypatch: pytest.MonkeyPatch,
         status_code: int,
     ) -> None:
-        """httpx status errors carry the merged request URL, so they must not be logged verbatim."""
+        """httpx status errors carry the merged request URL, so they must not be logged verbatim.
+
+        The status error is surfaced as the typed exception matching the status
+        (issue #181); the redaction of the log record is unchanged.
+        """
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
         params = {"search": "secret-search-term", "device": "secret-device-id"}
         request = httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/logs", params=params)
@@ -558,11 +571,16 @@ class TestAccessControlledClientRequestLogging:
         else:
             pytest.fail(f"{status_code} did not raise")
 
-        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"):
-            payload = await utils._api_request("GET", "/profiles/abc123/logs", params=params)
+        expected_error = {
+            401: utils.NextDNSAuthError,
+            429: utils.NextDNSRateLimitError,
+            503: utils.NextDNSServerError,
+        }[status_code]
 
-        assert payload["code"] == "http_error"
-        assert payload["status_code"] == status_code
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"), pytest.raises(expected_error) as raised_info:
+            await utils._api_request("GET", "/profiles/abc123/logs", params=params)
+
+        assert raised_info.value.status_code == status_code
         log_messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
         assert log_messages
         for msg in log_messages:

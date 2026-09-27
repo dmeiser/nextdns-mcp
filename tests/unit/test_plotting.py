@@ -803,8 +803,6 @@ class TestPlotFetchUsesSharedWrapper:
     async def test_fetch_series_payload_uses_api_request(
         self, clean_env, monkeypatch, mock_api_client, sample_series_payload
     ):
-        import nextdns_mcp.tools.plots as plots_module
-
         wrapped = AsyncMock(return_value=sample_series_payload)
         monkeypatch.setattr(plots_module, "_api_request", wrapped)
 
@@ -820,13 +818,10 @@ class TestPlotFetchUsesSharedWrapper:
         assert payload is sample_series_payload
 
     @pytest.mark.asyncio
-    async def test_fetch_series_payload_surfaces_wrapper_error(self, clean_env, monkeypatch, mock_api_client):
-        import nextdns_mcp.tools.plots as plots_module
-
-        wrapped = AsyncMock(
-            return_value={"error": "HTTP error in GET /x: boom", "code": "http_error", "status_code": 500}
-        )
-        monkeypatch.setattr(plots_module, "_api_request", wrapped)
+    async def test_fetch_series_payload_surfaces_wrapper_error(self, clean_env, mock_api_client):
+        upstream = httpx.HTTPError("boom")
+        upstream.response = httpx.Response(500, text="upstream exploded")
+        mock_api_client.request.side_effect = upstream
 
         payload, error = await plots_module._fetch_series_payload(
             "/profiles/abc123/analytics/status;series", {}, "status"
@@ -835,12 +830,11 @@ class TestPlotFetchUsesSharedWrapper:
         assert payload is None
         assert error is not None
         assert error["code"] == "http_error"
-        mock_api_client.request.assert_not_awaited()
+        assert error["status_code"] == 500
+        mock_api_client.request.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_plot_analytics_series_impl_uses_api_request(self, clean_env, monkeypatch):
-        import nextdns_mcp.tools.plots as plots_module
-
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         # Empty series so the impl returns before rendering; the fetch has already
         # run, which is what we are asserting on.

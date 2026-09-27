@@ -12,7 +12,15 @@ import httpx
 from . import client
 from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError, _log_safe_error, _redacted
 from .config import get_default_profile
-from .errors import ErrorCode, error_payload, http_error_payload
+from .errors import (
+    ErrorCode,
+    NextDNSAuthError,
+    NextDNSError,
+    NextDNSRateLimitError,
+    NextDNSServerError,
+    error_payload,
+    http_error_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,19 +170,37 @@ def access_denied_payload(exc: AccessDeniedError) -> dict[str, Any]:
     return payload
 
 
-async def _api_request(method: str, url: str, params: dict[str, Any] | None = None, json: Any = None) -> dict[str, Any]:
+def _handle_api_error(e: NextDNSError) -> dict[str, Any]:
+    """Convert a NextDNSError into a standardized error payload.
+
+    If the exception wraps an httpx.HTTPError, use http_error_payload to
+    preserve the original error structure. For any other case, fall back to a
+    generic internal error.
+    """
+    cause = getattr(e, "__cause__", None)
+    if cause is not None and isinstance(cause, httpx.HTTPError):
+        return http_error_payload(str(e), cause)
+    return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+
+
+async def _api_request(
+    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
+) -> dict[str, Any]:
     """Make an HTTP request through the access-controlled client and return JSON.
 
-    Failures are reported as standardized error payloads (see ``errors.py``) rather
-    than raised exceptions, so callers get a consistent, typed failure shape:
-    ``{"error": ..., "code": "http_error", "status_code": ...}`` for HTTP failures
-    (401/403/429/5xx are distinguishable via ``status_code``),
-    ``{"error": ..., "code": "read_access_denied" | "write_access_denied" | "access_denied"}
-    for denials raised by the access-control layer, and
-    ``{"error": ..., "code": "internal_error"}`` for non-HTTP failures.
+    Access-control denials raised by the ACL layer are reported as standardized
+    error payloads (see ``errors.py``) rather than raised exceptions, so callers
+    get a consistent, typed failure shape:
+    ``{"error": ..., "code": "read_access_denied" | "write_access_denied" | "access_denied", "status_code": 403, ...}``.
+
+    All other failures are raised as typed exceptions with status_code and response_body attributes, so callers can implement retry-with-backoff for 429 or circuit-breaking for 5xx.
+    ``NextDNSError`` is the base exception, with subclasses ``NextDNSAuthError`` (401/403), ``NextDNSRateLimitError`` (429), and ``NextDNSServerError`` (5xx).
+    For non-HTTP failures, a ``NextDNSError`` is raised with status_code=None.
+    Tools that report failures as payloads should await ``_api_request_payload``,
+    which applies this conversion.
     """
     try:
-        response = await client.api_client.request(method, url, params=params, json=json)
+        response = await client.api_client.request(method, url, params=params, json=json_body)
         response.raise_for_status()
         if response.status_code == 204 or not response.content:
             return {"success": True}
@@ -188,7 +214,36 @@ async def _api_request(method: str, url: str, params: dict[str, Any] | None = No
     except httpx.HTTPError as e:
         logger.error(f"HTTP error in {method} {_redacted(url)}: {_log_safe_error(e)}")
         message = f"HTTP error in {method} {url}: {e}"
-        return http_error_payload(message, e, fallback_code=ErrorCode.HTTP_ERROR)
-    except Exception as e:  # noqa: BLE001
+        response = getattr(e, "response", None)
+        status_code = getattr(response, "status_code", None) if response is not None else None
+        response_body = getattr(response, "text", None) if response is not None else None
+        raise _typed_http_error(message, status_code, response_body) from e
+    except Exception as e:
         logger.error(f"Unexpected error in {method} {_redacted(url)}: {_log_safe_error(e)}")
-        return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error in {method} {url}: {e}")
+        raise NextDNSError(f"Unexpected error in {method} {url}: {e}", status_code=None) from e
+
+
+def _typed_http_error(message: str, status_code: int | None, response_body: str | None) -> NextDNSError:
+    """Build the NextDNSError subclass matching an upstream HTTP status."""
+    if status_code in (401, 403):
+        return NextDNSAuthError(message, status_code=status_code, response_body=response_body)
+    if status_code == 429:
+        return NextDNSRateLimitError(message, status_code=status_code, response_body=response_body)
+    if status_code is not None and 500 <= status_code < 600:
+        return NextDNSServerError(message, status_code=status_code, response_body=response_body)
+    return NextDNSError(message, status_code=status_code, response_body=response_body)
+
+
+async def _api_request_payload(
+    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
+) -> dict[str, Any]:
+    """Perform an API request, reporting typed upstream failures as error payloads.
+
+    Equivalent to awaiting ``_api_request`` and passing any raised
+    ``NextDNSError`` through ``_handle_api_error``, so every tool reports the
+    same standardized failure shape.
+    """
+    try:
+        return await _api_request(method, url, params=params, json_body=json_body)
+    except NextDNSError as e:
+        return _handle_api_error(e)

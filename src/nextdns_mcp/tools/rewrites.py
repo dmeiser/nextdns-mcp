@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _optional_entry_id_error, resolve_profile_id
+from ..utils import _api_request_payload, _optional_entry_id_error, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 RewriteOperation = Literal["list", "add", "delete"]
@@ -34,17 +34,17 @@ async def _manage_rewrites_impl(
     base_url = f"/profiles/{target_profile}/rewrites"
 
     if operation == "list":
-        return await _api_request("GET", base_url)
+        return await _api_request_payload("GET", base_url)
 
     if operation == "add":
         if not name or not content:
             return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name and content are required for add operation")
-        return await _api_request("POST", base_url, json={"name": name, "content": content})
+        return await _api_request_payload("POST", base_url, json_body={"name": name, "content": content})
 
     if operation == "delete":
         if not entry_id:
             return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for delete operation")
-        return await _api_request("DELETE", f"{base_url}/{entry_id}")
+        return await _api_request_payload("DELETE", f"{base_url}/{entry_id}")
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 

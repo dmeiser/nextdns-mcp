@@ -17,6 +17,7 @@ import pytest
 from nextdns_mcp import client as client_module
 from nextdns_mcp import coercion, config, server, utils
 from nextdns_mcp.config import ConfigurationError
+from nextdns_mcp.errors import NextDNSAuthError, NextDNSError, NextDNSRateLimitError, NextDNSServerError
 from nextdns_mcp.tools import lists as lists_module
 from nextdns_mcp.tools import logs as logs_module
 from nextdns_mcp.tools import profiles as profiles_module
@@ -125,10 +126,11 @@ class TestApiRequest:
         exc.response.status_code = 500
         exc.response.text = "internal server error"
         mock_api_client.request.side_effect = exc
-        result = await utils._api_request("GET", "/profiles")
-        assert "error" in result
-        assert result["code"] == "http_error"
-        assert result["status_code"] == 500
+        with pytest.raises(NextDNSServerError) as exc_info:
+            await utils._api_request("GET", "/profiles")
+        raised_exc = exc_info.value
+        assert raised_exc.status_code == 500
+        assert raised_exc.response_body == "internal server error"
 
     @pytest.mark.asyncio
     async def test_http_error_status_distinguishable(self, mock_api_client):
@@ -139,24 +141,39 @@ class TestApiRequest:
             exc.response.status_code = status
             exc.response.text = None
             mock_api_client.request.side_effect = exc
-            result = await utils._api_request("GET", "/profiles")
-            assert result["code"] == "http_error"
-            assert result["status_code"] == status
+            if status in (401, 403):
+                with pytest.raises(NextDNSAuthError) as exc_info:
+                    await utils._api_request("GET", "/profiles")
+                raised_exc = exc_info.value
+                assert raised_exc.status_code == status
+            elif status == 429:
+                with pytest.raises(NextDNSRateLimitError) as exc_info:
+                    await utils._api_request("GET", "/profiles")
+                raised_exc = exc_info.value
+                assert raised_exc.status_code == status
+            else:  # 503
+                with pytest.raises(NextDNSServerError) as exc_info:
+                    await utils._api_request("GET", "/profiles")
+                raised_exc = exc_info.value
+                assert raised_exc.status_code == status
 
     @pytest.mark.asyncio
     async def test_http_error_no_response(self, mock_api_client):
         mock_api_client.request.side_effect = httpx.ConnectError("network down")
-        result = await utils._api_request("GET", "/profiles")
-        assert result["code"] == "http_error"
-        assert result["status_code"] is None
-        assert "response_body" not in result
+        with pytest.raises(NextDNSError) as exc_info:
+            await utils._api_request("GET", "/profiles")
+        raised_exc = exc_info.value
+        assert raised_exc.status_code is None
+        assert raised_exc.response_body is None
 
     @pytest.mark.asyncio
     async def test_unexpected_error(self, mock_api_client):
         mock_api_client.request.side_effect = RuntimeError("unexpected")
-        result = await utils._api_request("GET", "/profiles")
-        assert "error" in result
-        assert result["code"] == "internal_error"
+        with pytest.raises(NextDNSError) as exc_info:
+            await utils._api_request("GET", "/profiles")
+        raised_exc = exc_info.value
+        assert raised_exc.status_code is None
+        assert raised_exc.response_body is None
 
 
 class TestManageProfiles:
@@ -1564,6 +1581,80 @@ class TestPlotAnalyticsValidation:
         result = await server.plotAnalytics("status", profile_id="abc/def")
         assert "error" in result
         assert "Invalid profile_id format" in result["error"]
+
+
+class TestHttpErrorPropagation:
+    """HTTP failures raised by the shared wrapper are converted to typed payloads.
+
+    Every migrated call site awaits ``_api_request_payload`` (issue #181), which
+    turns a typed ``NextDNSError`` raised by ``_api_request`` into the
+    standardized error payload - ``code``/``status_code`` preserved, never a
+    success. These tests drive a real httpx failure through each call site.
+    """
+
+    @staticmethod
+    def _http_error(status: int) -> httpx.HTTPError:
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock(status_code=status, text=f"upstream {status}")
+        return exc
+
+    async def _drive(self, mock_api_client, status: int, coro):
+        mock_api_client.request.side_effect = self._http_error(status)
+        result = await coro
+        assert isinstance(result, dict)
+        assert result["code"] == "http_error"
+        assert result["status_code"] == status
+        return result
+
+    # --- manageLists leaf helpers (get/add/replace/update/remove) ---
+
+    @pytest.mark.asyncio
+    async def test_lists_get_http_error(self, mock_api_client):
+        await self._drive(mock_api_client, 500, server.manageLists("allowlist", "get", "abc123"))
+
+    @pytest.mark.asyncio
+    async def test_lists_add_http_error(self, mock_api_client):
+        await self._drive(mock_api_client, 429, server.manageLists("allowlist", "add", "abc123", entry="x.com"))
+
+    @pytest.mark.asyncio
+    async def test_lists_replace_http_error(self, mock_api_client):
+        await self._drive(
+            mock_api_client, 502, server.manageLists("allowlist", "replace", "abc123", entries=[{"id": "x.com"}])
+        )
+
+    @pytest.mark.asyncio
+    async def test_lists_update_http_error(self, mock_api_client):
+        await self._drive(
+            mock_api_client,
+            500,
+            server.manageLists("allowlist", "update", "abc123", entry_id="x.com", entry={"active": True}),
+        )
+
+    @pytest.mark.asyncio
+    async def test_lists_remove_http_error(self, mock_api_client):
+        await self._drive(mock_api_client, 503, server.manageLists("allowlist", "remove", "abc123", entry_id="x.com"))
+
+    # --- manageProfiles leaf helpers (list/create) ---
+
+    @pytest.mark.asyncio
+    async def test_profiles_list_http_error(self, mock_api_client):
+        await self._drive(mock_api_client, 500, server.manageProfiles("list"))
+
+    @pytest.mark.asyncio
+    async def test_profiles_create_http_error(self, mock_api_client):
+        await self._drive(mock_api_client, 500, server.manageProfiles("create", name="Home"))
+
+    # --- manageRewrites leaf helpers (add/delete) ---
+
+    @pytest.mark.asyncio
+    async def test_rewrites_add_http_error(self, mock_api_client):
+        await self._drive(
+            mock_api_client, 500, server.manageRewrites("add", "abc123", name="router.home", content="192.168.1.1")
+        )
+
+    @pytest.mark.asyncio
+    async def test_rewrites_delete_http_error(self, mock_api_client):
+        await self._drive(mock_api_client, 500, server.manageRewrites("delete", "abc123", entry_id="x.com"))
 
 
 class TestUsageGuidePrompt:

@@ -17,8 +17,18 @@ from .. import client
 from ..client import AccessDeniedError, _log_safe_error
 from ..coercion import ProfileId
 from ..config import get_download_max_bytes
-from ..errors import ErrorCode, error_payload, http_error_payload
-from ..utils import _api_request, _build_query_params, _cap_limit, access_denied_payload, resolve_profile_id
+from ..errors import (
+    ErrorCode,
+    error_payload,
+    http_error_payload,
+)
+from ..utils import (
+    _api_request_payload,
+    _build_query_params,
+    _cap_limit,
+    access_denied_payload,
+    resolve_profile_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -338,10 +348,10 @@ async def _manage_logs_impl(
         params = _build_query_params(
             **{"from": from_time, "to": to_time, "limit": capped_limit, "device": device, "search": user, "raw": raw}
         )
-        return await _api_request("GET", base_url, params=params)
+        return await _api_request_payload("GET", base_url, params=params)
 
     if operation == "clear":
-        return await _api_request("DELETE", base_url)
+        return await _api_request_payload("DELETE", base_url)
 
     if operation == "download":
         return await _download_logs_to_tempfile(target_profile)

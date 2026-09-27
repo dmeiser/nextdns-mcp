@@ -16,7 +16,13 @@ from fastmcp.utilities.types import Image
 
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_series_params, resolve_profile_id
+from ..utils import (
+    NextDNSError,
+    _api_request,
+    _build_series_params,
+    _handle_api_error,
+    resolve_profile_id,
+)
 from .metrics import PLOT_METRICS, PlotMetric
 
 logger = logging.getLogger(__name__)
@@ -44,6 +50,8 @@ PLOT_LIMIT_MAX = 500
 # would size a months-long range as minutes.
 _RELATIVE_TIME_RE = re.compile(r"^(-?)(\d+)([smhdwy])$")
 _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+
+_ACCESS_DENIED_CODES = frozenset({ErrorCode.READ_ACCESS_DENIED, ErrorCode.WRITE_ACCESS_DENIED, ErrorCode.ACCESS_DENIED})
 
 # matplotlib is imported lazily inside _render_series_chart (issue #165): the
 # import alone costs ~2s and every stdio cold start would pay it even though
@@ -324,9 +332,19 @@ async def _fetch_series_payload(
     same error handling, logging, and any future retry/rate-limit/telemetry
     behavior as every other tool (issue #183). Failures surface as the
     wrapper's standardized error payloads, so no behavior changes for callers.
+
+    Raised failures go through the shared ``_handle_api_error`` conversion, the
+    same one ``_api_request_payload`` applies. An ACL denial is the one failure
+    ``_api_request`` returns instead of raising, so it is matched by ``code``
+    below; a 2xx body that merely happens to carry an ``error`` key is data.
     """
-    payload = await _api_request("GET", url, params=params)
-    if "error" in payload:
+    try:
+        payload = await _api_request("GET", url, params=params)
+    except NextDNSError as e:
+        return None, _handle_api_error(e)
+    # The ACL layer's denial payload is returned, not raised: surface it as a
+    # failure rather than reading the denial dict as an empty time series.
+    if payload.get("code") in _ACCESS_DENIED_CODES:
         return None, payload
     return payload, None
 

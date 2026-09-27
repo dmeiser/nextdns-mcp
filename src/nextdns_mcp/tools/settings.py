@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, resolve_profile_id
+from ..utils import _api_request_payload, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 SettingsCategory = Literal["general", "privacy", "security", "parental", "performance", "logs", "blockpage"]
@@ -41,14 +41,14 @@ async def _manage_settings_impl(
     url = f"/profiles/{target_profile}/{path}"
 
     if operation == "get":
-        return await _api_request("GET", url)
+        return await _api_request_payload("GET", url)
     if operation == "update":
         if settings is None:
             return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "settings is required for update operation")
         settings = _coerce_json_arg(settings)
         if not isinstance(settings, dict):
             return error_payload(ErrorCode.INVALID_ARGUMENT, "settings must be a JSON object")
-        return await _api_request("PATCH", url, json=settings)
+        return await _api_request_payload("PATCH", url, json_body=settings)
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 

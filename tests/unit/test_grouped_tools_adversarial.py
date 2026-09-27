@@ -504,7 +504,7 @@ class TestFailClosedContract:
     @pytest.mark.asyncio
     async def test_denied_read_is_never_success(self, live_client, restricted_env):
         """A denied read surfaces read_access_denied, not a 200 payload."""
-        result = await utils._api_request("GET", "/profiles/xyz999/settings")
+        result = await server.manageProfiles("get", profile_id="xyz999")
         assert result["code"] == "read_access_denied"
         assert result != {"success": True}
         assert live_client.seen == []
@@ -512,7 +512,7 @@ class TestFailClosedContract:
     @pytest.mark.asyncio
     async def test_denied_write_is_never_success(self, live_client, restricted_env):
         """A denied write surfaces write_access_denied, not a 204 success."""
-        result = await utils._api_request("POST", "/profiles/xyz999/denylist", json={"id": "a.com"})
+        result = await server.manageLists("denylist", "add", "xyz999", entry="a.com")
         assert result["code"] == "write_access_denied"
         assert result != {"success": True}
         assert live_client.seen == []
