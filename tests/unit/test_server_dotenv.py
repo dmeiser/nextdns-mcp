@@ -122,6 +122,22 @@ class TestImportHasNoServerSideEffects:
 
         assert fastmcp.settings.check_for_updates == "off"
 
+    def test_sync_update_check_is_a_noop_without_fastmcp_settings(self, monkeypatch):
+        """The helper tolerates a fastmcp module that has no live settings object.
+
+        The guard is defensive: `_sync_fastmcp_update_check()` must stay safe to
+        call before FastMCP's settings object exists, so it does nothing rather
+        than raising (issue #291).
+        """
+        from nextdns_mcp import server
+
+        monkeypatch.delitem(sys.modules, "fastmcp")
+        monkeypatch.setenv("FASTMCP_CHECK_FOR_UPDATES", "stable")
+
+        server._sync_fastmcp_update_check()
+
+        assert os.environ["FASTMCP_CHECK_FOR_UPDATES"] == "stable"
+
     def test_configure_respects_an_explicit_update_check_opt_in(self, monkeypatch):
         """An operator who set FASTMCP_CHECK_FOR_UPDATES keeps their choice."""
         import fastmcp

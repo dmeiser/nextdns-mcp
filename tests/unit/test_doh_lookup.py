@@ -181,6 +181,23 @@ class TestDohLookup:
             assert result["_metadata"]["status_description"] == expected_desc
 
     @pytest.mark.asyncio
+    async def test_doh_lookup_without_a_status_field(self, mock_profile_id, mock_doh_client):
+        """A resolver reply that omits ``Status`` still returns its data.
+
+        ``Status`` is optional in practice, so a response without it must not
+        raise and must not carry a status description.
+        """
+        mock_response = Mock()
+        mock_response.json.return_value = {"Answer": [{"name": "example.com.", "type": 1}]}
+        mock_doh_client.get.return_value = mock_response
+
+        result = await dohLookup("example.com", mock_profile_id, "A")
+
+        assert "error" not in result
+        assert result["data"] == {"Answer": [{"name": "example.com.", "type": 1}]}
+        assert "status_description" not in result["_metadata"]
+
+    @pytest.mark.asyncio
     async def test_doh_lookup_http_error(self, mock_profile_id, mock_doh_client):
         """Test error handling for HTTP errors surfaces a typed http_error payload."""
         http_exc = httpx.HTTPError("Connection failed")

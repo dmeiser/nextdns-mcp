@@ -1,0 +1,179 @@
+"""Behavioral tests for the CI coverage gate's branch-coverage contract (issue #278).
+
+The `unit-tests` job in `.github/workflows/unit-tests.yml` is the machine
+consumption of the documented "100% coverage" contract in `AGENT.md`. Before
+issue #278 it measured **statements only**: `pyproject.toml` had no
+`[tool.coverage]` section, so a 100% statement report passed the gate while
+untested branches stayed invisible. That is how the
+`AccessControlledClient.stream()` ACL bypass (issue #262) survived a green
+build: the three `stream()` tests only used well-formed relative URLs, so the
+allow and deny paths were covered and the bypass branch was never taken.
+
+These tests assert two things a developer actually experiences when pushing:
+
+1. `pyproject.toml` enables branch measurement, so the `term-missing` report
+   the gate parses actually contains branch data.
+2. The gate script itself rejects a statement-only report and rejects a
+   branch report with a partial branch, and accepts a complete one.
+
+The script under test is taken verbatim from the workflow and is not modified
+here; only the `uv` launcher is shimmed so it can run against a throwaway
+coverage report.
+"""
+
+import shutil
+import stat
+import subprocess
+import tomllib
+from pathlib import Path
+
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PYPROJECT = REPO_ROOT / "pyproject.toml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
+
+# A report produced with branch measurement off: no Branch/BrPart columns, and
+# the header row of a real `term-missing` run in that mode.
+STATEMENT_ONLY_REPORT = """\
+Name                    Stmts   Miss  Cover   Missing
+-------------------------------------------------------
+src/nextdns_mcp/client.py     10      0   100%
+-------------------------------------------------------
+TOTAL                        10      0   100%
+"""
+
+# The same report with branch measurement on and every branch taken.
+BRANCH_COMPLETE_REPORT = """\
+Name                    Stmts   Miss Branch BrPart  Cover   Missing
+--------------------------------------------------------------------------------
+src/nextdns_mcp/client.py     10      0     48      0   100%
+--------------------------------------------------------------------------------
+TOTAL                        10      0     48      0   100%
+"""
+
+# Branch measurement on, but the `stream()` bypass branch was never taken.
+BRANCH_PARTIAL_REPORT = """\
+Name                    Stmts   Miss Branch BrPart  Cover   Missing
+--------------------------------------------------------------------------------
+src/nextdns_mcp/client.py     10      0     48      1    98%   249->252
+--------------------------------------------------------------------------------
+TOTAL                        10      0     48      1    98%
+"""
+
+# The reported failure mode (issue #278): with a repo-sized denominator a
+# handful of untaken branches still round to a displayed "100%", so a gate that
+# only reads the Cover column passes green while a branch is untaken. The exact
+# miss counts are what reveal it.
+BRANCH_PARTIAL_ROUNDS_TO_100_REPORT = """\
+Name                                 Stmts   Miss Branch BrPart  Cover
+--------------------------------------------------------------------
+src/nextdns_mcp/client.py              158      0     48      1   100%
+--------------------------------------------------------------------
+TOTAL                                1350      0    440      7   100%
+"""
+
+
+# Branch measurement on, but the report is truncated before its TOTAL row, so
+# there is no overall number to judge. The gate must say so rather than abort
+# silently: `TOTAL_ROW=$(grep ...)` propagates grep's exit status, and the step
+# runs under `set -e`, so an unguarded assignment kills the step before the
+# "Could not extract" diagnostic below it can run.
+BRANCH_REPORT_WITHOUT_TOTAL = """\
+Name                                 Stmts   Miss Branch BrPart  Cover
+--------------------------------------------------------------------------------
+src/nextdns_mcp/client.py              158      0     48      0   100%
+--------------------------------------------------------------------------------
+"""
+
+
+def _coverage_gate_script() -> str:
+    """Return the shell script the unit-tests job executes for its coverage gate."""
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    steps = workflow["jobs"]["unit-tests"]["steps"]
+    run_scripts = [step["run"] for step in steps if "MIN_FILE_COVERAGE" in step.get("run", "")]
+    assert len(run_scripts) == 1, f"expected one coverage gate step, found {len(run_scripts)}"
+    return run_scripts[0]
+
+
+def _run_gate(tmp_path: Path, report: str) -> subprocess.CompletedProcess[str]:
+    """Run the real CI coverage gate against a throwaway coverage report."""
+    (tmp_path / "report.txt").write_text(report)
+
+    # Shim `uv run pytest ...` so the gate script runs unmodified: it prints the
+    # throwaway report where the real step prints its pytest output.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "uv"
+    shim.write_text('#!/bin/sh\nshift 2  # drop "run" and the pytest launcher\nexec cat report.txt\n')
+    shim.chmod(shim.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    return subprocess.run(
+        [shutil.which("bash") or "/bin/bash", "-e", "-c", _coverage_gate_script()],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "GITHUB_OUTPUT": str(tmp_path / "github_output.txt"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_pyproject_enables_branch_coverage():
+    """Branch measurement is configured, not left to the pytest-cov default."""
+    config = tomllib.loads(PYPROJECT.read_text())
+    assert config["tool"]["coverage"]["run"]["branch"] is True, (
+        "pyproject.toml must set [tool.coverage.run] branch = true so the coverage gate "
+        "measures branches and not statements alone (issue #278)"
+    )
+
+
+def test_gate_rejects_a_statement_only_report(tmp_path):
+    """A 100% statement report with no branch data must not pass the gate."""
+    result = _run_gate(tmp_path, STATEMENT_ONLY_REPORT)
+    assert result.returncode != 0, (
+        f"gate accepted a statement-only coverage report; branch coverage is off (issue #278)\n{result.stdout}"
+    )
+    assert "branch" in result.stdout.lower(), result.stdout
+
+
+def test_gate_rejects_a_partial_branch(tmp_path):
+    """An untested branch must fail the gate even at 100% statement coverage."""
+    result = _run_gate(tmp_path, BRANCH_PARTIAL_REPORT)
+    assert result.returncode != 0, f"gate accepted a partial branch:\n{result.stdout}"
+    assert "98%" in result.stdout, result.stdout
+
+
+def test_gate_rejects_a_partial_branch_that_rounds_to_100(tmp_path):
+    """An untaken branch must fail the gate even when Cover displays 100%.
+
+    `term-missing` rounds Cover to whole percent, so at this repository's size
+    (1350 statements, 440 branches) up to seven untaken branches still print
+    "100%". A gate that reads only the Cover column would go green here, which
+    is exactly how the `stream()` ACL bypass survived the statement-only gate.
+    """
+    result = _run_gate(tmp_path, BRANCH_PARTIAL_ROUNDS_TO_100_REPORT)
+    assert result.returncode != 0, f"gate accepted untaken branches hidden by rounding:\n{result.stdout}"
+    assert "7 untaken branch" in result.stdout, result.stdout
+
+
+def test_gate_reports_a_missing_total_row_instead_of_aborting_silently(tmp_path):
+    """A report with no TOTAL row fails with a diagnostic, not a bare abort.
+
+    The step runs under `set -e`, so a bare `TOTAL_ROW=$(grep ...)` assignment
+    aborts the whole step with no output at all when the row is missing. The
+    gate must name the problem so a maintainer can tell a broken report apart
+    from a real coverage regression.
+    """
+    result = _run_gate(tmp_path, BRANCH_REPORT_WITHOUT_TOTAL)
+    assert result.returncode != 0, f"gate accepted a report with no TOTAL row:\n{result.stdout}"
+    assert "Could not extract" in result.stdout, f"gate failed without a diagnostic:\n{result.stdout}"
+
+
+def test_gate_accepts_complete_branch_coverage(tmp_path):
+    """A fully covered statement *and* branch report still passes the gate."""
+    result = _run_gate(tmp_path, BRANCH_COMPLETE_REPORT)
+    assert result.returncode == 0, f"gate rejected complete branch coverage:\n{result.stdout}{result.stderr}"

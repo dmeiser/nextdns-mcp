@@ -99,7 +99,8 @@ The last commits before a successful validation run MUST be formatting/type-chec
 **Minimum Coverage Standards**:
 - **Project-wide**: 100% code coverage
 - **Per-file**: No single file may have <100% coverage
-- **Exceptions**: Only for truly untestable code (e.g., `if __name__ == "__main__"`, module-level `sys.exit()`). Every exception must be covered by an explicit `# pragma: no cover` with a comment explaining why.
+- **Branch**: The 100% target covers statements *and* branches (`[tool.coverage.run] branch = true` in `pyproject.toml`). A statement-only report cannot see an untested branch, and the `Cover` column is rounded to whole percent, so it can read `100%` while a branch is untaken: check that the `Miss` and `BrPart` columns are `0`, as the CI gate does.
+- **Exceptions**: Only for truly untestable code (e.g., `if __name__ == "__main__"`, module-level `sys.exit()`). Every exception must be covered by an explicit `# pragma: no cover` with a comment explaining why, or `# pragma: no branch` for a branch that cannot be taken.
 
 **Running Coverage**:
 ```bash
@@ -111,9 +112,9 @@ open htmlcov/index.html
 ```
 
 **Coverage Validation**:
-- Check overall percentage in terminal output
+- Check the `Miss` and `BrPart` columns in the terminal output, not just the rounded `Cover` percentage (see the Branch standard above)
 - Review HTML report for per-file coverage
-- Ensure no file falls below 100%
+- Ensure no file falls below 100% statements and branches
 - Document any intentional gaps with inline comments explaining why they're untestable
 - **All tests must pass** - zero failures, zero errors
 
@@ -147,8 +148,8 @@ Before claiming work is complete:
 - [ ] Run `uv run ruff check --fix src/ tests/`
 - [ ] Run `uv run ruff format src/ tests/`
 - [ ] Run `uv run mypy src/` (0 errors)
-- [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (100% coverage, **ALL tests pass**)
-- [ ] Verify per-file coverage: all files 100% in `htmlcov/index.html`
+- [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (100% statements and branches, **ALL tests pass**)
+- [ ] Verify per-file coverage: all files 100% in `htmlcov/index.html` (statements and branches; see section 2)
 - [ ] Run `uv run radon cc src/ scripts/run_container_e2e.py -a` (verify grade A)
 - [ ] Run `uv run radon cc src/ scripts/run_container_e2e.py -nc` (verify no functions exceed grade B)
 - [ ] Commit formatting changes as final commit before validation
@@ -192,7 +193,7 @@ Before claiming work is complete:
    - Debug and fix the failing test or code
    - **NEVER ignore, skip, or comment out failing tests**
    - Restart quality checks from step 1 after fixes
-4. **Coverage <100%**: Add missing test cases, remove dead code, or document why code is untestable with `# pragma: no cover`, then restart quality checks
+4. **Coverage <100%**: Add missing test cases, remove dead code, or document why code is untestable with the exclusion markers listed in section 2, then restart quality checks
 5. **Complexity >B**: Refactor function into smaller units, extract methods, simplify logic, then restart quality checks
 
 **Iteration Loop**:

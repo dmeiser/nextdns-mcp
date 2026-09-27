@@ -47,6 +47,12 @@ include = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+[tool.coverage.run]
+# The CI coverage gate is a 100% statements *and* branches contract. Without
+# branch measurement an untested branch (e.g. the AccessControlledClient.stream()
+# ACL bypass) reports as fully covered (issue #278).
+branch = true
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"
