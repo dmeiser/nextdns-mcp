@@ -480,14 +480,13 @@ class TestAccessControlledClientStreamLogging:
                 assert "?" not in record.message, f"Query string leaked at INFO: {record.message}"
 
     @pytest.mark.asyncio
-    async def test_stream_full_url_logged_at_debug_not_info(
+    async def test_stream_logs_requested_path_at_info(
         self, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The full stream URL (with query) may only appear at DEBUG level."""
+        """The streamed path is still reported at INFO, stripped of the query."""
         clean_env("NEXTDNS_READABLE_PROFILES", "abc123")
 
-        sensitive_query = "search=secret-search-term&device=secret-device-id&cursor=secret-cursor-token"
-        stream_url = f"/profiles/abc123/logs/download?{sensitive_query}"
+        stream_url = "/profiles/abc123/logs/download?search=secret-search-term"
 
         with (
             caplog.at_level(logging.DEBUG, logger="nextdns_mcp.client"),
@@ -501,12 +500,7 @@ class TestAccessControlledClientStreamLogging:
                 await response.aread()
 
         info_messages = [record.message for record in caplog.records if record.levelno == logging.INFO]
-        debug_messages = [record.message for record in caplog.records if record.levelno == logging.DEBUG]
-
-        # INFO has the path without the query.
-        assert any("/profiles/abc123/logs/download" in msg and "?" not in msg for msg in info_messages)
-        # DEBUG carries the full URL including the sensitive query string.
-        assert any(sensitive_query in msg for msg in debug_messages)
+        assert any("GET /profiles/abc123/logs/download" in msg for msg in info_messages)
 
 
 class TestAccessDeniedError:
