@@ -197,8 +197,9 @@ async def _api_request(method: str, url: str, params: dict[str, Any] | None = No
     except httpx.HTTPError as e:
         logger.error(f"HTTP error in {method} {_redacted(url)}: {_log_safe_error(e)}")
         message = f"HTTP error in {method} {url}: {e}"
-        status_code = getattr(e.response, 'status_code', None)
-        response_body = getattr(e.response, 'text', None) if e.response is not None else None
+        response = getattr(e, 'response', None)
+        status_code = getattr(response, 'status_code', None) if response is not None else None
+        response_body = getattr(response, 'text', None) if response is not None else None
         if status_code in (401, 403):
             raise NextDNSAuthError(message, status_code=status_code, response_body=response_body) from e
         elif status_code == 429:
