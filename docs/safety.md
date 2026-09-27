@@ -31,6 +31,7 @@ Reduce risk when operating on real NextDNS profiles.
 - `manageLogs(operation="download")` streams the CSV to a file in the OS temp directory and returns the path; the full log text is never inlined into the tool payload.
 - A successful download is not cleaned up: the CSV (mode 0600) and its `nextdns_logs_*` parent directory stay on disk, and the returned path is the only record of them. There is no retention TTL or automatic sweep, so delete the file when it is no longer needed.
 - Every non-successful download removes the temp file and its parent directory, including access denial, HTTP error, unexpected error, and cancellation or timeout of the awaiting client.
+- A hard cap bounds the total bytes a download may stream to disk, enforced while streaming: `DOWNLOAD_MAX_TOTAL_BYTES` (default 1 GiB), overridable via the `NEXTDNS_DOWNLOAD_MAX_BYTES` environment variable (positive integer of bytes). A download that would exceed the cap is aborted mid-stream, the partial CSV and its parent directory are removed, and the tool returns the `download_too_large` error. This prevents a single download from filling the container's only writable location.
 
 ## CI credentials
 - GitHub Actions logs are world-readable on a public repository; never print the API key or any file that contains it to CI logs.

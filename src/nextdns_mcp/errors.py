@@ -39,6 +39,7 @@ class ErrorCode:
     UNSUPPORTED_METRIC = "unsupported_metric"
     UNSUPPORTED_PARAMETER = "unsupported_parameter"
     HTTP_ERROR = "http_error"
+    DOWNLOAD_TOO_LARGE = "download_too_large"
     INTERNAL_ERROR = "internal_error"
     NO_DATA = "no_data"
 

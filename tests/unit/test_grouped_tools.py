@@ -714,6 +714,71 @@ class TestManageLogs:
         assert not os.path.exists(os.path.join(created[0], "download.csv")), "partial CSV survived cancellation"
         assert not os.path.exists(created[0]), "mkdtemp parent directory leaked on cancellation"
 
+    @pytest.mark.asyncio
+    async def test_download_exceeding_total_size_cap_aborts_and_leaves_no_residue(self, mock_api_client, monkeypatch):
+        """A download over the total-size cap is aborted mid-stream and leaves no file or dir (issue #264)."""
+        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "1000")
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def recording_mkdtemp(*args, **kwargs):
+            path = real_mkdtemp(*args, **kwargs)
+            created.append(path)
+            return path
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", recording_mkdtemp)
+        row = "x" * 500 + "\n"
+        chunks = [row * 5 for _ in range(10)]  # 25_000 bytes total, far over the 1000-byte cap
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.is_error = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks(chunks)
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert result["code"] == "download_too_large"
+        assert "limit" in result["error"] and "1000" in result["error"]
+        assert len(created) == 1
+        assert not os.path.exists(os.path.join(created[0], "download.csv")), "partial CSV survived the size-cap abort"
+        assert not os.path.exists(created[0]), "mkdtemp parent directory leaked on the size-cap abort"
+
+    @pytest.mark.asyncio
+    async def test_download_within_total_size_cap_succeeds(self, mock_api_client, monkeypatch):
+        """A download under the (lowered) total-size cap still succeeds and is cleaned up by the caller."""
+        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "10_000")
+        csv_text = "date,time,question,answer\n" + ("x" * 90 + "\n") * 10  # ~913 bytes, under the cap
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([csv_text])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert "code" not in result
+        assert result["size"] == len(csv_text.encode("utf-8"))
+        assert result["row_count"] == 11
+        logs_module._unlink_temp_file(result["file_path"])
+
+    def test_download_max_bytes_defaults_and_env_override(self, monkeypatch):
+        """The total-size cap defaults when unset and honors a valid NEXTDNS_DOWNLOAD_MAX_BYTES (issue #264)."""
+        monkeypatch.delenv("NEXTDNS_DOWNLOAD_MAX_BYTES", raising=False)
+        assert logs_module.get_download_max_bytes() == logs_module.DOWNLOAD_MAX_TOTAL_BYTES
+        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "536_870_912")
+        assert logs_module.get_download_max_bytes() == 536_870_912
+
+    def test_download_max_bytes_invalid_value_falls_back_to_default(self, monkeypatch, caplog):
+        """A non-positive or non-integer NEXTDNS_DOWNLOAD_MAX_BYTES falls back to the default."""
+        for bad in ("abc", "0", "-5"):
+            monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", bad)
+            with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"):
+                assert logs_module.get_download_max_bytes() == logs_module.DOWNLOAD_MAX_TOTAL_BYTES
+            assert any("NEXTDNS_DOWNLOAD_MAX_BYTES" in rec.message for rec in caplog.records)
+
     def test_unlink_temp_file_removes_mkdtemp_parent(self):
         """Removing a temp log file also removes its (empty) mkdtemp parent (issue #264)."""
         parent = tempfile.mkdtemp(prefix="nextdns_logs_test_")
