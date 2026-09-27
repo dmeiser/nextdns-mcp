@@ -22,7 +22,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 | NEXTDNS_WRITABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for writes; special value "ALL" allows writes to all profiles; empty/unset denies all writes; ignored if NEXTDNS_READ_ONLY=true |
 | MCP_TRANSPORT | string | stdio | No | `stdio` (default) or `http` (streamable-HTTP). Case-insensitive and trimmed. Any other value fails startup with `ConfigurationError`. See "HTTP Transport" in the README |
 | MCP_HOST | string | 127.0.0.1 | No | Bind interface for HTTP transport. Loopback-only by default; a non-loopback value is an explicit opt-in that requires reverse-proxy/auth protection |
-| MCP_PORT | number | 8000 | No | Port for HTTP transport |
+| MCP_PORT | number | 8000 | No | Port for HTTP transport. Must be an integer in 1-65535; an invalid value fails fast at startup with `ConfigurationError`, like `NEXTDNS_HTTP_TIMEOUT` |
 | FASTMCP_CHECK_FOR_UPDATES | string | off | No | FastMCP's automatic update check, disabled by default because it slows startup and can hang offline/CI. Set an explicit FastMCP value (e.g. `stable`) to opt back in |
 
 Notes
@@ -30,6 +30,7 @@ Notes
 - `NEXTDNS_API_KEY` (or `NEXTDNS_API_KEY_FILE`) is required. An absent or empty key fails fast instead of creating an unauthenticated client: at startup as `MissingApiKeyError`, and again on first client construction as `ConfigurationError`. `MissingApiKeyError` is a subclass of `ConfigurationError`, so a single `except ConfigurationError` covers both.
 - `NEXTDNS_HTTP_TIMEOUT` must be a positive number of seconds. Invalid values (e.g. `abc`, `0`, empty) fail fast at startup with a clear `ConfigurationError` instead of a confusing crash deep in client construction.
 - `MCP_TRANSPORT` must be `stdio` or `http` (case-insensitive, trimmed). An unrecognized value (e.g. `https`, `sse`, a typo, or a stray trailing space) fails fast at startup with a clear `ConfigurationError` instead of silently downgrading to a stdio server that speaks no HTTP.
+- `MCP_PORT` must be an integer in 1-65535. A non-numeric or out-of-range value (e.g. `abc`, an empty value, `0`, `65536`) fails fast at startup with a clear `ConfigurationError` naming `MCP_PORT`, like the timeout above.
 - `NEXTDNS_DOWNLOAD_MAX_BYTES` must be a positive integer of bytes. Invalid values (e.g. `abc`, `0`, `-5`) raise `ConfigurationError`, like the timeout above. See "Local log downloads" in safety.md.
 - Profile IDs are hexadecimal and matched case-insensitively: values in `NEXTDNS_READABLE_PROFILES`/`NEXTDNS_WRITABLE_PROFILES` and the `profile_id` being checked are both normalized to lowercase before comparison, so `2F4A9B` in the config matches a query for `2f4a9b`.
 - Per-profile checks match the `profile_id` in the URL. Collection profile endpoints (`GET /profiles` for `manageProfiles(operation="list")`, `POST /profiles` for `create`) carry no `profile_id` but still respect the global denials above: collection reads are denied when both profile sets are unset, and collection writes are denied in read-only mode or when `NEXTDNS_WRITABLE_PROFILES` is unset.

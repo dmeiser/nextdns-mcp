@@ -157,6 +157,30 @@ def _resolve_transport() -> str:
     return mode
 
 
+def _parse_port() -> int:
+    """Resolve ``MCP_PORT`` to a valid TCP port number.
+
+    Mirrors :func:`get_http_timeout` so a malformed value fails fast with
+    the project's typed error naming the variable the operator actually set,
+    rather than a bare ``ValueError`` from ``int()`` at startup.
+
+    Returns:
+        int: The configured port (default 8000).
+
+    Raises:
+        ConfigurationError: If MCP_PORT is not an integer in 1-65535.
+    """
+    raw = os.getenv("MCP_PORT", "8000")
+    try:
+        port = int(raw)
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ConfigurationError(f"Invalid MCP_PORT: {raw!r}. Expected an integer in 1-65535.") from None
+
+    return port
+
+
 def get_mcp_run_options() -> dict[str, Any]:
     """Build MCP server run options based on environment configuration.
 
@@ -173,7 +197,7 @@ def get_mcp_run_options() -> dict[str, Any]:
 
     if transport_mode == "http":
         host = os.getenv("MCP_HOST", "127.0.0.1")
-        port = int(os.getenv("MCP_PORT", "8000"))
+        port = _parse_port()
         logger.info(f"  Transport: HTTP streamable on {host}:{port}")
         logger.info(f"  MCP endpoint: http://{host}:{port}/mcp")
         if not _is_loopback_host(host):
