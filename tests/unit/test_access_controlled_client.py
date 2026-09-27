@@ -435,9 +435,8 @@ class TestAccessControlledClientRequestLogging:
 
         mock_super_request.assert_not_called()
         assert exc_info.value.code == "access_denied"
-        # The typed error's message names the path only, so the denial that
-        # tools/logs.py logs (f"Access denied downloading logs: {e}") stays redacted too.
-        assert str(exc_info.value) == "Forbidden URL: /profiles/abc.def/logs"
+        # The typed error's message still names the full URL the caller passed.
+        assert str(exc_info.value) == f"Forbidden URL: {request_url}"
         # No WARNING record may contain the query string.
         warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
         assert warning_messages
@@ -517,6 +516,26 @@ class TestAccessControlledClientRequestLogging:
             assert "secret-search-term" not in msg
             assert "?" not in msg, f"Query string leaked in error log: {msg}"
         assert any("/profiles/abc123/logs" in msg for msg in log_messages)
+
+    @pytest.mark.asyncio
+    async def test_denied_api_request_payload_verbatim_but_log_redacted(
+        self, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The caller gets the full URL back; only the log record loses the query string."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        request_url = "/profiles/abc.def/logs?search=secret-search-term"
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"):
+            payload = await utils._api_request("GET", request_url)
+
+        assert payload["code"] == "access_denied"
+        assert payload["error"] == f"Forbidden URL: {request_url}"
+        warning_messages = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+        assert warning_messages
+        for msg in warning_messages:
+            assert "secret-search-term" not in msg
+            assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
+        assert any("/profiles/abc.def/logs" in msg for msg in warning_messages)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("status_code", [401, 429, 503], ids=["unauthorized", "rate-limited", "server-error"])

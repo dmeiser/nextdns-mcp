@@ -73,13 +73,14 @@ def _log_safe_error(error: Exception) -> str:
     """Return exception text that is safe to log at INFO or above (issue #139).
 
     httpx builds ``HTTPStatusError`` messages from the fully merged request
-    URL, so they carry the very query string :func:`_redacted` strips from the
-    request argument. Only the status is logged; the verbatim text stays in the
-    error payload returned to the caller that supplied the query.
+    URL, so only the status is logged for those. Every other message keeps its
+    wording but goes through :func:`_redacted`, because an exception raised by
+    the ACL layer names the URL the caller asked for verbatim. The exception
+    itself is never rewritten: the caller still receives the full text.
     """
     if isinstance(error, httpx.HTTPStatusError):
         return f"{error.response.status_code} {error.response.reason_phrase}"
-    return str(error)
+    return _redacted(str(error))
 
 
 # Match the first path segment case-insensitively; anything under a
@@ -356,7 +357,7 @@ class AccessControlledClient(httpx.AsyncClient):
             # ACL, so deny them instead of letting them bypass the check entirely.
             logger.warning(f"Forbidden URL: {_redacted(url_str)} (method={method})")
             raise AccessDeniedError(
-                f"Forbidden URL: {_redacted(url_str)}", code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or ""
+                f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or ""
             )
         else:
             self._check_collection_access(method, url_str, access)
