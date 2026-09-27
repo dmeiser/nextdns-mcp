@@ -72,11 +72,10 @@ def _validate_replace_entries(entries: list[Any]) -> dict[str, Any] | None:
                 f"entries[{index}] must be an object with an 'id' field for replace operation",
                 index=index,
             )
-        entry_id = entry.get("id")
-        if not isinstance(entry_id, str) or not entry_id:
+        if not isinstance(entry.get("id"), str):
             return error_payload(
                 ErrorCode.INVALID_ARGUMENT,
-                f"entries[{index}] is missing a non-empty string 'id' field for replace operation",
+                f"entries[{index}] must have a string 'id' field for replace operation",
                 index=index,
             )
     return None

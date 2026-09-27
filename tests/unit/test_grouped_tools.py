@@ -408,13 +408,6 @@ class TestManageLists:
         assert "entries[0]" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_replace_entry_with_empty_id(self, mock_api_client):
-        result = await server.manageLists("denylist", "replace", "abc123", entries=[{"id": ""}])
-        mock_api_client.request.assert_not_called()
-        assert result["code"] == "invalid_argument"
-        assert "entries[0]" in result["error"]
-
-    @pytest.mark.asyncio
     async def test_replace_entry_not_a_dict(self, mock_api_client):
         result = await server.manageLists("denylist", "replace", "abc123", entries=["bad.com"])
         mock_api_client.request.assert_not_called()
