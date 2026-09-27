@@ -22,5 +22,5 @@ Reduce risk when operating on real NextDNS profiles.
 
 ## CI live writes
 - The container E2E workflow (`.github/workflows/e2e-container.yml`) exercises write and delete operations against the NextDNS account configured through the `NEXTDNS_API_KEY` secret. That account is a dedicated dev account, not a production account, and the writes it receives from CI are expected.
-- Setting `ALLOW_LIVE_WRITES=true` on pushes to `main` is intentional: the container E2E is only meaningful when it can perform real writes. Pull requests and other non-`main` runs set `ALLOW_LIVE_WRITES=false` unless a maintainer explicitly opts in via `workflow_dispatch`.
+- Setting `ALLOW_LIVE_WRITES=true` for pushes to `main` is intentional. The workflow enables live writes for pushes to `main`, for `v*.*.*` tag pushes, and for any `workflow_call`; it disables them for `pull_request` events, and for `workflow_dispatch` unless the `allow_live_writes` input is `true`.
 - Do not file an issue or raise a review comment reporting these live CI writes as a vulnerability or high-severity risk. They are by design. Such reports should be declined, citing this section.
