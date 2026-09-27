@@ -8,7 +8,7 @@ import io
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import mcp.types
@@ -31,9 +31,18 @@ logger = logging.getLogger(__name__)
 PLOT_INTERVAL_MAX = 86400
 PLOT_MAX_POINTS = 2000
 
+# Ceiling on the tool's published ``limit`` parameter, matching the sibling
+# tools' caps. The ``;series`` endpoints consume no limit, so the value is
+# validated but never forwarded; an over-cap value is rejected rather than
+# silently clamped, so a caller is never told less than the tool enforced.
+PLOT_LIMIT_MAX = 500
+
 # Relative from/to values such as "-1d" or "-7d", with their unit in seconds.
-# "y" is a 365-day year, matching how the analytics endpoints read a year.
-_RELATIVE_TIME_RE = re.compile(r"^(-?)(\d+)([smhdwy])$", re.IGNORECASE)
+# "y" is a 365-day year, matching how the analytics endpoints read a year. The
+# unit is matched case-sensitively: an upper-case letter is a different unit
+# upstream ("-1M" reads as months), so folding it onto its lower-case twin
+# would size a months-long range as minutes.
+_RELATIVE_TIME_RE = re.compile(r"^(-?)(\d+)([smhdwy])$")
 _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
 
 # matplotlib is imported lazily inside _render_series_chart (issue #165): the
@@ -69,11 +78,14 @@ def _parse_series_timestamp(value: str) -> datetime:
     ``fromisoformat`` rejects - including whole-second timestamps without a
     timezone - still parse instead of raising an unhandled ``ValueError``.
 
+    A value carrying no timezone is anchored to UTC, so the same string always
+    denotes the same instant no matter which machine resolves it.
+
     Raises:
         ValueError: If the value matches none of the supported formats.
     """
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         for fmt in (
             "%Y-%m-%dT%H:%M:%S%z",
@@ -82,12 +94,16 @@ def _parse_series_timestamp(value: str) -> datetime:
             "%Y-%m-%dT%H:%M:%S.%f",
         ):
             try:
-                # Naive results are intentional: they mirror fromisoformat,
-                # which also leaves timezone-less strings naive.
-                return datetime.strptime(value, fmt)  # noqa: DTZ007
+                # Anchored to UTC below, so the naive result is intentional.
+                parsed = datetime.strptime(value, fmt)  # noqa: DTZ007
+                break
             except ValueError:
                 continue
-        raise
+        else:
+            raise
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def _render_series_chart(
@@ -157,9 +173,11 @@ def _resolve_time_point(value: str | int, now: float) -> float | None:
     """Resolve a ``from``/``to`` argument to Unix seconds, or None if unparseable.
 
     Accepts the forms the analytics endpoints accept: Unix timestamps, ISO 8601
-    timestamps, ``now``, and relative offsets such as ``-1d`` or ``-7d``. An
-    unparseable value yields None so the caller can leave the request untouched
-    rather than reject a value the API itself might accept.
+    timestamps, ``now``, and relative offsets such as ``-1d`` or ``-7d``. A
+    relative offset's unit letter is read case-sensitively, and an ISO 8601
+    value with no timezone is read as UTC. An unparseable value yields None so
+    the caller can reject the request instead of forwarding a range whose size
+    it cannot bound.
     """
     if isinstance(value, bool):
         return None
@@ -171,7 +189,7 @@ def _resolve_time_point(value: str | int, now: float) -> float | None:
     match = _RELATIVE_TIME_RE.match(text)
     if match:
         sign = -1.0 if match.group(1) else 1.0
-        return now + sign * int(match.group(2)) * _RELATIVE_UNIT_SECONDS[match.group(3).lower()]
+        return now + sign * int(match.group(2)) * _RELATIVE_UNIT_SECONDS[match.group(3)]
     try:
         return float(int(text))
     except ValueError:
@@ -185,24 +203,22 @@ def _resolve_time_point(value: str | int, now: float) -> float | None:
 def _series_span_seconds(from_time: str | int, to_time: str | int, now: float) -> float | None:
     """Return the length in seconds of the requested range, or None if unknown.
 
-    None means the range could not be resolved (an unparseable from/to value,
-    or an end that is not after the start). The series point budget cannot be
-    evaluated for such a request, so it is left to the API rather than rejected
-    on a guess.
+    None means the range could not be resolved because one of the two values is
+    unparseable. A span at or below zero (an end not after the start) is
+    returned as computed, so the caller can distinguish an unresolvable range
+    from a nonsensical one.
     """
     start = _resolve_time_point(from_time, now)
     end = _resolve_time_point(to_time, now)
     if start is None or end is None:
         return None
-    span = end - start
-    return span if span > 0 else None
+    return end - start
 
 
 def _series_budget_error(
     from_time: str | int,
     to_time: str | int,
     interval: int,
-    max_points: int = PLOT_MAX_POINTS,
     now: float | None = None,
 ) -> dict[str, Any] | None:
     """Return a typed error when the series response would exceed the point budget.
@@ -213,22 +229,39 @@ def _series_budget_error(
     budget is enforced where the series request is constructed - as a rejection
     naming the limit, never as a silent substitution of the caller's interval,
     which would return a different series than the one asked for (issue #267).
+
+    The check fails closed: a range that does not resolve to a positive span is
+    rejected, because an unbounded request is exactly what the budget exists to
+    prevent.
     """
-    if interval <= 0 or max_points <= 0:
-        return None
     span = _series_span_seconds(from_time, to_time, _now() if now is None else now)
     if span is None:
-        return None
-    max_span = max_points * interval
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            (
+                f"Could not interpret the requested time range ({from_time!r} to {to_time!r}); "
+                "use a Unix timestamp, an ISO 8601 timestamp, 'now', or a relative offset such as '-7d'"
+            ),
+            from_time=from_time,
+            to_time=to_time,
+        )
+    if span <= 0:
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"Requested time range must end after it starts, got {from_time!r} to {to_time!r}",
+            from_time=from_time,
+            to_time=to_time,
+        )
+    max_span = PLOT_MAX_POINTS * interval
     if span <= max_span:
         return None
     return error_payload(
         ErrorCode.INVALID_ARGUMENT,
         (
-            f"Requested range spans {span:.0f}s, more than the {max_points}-point series budget "
+            f"Requested range spans {span:.0f}s, more than the {PLOT_MAX_POINTS}-point series budget "
             f"allows at interval={interval}s (max {max_span}s); use a larger interval or a shorter range"
         ),
-        max_points=max_points,
+        max_points=PLOT_MAX_POINTS,
         max_span_seconds=max_span,
         interval=interval,
     )
@@ -240,8 +273,9 @@ def _validate_plot_params(
     profile_id: OptionalProfileId,
     from_time: str | int = "-1d",
     to_time: str | int = "now",
+    limit: int = 10,
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Validate metric, interval, range, and profile ID parameters for plotting."""
+    """Validate metric, interval, limit, range, and profile ID parameters for plotting."""
     if metric not in PLOT_METRICS:
         return None, error_payload(
             ErrorCode.UNSUPPORTED_METRIC,
@@ -262,6 +296,14 @@ def _validate_plot_params(
             f"interval must not exceed {PLOT_INTERVAL_MAX} seconds, got {interval}",
             max_interval=PLOT_INTERVAL_MAX,
             interval=interval,
+        )
+
+    if limit > PLOT_LIMIT_MAX:
+        return None, error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"limit must not exceed {PLOT_LIMIT_MAX}, got {limit}",
+            max_limit=PLOT_LIMIT_MAX,
+            limit=limit,
         )
 
     budget_error = _series_budget_error(from_time, to_time, interval)
@@ -312,9 +354,10 @@ async def _plot_analytics_series_impl(
     alignment: str = "end",
     timezone: str = "GMT",
     partials: str = "none",
+    limit: int = 10,
 ) -> dict[str, Any] | mcp.types.ImageContent:
     """Generate a PNG line chart from a NextDNS analytics time-series endpoint."""
-    target_profile, val_error = _validate_plot_params(metric, interval, profile_id, from_time, to_time)
+    target_profile, val_error = _validate_plot_params(metric, interval, profile_id, from_time, to_time, limit)
     if val_error:
         return val_error
     assert target_profile is not None
@@ -364,6 +407,7 @@ async def plotAnalytics(
     alignment: str = "end",
     timezone: str = "GMT",
     partials: str = "none",
+    limit: int = 10,
 ) -> dict[str, Any] | mcp.types.ImageContent:
     """Generate a PNG line chart for a NextDNS analytics time-series metric.
 
@@ -376,15 +420,21 @@ async def plotAnalytics(
 
     Time values can be Unix timestamps or relative strings like ``-1d``.
 
-    ``interval`` is the bucket width in seconds. The ``;series`` endpoint takes
-    no ``limit`` parameter, so the requested range is the only thing that bounds
-    the response. Two server-side limits are enforced before the request is
-    built, and each is rejected with an ``invalid_argument`` error naming the
-    limit rather than silently adjusted:
+    The ``;series`` endpoint takes no ``limit`` parameter: ``limit`` is part of
+    this tool's published surface, is capped at 500, and is never forwarded, so
+    the requested range is the only thing that bounds the response. Three
+    server-side limits are enforced before the request is built, and each is
+    rejected with an ``invalid_argument`` error naming the limit rather than
+    silently adjusted:
 
-    - ``interval`` must be between 60 and 86400 seconds (one day).
-    - The range spans at most 2000 intervals (at most 2000 points per series),
-      so a wide range needs a proportionally larger ``interval``.
+    - ``interval`` must be between 60 and 86400 seconds.
+    - ``limit`` must not exceed 500.
+    - The range must be interpretable (a Unix timestamp, an ISO 8601
+      timestamp, ``now``, or a relative offset such as ``-7d``; a relative
+      unit letter is read case-sensitively and a timestamp with no timezone is
+      read as UTC), must end after it starts, and spans at most 2000 intervals
+      (at most 2000 points per series), so a wide range needs a proportionally
+      larger ``interval``.
 
     Examples:
         - ``plotAnalytics(metric="status", profile_id="abc123", from_time="-1d")``
@@ -403,4 +453,5 @@ async def plotAnalytics(
         alignment=alignment,
         timezone=timezone,
         partials=partials,
+        limit=limit,
     )
