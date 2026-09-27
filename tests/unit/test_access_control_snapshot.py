@@ -173,6 +173,28 @@ def test_env_is_read_once_per_request(monkeypatch, acl_client):
     assert counts == {var: 1 for var in ACL_ENV_VARS}
 
 
+def test_acl_env_read_at_most_once_per_request(monkeypatch, acl_client):
+    """Regression for issue #179: one request reads each ACL variable once.
+
+    Asserted purely through the public request path and os.getenv counting, so
+    it fails against the pre-fix code (which consulted the environment
+    repeatedly per request) and passes against the snapshot implementation.
+    """
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "abc123")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abc123")
+    counts = _counted_getenv(monkeypatch)
+
+    async def fake_request(self, method, url, **kwargs):
+        return httpx.Response(200, json={"ok": True})
+
+    with patch.object(httpx.AsyncClient, "request", new=fake_request):
+        response = run(acl_client.request("PUT", "/profiles/abc123/settings"))
+
+    assert response.status_code == 200
+    for var in ACL_ENV_VARS:
+        assert counts.get(var, 0) <= 1, f"{var} was read {counts.get(var, 0)} times for one request"
+
+
 def test_mid_request_env_change_cannot_desync(monkeypatch, acl_client):
     """The ACL decision and the outgoing request use the same values.
 
