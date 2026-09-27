@@ -1,5 +1,7 @@
 """Integration tests for AccessControlledClient HTTP interception."""
 
+import copy
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -581,3 +583,96 @@ class TestAccessControlledClientBodyPassthrough:
         body = mock_super_request.call_args.kwargs["json"]
         assert body == [{"id": "example.com", "blocked": True}]
         assert isinstance(body[0]["blocked"], bool)
+
+
+class TestAccessControlledClientCallerPayloadIsolation:
+    """Regression tests for issue #180.
+
+    ``request()`` must never rewrite the payload a caller still holds. A caller
+    that reuses one payload dict across requests (retry logic, wrappers, tests)
+    must see the same data afterwards that it passed in, and each request must
+    carry exactly that data on the wire. The client previously replaced
+    ``kwargs["json"]`` in place, so the body the caller kept could drift away
+    from the body that was sent; that path was removed in PR #208 (pass JSON
+    request bodies without type coercion), and these tests pin the invariant
+    it left behind.
+    """
+
+    @pytest.fixture
+    def payload(self) -> dict[str, Any]:
+        """A payload whose values a naive type coercion would corrupt."""
+        return {
+            "name": "12345",
+            "password": "0012",
+            "web3": "true",
+            "denylist": [{"id": "example.com", "blocked": "true"}],
+        }
+
+    @pytest.mark.asyncio
+    async def test_caller_payload_dict_not_mutated(
+        self,
+        mock_super_request: Any,
+        clean_env: Callable[[str, str], None],
+        payload: dict[str, Any],
+    ) -> None:
+        """The caller's own payload dict is unchanged after the request."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+        before = copy.deepcopy(payload)
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            await client.request("PATCH", "/profiles/abc123", json=payload)
+
+        assert payload == before
+        assert mock_super_request.call_args.kwargs["json"] == before
+
+    @pytest.mark.asyncio
+    async def test_reused_payload_sends_identical_body_twice(
+        self,
+        mock_super_request: Any,
+        clean_env: Callable[[str, str], None],
+        payload: dict[str, Any],
+    ) -> None:
+        """Reusing one payload for a retry sends the same body both times."""
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+        before = copy.deepcopy(payload)
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            await client.request("PATCH", "/profiles/abc123", json=payload)
+            await client.request("PATCH", "/profiles/abc123", json=payload)
+
+        first_body = mock_super_request.call_args_list[0].kwargs["json"]
+        second_body = mock_super_request.call_args_list[1].kwargs["json"]
+        assert first_body == before
+        assert second_body == before
+        assert payload == before
+
+    @pytest.mark.asyncio
+    async def test_wire_body_equals_caller_payload_over_real_send_path(
+        self,
+        clean_env: Callable[[str, str], None],
+        payload: dict[str, Any],
+    ) -> None:
+        """The bytes httpx serializes onto the wire equal the caller's payload.
+
+        Unlike the tests above this exercises the real send path (no mocked
+        ``super().request``), so it proves the invariant on the actual HTTP
+        body rather than on forwarded keyword arguments.
+        """
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+        before = copy.deepcopy(payload)
+        wire_bodies: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            wire_bodies.append(request.content)
+            return httpx.Response(200, json={"data": "success"})
+
+        async with AccessControlledClient(
+            base_url="https://api.nextdns.io",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            await client.request("PATCH", "/profiles/abc123", json=payload)
+            await client.request("PATCH", "/profiles/abc123", json=payload)
+
+        assert len(wire_bodies) == 2
+        assert [json.loads(body) for body in wire_bodies] == [before, before]
+        assert payload == before
