@@ -269,9 +269,7 @@ def test_validate_tool_response_manage_logs_download():
             "/profiles/{profile_id}/logs/download": {
                 "get": {
                     "operationId": "downloadLogs",
-                    "responses": {
-                        "200": {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}
-                    },
+                    "responses": {"200": {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}},
                 }
             },
         }
@@ -338,9 +336,7 @@ def test_get_operation_response_schema_resolves_text_csv():
             "/profiles/{profile_id}/logs/download": {
                 "get": {
                     "operationId": "downloadLogs",
-                    "responses": {
-                        "200": {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}
-                    },
+                    "responses": {"200": {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}},
                 }
             }
         }
@@ -359,9 +355,7 @@ def test_manage_logs_download_envelope_not_short_circuited():
             "/profiles/{profile_id}/logs/download": {
                 "get": {
                     "operationId": "downloadLogs",
-                    "responses": {
-                        "200": {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}
-                    },
+                    "responses": {"200": {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}},
                 }
             }
         }
