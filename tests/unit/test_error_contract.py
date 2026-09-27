@@ -16,7 +16,13 @@ import pytest
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
-from nextdns_mcp.errors import MAX_RESPONSE_BODY_CHARS, ErrorCode, error_payload, http_error_payload
+from nextdns_mcp.errors import (
+    MAX_RESPONSE_BODY_CHARS,
+    TRUNCATION_MARKER,
+    ErrorCode,
+    error_payload,
+    http_error_payload,
+)
 from nextdns_mcp.tools.logs import _manage_logs_impl
 from nextdns_mcp.tools.plots import _plot_analytics_series_impl
 from nextdns_mcp.tools.profiles import _manage_profiles_impl
@@ -99,10 +105,12 @@ class TestErrorPayloadShape:
         assert payload["response_body"] == "<html>500 Bad Gateway</html>"
         assert payload["response_body_truncated"] is False
 
-    def test_http_error_payload_structured_json_fields_are_never_bounded(self):
-        # Structured error documents are surfaced verbatim (issue #148): the
-        # response_body cap applies only to unparseable bodies, so a large
-        # upstream field must survive intact and no truncation keys appear.
+    def test_http_error_payload_bounds_oversized_structured_fields(self):
+        # Issue #297: the structured-dict branch must not inline an unbounded
+        # upstream document into the tool result the LLM reads. An oversized
+        # string field is cut at MAX_RESPONSE_BODY_CHARS with the shared
+        # truncation marker, and the payload is flagged so a caller can tell a
+        # truncated document from a complete one.
         details = "d" * (100 * 1024)
         exc = httpx.HTTPError("boom")
         exc.response = MagicMock()
@@ -111,9 +119,64 @@ class TestErrorPayloadShape:
         exc.response.text = '{"error": "Bad Request", "details": "' + details + '"}'
         payload = http_error_payload("msg", exc)
         assert payload["error"] == "Bad Request"
-        assert payload["details"] == details
+        assert payload["details"] == "d" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert payload["status_code"] == 400
+        assert payload["response_body_truncated"] is True
+        assert "response_body" not in payload
+
+    def test_http_error_payload_structured_typed_fields_are_exempt(self):
+        # Issue #148 contract: callers branch on the typed fields, so ``code``,
+        # ``error`` and ``status_code`` are never bounded - only free-form
+        # upstream string fields are.
+        big_error = "e" * (100 * 1024)
+        big_code = "c" * (100 * 1024)
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 400
+        exc.response.json.return_value = {
+            "error": big_error,
+            "code": big_code,
+            "details": "d" * (100 * 1024),
+        }
+        payload = http_error_payload("msg", exc)
+        assert payload["error"] == big_error
+        assert payload["code"] == big_code
+        assert payload["details"] == "d" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER
+        assert payload["response_body_truncated"] is True
+
+    def test_http_error_payload_structured_non_string_fields_are_untouched(self):
+        # Only string field values are bounded; non-string values pass through.
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 429
+        exc.response.json.return_value = {
+            "error": "rate limit exceeded",
+            "retryAfter": 10**9,
+            "context": ["x" * (100 * 1024)],
+        }
+        payload = http_error_payload("msg", exc)
+        assert payload["error"] == "rate limit exceeded"
+        assert payload["retryAfter"] == 10**9
+        assert payload["context"] == ["x" * (100 * 1024)]
+        assert "response_body_truncated" not in payload
+
+    def test_http_error_payload_structured_small_document_is_complete(self):
+        # A structured document within the cap is surfaced whole (issue #148)
+        # and carries no truncation flag, so callers can tell it is complete.
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 403
+        exc.response.json.return_value = {
+            "error": "Read access denied for profile: abc123",
+            "code": ErrorCode.READ_ACCESS_DENIED,
+            "profile_id": "abc123",
+        }
+        payload = http_error_payload("msg", exc)
+        assert payload["error"] == "Read access denied for profile: abc123"
+        assert payload["code"] == ErrorCode.READ_ACCESS_DENIED
+        assert payload["profile_id"] == "abc123"
+        assert payload["status_code"] == 403
         assert "response_body" not in payload
         assert "response_body_truncated" not in payload
 
