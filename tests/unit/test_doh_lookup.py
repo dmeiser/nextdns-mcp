@@ -50,6 +50,23 @@ class TestDohLookup:
         assert result["code"] == "read_access_denied"
 
     @pytest.mark.asyncio
+    async def test_doh_lookup_denies_before_validating_record_type(self, mock_profile_id, monkeypatch, mock_doh_client):
+        """Access control precedes argument validation on the DoH path.
+
+        A profile that is not readable is reported as read_access_denied even
+        when the record type is also invalid, so the error code callers branch
+        on stays the authorization one.
+        """
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "zzz999")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "zzz999")
+
+        result = await dohLookup("example.com", mock_profile_id, "BOGUS")
+
+        assert result["code"] == "read_access_denied"
+        assert "Read access denied" in result["error"]
+        assert mock_doh_client.get.await_count == 0
+
+    @pytest.mark.asyncio
     async def test_doh_lookup_rejects_invalid_profile_id(self, monkeypatch):
         """Test that dohLookup rejects unsafe profile IDs."""
         result = await dohLookup("example.com", "abc/def", "A")

@@ -63,6 +63,12 @@ def _build_doh_metadata(
     return metadata
 
 
+def _read_denied(target_profile: str) -> dict[str, Any]:
+    """Build the read-access-denied payload for a profile."""
+    logger.warning(f"Read access denied for profile: {target_profile}")
+    return error_payload(ErrorCode.READ_ACCESS_DENIED, f"Read access denied for profile: {target_profile}")
+
+
 async def doh_lookup(
     doh_url: str, domain: str, record_type: str, target_profile: str, access: ProfileAccessControl
 ) -> dict[str, Any]:
@@ -75,14 +81,7 @@ async def doh_lookup(
     in flight (issue #179).
     """
     if not access.can_read(target_profile):
-        logger.warning(f"Read access denied for profile: {target_profile}")
-        return error_payload(
-            ErrorCode.READ_ACCESS_DENIED,
-            f"Read access denied for profile: {target_profile}",
-            profile_id=target_profile,
-            domain=domain,
-            type=record_type,
-        )
+        return _read_denied(target_profile)
 
     params = {"name": domain, "type": record_type}
     headers = {"accept": "application/dns-json"}
@@ -122,9 +121,11 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
         return error
     assert target_profile is not None
 
-    # One snapshot for the whole lookup: the read gate enforced by doh_lookup()
-    # and the query it authorizes both use these values.
+    # One snapshot for the whole lookup: this decision, the send-time gate in
+    # doh_lookup() and the query they authorize all use these values.
     access = load_profile_access_control()
+    if not access.can_read(target_profile):
+        return _read_denied(target_profile)
 
     is_valid, record_type_upper = _validate_record_type(record_type)
     if not is_valid:
