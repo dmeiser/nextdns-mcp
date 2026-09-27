@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import socket
+import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -655,11 +656,16 @@ class TestManageLogs:
         assert result["preview"]["line_count"] == 2
         logs_module._unlink_temp_file(result["file_path"])
 
-    def test_unlink_temp_file_never_created_path_is_quiet(self, tmp_path, caplog):
+    def test_unlink_temp_file_never_created_path_is_quiet(self, caplog):
         """A temp file that was never written is not reported as a cleanup failure."""
-        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"):
-            logs_module._unlink_temp_file(str(tmp_path / "download.csv"))
-        assert not caplog.records, [rec.message for rec in caplog.records]
+        parent = tempfile.mkdtemp(prefix="nextdns_logs_test_")
+        try:
+            with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"):
+                logs_module._unlink_temp_file(os.path.join(parent, "download.csv"))
+            assert not caplog.records, [rec.message for rec in caplog.records]
+            assert not os.path.exists(parent), "empty mkdtemp parent directory leaked"
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
 
     def test_unlink_temp_file_failure_logs_warning(self, tmp_path, caplog):
         """A temp file that exists but cannot be unlinked logs a warning and never raises."""
@@ -671,9 +677,7 @@ class TestManageLogs:
         assert any("Failed to remove temp log file" in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_download_cancelled_mid_stream_removes_temp_dir_and_partial_file(
-        self, mock_api_client, monkeypatch, tmp_path
-    ):
+    async def test_download_cancelled_mid_stream_removes_temp_dir_and_partial_file(self, mock_api_client, monkeypatch):
         """Cancelling a download mid-stream leaves no partial CSV and no mkdtemp parent (issue #264)."""
         first_chunk_written = asyncio.Event()
         created: list[str] = []
@@ -710,22 +714,17 @@ class TestManageLogs:
         assert not os.path.exists(os.path.join(created[0], "download.csv")), "partial CSV survived cancellation"
         assert not os.path.exists(created[0]), "mkdtemp parent directory leaked on cancellation"
 
-    def test_unlink_temp_file_removes_mkdtemp_parent(self, tmp_path):
+    def test_unlink_temp_file_removes_mkdtemp_parent(self):
         """Removing a temp log file also removes its (empty) mkdtemp parent (issue #264)."""
-        import tempfile
-
-        parent = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_test_"), "download.csv")
+        parent = tempfile.mkdtemp(prefix="nextdns_logs_test_")
         try:
-            with open(parent, "w") as f:
+            with open(os.path.join(parent, "download.csv"), "w") as f:
                 f.write("csv,data\n")
-            assert os.path.exists(os.path.dirname(parent))
-            logs_module._unlink_temp_file(parent)
-            assert not os.path.exists(parent)
-            assert not os.path.exists(os.path.dirname(parent)), "mkdtemp parent directory leaked"
+            assert os.path.exists(parent)
+            logs_module._unlink_temp_file(os.path.join(parent, "download.csv"))
+            assert not os.path.exists(parent), "mkdtemp parent directory leaked"
         finally:
-            import shutil
-
-            shutil.rmtree(os.path.dirname(parent), ignore_errors=True)
+            shutil.rmtree(parent, ignore_errors=True)
 
     @pytest.mark.asyncio
     async def test_download_does_not_pass_follow_redirects_to_authenticated_client(self, mock_api_client):
