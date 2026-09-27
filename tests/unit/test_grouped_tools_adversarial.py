@@ -512,10 +512,14 @@ class TestFailClosedContract:
     @pytest.mark.asyncio
     async def test_denied_write_is_never_success(self, live_client, restricted_env):
         """A denied write surfaces write_access_denied, not a 204 success."""
-        result = await utils._api_request("POST", "/profiles/xyz999/denylist", json={"id": "a.com"})
-        assert result["code"] == "write_access_denied"
-        assert result != {"success": True}
-        assert live_client.seen == []
+        try:
+            result = await utils._api_request("POST", "/profiles/xyz999/denylist", json_body={"id": "a.com"})
+            # If we get here, the request succeeded, which is not expected.
+            assert False, "Expected _api_request to raise an exception"
+        except Exception as e:
+            payload = _handle_api_error(e)
+            assert payload["code"] == "write_access_denied"
+            assert live_client.seen == []
 
     @pytest.mark.asyncio
     async def test_collection_write_denied_when_no_writable(self, live_client, monkeypatch):

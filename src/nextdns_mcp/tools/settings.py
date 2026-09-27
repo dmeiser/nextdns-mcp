@@ -53,7 +53,7 @@ async def _manage_settings_impl(
         if not isinstance(settings, dict):
             return error_payload(ErrorCode.INVALID_ARGUMENT, "settings must be a JSON object")
         try:
-                    return await _api_request("PATCH", url, json=settings)
+                    return await _api_request("PATCH", url, json_body=settings)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
             return _handle_api_error(e)
 

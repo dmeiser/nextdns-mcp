@@ -18,6 +18,7 @@ from ..utils import (
     _build_query_params,
     _build_series_params,
     _cap_limit,
+    _handle_api_error,
     resolve_profile_id,
 )
 from .metrics import NON_SERIES_METRICS, AnalyticsMetric
@@ -92,13 +93,7 @@ async def _query_analytics_impl(
     try:
             return await _api_request("GET", url, params=params)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        if hasattr(e, 'error_payload') and e.error_payload is not None:
-            return e.error_payload
-        cause = e.__cause__
-        if cause is not None and isinstance(cause, httpx.HTTPError):
-            return http_error_payload(str(e), cause)
-        else:
-            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+        return _handle_api_error(e)
 
 
 async def queryAnalytics(

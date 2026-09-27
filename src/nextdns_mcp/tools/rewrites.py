@@ -15,6 +15,7 @@ from ..utils import (
     NextDNSRateLimitError,
     NextDNSServerError,
     _api_request,
+    _handle_api_error,
     _optional_entry_id_error,
     resolve_profile_id,
 )
@@ -47,27 +48,15 @@ async def _manage_rewrites_impl(
         try:
                     return await _api_request("GET", base_url)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-            if hasattr(e, 'error_payload') and e.error_payload is not None:
-                return e.error_payload
-            cause = e.__cause__
-            if cause is not None and isinstance(cause, httpx.HTTPError):
-                return http_error_payload(str(e), cause)
-            else:
-                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+            return _handle_api_error(e)
 
     if operation == "add":
         if not name or not content:
             return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name and content are required for add operation")
         try:
-                    return await _api_request("POST", base_url, json={"name": name, "content": content})
+                    return await _api_request("POST", base_url, json_body={"name": name, "content": content})
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-            if hasattr(e, 'error_payload') and e.error_payload is not None:
-                return e.error_payload
-            cause = e.__cause__
-            if cause is not None and isinstance(cause, httpx.HTTPError):
-                return http_error_payload(str(e), cause)
-            else:
-                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+            return _handle_api_error(e)
 
     if operation == "delete":
         if not entry_id:
@@ -75,13 +64,7 @@ async def _manage_rewrites_impl(
         try:
                     return await _api_request("DELETE", f"{base_url}/{entry_id}")
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-            if hasattr(e, 'error_payload') and e.error_payload is not None:
-                return e.error_payload
-            cause = e.__cause__
-            if cause is not None and isinstance(cause, httpx.HTTPError):
-                return http_error_payload(str(e), cause)
-            else:
-                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+            return _handle_api_error(e)
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 

@@ -15,6 +15,7 @@ from ..utils import (
     NextDNSRateLimitError,
     NextDNSServerError,
     _api_request,
+    _handle_api_error,
     _optional_entry_id_error,
     resolve_profile_id,
 )
@@ -56,13 +57,7 @@ async def _lists_get(base_url: str) -> dict[str, Any]:
     try:
         return await _api_request("GET", base_url)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        if hasattr(e, 'error_payload') and e.error_payload is not None:
-            return e.error_payload
-        cause = e.__cause__
-        if cause is not None and isinstance(cause, httpx.HTTPError):
-            return http_error_payload(str(e), cause)
-        else:
-            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+        return _handle_api_error(e)
 
 
 async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[str, Any]:
@@ -75,15 +70,9 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
     if entry_error:
         return entry_error
     try:
-        return await _api_request("POST", base_url, json=body)
+        return await _api_request("POST", base_url, json_body=body)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        if hasattr(e, 'error_payload') and e.error_payload is not None:
-            return e.error_payload
-        cause = e.__cause__
-        if cause is not None and isinstance(cause, httpx.HTTPError):
-            return http_error_payload(str(e), cause)
-        else:
-            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+        return _handle_api_error(e)
 
 
 def _validate_list_entry(entry: Any, label: str, operation: str, **extra: Any) -> dict[str, Any] | None:
@@ -132,15 +121,9 @@ async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | No
     if entry_error:
         return entry_error
     try:
-            return await _api_request("PUT", base_url, json=entries)
+            return await _api_request("PUT", base_url, json_body=entries)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        if hasattr(e, 'error_payload') and e.error_payload is not None:
-            return e.error_payload
-        cause = e.__cause__
-        if cause is not None and isinstance(cause, httpx.HTTPError):
-            return http_error_payload(str(e), cause)
-        else:
-            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+        return _handle_api_error(e)
 
 
 async def _lists_update(
@@ -162,15 +145,9 @@ async def _lists_update(
     if not isinstance(entry, dict):
         return error_payload(ErrorCode.INVALID_ARGUMENT, "entry must be a dict for update operation")
     try:
-            return await _api_request("PATCH", f"{base_url}/{entry_id}", json=entry)
+            return await _api_request("PATCH", f"{base_url}/{entry_id}", json_body=entry)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        if hasattr(e, 'error_payload') and e.error_payload is not None:
-            return e.error_payload
-        cause = e.__cause__
-        if cause is not None and isinstance(cause, httpx.HTTPError):
-            return http_error_payload(str(e), cause)
-        else:
-            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+        return _handle_api_error(e)
 
 
 async def _lists_remove(base_url: str, entry_id: str | None) -> dict[str, Any]:
@@ -180,13 +157,7 @@ async def _lists_remove(base_url: str, entry_id: str | None) -> dict[str, Any]:
     try:
             return await _api_request("DELETE", f"{base_url}/{entry_id}")
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        if hasattr(e, 'error_payload') and e.error_payload is not None:
-            return e.error_payload
-        cause = e.__cause__
-        if cause is not None and isinstance(cause, httpx.HTTPError):
-            return http_error_payload(str(e), cause)
-        else:
-            return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+        return _handle_api_error(e)
 
 
 async def _manage_lists_impl(

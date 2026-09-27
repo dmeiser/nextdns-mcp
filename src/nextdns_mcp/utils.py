@@ -171,7 +171,25 @@ def access_denied_payload(exc: AccessDeniedError) -> dict[str, Any]:
     return payload
 
 
-async def _api_request(method: str, url: str, params: dict[str, Any] | None = None, json: Any = None) -> dict[str, Any]:
+def _handle_api_error(e: NextDNSError) -> dict[str, Any]:
+    """Convert a NextDNSError into a standardized error payload.
+
+    If the exception carries an error_payload (e.g., from an API-level error),
+    return it directly. Otherwise, if the exception wraps an httpx.HTTPError,
+    use http_error_payload to preserve the original error structure.
+    For any other case, fall back to a generic internal error.
+    """
+    if getattr(e, "error_payload", None) is not None:
+        return e.error_payload
+    cause = getattr(e, "__cause__", None)
+    if cause is not None and isinstance(cause, httpx.HTTPError):
+        return http_error_payload(str(e), cause)
+    return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+
+
+async def _api_request(
+    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
+) -> dict[str, Any]:
     """Make an HTTP request through the access-controlled client and return JSON.
 
     Access-control denials raised by the ACL layer are reported as standardized
@@ -184,20 +202,11 @@ async def _api_request(method: str, url: str, params: dict[str, Any] | None = No
     For non-HTTP failures, a ``NextDNSError`` is raised with status_code=None.
     """
     try:
-        response = await client.api_client.request(method, url, params=params, json=json)
+        response = await client.api_client.request(method, url, params=params, json=json_body)
         response.raise_for_status()
         if response.status_code == 204 or not response.content:
             return {"success": True}
-        data = response.json()
-        # Check for API-level error in successful response
-        if isinstance(data, dict) and data.get("error"):
-            raise NextDNSError(
-                f"API error in {method} {url}: {data.get('error')}",
-                status_code=None,
-                response_body=json.dumps(data),
-                error_payload=data
-            )
-        return data
+        return response.json()
     except AccessDeniedError as e:
         # Raised by the ACL layer before any network request. Kept out of the
         # httpx.HTTPError branch: a real upstream 403 (raise_for_status) must
