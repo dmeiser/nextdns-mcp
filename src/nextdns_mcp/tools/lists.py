@@ -52,32 +52,44 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry is required for add operation")
     entry = _coerce_json_arg(entry)
     body = entry if isinstance(entry, dict) else {"id": entry}
+    entry_error = _validate_list_entry(body, "entry", "add")
+    if entry_error:
+        return entry_error
     return await _api_request("POST", base_url, json=body)
 
 
-def _validate_replace_entries(entries: list[Any]) -> dict[str, Any] | None:
-    """Return an error dict if a replace payload has a malformed entry (issue #189).
+def _validate_list_entry(entry: Any, label: str, operation: str, **extra: Any) -> dict[str, Any] | None:
+    """Return an error dict if a list entry does not carry a string ``id``.
 
-    The OpenAPI schemas for every ``replace*`` list operation declare the body as an
-    array of objects with a required ``id`` field (e.g. ``[{"id": "blocked.com"}]``).
-    Nested body fields are not checked by ``StripExtraFieldsMiddleware``, so an entry
-    that is not an object, or that omits ``id``, used to be forwarded verbatim and
-    come back as an opaque upstream HTTP 400. Validate locally and report the
-    offending index so the caller gets a typed, actionable error instead.
+    The OpenAPI schemas for the ``add*`` and ``replace*`` list operations declare
+    each entry as an object with a required string ``id`` field (e.g.
+    ``{"id": "blocked.com"}``). Nested body fields are not checked by
+    ``StripExtraFieldsMiddleware``, so a malformed entry used to be forwarded
+    verbatim and come back as an opaque upstream HTTP 400. Validate locally and
+    name the offending entry (``label``) so the caller gets a typed, actionable
+    error instead (issues #189, #253).
     """
+    if not isinstance(entry, dict):
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"{label} must be an object with an 'id' field for {operation} operation",
+            **extra,
+        )
+    if not isinstance(entry.get("id"), str):
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"{label} must have a string 'id' field for {operation} operation",
+            **extra,
+        )
+    return None
+
+
+def _validate_replace_entries(entries: list[Any]) -> dict[str, Any] | None:
+    """Return an error dict if a replace payload has a malformed entry (issue #189)."""
     for index, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            return error_payload(
-                ErrorCode.INVALID_ARGUMENT,
-                f"entries[{index}] must be an object with an 'id' field for replace operation",
-                index=index,
-            )
-        if not isinstance(entry.get("id"), str):
-            return error_payload(
-                ErrorCode.INVALID_ARGUMENT,
-                f"entries[{index}] must have a string 'id' field for replace operation",
-                index=index,
-            )
+        error = _validate_list_entry(entry, f"entries[{index}]", "replace", index=index)
+        if error:
+            return error
     return None
 
 
@@ -179,6 +191,8 @@ async def manageLists(
     Operations:
         - ``get``: Return the current list.
         - ``add``: Append one entry (pass ``entry`` as ``{"id": "value"}`` or as a plain id string).
+          The entry must carry a string ``id``; an entry without one is rejected locally with
+          ``invalid_argument`` rather than sent upstream.
         - ``remove``: Delete one entry by ``entry_id``.
         - ``update``: Toggle an existing entry by ``entry_id`` (pass ``entry={"active": True|False}``).
           Only supported for ``allowlist``, ``denylist``, ``parental_categories``, and
