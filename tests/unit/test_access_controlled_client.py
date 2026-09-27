@@ -593,8 +593,9 @@ class TestAccessControlledClientCallerPayloadIsolation:
     must see the same data afterwards that it passed in, and each request must
     carry exactly that data on the wire. The client previously replaced
     ``kwargs["json"]`` in place, so the body the caller kept could drift away
-    from the body that was sent; that path was removed with the body coercion
-    in #208, and these tests pin the invariant it left behind.
+    from the body that was sent; that path was removed in PR #208 (pass JSON
+    request bodies without type coercion), and these tests pin the invariant
+    it left behind.
     """
 
     @pytest.fixture
