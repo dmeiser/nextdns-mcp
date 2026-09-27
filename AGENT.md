@@ -119,7 +119,7 @@ open htmlcov/index.html
 - Run: `uv run radon cc src/ -a`
 
 **Function Complexity**: Maximum Grade B
-- No individual function may exceed grade B (cyclomatic complexity ≤11)
+- No individual function may exceed grade B (cyclomatic complexity ≤10)
 - Check with: `uv run radon cc src/ -nc`
 - If a function exceeds grade B:
   - Refactor into smaller functions
@@ -128,10 +128,11 @@ open htmlcov/index.html
 
 **Complexity Grading Scale** (Radon):
 - A: 1-5 (simple, low risk)
-- B: 6-11 (more complex, moderate risk)
+- B: 6-10 (more complex, moderate risk)
 - C: 11-20 (complex, high risk) ❌ Not allowed
-- D: 21-50 (very complex, very high risk) ❌ Not allowed
-- F: 51+ (extremely complex, extreme risk) ❌ Not allowed
+- D: 21-30 (very complex, very high risk) ❌ Not allowed
+- E: 31-40 (extremely complex, extreme risk) ❌ Not allowed
+- F: 41+ (unmaintainable, extreme risk) ❌ Not allowed
 
 ### 4. Pre-Commit Quality Checklist
 
@@ -165,11 +166,13 @@ Before claiming work is complete:
 - Add type hints to all function signatures
 - Use `typing` module for complex types
 
-**radon** (complexity analysis):
+**radon** (complexity analysis) - the single complexity tool for this project:
 - Installed as dev dependency
 - Use `cc` (cyclomatic complexity) command
 - Use `-a` flag for average complexity
 - Use `-nc` flag to show only functions above grade B
+- Enforced in CI by the `complexity` job in `.github/workflows/unit-tests.yml`
+  (grade A project average, no function above grade B)
 
 ### 6. Handling Quality Failures
 

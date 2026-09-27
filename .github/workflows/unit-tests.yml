@@ -96,16 +96,19 @@ jobs:
 
       - name: Run radon complexity check
         run: |
-          uv run radon cc src/ -a
+          # Project average complexity must stay at Grade A.
+          AVERAGE=$(uv run radon cc src/ -a --total-average | tail -1 | awk '{print $3}')
+          if [ "$AVERAGE" != "A" ]; then
+            echo "Project average complexity is grade $AVERAGE, Grade A required."
+            exit 1
+          fi
+          # No individual function may exceed Grade B.
           OUTPUT=$(uv run radon cc src/ -nc)
           if [ -n "$OUTPUT" ]; then
             echo "Radon found functions exceeding Grade B:"
             echo "$OUTPUT"
             exit 1
           fi
-
-      - name: Run xenon complexity check
-        run: uv run xenon -b B -m B -a A src
 
   unit-tests:
     runs-on: ubuntu-latest
