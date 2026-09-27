@@ -246,7 +246,7 @@ class AccessControlledClient(httpx.AsyncClient):
 
         Relative URLs resolve against this client's ``base_url``, exactly as
         httpx merges them, so a client built on a non-NextDNS base is caught
-        here too. An unresolvable destination yields "" and is refused.
+        here too. A relative URL on a client with no base URL yields "".
         """
         parsed = httpx.URL(str(url))
         if parsed.is_absolute_url or parsed.scheme or parsed.host:
@@ -270,7 +270,7 @@ class AccessControlledClient(httpx.AsyncClient):
         if host in allowed_destination_hosts():
             return
 
-        error_msg = f"Blocked request to non-NextDNS host: {host or '(unresolved)'}"
+        error_msg = f"Blocked request to non-NextDNS host: {host}"
         logger.warning(f"{error_msg} (method={method})")
         raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED)
 
