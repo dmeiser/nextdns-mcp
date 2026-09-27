@@ -34,12 +34,19 @@ jobs:
         id: check-workflows
         with:
           script: |
-            const required_workflows = ['Unit Tests', 'CodeQL'];
+            const required_workflows = ['Unit Tests', 'CodeQL', 'E2E Container'];
             const pr_number = context.issue.number;
             const max_wait_minutes = 20;
             const check_interval_seconds = 30;
             const max_checks = (max_wait_minutes * 60) / check_interval_seconds;
-            
+
+            // E2E Container skips its live validation step when NEXTDNS_API_KEY is
+            // unavailable (e.g. fork PRs). A skipped step still leaves the
+            // workflow run green, so the run conclusion alone cannot prove the
+            // tool suite ran; the validation step's own check run reports
+            // 'success' only when it actually executed (issue #271).
+            const E2E_VALIDATION_CHECK_PREFIX = 'Run E2E validation against container';
+
             console.log(`Waiting for required workflows on PR #${pr_number}`);
             console.log(`Required: ${required_workflows.join(', ')}`);
             
@@ -82,6 +89,31 @@ jobs:
                   status: latest_run.status,
                   conclusion: latest_run.conclusion
                 };
+
+                if (
+                  workflow_name === 'E2E Container' &&
+                  latest_run.status === 'completed' &&
+                  latest_run.conclusion === 'success'
+                ) {
+                  const check_runs = await github.rest.checks.listForRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref: head_sha
+                  });
+                  const validation_checks = check_runs.data.check_runs.filter(
+                    cr => cr.name.startsWith(E2E_VALIDATION_CHECK_PREFIX)
+                  );
+                  const validation_ran =
+                    validation_checks.length > 0 &&
+                    validation_checks.every(cr => cr.conclusion === 'success');
+                  if (!validation_ran) {
+                    console.log('E2E Container run is green but its validation step did not run');
+                    workflow_status[workflow_name] = {
+                      status: latest_run.status,
+                      conclusion: 'skipped'
+                    };
+                  }
+                }
               }
               
               console.log(`Check ${check + 1}/${max_checks}:`, JSON.stringify(workflow_status, null, 2));
@@ -97,10 +129,19 @@ jobs:
               
               if (all_completed && all_successful) {
                 console.log('✅ All required workflows passed!');
-                return { 
-                  success: true, 
-                  pr_number, 
-                  pr_title: pr.data.title 
+                // The approval body is derived from the same list that gated
+                // the merge, so the comment cannot claim a check the gate did
+                // not require (issue #271).
+                const approval_body = [
+                  '✅ Auto-approved: All required workflows passed',
+                  '',
+                  ...required_workflows.map(name => `- ${name}: ✅ Passed`)
+                ].join('\n');
+                return {
+                  success: true,
+                  pr_number,
+                  pr_title: pr.data.title,
+                  approval_body
                 };
               }
               
@@ -137,14 +178,12 @@ jobs:
           
           echo "✅ All checks passed for PR #$PR_NUMBER"
           echo "Approving and enabling auto-merge..."
-          
-          # Approve the PR
+
+          # The body was built by the gate from the same required_workflows
+          # list that decided success, so the comment cannot drift from the
+          # gate (issue #271).
           gh pr review "$PR_NUMBER" --repo ${{ github.repository }} --approve \
-            --body "✅ Auto-approved: All workflows passed
-          
-          - Unit Tests: ✅ Passed (100% overall coverage, all files 100%)
-          - E2E Tests: ✅ Passed (100% of tools tested)
-          - CodeQL: ✅ Passed"
+            --body '${{ fromJSON(steps.check-workflows.outputs.result).approval_body }}'
           
           # Enable auto-merge
           gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --auto --squash
