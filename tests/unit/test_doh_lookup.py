@@ -198,7 +198,7 @@ class TestDohLookup:
 
     @pytest.mark.asyncio
     async def test_doh_lookup_status_error_log_hides_the_queried_domain(self, mock_profile_id, mock_doh_client, caplog):
-        """A failing DoH status must not log the merged query string carrying the domain."""
+        """A failing DoH status must keep the domain and its query out of the error record."""
         domain = "alice-bank.com"
         request = httpx.Request(
             "GET", f"https://dns.nextdns.io/{mock_profile_id}/dns-query", params={"name": domain, "type": "A"}
@@ -219,6 +219,7 @@ class TestDohLookup:
         assert error_messages
         for msg in error_messages:
             assert "?" not in msg, f"Query string leaked into the DoH error log: {msg}"
+            assert domain not in msg, f"Queried domain leaked into the DoH error log: {msg}"
         assert any("429" in msg for msg in error_messages)
 
     @pytest.mark.asyncio

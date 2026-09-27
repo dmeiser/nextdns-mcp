@@ -97,12 +97,12 @@ async def doh_lookup(
             logger.debug(f"DoH lookup result: {domain} -> {metadata['status_description']}")
         return {"data": result, "_metadata": metadata}
     except httpx.HTTPError as e:
-        logger.error(f"HTTP error during DoH lookup for {domain}: {_log_safe_error(e)}")
+        logger.error(f"HTTP error during DoH lookup: {_log_safe_error(e)}")
         payload = http_error_payload(f"HTTP error during DoH lookup: {e!s}", e, fallback_code=ErrorCode.HTTP_ERROR)
         payload.update(profile_id=target_profile, domain=domain, type=record_type)
         return payload
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Unexpected error during DoH lookup for {domain}: {_log_safe_error(e)}")
+        logger.error(f"Unexpected error during DoH lookup: {_log_safe_error(e)}")
         return error_payload(
             ErrorCode.INTERNAL_ERROR,
             f"Unexpected error during DoH lookup: {e!s}",
