@@ -9,6 +9,8 @@ __pycache__/
 *.pyd
 .venv/
 venv/
+.mypy_cache/
+.ruff_cache/
 
 # Test / coverage artifacts
 tests/

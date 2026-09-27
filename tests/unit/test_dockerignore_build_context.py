@@ -19,7 +19,6 @@ while every path the Dockerfiles actually copy is not.
 from __future__ import annotations
 
 import fnmatch
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -86,9 +85,7 @@ def is_excluded(patterns: list[Pattern], path: str) -> bool:
         prefix = f"{pattern.body}/"
         matched = path.startswith(prefix) or path == pattern.body
         if not matched and not pattern.dir_only:
-            matched = fnmatch.fnmatch(path, pattern.body) or fnmatch.fnmatch(
-                Path(path).name, pattern.body
-            )
+            matched = fnmatch.fnmatch(path, pattern.body) or fnmatch.fnmatch(Path(path).name, pattern.body)
         if matched:
             excluded = not pattern.negated
     return excluded
@@ -96,7 +93,6 @@ def is_excluded(patterns: list[Pattern], path: str) -> bool:
 
 def copied_paths(dockerfile: Path) -> set[str]:
     """Every context path a Dockerfile copies (from ``COPY``/``ADD`` sources)."""
-    copy_line = re.compile(r"^\s*(?:COPY|ADD)\s+(.*)$", re.IGNORECASE)
     sources: set[str] = set()
     for raw in dockerfile.read_text().splitlines():
         line = raw.split(" #", 1)[0].strip()
@@ -129,9 +125,7 @@ def test_tool_cache_omission_is_what_the_test_detects() -> None:
     run means the patterns are present rather than a vacuous assertion.
     """
     text = DOCKERIGNORE_PATH.read_text()
-    pre_fix = "\n".join(
-        line for line in text.splitlines() if line.strip().rstrip("/") not in TOOL_CACHE_DIRS
-    )
+    pre_fix = "\n".join(line for line in text.splitlines() if line.strip().rstrip("/") not in TOOL_CACHE_DIRS)
     patterns = parse_patterns(pre_fix)
 
     leaked = [path for path in TOOL_CACHE_FILES if not is_excluded(patterns, path)]
