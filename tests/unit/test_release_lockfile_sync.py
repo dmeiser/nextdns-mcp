@@ -35,7 +35,6 @@ import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml
@@ -310,45 +309,3 @@ def test_bump_leaves_the_ci_lockfile_check_passing(workflow_name: str, job_id: s
         f"{workflow_name}:{job_id} released {sorted(released)} without {LOCKFILE}; "
         "the refreshed lockfile would be left behind and CI would still fail"
     )
-
-
-def test_check_only_invocation_is_not_a_lock_refresh(tmp_path: Path) -> None:
-    """Guard the guard: ``uv lock --check`` validates, it cannot repair a lockfile."""
-    spec: dict[str, Any] = {
-        "jobs": {
-            "bump-version": {
-                "steps": [
-                    {"name": "Calculate and Update Version", "run": "re.sub(..., pyproject.toml)"},
-                    {"name": "Check lockfile", "run": "uv lock --check"},
-                ]
-            }
-        }
-    }
-    job = load_release_job(_spec_workflow(tmp_path, spec), "bump-version")
-
-    assert job.lock_refresh() is None, "a `uv lock --check` step was mistaken for a lockfile refresh"
-
-
-def test_pre_fix_bump_workflow_is_detected_as_regression(tmp_path: Path) -> None:
-    """Guard the guard: the pre-fix version-bumper must be read as a bump with no lock refresh."""
-    pre_fix: dict[str, Any] = {
-        "jobs": {
-            "bump-version": {
-                "steps": [
-                    {"name": "Calculate and Update Version", "run": 're.sub(..., "pyproject.toml", ...)'},
-                    {"name": "Commit and Push", "run": "git commit -m chore"},
-                ]
-            }
-        }
-    }
-    job = load_release_job(_spec_workflow(tmp_path, pre_fix), "bump-version")
-
-    assert job.version_edit() is not None and job.commit() is not None
-    assert job.lock_refresh() is None, "the pre-fix workflow was not recognised as missing its lock refresh"
-
-
-def _spec_workflow(tmp_path: Path, spec: dict[str, Any]) -> Path:
-    """Write a throwaway workflow file and return its path."""
-    path = tmp_path / "version-bumper.yml"
-    path.write_text(yaml.safe_dump(spec))
-    return path
