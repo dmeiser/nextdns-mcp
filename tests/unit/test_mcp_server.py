@@ -1,11 +1,9 @@
 """Unit tests for MCP server creation (openapi.py create_mcp_server)."""
 
 import logging
-from contextlib import asynccontextmanager
 
 import pytest
 from fastmcp import FastMCP
-from fastmcp.server.lifespan import lifespan
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp.openapi import StripExtraFieldsMiddleware, create_mcp_server
@@ -150,65 +148,3 @@ class TestServerLifespan:
                 await api_client.aclose()
             if not doh_client.is_closed:
                 await doh_client.aclose()
-
-    @pytest.mark.asyncio
-    async def test_server_lifespan_composes_with_custom_context_manager(self, mock_api_key, monkeypatch):
-        """create_mcp_server composes custom contextmanager lifespan with client cleanup."""
-        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(client_module, "_client", None)
-        monkeypatch.setattr(doh_module, "_doh_client", None)
-
-        custom_events = []
-
-        @asynccontextmanager
-        async def custom_lifespan(s):
-            custom_events.append("enter")
-            try:
-                yield {"custom": True}
-            finally:
-                custom_events.append("exit")
-
-        server = create_mcp_server(lifespan=custom_lifespan)
-        api_client = client_module.get_api_client()
-
-        try:
-            async with server._lifespan_manager():
-                assert custom_events == ["enter"]
-                assert not api_client.is_closed
-
-            assert custom_events == ["enter", "exit"]
-            assert api_client.is_closed
-        finally:
-            if not api_client.is_closed:
-                await api_client.aclose()
-
-    @pytest.mark.asyncio
-    async def test_server_lifespan_composes_with_lifespan_instance(self, mock_api_key, monkeypatch):
-        """create_mcp_server composes Lifespan instance with client cleanup."""
-        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(client_module, "_client", None)
-        monkeypatch.setattr(doh_module, "_doh_client", None)
-
-        custom_events = []
-
-        @lifespan
-        async def custom_lifespan(s):
-            custom_events.append("enter")
-            try:
-                yield {"custom": True}
-            finally:
-                custom_events.append("exit")
-
-        server = create_mcp_server(lifespan=custom_lifespan)
-        api_client = client_module.get_api_client()
-
-        try:
-            async with server._lifespan_manager():
-                assert custom_events == ["enter"]
-                assert not api_client.is_closed
-
-            assert custom_events == ["enter", "exit"]
-            assert api_client.is_closed
-        finally:
-            if not api_client.is_closed:
-                await api_client.aclose()

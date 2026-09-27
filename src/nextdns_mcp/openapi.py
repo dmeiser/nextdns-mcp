@@ -32,7 +32,6 @@ import httpx
 import mcp.types
 from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
-from fastmcp.server.lifespan import ContextManagerLifespan, Lifespan
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 from starlette.requests import Request
@@ -254,7 +253,7 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             await close_doh_client()
 
 
-def create_mcp_server(client: Any = None, lifespan: Any = None) -> FastMCP:
+def create_mcp_server(client: Any = None) -> FastMCP:
     """Create and configure the NextDNS MCP server.
 
     The server exposes only the grouped CRUD tools registered by
@@ -264,21 +263,12 @@ def create_mcp_server(client: Any = None, lifespan: Any = None) -> FastMCP:
 
     Args:
         client: Retained for backward compatibility.
-        lifespan: Optional custom lifespan context manager or FastMCP Lifespan.
-            When provided, it is composed with the server lifespan that closes
-            the long-lived API and DoH clients on shutdown.
 
     Returns:
         FastMCP: Configured MCP server instance
     """
     logger.info("Creating NextDNS MCP server...")
-    if lifespan is not None:
-        user_lifespan = lifespan if isinstance(lifespan, Lifespan) else ContextManagerLifespan(lifespan)
-        server_lifespan: Any = ContextManagerLifespan(_server_lifespan) | user_lifespan
-    else:
-        server_lifespan = _server_lifespan
-
-    mcp = FastMCP(name="NextDNS MCP Server", lifespan=server_lifespan)
+    mcp = FastMCP(name="NextDNS MCP Server", lifespan=_server_lifespan)
 
     # Add middleware to strip unknown fields from tool arguments
     # This allows AI clients (like OpenAI) that send extra fields to work properly
