@@ -6,8 +6,9 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
-from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, resolve_profile_id
+from ..errors import ErrorCode, error_payload, http_error_payload
+from ..utils import _api_request, resolve_profile_id, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
+import httpx
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 SettingsCategory = Literal["general", "privacy", "security", "parental", "performance", "logs", "blockpage"]

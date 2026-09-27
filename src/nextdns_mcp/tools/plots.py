@@ -11,12 +11,22 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
+
 import mcp.types
 from fastmcp.utilities.types import Image
 
 from ..coercion import OptionalProfileId
-from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_series_params, resolve_profile_id
+from ..errors import ErrorCode, error_payload, http_error_payload
+from ..utils import (
+    NextDNSAuthError,
+    NextDNSError,
+    NextDNSRateLimitError,
+    NextDNSServerError,
+    _api_request,
+    _build_series_params,
+    resolve_profile_id,
+)
 from .metrics import PLOT_METRICS, PlotMetric
 
 logger = logging.getLogger(__name__)
@@ -325,7 +335,14 @@ async def _fetch_series_payload(
     behavior as every other tool (issue #183). Failures surface as the
     wrapper's standardized error payloads, so no behavior changes for callers.
     """
-    payload = await _api_request("GET", url, params=params)
+    try:
+        payload = await _api_request("GET", url, params=params)
+    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        cause = e.__cause__
+        if cause is not None and isinstance(cause, httpx.HTTPError):
+            return None, http_error_payload(str(e), cause)
+        else:
+            return None, error_payload(ErrorCode.INTERNAL_ERROR, str(e))
     if "error" in payload:
         return None, payload
     return payload, None
