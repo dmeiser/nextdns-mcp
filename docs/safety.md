@@ -33,6 +33,11 @@ Reduce risk when operating on real NextDNS profiles.
 - Every non-successful download removes the temp file and its parent directory, including access denial, HTTP error, unexpected error, and cancellation or timeout of the awaiting client.
 - A hard cap bounds the total bytes a download may stream to disk, enforced while streaming: the cap defaults to 1 GiB and is set via the `NEXTDNS_DOWNLOAD_MAX_BYTES` environment variable (a positive integer of bytes; an invalid value fails fast with a configuration error at startup, same as `NEXTDNS_HTTP_TIMEOUT`). A download that would exceed the cap is aborted mid-stream, the partial CSV and its parent directory are removed, and the tool returns the `download_too_large` error. This prevents a single download from filling the container's only writable location.
 
+## Log redaction
+- Query strings can carry DNS search terms, device IDs, and cursor tokens, so any log record at INFO or above that names a request URL or an exception message carries the request path only, never the query; the full URL is logged at DEBUG (issue #139). httpx builds `HTTPStatusError` text from the fully merged request URL, so only the status is logged for those. `_redacted()` and `_log_safe_error()` in `src/nextdns_mcp/client.py` implement both rules — route any new WARNING-or-higher log site through them.
+- Redaction applies to log records, not to what the caller receives: a denied request still returns the URL it asked for (e.g. `Forbidden URL: <url>`), so the caller can correlate the denial with its own request.
+- The `httpx` and `httpcore` loggers are pinned to WARNING by `configure_logging()` (`src/nextdns_mcp/config.py`), because httpx logs every completed request at INFO with the fully merged URL — including the pre-signed object-store URL fetched by `manageLogs(operation="download")` — which would otherwise re-introduce what the client redacts.
+
 ## CI credentials
 - GitHub Actions logs are world-readable on a public repository; never print the API key or any file that contains it to CI logs.
 - The container E2E workflow (`.github/workflows/e2e-container.yml`) injects `NEXTDNS_API_KEY` into the test container via `docker run -e` from a GitHub Actions secret; it does not write the key to a catalog or other file, so there is no secret-bearing artifact to dump.
