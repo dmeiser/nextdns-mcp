@@ -26,11 +26,7 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
 def _gate_script() -> str:
     """Return the shell script the complexity job executes in CI."""
     workflow = yaml.safe_load(WORKFLOW.read_text())
-    run_scripts = [
-        step["run"]
-        for step in workflow["jobs"]["complexity"]["steps"]
-        if "radon" in step.get("run", "")
-    ]
+    run_scripts = [step["run"] for step in workflow["jobs"]["complexity"]["steps"] if "radon" in step.get("run", "")]
     assert len(run_scripts) == 1, f"expected one radon step, found {len(run_scripts)}"
     return run_scripts[0]
 
@@ -76,6 +72,7 @@ def _run_gate(tmp_path: Path, sources: dict[str, str]) -> subprocess.CompletedPr
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
