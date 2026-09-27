@@ -28,6 +28,7 @@ This file contains repository-specific agent rules. Agents should follow these w
   - Always verify the target profile ID before any write operation
 - **Development Workflow:**
   - The server is built from the grouped CRUD tools in `src/nextdns_mcp/tools/`; `create_mcp_server()` (src/nextdns_mcp/openapi.py) creates a plain `FastMCP` instance, and server.py registers the tools on it.
+  - Importing `src/nextdns_mcp/server.py` must stay side-effect free: no `load_dotenv()`, no environment mutation, and no module-level server instance. Call `configure()` (as `python -m nextdns_mcp.server` and the tests do) to build the shared server and disable FastMCP's update check. Enforced by `tests/unit/test_server_dotenv.py`.
   - `src/nextdns_mcp/nextdns-openapi.yaml` is a reference specification (used by `scripts/validate_schema.py`); it is NOT used for tool generation.
   - The fastmcp library handles MCP protocol implementation, routing, and tool registration
 - **Array-body Endpoints (FastMCP 3.x):**
