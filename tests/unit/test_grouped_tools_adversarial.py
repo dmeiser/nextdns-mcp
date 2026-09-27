@@ -197,6 +197,62 @@ class TestTraversalAndAclBypass:
         assert live_client.seen == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "/PROFILES/def456/settings",
+            "/Profiles/def456/settings",
+        ],
+    )
+    async def test_case_variant_profiles_path_denied(self, live_client, restricted_env, payload):
+        """A case-variant /PROFILES path is classified, not waved through (issue #285).
+
+        With an explicit readable/writable set of ``abc123`` only, the
+        case-sensitive classification let ``def456`` through: the path yielded no
+        profile id *and* was not unclassifiable, so only the global
+        any_readable/any_writable gates ran and the request was forwarded
+        upstream. It must now be matched against the per-profile ACL and denied.
+        """
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await live_client.client.request("GET", payload)
+        assert exc_info.value.code == "read_access_denied"
+        assert exc_info.value.profile_id == "def456"
+        assert live_client.seen == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "/PROFILES/def456/settings",
+            "/Profiles/def456/settings",
+        ],
+    )
+    async def test_case_variant_profiles_path_denied_by_stream(self, live_client, restricted_env, payload):
+        """stream() applies the same classification as request() (issue #285)."""
+        with pytest.raises(AccessDeniedError) as exc_info:
+            async with live_client.client.stream("GET", payload):
+                pass
+        assert exc_info.value.code == "read_access_denied"
+        assert exc_info.value.profile_id == "def456"
+        assert live_client.seen == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "/profiles/abc.def/settings",
+            "/PROFILES/abc.def/settings",
+        ],
+    )
+    async def test_unclassifiable_profiles_path_denied_by_stream(self, live_client, restricted_env, payload):
+        """stream() fails closed on a /profiles path with no safe, spec-shaped id."""
+        with pytest.raises(AccessDeniedError) as exc_info:
+            async with live_client.client.stream("GET", payload):
+                pass
+        assert exc_info.value.code == "access_denied"
+        assert live_client.seen == []
+
+    @pytest.mark.asyncio
     async def test_entry_id_traversal_rejected(self, live_client):
         """A traversal entry_id is rejected by the tool before any request."""
         result = await server.manageLists("allowlist", "remove", "abc123", entry_id="../settings")
