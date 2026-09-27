@@ -373,6 +373,30 @@ class TestManageLists:
         assert "error" in result
 
     @pytest.mark.asyncio
+    async def test_add_entry_missing_id(self, mock_api_client):
+        """An add entry without the schema-required 'id' is rejected locally (issue #253)."""
+        result = await server.manageLists("denylist", "add", "abc123", entry={"active": True})
+        mock_api_client.request.assert_not_called()
+        assert result["code"] == "invalid_argument"
+        assert "entry" in result["error"]
+        assert "id" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_add_entry_with_non_string_id(self, mock_api_client):
+        result = await server.manageLists("denylist", "add", "abc123", entry={"id": 7})
+        mock_api_client.request.assert_not_called()
+        assert result["code"] == "invalid_argument"
+        assert "id" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_add_entry_not_a_string_or_object(self, mock_api_client):
+        """A non-string, non-object entry cannot yield a string 'id' and is rejected locally."""
+        result = await server.manageLists("denylist", "add", "abc123", entry=["bad.com"])
+        mock_api_client.request.assert_not_called()
+        assert result["code"] == "invalid_argument"
+        assert "id" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_replace(self, mock_api_client):
         mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
         result = await server.manageLists("allowlist", "replace", "abc123", entries=[{"id": "x"}])
