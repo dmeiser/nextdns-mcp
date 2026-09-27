@@ -410,6 +410,20 @@ def test_assert_operation_coverage_rejects_unresolvable_ids():
         assert_operation_coverage({"paths": {}}, EXPECTED_TOOLS)
 
 
+def test_assert_operation_coverage_rejects_tools_without_any_candidate_schema(monkeypatch):
+    """A mapped tool with no resolvable op id and no literal schema is a hard error."""
+    from scripts import validate_schema
+
+    monkeypatch.setitem(
+        validate_schema.GROUPED_TOOL_OPERATIONS,
+        "brandNewTool",
+        [],
+    )
+    spec = validate_schema.load_openapi_spec(str(REAL_SPEC_PATH))
+    with pytest.raises(ValueError, match=r"no candidate response schema: \['brandNewTool'\]"):
+        validate_schema.assert_operation_coverage(spec, [*EXPECTED_TOOLS, "brandNewTool"])
+
+
 def test_assert_operation_coverage_rejects_key_set_mismatch():
     """The mapping's key set must match the server's tool set."""
     from scripts.validate_schema import assert_operation_coverage, load_openapi_spec

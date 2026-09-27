@@ -165,7 +165,9 @@ def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str
     degrade to SKIPPED at validation time, which the E2E workflow counts as
     neither pass nor fail. The key set must match ``expected_tools`` so a
     tool added to the server without a mapping (or a mapping entry for a
-    tool the server no longer serves) fails here too.
+    tool the server no longer serves) fails here too. A mapped tool must end
+    up with at least one candidate schema, from either its operationIds or
+    TOOL_RESPONSE_SCHEMAS, so that it is validated rather than skipped.
 
     Raises:
         ValueError: listing the offending tools or operation ids.
@@ -186,6 +188,14 @@ def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str
     )
     if unresolvable:
         raise ValueError(f"operationIds that resolve to no response schema: {unresolvable}")
+    unvalidated = sorted(
+        tool
+        for tool, op_ids in GROUPED_TOOL_OPERATIONS.items()
+        if not any(get_operation_response_schema(spec, op_id) is not None for op_id in op_ids)
+        and tool not in TOOL_RESPONSE_SCHEMAS
+    )
+    if unvalidated:
+        raise ValueError(f"tools with no candidate response schema: {unvalidated}")
 
 
 def validate_field_type(value: Any, expected_type: str) -> bool:
