@@ -290,3 +290,29 @@ class TestCreateNextdnsClient:
             _ = client_module.api_client
 
         assert "NEXTDNS_API_KEY is required" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_close_api_client_closes_and_resets(self, monkeypatch, mock_api_key):
+        """close_api_client closes the active client and resets _client to None."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        import nextdns_mcp.client as client_module
+
+        monkeypatch.setattr(client_module, "_client", None)
+
+        client = client_module.get_api_client()
+        assert not client.is_closed
+        assert client_module._client is client
+
+        await client_module.close_api_client()
+        assert client.is_closed
+        assert client_module._client is None
+
+    @pytest.mark.asyncio
+    async def test_close_api_client_noop_when_none(self, monkeypatch):
+        """close_api_client is a safe no-op when no client was created."""
+        import nextdns_mcp.client as client_module
+
+        monkeypatch.setattr(client_module, "_client", None)
+
+        await client_module.close_api_client()
+        assert client_module._client is None

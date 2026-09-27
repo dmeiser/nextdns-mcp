@@ -24,6 +24,8 @@ SPDX-License-Identifier: MIT
 
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, NamedTuple
 
 import httpx
@@ -35,8 +37,9 @@ from fastmcp.tools import ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .client import get_api_client
+from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile
+from .tools.doh import close_doh_client
 from .utils import is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
@@ -238,6 +241,18 @@ class StripExtraFieldsMiddleware(Middleware):
         return await call_next(context)
 
 
+@asynccontextmanager
+async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
+    """Manage server lifespan, closing long-lived HTTP clients on shutdown (issue #277)."""
+    try:
+        yield {}
+    finally:
+        try:
+            await close_api_client()
+        finally:
+            await close_doh_client()
+
+
 def create_mcp_server(client: Any = None) -> FastMCP:
     """Create and configure the NextDNS MCP server.
 
@@ -246,11 +261,14 @@ def create_mcp_server(client: Any = None) -> FastMCP:
     generated from the OpenAPI spec anymore (see module docstring and issue
     #141/#146 for the rationale).
 
+    Args:
+        client: Retained for backward compatibility.
+
     Returns:
         FastMCP: Configured MCP server instance
     """
     logger.info("Creating NextDNS MCP server...")
-    mcp = FastMCP(name="NextDNS MCP Server")
+    mcp = FastMCP(name="NextDNS MCP Server", lifespan=_server_lifespan)
 
     # Add middleware to strip unknown fields from tool arguments
     # This allows AI clients (like OpenAI) that send extra fields to work properly

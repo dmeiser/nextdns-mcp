@@ -3,9 +3,11 @@
 import logging
 
 import pytest
-from fastmcp import FastMCP
+from fastmcp import Client, FastMCP
 
+from nextdns_mcp import client as client_module
 from nextdns_mcp.openapi import StripExtraFieldsMiddleware, create_mcp_server
+from nextdns_mcp.tools import doh as doh_module
 
 
 class TestCreateMcpServer:
@@ -114,3 +116,61 @@ class TestProductionServerTools:
         }
 
         assert not (tool_names & atomic_tools), f"Atomic tools still registered: {tool_names & atomic_tools}"
+
+
+class TestServerLifespan:
+    """Test that server lifespan shuts down long-lived HTTP clients (issue #277)."""
+
+    @pytest.mark.asyncio
+    async def test_server_lifespan_closes_http_clients(self, mock_api_key, monkeypatch):
+        """Server lifespan exit must close both API and DoH clients and reset singletons."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setattr(client_module, "_client", None)
+        monkeypatch.setattr(doh_module, "_doh_client", None)
+
+        server = create_mcp_server()
+        api_client = client_module.get_api_client()
+        doh_client = doh_module._get_doh_client()
+
+        try:
+            assert not api_client.is_closed
+            assert not doh_client.is_closed
+
+            async with server._lifespan_manager():
+                pass
+
+            assert api_client.is_closed
+            assert doh_client.is_closed
+            assert client_module._client is None
+            assert doh_module._doh_client is None
+        finally:
+            if not api_client.is_closed:
+                await api_client.aclose()
+            if not doh_client.is_closed:
+                await doh_client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_real_client_session_closes_http_clients_on_disconnect(self, mock_api_key, monkeypatch):
+        """A real MCP client session (the public surface) closes both clients when it ends.
+
+        The lifecycle above drives FastMCP's private ``_lifespan_manager``; this
+        one goes through ``fastmcp.Client``, so it also proves the hook is wired
+        into the transport the server actually runs under.
+        """
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setattr(client_module, "_client", None)
+        monkeypatch.setattr(doh_module, "_doh_client", None)
+
+        server = create_mcp_server()
+
+        async with Client(server) as mcp_client:
+            await mcp_client.list_tools()
+            api_client = client_module.get_api_client()
+            doh_client = doh_module._get_doh_client()
+            assert not api_client.is_closed
+            assert not doh_client.is_closed
+
+        assert api_client.is_closed
+        assert doh_client.is_closed
+        assert client_module._client is None
+        assert doh_module._doh_client is None
