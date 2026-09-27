@@ -48,7 +48,9 @@ LOGS_LIMIT_MAX = 1000
 
 # Caps for log downloads: the CSV is streamed to a temp file (never buffered
 # twice or inlined into the tool payload) and only a bounded preview is
-# returned so large multi-MB/GB downloads cannot blow up the LLM context.
+# returned so large downloads cannot blow up the LLM context. The total
+# download size itself is capped separately and configured in config.py
+# (NEXTDNS_DOWNLOAD_MAX_BYTES).
 DOWNLOAD_PREVIEW_MAX_LINES = 20
 DOWNLOAD_PREVIEW_MAX_BYTES = 256 * 1024
 
