@@ -46,7 +46,7 @@ class _StubUpstream(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def stub_nextdns_api(monkeypatch):
+async def stub_nextdns_api(monkeypatch):
     """Serve canned upstream statuses over real HTTP through the real ACL client."""
     _UPSTREAM.update(
         {
@@ -64,21 +64,29 @@ def stub_nextdns_api(monkeypatch):
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _StubUpstream)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base_url = f"http://127.0.0.1:{httpd.server_address[1]}"
-    monkeypatch.setattr(
-        client_module,
-        "_client",
-        client_module.AccessControlledClient(
-            base_url=base_url,
-            headers={"X-Api-Key": "test-key", "Accept": "application/json", "Content-Type": "application/json"},
-            timeout=5.0,
-            follow_redirects=False,
-        ),
-    )
     monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
     monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+    client = client_module.AccessControlledClient(
+        base_url=base_url,
+        headers={"X-Api-Key": "test-key", "Accept": "application/json", "Content-Type": "application/json"},
+        timeout=5.0,
+        follow_redirects=False,
+    )
+    # Every production read of the client goes through ``client.api_client``,
+    # which is served by the module's lazy ``__getattr__`` and therefore resolves
+    # to the ``_client`` singleton -- unless a real entry is sitting in the
+    # module dict, because a test that injected ``api_client`` directly leaves
+    # one behind on teardown (its monkeypatch probe is answered by that same
+    # ``__getattr__``). Such a leftover would shadow the stub and send these
+    # requests to the real api.nextdns.io on a dead event loop, so drop it here
+    # and again on the way out instead of depending on which tests ran before.
+    client_module.__dict__.pop("api_client", None)
+    monkeypatch.setattr(client_module, "_client", client)
     try:
         yield base_url
     finally:
+        client_module.__dict__.pop("api_client", None)
+        await client.aclose()
         httpd.shutdown()
         httpd.server_close()
         _UPSTREAM.clear()
