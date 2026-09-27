@@ -13,12 +13,9 @@ from nextdns_mcp.tools import doh as doh_module
 
 @pytest.fixture(autouse=True)
 def allow_doh_read_access(monkeypatch):
-    """Allow all DoH lookups by bypassing the can_read_profile gate.
-
-    Patches the function's global namespace directly so the bypass survives
-    module reloads performed by other tests.
-    """
-    monkeypatch.setitem(doh_module._dohLookup_impl.__globals__, "can_read_profile", lambda _profile_id: True)
+    """Allow all DoH lookups by opening the readable profile gate via the env."""
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
 
 def test_coerce_helpers():
@@ -204,7 +201,9 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     monkeypatch.setattr(doh_module, "_doh_client", DummyClient())
 
     # doh_lookup success
-    res = await doh_module.doh_lookup("https://dns.nextdns.io/abc123/dns-query", "google.com", "A", "abc123")
+    res = await doh_module.doh_lookup(
+        "https://dns.nextdns.io/abc123/dns-query", "google.com", "A", "abc123", config.load_profile_access_control()
+    )
     assert "_metadata" in res
 
     # _dohLookup_impl: no default profile
@@ -218,7 +217,7 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     assert "error" in r2 and "Invalid record type" in r2["error"]
 
     # success path uses doh_lookup
-    async def fake_exec(doh_url, domain, record_type, profile):
+    async def fake_exec(doh_url, domain, record_type, profile, access):
         return {"ok": True}
 
     monkeypatch.setattr(doh_module, "doh_lookup", fake_exec)

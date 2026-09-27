@@ -24,13 +24,14 @@ def clean_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def allow_doh_read_access(monkeypatch):
-    """Allow all DoH lookups by bypassing the can_read_profile gate.
+def allow_doh_read_access(monkeypatch, clean_env):
+    """Allow all DoH lookups by opening the readable profile gate via the env.
 
-    Patches the function's global namespace directly so the bypass survives
-    module reloads performed by other tests.
+    Depends on ``clean_env`` so the gate is opened after the environment is
+    stripped, not before.
     """
-    monkeypatch.setitem(_dohLookup_impl.__globals__, "can_read_profile", lambda _profile_id: True)
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
 
 @pytest.fixture(autouse=True)

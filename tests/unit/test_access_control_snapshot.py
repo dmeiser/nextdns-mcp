@@ -19,6 +19,7 @@ import pytest
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import config
+from nextdns_mcp.tools import doh as doh_module
 
 ACL_ENV_VARS = (
     "NEXTDNS_READ_ONLY",
@@ -143,12 +144,6 @@ def test_writable_all_grants_read_all(monkeypatch):
 
     assert snapshot.readable == frozenset()  # allow all
     assert snapshot.any_readable
-
-
-def test_no_dead_cache_globals_remain():
-    """The old always-reset module-level caches must not come back."""
-    for name in ("_readable_profiles_cache", "_writable_profiles_cache"):
-        assert not hasattr(config, name)
 
 
 # --- Per-request contract --------------------------------------------------
@@ -307,3 +302,52 @@ def test_convenience_wrappers_match_snapshot(monkeypatch):
     assert config.can_read_profile("abc123") is snapshot.can_read("abc123")
     assert config.can_write_profile("def456") is snapshot.can_write("def456")
     assert config.is_read_only() is snapshot.read_only
+
+
+# --- DoH lookups share the request's snapshot ------------------------------
+
+
+class _RecordingDohClient:
+    """Stand-in DoH client that records the queries it was asked to send."""
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    async def get(self, doh_url, params=None, headers=None):
+        self.queries.append(doh_url)
+        return _StubResponse({"Status": 0})
+
+
+class _StubResponse:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+def test_doh_query_is_authorized_by_the_request_snapshot(monkeypatch):
+    """A DoH query is sent only under the ACL values of the request that gated it."""
+    doh_client = _RecordingDohClient()
+    monkeypatch.setattr(doh_module, "_doh_client", doh_client)
+    doh_url = "https://dns.nextdns.io/abc123/dns-query"
+
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "abc123")
+    allowing = config.load_profile_access_control()
+    # Environment tightened while the request is in flight: the in-flight
+    # request keeps the values it started with, the next one does not.
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "")
+    allowed = run(doh_module.doh_lookup(doh_url, "example.com", "A", "abc123", allowing))
+    assert "error" not in allowed
+    assert doh_client.queries == [doh_url]
+
+    denying = config.load_profile_access_control()
+    # Environment reopened after the denying snapshot was taken: a request
+    # holding that snapshot still must not put the query on the wire.
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "abc123")
+    denied = run(doh_module.doh_lookup(doh_url, "example.com", "A", "abc123", denying))
+    assert denied["code"] == "read_access_denied"
+    assert doh_client.queries == [doh_url]

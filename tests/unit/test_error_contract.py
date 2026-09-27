@@ -17,7 +17,6 @@ import pytest
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server
 from nextdns_mcp.errors import ErrorCode, error_payload, http_error_payload
-from nextdns_mcp.tools.doh import _dohLookup_impl
 from nextdns_mcp.tools.logs import _manage_logs_impl
 from nextdns_mcp.tools.plots import _plot_analytics_series_impl
 from nextdns_mcp.tools.profiles import _manage_profiles_impl
@@ -290,7 +289,8 @@ class TestPlotAndDohErrorContract:
 
     @pytest.mark.asyncio
     async def test_doh_unsupported_metric_style_codes(self, monkeypatch):
-        monkeypatch.setitem(_dohLookup_impl.__globals__, "can_read_profile", lambda _p: False)
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "zzz999")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "zzz999")
         result = await server.dohLookup("example.com", "abc123", "A")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.READ_ACCESS_DENIED

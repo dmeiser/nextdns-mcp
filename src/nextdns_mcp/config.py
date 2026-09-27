@@ -45,7 +45,6 @@ DEFAULT_HTTP_TIMEOUT: float = 30.0
 
 # Constants for profile access control
 ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
-ALLOW_ALL_FROZENSET: frozenset[str] = frozenset()  # Same, for immutable snapshots
 
 
 def get_api_key() -> str | None:
@@ -248,11 +247,11 @@ def _combine_readable(readable: set[str] | None, writable: set[str] | None) -> f
 
     # If readable is empty set (ALL), allow all
     if not readable:
-        return ALLOW_ALL_FROZENSET
+        return frozenset(ALLOW_ALL_PROFILES)
 
     # Writable ALL implies readable ALL
     if not writable:
-        return ALLOW_ALL_FROZENSET
+        return frozenset(ALLOW_ALL_PROFILES)
 
     # Readable is set: combine with writable (write implies read)
     return frozenset(readable | writable)
