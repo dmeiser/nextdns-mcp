@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
-from nextdns_mcp.server import _is_loopback_host, get_mcp_run_options
+from nextdns_mcp.config import ConfigurationError
+from nextdns_mcp.server import _is_loopback_host, _resolve_transport, get_mcp_run_options
 
 
 class TestGetMcpRunOptions:
@@ -59,11 +60,13 @@ class TestGetMcpRunOptions:
                 assert "host" in options
                 assert "port" in options
 
-    def test_unknown_transport_falls_back_to_stdio(self):
-        """Test that unknown transport mode falls back to stdio."""
-        with patch.dict(os.environ, {"MCP_TRANSPORT": "grpc"}):
-            options = get_mcp_run_options()
-            assert options == {}
+    def test_unknown_transport_raises_configuration_error(self):
+        """Test that an unknown transport fails loudly instead of silently downgrading to stdio (#294)."""
+        with (
+            patch.dict(os.environ, {"MCP_TRANSPORT": "grpc"}, clear=True),
+            pytest.raises(ConfigurationError),
+        ):
+            get_mcp_run_options()
 
     def test_http_with_only_custom_host(self):
         """Test HTTP with only host customized."""
@@ -114,6 +117,56 @@ class TestGetMcpRunOptions:
             # Verify all keys are valid Python identifiers (can be used as kwargs)
             for key in options:
                 assert key.isidentifier(), f"Key '{key}' is not a valid identifier"
+
+
+class TestResolveTransport:
+    """Test _resolve_transport validation for MCP_TRANSPORT (#294).
+
+    A value the operator clearly did not intend must fail loudly instead of
+    silently downgrading to stdio; a trivially misspelled-but-clear value
+    (extra whitespace, case) must still resolve.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("http", "http"),
+            ("HTTP", "http"),  # case-insensitive
+            ("Http", "http"),
+            (" http", "http"),  # leading whitespace stripped
+            ("http ", "http"),  # trailing whitespace stripped
+            ("  HTTP  ", "http"),
+            ("stdio", "stdio"),
+            (" STDIO ", "stdio"),  # case-insensitive and trimmed
+        ],
+    )
+    def test_valid_transports_resolve(self, raw, expected):
+        """A recognized transport (modulo case/whitespace) resolves to it."""
+        with patch.dict(os.environ, {"MCP_TRANSPORT": raw}, clear=True):
+            assert _resolve_transport() == expected
+
+    def test_unset_defaults_to_stdio(self):
+        """With MCP_TRANSPORT unset, resolve to the stdio default."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert _resolve_transport() == "stdio"
+
+    @pytest.mark.parametrize("raw", ["https", "sse", "typo", "", " "])
+    def test_invalid_transports_raise_configuration_error(self, raw):
+        """An unrecognized transport fails loudly with ConfigurationError (#294)."""
+        with (
+            patch.dict(os.environ, {"MCP_TRANSPORT": raw}, clear=True),
+            pytest.raises(ConfigurationError),
+        ):
+            _resolve_transport()
+
+    @pytest.mark.parametrize("raw", ["https", "sse", "typo", ""])
+    def test_invalid_transports_raise_through_get_mcp_run_options(self, raw):
+        """The failure surfaces through get_mcp_run_options, not a silent stdio."""
+        with (
+            patch.dict(os.environ, {"MCP_TRANSPORT": raw}, clear=True),
+            pytest.raises(ConfigurationError),
+        ):
+            get_mcp_run_options()
 
 
 class TestIsLoopbackHost:
