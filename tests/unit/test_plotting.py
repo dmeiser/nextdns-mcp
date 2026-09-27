@@ -13,6 +13,15 @@ from nextdns_mcp import server
 from nextdns_mcp.tools import plots as plots_module
 
 
+def _make_response(json_data):
+    """Build a mock httpx.Response returning ``json_data``."""
+    response = MagicMock()
+    response.status_code = 200
+    response.content = b'{"dummy": true}'
+    response.json.return_value = json_data
+    return response
+
+
 def _png_is_complete(png: bytes) -> bool:
     """Return True if the PNG bytes end with a proper IEND chunk."""
     return png.endswith(b"IEND\xae\x42\x60\x82")
@@ -340,6 +349,33 @@ class TestPlotAnalyticsSeriesImpl:
         result = await plots_module._plot_analytics_series_impl("status", interval=30)
         assert "error" in result
         assert "interval must be at least 60" in result["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            ({"limit": 10_000}, 500),
+            ({"limit": -1}, 1),
+            ({"limit": 0}, 1),
+            ({"interval": 999_999}, 86_400),
+        ],
+    )
+    async def test_limit_and_interval_capped(self, clean_env, mock_api_client, monkeypatch, kwargs, expected):
+        """Caller-supplied limit/interval above the server-side caps are clamped (issue #267)."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        await plots_module._plot_analytics_series_impl("status", **kwargs)
+        key = "limit" if "limit" in kwargs else "interval"
+        assert mock_api_client.request.call_args.kwargs["params"][key] == expected
+
+    @pytest.mark.asyncio
+    async def test_limit_and_interval_unchanged_within_bounds(self, clean_env, mock_api_client, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        await plots_module._plot_analytics_series_impl("status", limit=10, interval=3600)
+        params = mock_api_client.request.call_args.kwargs["params"]
+        assert params["limit"] == 10
+        assert params["interval"] == 3600
 
     @pytest.mark.asyncio
     async def test_no_profile_returns_error(self, clean_env):
