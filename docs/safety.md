@@ -18,6 +18,7 @@ Reduce risk when operating on real NextDNS profiles.
 ## CI credentials
 - GitHub Actions logs are world-readable on a public repository; never print the API key or any file that contains it to CI logs.
 - The container E2E workflow (`.github/workflows/e2e-container.yml`) injects `NEXTDNS_API_KEY` into the test container via `docker run -e` from a GitHub Actions secret; it does not write the key to a catalog or other file, so there is no secret-bearing artifact to dump.
+- The same workflow also starts a second, disposable container with a hard-coded placeholder value (`e2e-invalid-key-not-a-real-credential`) to exercise the `/health` readiness failure path. That string is not a credential and is safe to see in logs; only the secret injected above needs rotation if exposed.
 - If a key is ever exposed in a log or artifact, rotate it immediately at <https://my.nextdns.io/account> and purge the affected runs/artifacts.
 
 ## CI live writes
