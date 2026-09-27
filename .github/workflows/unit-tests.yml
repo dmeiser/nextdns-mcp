@@ -97,13 +97,13 @@ jobs:
       - name: Run radon complexity check
         run: |
           # Project average complexity must stay at Grade A.
-          AVERAGE=$(uv run radon cc src/ -a --total-average | tail -1 | awk '{print $3}')
+          AVERAGE=$(uv run radon cc src/ scripts/run_container_e2e.py -a --total-average | tail -1 | awk '{print $3}')
           if [ "$AVERAGE" != "A" ]; then
             echo "Project average complexity is grade $AVERAGE, Grade A required."
             exit 1
           fi
           # No individual function may exceed Grade B.
-          OUTPUT=$(uv run radon cc src/ -nc)
+          OUTPUT=$(uv run radon cc src/ scripts/run_container_e2e.py -nc)
           if [ -n "$OUTPUT" ]; then
             echo "Radon found functions exceeding Grade B:"
             echo "$OUTPUT"

@@ -32,6 +32,24 @@ from scripts.validate_schema import (
 HEALTH_FAILURE_CLASSES = ("auth", "unreachable")
 
 
+def _assert_health_ok(body: Any, health_url: str) -> tuple[bool, str]:
+    """Assert the 200 side of the contract: exactly ``{"status": "ok"}``."""
+    if body != {"status": "ok"}:
+        return False, f'expected {{"status": "ok"}} from {health_url}, got {body}'
+    return True, f'GET {health_url} -> 200 {{"status": "ok"}}'
+
+
+def _assert_health_failure(body: dict[str, Any], health_url: str) -> tuple[bool, str]:
+    """Assert the 503 side: a documented failure class and a non-empty reason."""
+    failure_class = body.get("class")
+    if failure_class not in HEALTH_FAILURE_CLASSES:
+        return False, f"expected class in {HEALTH_FAILURE_CLASSES}, got {failure_class!r}"
+    reason = body.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return False, f"expected a non-empty reason in the {health_url} 503 body, got {body}"
+    return True, f"GET {health_url} -> 503 class={failure_class} reason={reason!r}"
+
+
 def check_health_endpoint(health_url: str, api_key: str, expect_ok: bool, timeout: float = 15.0) -> tuple[bool, str]:
     """Validate the served ``/health`` readiness endpoint over real HTTP.
 
@@ -69,21 +87,13 @@ def check_health_endpoint(health_url: str, api_key: str, expect_ok: bool, timeou
     if expect_ok:
         if response.status_code != 200:
             return False, f"expected HTTP 200 from {health_url}, got {response.status_code}: {body}"
-        if body != {"status": "ok"}:
-            return False, f'expected {{"status": "ok"}} from {health_url}, got {body}'
-        return True, f'GET {health_url} -> 200 {{"status": "ok"}}'
+        return _assert_health_ok(body, health_url)
 
     if response.status_code != 503:
         return False, f"expected HTTP 503 from {health_url}, got {response.status_code}: {body}"
     if not isinstance(body, dict) or body.get("status") != "error":
         return False, f'expected status "error" in the {health_url} 503 body, got {body}'
-    failure_class = body.get("class")
-    if failure_class not in HEALTH_FAILURE_CLASSES:
-        return False, f"expected class in {HEALTH_FAILURE_CLASSES}, got {failure_class!r}"
-    reason = body.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        return False, f"expected a non-empty reason in the {health_url} 503 body, got {body}"
-    return True, f"GET {health_url} -> 503 class={failure_class} reason={reason!r}"
+    return _assert_health_failure(body, health_url)
 
 
 # Colors for terminal output
@@ -119,6 +129,18 @@ EXPECTED_TOOLS = [
     "manageSettings",
     "plotAnalytics",
     "queryAnalytics",
+]
+
+LIST_WRITE_CASES = [
+    # (list_type, entry_id, supports_update); "{ts}" in entry_id is substituted
+    # with the run timestamp so repeated runs exercise fresh entries.
+    ("allowlist", "e2e-{ts}-allow.example.com", True),
+    ("denylist", "e2e-{ts}-deny.example.com", True),
+    ("privacy_blocklists", "nextdns-recommended", False),
+    ("privacy_natives", "apple", False),
+    ("security_tlds", "zip", False),
+    ("parental_categories", "gambling", True),
+    ("parental_services", "tiktok", True),
 ]
 
 SPEC_PATH = PROJECT_ROOT / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
@@ -204,18 +226,74 @@ class ContainerE2ERunner:
             f.write(json.dumps(record) + "\n")
         self.skipped_count += 1
 
-    async def execute_call(
+    def _parse_response_content(self, result: Any) -> tuple[str, bool, Any]:
+        """Split a tool result into (response_text, has_image, parsed_json)."""
+        response_text = ""
+        has_image = False
+        parsed_json: Any = None
+
+        for content_block in getattr(result, "content", []):
+            if isinstance(content_block, ImageContent) or getattr(content_block, "type", "") == "image":
+                has_image = True
+            elif isinstance(content_block, TextContent) or getattr(content_block, "type", "") == "text":
+                response_text = getattr(content_block, "text", "")
+
+        if response_text:
+            try:
+                parsed_json = json.loads(response_text)
+            except json.JSONDecodeError:
+                parsed_json = response_text
+
+        return response_text, has_image, parsed_json
+
+    @staticmethod
+    def _payload_error(parsed_json: Any) -> str | None:
+        """Return the error message carried by a JSON payload, or None when there is none."""
+        if isinstance(parsed_json, dict) and "error" in parsed_json:
+            return str(parsed_json["error"])
+        return None
+
+    @staticmethod
+    def _plot_missing_image(tool_name: str, is_error: bool, has_image: bool, response_text: str) -> bool:
+        """True when a plotAnalytics call succeeded without returning image content."""
+        return (
+            tool_name == "plotAnalytics"
+            and not is_error
+            and not has_image
+            and not (isinstance(response_text, str) and "data:image" in response_text)
+        )
+
+    def _validate_against_schema(self, tool_name: str, parsed_json: Any) -> tuple[str, str]:
+        """Validate a parsed payload against the OpenAPI spec.
+
+        Returns a (status, error) pair, where status is SKIPPED when no spec is
+        loaded or the payload is not schema-validated.
+        """
+        if not self.spec or parsed_json is None or parsed_json == {"success": True}:
+            return "SKIPPED", ""
+        status, err_lines = validate_tool_response(tool_name, parsed_json, self.spec)
+        if status == "INVALID":
+            log_warn(f"  Schema validation failed: {'; '.join(err_lines)}")
+            self.schema_errors += 1
+            return "INVALID", "; ".join(err_lines)
+        if status == "VALID":
+            return "VALID", ""
+        return status, ""
+
+    async def _call_with_retries(
         self,
         session: ClientSession,
         tool_name: str,
         args: dict[str, Any],
-        max_retries: int = 3,
-        retry_delay: float = 5.0,
-    ) -> tuple[bool, Any]:
-        """Execute a single tool call with retries and schema validation."""
-        args_str = " ".join(f"{k}={v}" for k, v in args.items())
-        log_info(f"Executing: {tool_name} {args_str}")
+        max_retries: int,
+        retry_delay: float,
+    ) -> tuple[float, str, Any]:
+        """Call the tool, retrying transient failures.
 
+        Returns:
+            A (duration, last_error, result) triple; ``result`` is None when every
+            attempt failed.
+        """
         start_time = time.time()
         attempt = 1
         last_error = ""
@@ -235,7 +313,21 @@ class ContainerE2ERunner:
                 else:
                     break
 
-        duration = time.time() - start_time
+        return time.time() - start_time, last_error, result
+
+    async def execute_call(
+        self,
+        session: ClientSession,
+        tool_name: str,
+        args: dict[str, Any],
+        max_retries: int = 3,
+        retry_delay: float = 5.0,
+    ) -> tuple[bool, Any]:
+        """Execute a single tool call with retries and schema validation."""
+        args_str = " ".join(f"{k}={v}" for k, v in args.items())
+        log_info(f"Executing: {tool_name} {args_str}")
+
+        duration, last_error, result = await self._call_with_retries(session, tool_name, args, max_retries, retry_delay)
 
         if last_error or result is None:
             log_error(f"{tool_name}: FAILED (call failed: {last_error})")
@@ -251,32 +343,15 @@ class ContainerE2ERunner:
 
         # Check for error payload or result.is_error
         is_error = getattr(result, "is_error", False)
-        response_text = ""
-        has_image = False
-        parsed_json: Any = None
+        response_text, has_image, parsed_json = self._parse_response_content(result)
 
-        for content_block in getattr(result, "content", []):
-            if isinstance(content_block, ImageContent) or getattr(content_block, "type", "") == "image":
-                has_image = True
-            elif isinstance(content_block, TextContent) or getattr(content_block, "type", "") == "text":
-                response_text = getattr(content_block, "text", "")
-
-        if response_text:
-            try:
-                parsed_json = json.loads(response_text)
-                if isinstance(parsed_json, dict) and "error" in parsed_json:
-                    is_error = True
-                    last_error = str(parsed_json["error"])
-            except json.JSONDecodeError:
-                parsed_json = response_text
+        payload_error = self._payload_error(parsed_json)
+        if payload_error is not None:
+            is_error = True
+            last_error = payload_error
 
         # Validate plotAnalytics image output
-        if (
-            tool_name == "plotAnalytics"
-            and not is_error
-            and not has_image
-            and not (isinstance(response_text, str) and "data:image" in response_text)
-        ):
+        if self._plot_missing_image(tool_name, is_error, has_image, response_text):
             is_error = True
             last_error = "plotAnalytics did not return image content"
 
@@ -293,17 +368,7 @@ class ContainerE2ERunner:
             return False, parsed_json
 
         # Schema validation
-        schema_status = "SKIPPED"
-        schema_error = ""
-        if self.spec and parsed_json is not None and parsed_json != {"success": True}:
-            status, err_lines = validate_tool_response(tool_name, parsed_json, self.spec)
-            schema_status = status
-            if status == "INVALID":
-                schema_error = "; ".join(err_lines)
-                log_warn(f"  Schema validation failed: {schema_error}")
-                self.schema_errors += 1
-            elif status == "VALID":
-                schema_status = "VALID"
+        schema_status, schema_error = self._validate_against_schema(tool_name, parsed_json)
 
         log_success(f"{tool_name}: OK")
         self.record_result(
@@ -345,6 +410,389 @@ class ContainerE2ERunner:
             log_error(detail)
         return passed
 
+    async def _preflight(self, session: ClientSession) -> bool:
+        """Enumerate the served tools and verify the expected set is present."""
+        log_info("Performing preflight checks...")
+        tools_result = await session.list_tools()
+        tool_names = [t.name for t in tools_result.tools]
+
+        missing_tools = [t for t in EXPECTED_TOOLS if t not in tool_names]
+        if missing_tools:
+            log_error(f"Missing expected tools: {missing_tools}")
+            return False
+
+        log_success(f"Found {len(tool_names)} tools; all {len(EXPECTED_TOOLS)} expected tools present")
+        return True
+
+    async def _create_profile(self, session: ClientSession) -> str:
+        """Create a test profile for live writes; empty when creation failed."""
+        log_info("Step 1: Creating test profile for live writes...")
+        ts = int(time.time())
+        p_name = f"E2E Test Profile {ts}"
+        ok, res = await self.execute_call(
+            session,
+            "manageProfiles",
+            {"operation": "create", "name": p_name},
+        )
+        created_profile_id = ""
+        if ok and isinstance(res, dict):
+            data_obj = res.get("data") if isinstance(res.get("data"), dict) else res
+            created_profile_id = str(data_obj.get("id") or "") if isinstance(data_obj, dict) else ""
+            if created_profile_id:
+                (self.artifacts_dir / "test_profile_id.txt").write_text(created_profile_id, encoding="utf-8")
+                log_success(f"Created test profile: {created_profile_id}")
+        if not created_profile_id:
+            log_error("Failed to create test profile")
+        return created_profile_id
+
+    async def _fetch_existing_profile(self, session: ClientSession) -> str:
+        """Fetch an existing profile for read-only tests; empty when none is available."""
+        log_info("Step 1: Fetching existing profile for read-only tests...")
+        ok, res = await self.execute_call(session, "manageProfiles", {"operation": "list"})
+        if ok and isinstance(res, dict) and "data" in res and res["data"]:
+            profile_id = str(res["data"][0].get("id") or "")
+            log_success(f"Using existing profile: {profile_id}")
+            if profile_id:
+                return profile_id
+        log_error("No existing profile available for read-only tests")
+        return ""
+
+    async def _provision_profile(self, session: ClientSession) -> tuple[str, str]:
+        """Create (live writes) or fetch (read-only) the test profile.
+
+        Returns:
+            A (profile_id, created_profile_id) pair; ``profile_id`` is empty when
+            provisioning failed. ``created_profile_id`` is non-empty only when this
+            run created the profile and must clean it up.
+        """
+        if self.allow_live_writes:
+            created_profile_id = await self._create_profile(session)
+            return created_profile_id, created_profile_id
+        profile_id = await self._fetch_existing_profile(session)
+        return profile_id, ""
+
+    async def _run_read_checks(
+        self,
+        session: ClientSession,
+        profile_id: str,
+        plot_profile_id: str,
+        one_hour_ago: int,
+        one_day_ago: int,
+    ) -> None:
+        """Exercise every read-only tool against the provisioned profile."""
+        log_info(f"Step 2: Testing grouped tools with profile {profile_id}...")
+
+        # Read-only tests
+        await self.execute_call(session, "manageProfiles", {"operation": "list"})
+        await self.execute_call(session, "manageProfiles", {"operation": "get", "profile_id": profile_id})
+
+        settings_cats = ["general", "privacy", "security", "parental", "performance", "logs", "blockpage"]
+        for cat in settings_cats:
+            await self.execute_call(
+                session,
+                "manageSettings",
+                {"operation": "get", "category": cat, "profile_id": profile_id},
+            )
+
+        list_types = [
+            "allowlist",
+            "denylist",
+            "privacy_blocklists",
+            "privacy_natives",
+            "security_tlds",
+            "parental_categories",
+            "parental_services",
+        ]
+        for lt in list_types:
+            await self.execute_call(
+                session,
+                "manageLists",
+                {"operation": "get", "list_type": lt, "profile_id": profile_id},
+            )
+
+        await self.execute_call(session, "manageRewrites", {"operation": "list", "profile_id": profile_id})
+        await self.execute_call(
+            session,
+            "manageLogs",
+            {"operation": "get", "profile_id": profile_id, "from_time": str(one_hour_ago), "limit": 10},
+        )
+        await self.execute_call(
+            session,
+            "manageLogs",
+            {"operation": "download", "profile_id": profile_id},
+        )
+        await self.execute_call(
+            session,
+            "dohLookup",
+            {"domain": "example.com", "profile_id": profile_id, "record_type": "A"},
+        )
+
+        # Analytics metrics
+        analytics_metrics = [
+            "status",
+            "domains",
+            "queryTypes",
+            "reasons",
+            "ips",
+            "dnssec",
+            "encryption",
+            "ipVersions",
+            "protocols",
+            "devices",
+            "destinations",
+        ]
+        for metric in analytics_metrics:
+            q_args: dict[str, Any] = {
+                "metric": metric,
+                "profile_id": plot_profile_id,
+                "from_time": str(one_day_ago),
+            }
+            if metric == "destinations":
+                q_args["destination_type"] = "countries"
+            await self.execute_call(session, "queryAnalytics", q_args)
+
+        series_metrics = [
+            "status",
+            "queryTypes",
+            "reasons",
+            "ips",
+            "dnssec",
+            "encryption",
+            "ipVersions",
+            "protocols",
+            "devices",
+            "destinations",
+        ]
+        for metric in series_metrics:
+            q_args = {
+                "metric": metric,
+                "profile_id": plot_profile_id,
+                "from_time": str(one_day_ago),
+                "series": True,
+            }
+            if metric == "destinations":
+                q_args["destination_type"] = "countries"
+            await self.execute_call(session, "queryAnalytics", q_args)
+
+    async def _run_plot_sweep(self, session: ClientSession, plot_profile_id: str, one_day_ago: int) -> None:
+        """Exercise plotAnalytics for each metric, or record skips when no plot profile is set."""
+        plot_metrics = [
+            "status",
+            "devices",
+            "protocols",
+            "queryTypes",
+            "ipVersions",
+            "dnssec",
+            "encryption",
+            "reasons",
+            "ips",
+        ]
+        if self.plot_profile:
+            for metric in plot_metrics:
+                await self.execute_call(
+                    session,
+                    "plotAnalytics",
+                    {"metric": metric, "profile_id": plot_profile_id, "from_time": str(one_day_ago)},
+                )
+        else:
+            log_warn("NEXTDNS_PLOT_PROFILE not set; skipping plotAnalytics tools")
+            for metric in plot_metrics:
+                self.record_skip("plotAnalytics", f"metric={metric}: NEXTDNS_PLOT_PROFILE not set")
+
+    async def _run_write_checks(self, session: ClientSession, profile_id: str) -> None:
+        """Exercise profile/settings updates, every list type, rewrites, and log clearing."""
+        log_info("Step 3: Running live write tests...")
+        ts = int(time.time())
+
+        await self.execute_call(
+            session,
+            "manageProfiles",
+            {"operation": "update", "profile_id": profile_id, "name": f"Updated E2E Profile {ts}"},
+        )
+        await self.execute_call(
+            session,
+            "manageSettings",
+            {
+                "operation": "update",
+                "category": "general",
+                "profile_id": profile_id,
+                "settings": {"web3": True},
+            },
+        )
+        await self.execute_call(
+            session,
+            "manageSettings",
+            {
+                "operation": "update",
+                "category": "logs",
+                "profile_id": profile_id,
+                "settings": {"enabled": True, "retention": 86400},
+            },
+        )
+        await self.execute_call(
+            session,
+            "manageSettings",
+            {
+                "operation": "update",
+                "category": "blockpage",
+                "profile_id": profile_id,
+                "settings": {"enabled": True},
+            },
+        )
+        await self.execute_call(
+            session,
+            "manageSettings",
+            {
+                "operation": "update",
+                "category": "performance",
+                "profile_id": profile_id,
+                "settings": {"ecs": True, "cacheBoost": True},
+            },
+        )
+        await self.execute_call(
+            session,
+            "manageSettings",
+            {
+                "operation": "update",
+                "category": "privacy",
+                "profile_id": profile_id,
+                "settings": {"disguisedTrackers": True, "allowAffiliate": False},
+            },
+        )
+        await self.execute_call(
+            session,
+            "manageSettings",
+            {
+                "operation": "update",
+                "category": "security",
+                "profile_id": profile_id,
+                "settings": {"threatIntelligenceFeeds": True, "googleSafeBrowsing": True},
+            },
+        )
+        await self.execute_call(
+            session,
+            "manageSettings",
+            {
+                "operation": "update",
+                "category": "parental",
+                "profile_id": profile_id,
+                "settings": {"safeSearch": True, "youtubeRestrictedMode": True},
+            },
+        )
+
+        for list_type, entry_template, supports_update in LIST_WRITE_CASES:
+            entry_id = entry_template.format(ts=ts)
+            await self.execute_call(
+                session,
+                "manageLists",
+                {
+                    "list_type": list_type,
+                    "operation": "replace",
+                    "profile_id": profile_id,
+                    "entries": [{"id": entry_id}],
+                },
+            )
+            if supports_update:
+                await self.execute_call(
+                    session,
+                    "manageLists",
+                    {
+                        "list_type": list_type,
+                        "operation": "update",
+                        "profile_id": profile_id,
+                        "entry_id": entry_id,
+                        "entry": {"active": True},
+                    },
+                )
+            await self.execute_call(
+                session,
+                "manageLists",
+                {
+                    "list_type": list_type,
+                    "operation": "remove",
+                    "profile_id": profile_id,
+                    "entry_id": entry_id,
+                },
+            )
+            await self.execute_call(
+                session,
+                "manageLists",
+                {
+                    "list_type": list_type,
+                    "operation": "add",
+                    "profile_id": profile_id,
+                    "entry": {"id": entry_id},
+                },
+            )
+            await self.execute_call(
+                session,
+                "manageLists",
+                {
+                    "list_type": list_type,
+                    "operation": "remove",
+                    "profile_id": profile_id,
+                    "entry_id": entry_id,
+                },
+            )
+
+        # rewrites
+        ok, rw_res = await self.execute_call(
+            session,
+            "manageRewrites",
+            {
+                "operation": "add",
+                "profile_id": profile_id,
+                "name": f"e2e-{ts}.example.com",
+                "content": "192.0.2.1",
+            },
+        )
+        if ok and isinstance(rw_res, dict):
+            rw_data = rw_res.get("data") if isinstance(rw_res.get("data"), dict) else rw_res
+            rw_id = str(rw_data.get("id") or "") if isinstance(rw_data, dict) else ""
+            if rw_id:
+                await self.execute_call(
+                    session,
+                    "manageRewrites",
+                    {"operation": "delete", "profile_id": profile_id, "entry_id": rw_id},
+                )
+
+        # logs clear
+        await self.execute_call(
+            session,
+            "manageLogs",
+            {"operation": "clear", "profile_id": profile_id},
+        )
+
+    async def _cleanup(self, created_profile_id: str) -> None:
+        """Delete the test profile if this run created it."""
+        if not created_profile_id:
+            return
+        log_info(f"Cleaning up test profile {created_profile_id}...")
+        try:
+            async with (
+                streamable_http_client(self.endpoint) as (r, w),
+                ClientSession(r, w) as cleanup_session,
+            ):
+                await cleanup_session.initialize()
+                await self.execute_call(
+                    cleanup_session,
+                    "manageProfiles",
+                    {"operation": "delete", "profile_id": created_profile_id},
+                )
+        except Exception as e:  # noqa: BLE001
+            log_warn(f"Failed to delete test profile {created_profile_id}: {e}")
+        finally:
+            (self.artifacts_dir / "test_profile_id.txt").unlink(missing_ok=True)
+
+    async def _run_health_only(self) -> int:
+        """Validate /health alone; returns the process exit code."""
+        # Nothing listens on the /mcp endpoint in this mode, so the health
+        # check is the only thing to run and there is no boot wait for it.
+        if not self.check_health():
+            return 1
+        log_success("/health readiness probe validated over HTTP")
+        return 0
+
     async def run(self) -> int:
         """Run the full container E2E suite."""
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -359,12 +807,7 @@ class ContainerE2ERunner:
         log_info("================================")
 
         if self.health_only:
-            # Nothing listens on the /mcp endpoint in this mode, so the health
-            # check is the only thing to run and there is no boot wait for it.
-            if not self.check_health():
-                return 1
-            log_success("/health readiness probe validated over HTTP")
-            return 0
+            return await self._run_health_only()
 
         # Wait for the container to accept connections first: the health probe
         # is a single un-retried request, so it must only run once the server
@@ -385,644 +828,39 @@ class ContainerE2ERunner:
                 await session.initialize()
                 log_success("Connected to MCP container and session initialized")
 
-                # Preflight: tool enumeration
-                log_info("Performing preflight checks...")
-                tools_result = await session.list_tools()
-                tool_names = [t.name for t in tools_result.tools]
-
-                missing_tools = [t for t in EXPECTED_TOOLS if t not in tool_names]
-                if missing_tools:
-                    log_error(f"Missing expected tools: {missing_tools}")
+                if not await self._preflight(session):
                     return 1
 
-                log_success(f"Found {len(tool_names)} tools; all {len(EXPECTED_TOOLS)} expected tools present")
+                profile_id, created_profile_id = await self._provision_profile(session)
+                if not profile_id:
+                    return 1
 
-                # Profile setup
-                profile_id = ""
-                if self.allow_live_writes:
-                    log_info("Step 1: Creating test profile for live writes...")
-                    ts = int(time.time())
-                    p_name = f"E2E Test Profile {ts}"
-                    ok, res = await self.execute_call(
-                        session,
-                        "manageProfiles",
-                        {"operation": "create", "name": p_name},
-                    )
-                    if ok and isinstance(res, dict):
-                        data_obj = res.get("data") if isinstance(res.get("data"), dict) else res
-                        created_profile_id = str(data_obj.get("id") or "") if isinstance(data_obj, dict) else ""
-                        if created_profile_id:
-                            profile_id = created_profile_id
-                            (self.artifacts_dir / "test_profile_id.txt").write_text(profile_id, encoding="utf-8")
-                            log_success(f"Created test profile: {profile_id}")
-                    if not profile_id:
-                        log_error("Failed to create test profile")
-                        return 1
-                else:
-                    log_info("Step 1: Fetching existing profile for read-only tests...")
-                    ok, res = await self.execute_call(session, "manageProfiles", {"operation": "list"})
-                    if ok and isinstance(res, dict) and "data" in res and res["data"]:
-                        profile_id = str(res["data"][0].get("id") or "")
-                        log_success(f"Using existing profile: {profile_id}")
-                    if not profile_id:
-                        log_error("No existing profile available for read-only tests")
-                        return 1
-
-                plot_profile_id = self.plot_profile or profile_id
                 now_ts = int(time.time())
                 one_day_ago = now_ts - 86400
                 one_hour_ago = now_ts - 3600
+                plot_profile_id = self.plot_profile or profile_id
 
-                log_info(f"Step 2: Testing grouped tools with profile {profile_id}...")
+                await self._run_read_checks(session, profile_id, plot_profile_id, one_hour_ago, one_day_ago)
+                await self._run_plot_sweep(session, plot_profile_id, one_day_ago)
 
-                # Read-only tests
-                await self.execute_call(session, "manageProfiles", {"operation": "list"})
-                await self.execute_call(session, "manageProfiles", {"operation": "get", "profile_id": profile_id})
-
-                settings_cats = ["general", "privacy", "security", "parental", "performance", "logs", "blockpage"]
-                for cat in settings_cats:
-                    await self.execute_call(
-                        session,
-                        "manageSettings",
-                        {"operation": "get", "category": cat, "profile_id": profile_id},
-                    )
-
-                list_types = [
-                    "allowlist",
-                    "denylist",
-                    "privacy_blocklists",
-                    "privacy_natives",
-                    "security_tlds",
-                    "parental_categories",
-                    "parental_services",
-                ]
-                for lt in list_types:
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {"operation": "get", "list_type": lt, "profile_id": profile_id},
-                    )
-
-                await self.execute_call(session, "manageRewrites", {"operation": "list", "profile_id": profile_id})
-                await self.execute_call(
-                    session,
-                    "manageLogs",
-                    {"operation": "get", "profile_id": profile_id, "from_time": str(one_hour_ago), "limit": 10},
-                )
-                await self.execute_call(
-                    session,
-                    "manageLogs",
-                    {"operation": "download", "profile_id": profile_id},
-                )
-                await self.execute_call(
-                    session,
-                    "dohLookup",
-                    {"domain": "example.com", "profile_id": profile_id, "record_type": "A"},
-                )
-
-                # Analytics metrics
-                analytics_metrics = [
-                    "status",
-                    "domains",
-                    "queryTypes",
-                    "reasons",
-                    "ips",
-                    "dnssec",
-                    "encryption",
-                    "ipVersions",
-                    "protocols",
-                    "devices",
-                    "destinations",
-                ]
-                for metric in analytics_metrics:
-                    q_args: dict[str, Any] = {
-                        "metric": metric,
-                        "profile_id": plot_profile_id,
-                        "from_time": str(one_day_ago),
-                    }
-                    if metric == "destinations":
-                        q_args["destination_type"] = "countries"
-                    await self.execute_call(session, "queryAnalytics", q_args)
-
-                series_metrics = [
-                    "status",
-                    "queryTypes",
-                    "reasons",
-                    "ips",
-                    "dnssec",
-                    "encryption",
-                    "ipVersions",
-                    "protocols",
-                    "devices",
-                    "destinations",
-                ]
-                for metric in series_metrics:
-                    q_args = {
-                        "metric": metric,
-                        "profile_id": plot_profile_id,
-                        "from_time": str(one_day_ago),
-                        "series": True,
-                    }
-                    if metric == "destinations":
-                        q_args["destination_type"] = "countries"
-                    await self.execute_call(session, "queryAnalytics", q_args)
-
-                # Plot analytics
-                plot_metrics = [
-                    "status",
-                    "devices",
-                    "protocols",
-                    "queryTypes",
-                    "ipVersions",
-                    "dnssec",
-                    "encryption",
-                    "reasons",
-                    "ips",
-                ]
-                if self.plot_profile:
-                    for metric in plot_metrics:
-                        await self.execute_call(
-                            session,
-                            "plotAnalytics",
-                            {"metric": metric, "profile_id": plot_profile_id, "from_time": str(one_day_ago)},
-                        )
-                else:
-                    log_warn("NEXTDNS_PLOT_PROFILE not set; skipping plotAnalytics tools")
-                    for metric in plot_metrics:
-                        self.record_skip("plotAnalytics", f"metric={metric}: NEXTDNS_PLOT_PROFILE not set")
-
-                # Live writes
                 if self.allow_live_writes:
-                    log_info("Step 3: Running live write tests...")
-                    ts = int(time.time())
-                    allow_entry = f"e2e-{ts}-allow.example.com"
-                    deny_entry = f"e2e-{ts}-deny.example.com"
-
-                    await self.execute_call(
-                        session,
-                        "manageProfiles",
-                        {"operation": "update", "profile_id": profile_id, "name": f"Updated E2E Profile {ts}"},
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageSettings",
-                        {
-                            "operation": "update",
-                            "category": "general",
-                            "profile_id": profile_id,
-                            "settings": {"web3": True},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageSettings",
-                        {
-                            "operation": "update",
-                            "category": "logs",
-                            "profile_id": profile_id,
-                            "settings": {"enabled": True, "retention": 86400},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageSettings",
-                        {
-                            "operation": "update",
-                            "category": "blockpage",
-                            "profile_id": profile_id,
-                            "settings": {"enabled": True},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageSettings",
-                        {
-                            "operation": "update",
-                            "category": "performance",
-                            "profile_id": profile_id,
-                            "settings": {"ecs": True, "cacheBoost": True},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageSettings",
-                        {
-                            "operation": "update",
-                            "category": "privacy",
-                            "profile_id": profile_id,
-                            "settings": {"disguisedTrackers": True, "allowAffiliate": False},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageSettings",
-                        {
-                            "operation": "update",
-                            "category": "security",
-                            "profile_id": profile_id,
-                            "settings": {"threatIntelligenceFeeds": True, "googleSafeBrowsing": True},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageSettings",
-                        {
-                            "operation": "update",
-                            "category": "parental",
-                            "profile_id": profile_id,
-                            "settings": {"safeSearch": True, "youtubeRestrictedMode": True},
-                        },
-                    )
-
-                    # allowlist
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "allowlist",
-                            "operation": "replace",
-                            "profile_id": profile_id,
-                            "entries": [{"id": allow_entry}],
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "allowlist",
-                            "operation": "update",
-                            "profile_id": profile_id,
-                            "entry_id": allow_entry,
-                            "entry": {"active": True},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "allowlist",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": allow_entry,
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "allowlist",
-                            "operation": "add",
-                            "profile_id": profile_id,
-                            "entry": {"id": allow_entry},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "allowlist",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": allow_entry,
-                        },
-                    )
-
-                    # denylist
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "denylist",
-                            "operation": "replace",
-                            "profile_id": profile_id,
-                            "entries": [{"id": deny_entry}],
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "denylist",
-                            "operation": "update",
-                            "profile_id": profile_id,
-                            "entry_id": deny_entry,
-                            "entry": {"active": True},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "denylist",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": deny_entry,
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "denylist",
-                            "operation": "add",
-                            "profile_id": profile_id,
-                            "entry": {"id": deny_entry},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "denylist",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": deny_entry,
-                        },
-                    )
-
-                    # privacy_blocklists
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "privacy_blocklists",
-                            "operation": "replace",
-                            "profile_id": profile_id,
-                            "entries": [{"id": "nextdns-recommended"}],
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "privacy_blocklists",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": "nextdns-recommended",
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "privacy_blocklists",
-                            "operation": "add",
-                            "profile_id": profile_id,
-                            "entry": {"id": "nextdns-recommended"},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "privacy_blocklists",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": "nextdns-recommended",
-                        },
-                    )
-
-                    # privacy_natives
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "privacy_natives",
-                            "operation": "replace",
-                            "profile_id": profile_id,
-                            "entries": [{"id": "apple"}],
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "privacy_natives",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": "apple",
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "privacy_natives",
-                            "operation": "add",
-                            "profile_id": profile_id,
-                            "entry": {"id": "apple"},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "privacy_natives",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": "apple",
-                        },
-                    )
-
-                    # security_tlds
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "security_tlds",
-                            "operation": "replace",
-                            "profile_id": profile_id,
-                            "entries": [{"id": "zip"}],
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "security_tlds",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": "zip",
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "security_tlds",
-                            "operation": "add",
-                            "profile_id": profile_id,
-                            "entry": {"id": "zip"},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "security_tlds",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": "zip",
-                        },
-                    )
-
-                    # parental_categories
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "parental_categories",
-                            "operation": "replace",
-                            "profile_id": profile_id,
-                            "entries": [{"id": "gambling"}],
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "parental_categories",
-                            "operation": "update",
-                            "profile_id": profile_id,
-                            "entry_id": "gambling",
-                            "entry": {"active": True},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "parental_categories",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": "gambling",
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "parental_categories",
-                            "operation": "add",
-                            "profile_id": profile_id,
-                            "entry": {"id": "gambling"},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "parental_categories",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": "gambling",
-                        },
-                    )
-
-                    # parental_services
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "parental_services",
-                            "operation": "replace",
-                            "profile_id": profile_id,
-                            "entries": [{"id": "tiktok"}],
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "parental_services",
-                            "operation": "update",
-                            "profile_id": profile_id,
-                            "entry_id": "tiktok",
-                            "entry": {"active": True},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "parental_services",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": "tiktok",
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "parental_services",
-                            "operation": "add",
-                            "profile_id": profile_id,
-                            "entry": {"id": "tiktok"},
-                        },
-                    )
-                    await self.execute_call(
-                        session,
-                        "manageLists",
-                        {
-                            "list_type": "parental_services",
-                            "operation": "remove",
-                            "profile_id": profile_id,
-                            "entry_id": "tiktok",
-                        },
-                    )
-
-                    # rewrites
-                    ok, rw_res = await self.execute_call(
-                        session,
-                        "manageRewrites",
-                        {
-                            "operation": "add",
-                            "profile_id": profile_id,
-                            "name": f"e2e-{ts}.example.com",
-                            "content": "192.0.2.1",
-                        },
-                    )
-                    if ok and isinstance(rw_res, dict):
-                        rw_data = rw_res.get("data") if isinstance(rw_res.get("data"), dict) else rw_res
-                        rw_id = str(rw_data.get("id") or "") if isinstance(rw_data, dict) else ""
-                        if rw_id:
-                            await self.execute_call(
-                                session,
-                                "manageRewrites",
-                                {"operation": "delete", "profile_id": profile_id, "entry_id": rw_id},
-                            )
-
-                    # logs clear
-                    await self.execute_call(
-                        session,
-                        "manageLogs",
-                        {"operation": "clear", "profile_id": profile_id},
-                    )
+                    await self._run_write_checks(session, profile_id)
                 else:
                     log_info("Skipping write operations (allow_live_writes=False)")
-
         finally:
-            # Cleanup test profile if created
-            if created_profile_id:
-                log_info(f"Cleaning up test profile {created_profile_id}...")
-                try:
-                    async with (
-                        streamable_http_client(self.endpoint) as (r, w),
-                        ClientSession(r, w) as cleanup_session,
-                    ):
-                        await cleanup_session.initialize()
-                        await self.execute_call(
-                            cleanup_session,
-                            "manageProfiles",
-                            {"operation": "delete", "profile_id": created_profile_id},
-                        )
-                except Exception as e:  # noqa: BLE001
-                    log_warn(f"Failed to delete test profile {created_profile_id}: {e}")
-                finally:
-                    (self.artifacts_dir / "test_profile_id.txt").unlink(missing_ok=True)
+            await self._cleanup(created_profile_id)
 
-        # Execution Summary
+        self._log_summary()
+
+        if self.failed_count > 0 or self.schema_errors > 0:
+            log_error("E2E test failed")
+            return 1
+
+        log_success("All executed E2E calls completed successfully")
+        return 0
+
+    def _log_summary(self) -> None:
+        """Log the execution summary."""
         log_info("")
         log_info("================================")
         log_info(f"Execution Summary ({self.variant})")
@@ -1037,13 +875,6 @@ class ContainerE2ERunner:
         if self.schema_errors > 0:
             log_warn(f"Schema validation errors: {self.schema_errors}")
         log_info(f"Report: {self.report_file}")
-
-        if self.failed_count > 0 or self.schema_errors > 0:
-            log_error("E2E test failed")
-            return 1
-
-        log_success("All executed E2E calls completed successfully")
-        return 0
 
 
 def parse_args() -> argparse.Namespace:

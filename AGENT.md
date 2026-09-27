@@ -123,11 +123,11 @@ open htmlcov/index.html
 **Project Complexity**: Grade A
 - Measured using `radon` tool
 - Project average complexity must be grade A
-- Run: `uv run radon cc src/ -a`
+- Run: `uv run radon cc src/ scripts/run_container_e2e.py -a`
 
 **Function Complexity**: Maximum Grade B
 - No individual function may exceed grade B (cyclomatic complexity ≤10)
-- Check with: `uv run radon cc src/ -nc`
+- Check with: `uv run radon cc src/ scripts/run_container_e2e.py -nc`
 - If a function exceeds grade B:
   - Refactor into smaller functions
   - Extract complex conditional logic
@@ -150,8 +150,8 @@ Before claiming work is complete:
 - [ ] Run `uv run mypy src/` (0 errors)
 - [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (100% coverage, **ALL tests pass**)
 - [ ] Verify per-file coverage: all files 100% in `htmlcov/index.html`
-- [ ] Run `uv run radon cc src/ -a` (verify grade A)
-- [ ] Run `uv run radon cc src/ -nc` (verify no functions exceed grade B)
+- [ ] Run `uv run radon cc src/ scripts/run_container_e2e.py -a` (verify grade A)
+- [ ] Run `uv run radon cc src/ scripts/run_container_e2e.py -nc` (verify no functions exceed grade B)
 - [ ] Commit formatting changes as final commit before validation
 
 **CRITICAL**: If ANY check fails, fix the issues and restart from step 1. Continue iterating through all quality checks until every standard is met with zero failures.
