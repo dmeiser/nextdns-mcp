@@ -10,13 +10,29 @@ endpoint, while leaving a legitimate local client untouched.
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 ENV_VAR = "FASTMCP_HTTP_HOST_ORIGIN_PROTECTION"
 ALLOWED_HOSTS_VAR = "FASTMCP_HTTP_ALLOWED_HOSTS"
 PROTECTION_AUTO = "auto"
 MCP_ENDPOINT = "/mcp"
+DOCKERFILES = ("Dockerfile", "Dockerfile.alpine")
+
+_IMAGE_PROBE = """
+from fastmcp import settings
+from starlette.testclient import TestClient
+
+from nextdns_mcp import server
+
+app = server.configure().http_app(transport="http", path="/mcp")
+with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+    status = client.get("/mcp", headers={"host": "evil.example"}).status_code
+print(f"setting={settings.http_host_origin_protection}")
+print(f"rebinding={status}")
+"""
 
 
 @pytest.fixture
@@ -52,6 +68,51 @@ def test_env_var_enables_auto_mode_in_fastmcp() -> None:
     assert result.stdout.strip() == PROTECTION_AUTO
 
 
+def _image_environment(dockerfile: str) -> dict[str, str]:
+    """Return the ``KEY=VALUE`` environment a built image inherits from its ``ENV`` blocks."""
+    pairs: dict[str, str] = {}
+    lines = (REPO_ROOT / dockerfile).read_text(encoding="utf-8").splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("ENV "):
+            entries = [line[len("ENV ") :].strip()]
+            while entries[-1].endswith("\\"):
+                entries[-1] = entries[-1][:-1].strip()
+                index += 1
+                entries.append(lines[index].strip())
+            for entry in " ".join(entries).split():
+                key, _, value = entry.partition("=")
+                pairs[key] = value
+        index += 1
+    return pairs
+
+
+@pytest.mark.parametrize("dockerfile", DOCKERFILES)
+def test_shipped_image_environment_turns_the_guard_on(dockerfile: str) -> None:
+    """The images' own environment must resolve to ``auto`` and actually reject a rebinding.
+
+    The image environment is the change's only functional artifact, so it is run
+    through the real server rather than matched as text: the subprocess builds
+    the HTTP app the way the entrypoint does and reports what a request carrying
+    a foreign ``Host`` gets.
+    """
+    image_env = _image_environment(dockerfile)
+    env = {key: value for key, value in image_env.items() if key != "PYTHONPATH"}
+    env["PATH"] = os.environ.get("PATH", "")
+
+    result = subprocess.run(
+        [sys.executable, "-c", _IMAGE_PROBE],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    observed = dict(line.split("=", 1) for line in result.stdout.split("\n") if "=" in line)
+    assert observed == {"setting": PROTECTION_AUTO, "rebinding": "421"}
+
+
 def test_configure_does_not_enable_origin_protection_implicitly(build_app, monkeypatch) -> None:
     """Enabling it by default would 421 a reverse proxy fronting a loopback bind.
 
@@ -61,12 +122,12 @@ def test_configure_does_not_enable_origin_protection_implicitly(build_app, monke
     """
     import fastmcp
 
-    monkeypatch.setattr(fastmcp.settings, "http_host_origin_protection", PROTECTION_AUTO)
+    monkeypatch.setattr(fastmcp.settings, "http_host_origin_protection", False)
 
     build_app()
 
     assert ENV_VAR not in os.environ
-    assert fastmcp.settings.http_host_origin_protection == PROTECTION_AUTO
+    assert fastmcp.settings.http_host_origin_protection is False
 
 
 def test_loopback_endpoint_rejects_a_rebound_host_header(build_app) -> None:
