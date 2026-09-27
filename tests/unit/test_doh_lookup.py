@@ -11,12 +11,9 @@ from nextdns_mcp.tools.doh import _dohLookup_impl as dohLookup
 
 @pytest.fixture(autouse=True)
 def allow_doh_read_access(monkeypatch):
-    """Allow all DoH lookups by bypassing the can_read_profile gate.
-
-    Patches the function's global namespace directly so the bypass survives
-    module reloads performed by other tests.
-    """
-    monkeypatch.setitem(dohLookup.__globals__, "can_read_profile", lambda _profile_id: True)
+    """Allow all DoH lookups by opening the readable profile gate via the env."""
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
 
 @pytest.fixture(autouse=True)
@@ -45,11 +42,29 @@ class TestDohLookup:
     @pytest.mark.asyncio
     async def test_doh_lookup_denies_unreadable_profile(self, mock_profile_id, monkeypatch):
         """Test that dohLookup respects read access controls."""
-        monkeypatch.setitem(dohLookup.__globals__, "can_read_profile", lambda _profile_id: False)
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "zzz999")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "zzz999")
         result = await dohLookup("example.com", mock_profile_id, "A")
         assert "error" in result
         assert "Read access denied" in result["error"]
         assert result["code"] == "read_access_denied"
+
+    @pytest.mark.asyncio
+    async def test_doh_lookup_denies_before_validating_record_type(self, mock_profile_id, monkeypatch, mock_doh_client):
+        """Access control precedes argument validation on the DoH path.
+
+        A profile that is not readable is reported as read_access_denied even
+        when the record type is also invalid, so the error code callers branch
+        on stays the authorization one.
+        """
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "zzz999")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "zzz999")
+
+        result = await dohLookup("example.com", mock_profile_id, "BOGUS")
+
+        assert result["code"] == "read_access_denied"
+        assert "Read access denied" in result["error"]
+        assert mock_doh_client.get.await_count == 0
 
     @pytest.mark.asyncio
     async def test_doh_lookup_rejects_invalid_profile_id(self, monkeypatch):
@@ -84,8 +99,8 @@ class TestDohLookup:
 
         importlib.reload(doh_module)
 
-        # Re-apply access bypass after module reload.
-        monkeypatch.setattr(doh_module, "can_read_profile", lambda _profile_id: True)
+        # Re-apply access after module reload.
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
         # The reload reset the module-level client cache; reinstall the mock.
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_response = Mock()

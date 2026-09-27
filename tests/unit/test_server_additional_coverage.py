@@ -6,19 +6,16 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import coercion, openapi, server
+from nextdns_mcp import coercion, config, openapi, server
 from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools import doh as doh_module
 
 
 @pytest.fixture(autouse=True)
 def allow_doh_read_access(monkeypatch):
-    """Allow all DoH lookups by bypassing the can_read_profile gate.
-
-    Patches the function's global namespace directly so the bypass survives
-    module reloads performed by other tests.
-    """
-    monkeypatch.setitem(doh_module._dohLookup_impl.__globals__, "can_read_profile", lambda _profile_id: True)
+    """Allow all DoH lookups by opening the readable profile gate via the env."""
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
 
 def test_coerce_helpers():
@@ -135,23 +132,23 @@ def test_access_denied_error_carries_reason():
     assert err.profile_id == "abc"
 
 
-def test_access_control_client_checks(monkeypatch):
+def test_access_control_client_checks():
     client = client_module.AccessControlledClient()
 
     # Deny write, read-only true
-    monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
-    monkeypatch.setattr(client_module, "is_read_only", lambda: True)
-
+    read_only_denies = config.ProfileAccessControl(read_only=True, readable=frozenset(), writable=None)
     with pytest.raises(client_module.AccessDeniedError) as exc_info:
-        client._check_write_access("abc", "PUT", "/profiles/abc")
+        client._check_write_access("abc", "PUT", "/profiles/abc", read_only_denies)
     assert exc_info.value.code == "write_access_denied"
+    assert exc_info.value.profile_id == "abc"
     assert "read-only" in str(exc_info.value).lower()
 
     # Deny read
-    monkeypatch.setattr(client_module, "can_read_profile", lambda _id: False)
+    read_denies = config.ProfileAccessControl(read_only=False, readable=None, writable=frozenset({"abc123"}))
     with pytest.raises(client_module.AccessDeniedError) as exc_info2:
-        client._check_read_access("abc", "GET", "/profiles/abc")
+        client._check_read_access("abc", "GET", "/profiles/abc", read_denies)
     assert exc_info2.value.code == "read_access_denied"
+    assert exc_info2.value.profile_id == "abc"
 
 
 @pytest.mark.asyncio
@@ -160,10 +157,9 @@ async def test_request_body_passthrough_and_access_denied(monkeypatch):
 
     # Test request returns early when access denied
     monkeypatch.setattr(client_module, "extract_profile_id_from_url", lambda url: "abc123")
-    monkeypatch.setattr(client_module, "can_write_profile", lambda _id: False)
-    monkeypatch.setattr(client_module, "is_read_only", lambda: False)
     # allow reads for this test
-    monkeypatch.setattr(client_module, "can_read_profile", lambda _id: True)
+    allow_read = config.ProfileAccessControl(read_only=False, readable=frozenset(), writable=frozenset())
+    monkeypatch.setattr(client_module, "load_profile_access_control", lambda: allow_read)
 
     async def fake_super_request(self, method, url, **kwargs):
         return httpx.Response(200, json={"ok": True})
@@ -205,7 +201,9 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     monkeypatch.setattr(doh_module, "_doh_client", DummyClient())
 
     # doh_lookup success
-    res = await doh_module.doh_lookup("https://dns.nextdns.io/abc123/dns-query", "google.com", "A", "abc123")
+    res = await doh_module.doh_lookup(
+        "https://dns.nextdns.io/abc123/dns-query", "google.com", "A", "abc123", config.load_profile_access_control()
+    )
     assert "_metadata" in res
 
     # _dohLookup_impl: no default profile
@@ -219,7 +217,7 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
     assert "error" in r2 and "Invalid record type" in r2["error"]
 
     # success path uses doh_lookup
-    async def fake_exec(doh_url, domain, record_type, profile):
+    async def fake_exec(doh_url, domain, record_type, profile, access):
         return {"ok": True}
 
     monkeypatch.setattr(doh_module, "doh_lookup", fake_exec)

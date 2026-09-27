@@ -9,7 +9,13 @@ from typing import Any
 import httpx
 
 from ..coercion import OptionalProfileId
-from ..config import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES, can_read_profile, get_http_timeout
+from ..config import (
+    DNS_STATUS_CODES,
+    VALID_DNS_RECORD_TYPES,
+    ProfileAccessControl,
+    get_http_timeout,
+    load_profile_access_control,
+)
 from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import resolve_profile_id
 
@@ -57,8 +63,26 @@ def _build_doh_metadata(
     return metadata
 
 
-async def doh_lookup(doh_url: str, domain: str, record_type: str, target_profile: str) -> dict[str, Any]:
-    """Execute DoH query and return result with metadata."""
+def _read_denied(target_profile: str) -> dict[str, Any]:
+    """Build the read-access-denied payload for a profile."""
+    logger.warning(f"Read access denied for profile: {target_profile}")
+    return error_payload(ErrorCode.READ_ACCESS_DENIED, f"Read access denied for profile: {target_profile}")
+
+
+async def doh_lookup(
+    doh_url: str, domain: str, record_type: str, target_profile: str, access: ProfileAccessControl
+) -> dict[str, Any]:
+    """Execute DoH query and return result with metadata.
+
+    The read gate is enforced here, on the function that actually sends the
+    query, against the caller's request snapshot. The decision to query
+    upstream and the query itself are therefore always authorized by the same
+    environment values, even if the environment changes while the request is
+    in flight (issue #179).
+    """
+    if not access.can_read(target_profile):
+        return _read_denied(target_profile)
+
     params = {"name": domain, "type": record_type}
     headers = {"accept": "application/dns-json"}
 
@@ -97,8 +121,11 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
         return error
     assert target_profile is not None
 
-    if not can_read_profile(target_profile):
-        return error_payload(ErrorCode.READ_ACCESS_DENIED, f"Read access denied for profile: {target_profile}")
+    # One snapshot for the whole lookup: this decision, the send-time gate in
+    # doh_lookup() and the query they authorize all use these values.
+    access = load_profile_access_control()
+    if not access.can_read(target_profile):
+        return _read_denied(target_profile)
 
     is_valid, record_type_upper = _validate_record_type(record_type)
     if not is_valid:
@@ -111,7 +138,7 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
 
     doh_url = f"https://dns.nextdns.io/{target_profile}/dns-query"
     logger.info(f"DoH lookup: {domain} ({record_type_upper}) via profile {target_profile}")
-    return await doh_lookup(doh_url, domain, record_type_upper, target_profile)
+    return await doh_lookup(doh_url, domain, record_type_upper, target_profile, access)
 
 
 async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_type: str = "A") -> dict[str, Any]:

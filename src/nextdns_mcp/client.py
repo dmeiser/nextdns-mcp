@@ -15,13 +15,10 @@ import httpx
 from .config import (
     NEXTDNS_BASE_URL,
     ConfigurationError,
-    can_read_profile,
-    can_write_profile,
+    ProfileAccessControl,
     get_api_key,
     get_http_timeout,
-    get_readable_profiles_set,
-    get_writable_profiles_set,
-    is_read_only,
+    load_profile_access_control,
 )
 from .errors import ErrorCode
 
@@ -121,12 +118,12 @@ class AccessDeniedError(Exception):
 class AccessControlledClient(httpx.AsyncClient):
     """HTTP client wrapper that enforces profile access control."""
 
-    def _check_write_access(self, profile_id: str, method: str, url: str) -> None:
-        """Check write access; raise AccessDeniedError if denied."""
-        if can_write_profile(profile_id):
+    def _check_write_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
+        """Check write access against the request snapshot; raise AccessDeniedError if denied."""
+        if access.can_write(profile_id):
             return
 
-        if is_read_only():
+        if access.read_only:
             error_msg = "Write operation denied: server is in read-only mode"
         else:
             error_msg = f"Write access denied for profile: {profile_id}"
@@ -134,57 +131,57 @@ class AccessControlledClient(httpx.AsyncClient):
         logger.warning(f"{error_msg} (method={method}, url={str(url).split('?', 1)[0]})")
         raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED, profile_id=profile_id)
 
-    def _check_read_access(self, profile_id: str, method: str, url: str) -> None:
-        """Check read access; raise AccessDeniedError if denied."""
-        if can_read_profile(profile_id):
+    def _check_read_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
+        """Check read access against the request snapshot; raise AccessDeniedError if denied."""
+        if access.can_read(profile_id):
             return
 
         error_msg = f"Read access denied for profile: {profile_id}"
         logger.warning(f"{error_msg} (method={method}, url={str(url).split('?', 1)[0]})")
         raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED, profile_id=profile_id)
 
-    def _check_collection_write_access(self, method: str, url: str) -> None:
+    def _check_collection_write_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
         """Enforce global write denials for collection endpoints (no profile_id in URL).
 
         Collection endpoints such as POST /profiles create resources that belong to a
         profile, so they must respect read-only mode and the writable-profile set even
         though the URL carries no profile_id.
         """
-        if is_read_only():
+        if access.read_only:
             error_msg = "Write operation denied: server is in read-only mode"
             logger.warning(f"{error_msg} (method={method}, url={url})")
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
-        if get_writable_profiles_set() is None:
+        if not access.any_writable:
             error_msg = "Write access denied: no profiles are writable"
             logger.warning(f"{error_msg} (method={method}, url={url})")
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
-    def _check_collection_read_access(self, method: str, url: str) -> None:
+    def _check_collection_read_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
         """Enforce global read denials for collection endpoints (no profile_id in URL).
 
         Collection endpoints such as GET /profiles list profile-scoped resources, so
         they must respect the readable-profile deny-all default even though the URL
         carries no profile_id.
         """
-        if get_readable_profiles_set() is None:
+        if not access.any_readable:
             error_msg = "Read access denied: no profiles are readable"
             logger.warning(f"{error_msg} (method={method}, url={url})")
             raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED)
 
-    def _check_access(self, profile_id: str, method: str, url: str) -> None:
+    def _check_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
         """Check access control for profile operations; raise AccessDeniedError if denied."""
         if is_write_operation(method):
-            self._check_write_access(profile_id, method, url)
+            self._check_write_access(profile_id, method, url, access)
         else:
-            self._check_read_access(profile_id, method, url)
+            self._check_read_access(profile_id, method, url, access)
 
-    def _check_collection_access(self, method: str, url: str) -> None:
+    def _check_collection_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
         """Check access control for collection operations; raise AccessDeniedError if denied."""
         if is_write_operation(method):
-            self._check_collection_write_access(method, url)
+            self._check_collection_write_access(method, url, access)
         else:
-            self._check_collection_read_access(method, url)
+            self._check_collection_read_access(method, url, access)
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
         """Make an HTTP request with access control checks.
@@ -216,8 +213,13 @@ class AccessControlledClient(httpx.AsyncClient):
         unclassifiable_profiles_path = request_path is not None and request_path.rstrip("/").startswith("/profiles/")
         profile_id = _extract_profile_id_from_path(request_path)
 
+        # One snapshot per request: every check below, and the decision to send
+        # the request upstream at all, is made against the same env values even
+        # if the environment changes while this call is in flight (issue #179).
+        access = load_profile_access_control()
+
         if profile_id:
-            self._check_access(profile_id, method, url)
+            self._check_access(profile_id, method, url, access)
         elif is_absolute_url or contains_traversal or unclassifiable_profiles_path:
             # Fail closed: absolute/authority-bearing URLs, traversal payloads, and
             # unclassifiable /profiles paths cannot be matched against the profile
@@ -226,7 +228,7 @@ class AccessControlledClient(httpx.AsyncClient):
             logger.warning(f"Forbidden URL: {logged_path} (method={method})")
             raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or "")
         else:
-            self._check_collection_access(method, url)
+            self._check_collection_access(method, url, access)
 
         # No body coercion here: string values in JSON bodies are passed through
         # unchanged. Schema-aware coercion of tool arguments already happens in
@@ -245,9 +247,10 @@ class AccessControlledClient(httpx.AsyncClient):
         """
         logger.info(f"HTTP Stream: {method} {url}")
 
+        access = load_profile_access_control()
         profile_id = extract_profile_id_from_url(str(url))
         if profile_id:
-            self._check_access(profile_id, method, str(url))
+            self._check_access(profile_id, method, str(url), access)
 
         async with super().stream(method, url, **kwargs) as response:
             yield response
