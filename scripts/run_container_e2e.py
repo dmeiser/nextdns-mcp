@@ -242,11 +242,11 @@ class ContainerE2ERunner:
         return response_text, has_image, parsed_json
 
     @staticmethod
-    def _payload_error(parsed_json: Any) -> str:
-        """Return the error message carried by a JSON payload, or "" when there is none."""
+    def _payload_error(parsed_json: Any) -> str | None:
+        """Return the error message carried by a JSON payload, or None when there is none."""
         if isinstance(parsed_json, dict) and "error" in parsed_json:
             return str(parsed_json["error"])
-        return ""
+        return None
 
     @staticmethod
     def _plot_missing_image(tool_name: str, is_error: bool, has_image: bool, response_text: str) -> bool:
@@ -280,7 +280,6 @@ class ContainerE2ERunner:
         session: ClientSession,
         tool_name: str,
         args: dict[str, Any],
-        args_str: str,
         max_retries: int,
         retry_delay: float,
     ) -> tuple[float, str, Any]:
@@ -324,7 +323,7 @@ class ContainerE2ERunner:
         log_info(f"Executing: {tool_name} {args_str}")
 
         duration, last_error, result = await self._call_with_retries(
-            session, tool_name, args, args_str, max_retries, retry_delay
+            session, tool_name, args, max_retries, retry_delay
         )
 
         if last_error or result is None:
@@ -344,7 +343,7 @@ class ContainerE2ERunner:
         response_text, has_image, parsed_json = self._parse_response_content(result)
 
         payload_error = self._payload_error(parsed_json)
-        if payload_error:
+        if payload_error is not None:
             is_error = True
             last_error = payload_error
 
