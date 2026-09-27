@@ -36,8 +36,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .client import get_api_client
-from .coercion import _is_integer
 from .config import ConfigurationError, get_api_key, get_default_profile
+from .utils import is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
 
@@ -133,12 +133,12 @@ class StripExtraFieldsMiddleware(Middleware):
         sl = s.lower()
         if "boolean" in schema_types and sl in ("true", "false"):
             return sl == "true"
-        if "integer" in schema_types and _is_integer(s):
+        if "integer" in schema_types and is_integer_shaped(s):
             try:
                 return int(s)
             except ValueError:
                 return s
-        if "number" in schema_types and s.replace(".", "", 1).replace("-", "", 1).isdecimal():
+        if "number" in schema_types and is_float_shaped(s):
             try:
                 return float(s)
             except ValueError:

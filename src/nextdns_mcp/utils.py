@@ -48,6 +48,31 @@ def is_safe_entry_id(value: str) -> bool:
     return bool(SAFE_ENTRY_ID_PATTERN.match(value))
 
 
+def is_integer_shaped(value: str) -> bool:
+    """Return True if value is a string that represents an integer.
+
+    Decimal digits (optionally signed with ``-``) qualify, so non-decimal
+    digit-like characters such as ``"²"`` are rejected instead of relying on
+    ``int()`` accepting them inconsistently.
+    """
+    try:
+        int(value)
+        return value.isdecimal() or (value.startswith("-") and value[1:].isdecimal())
+    except ValueError:
+        return False
+
+
+def is_float_shaped(value: str) -> bool:
+    """Return True if value is a string that could represent a float.
+
+    At most one ``.`` and one ``-`` are ignored when testing for decimal digits,
+    so malformed values (``"3.14.15"``) and Unicode digit-like characters
+    (``"1.²"``) are rejected. Parsing may still fail for an accepted shape; the
+    caller is responsible for handling that.
+    """
+    return value.replace(".", "", 1).replace("-", "", 1).isdecimal()
+
+
 def resolve_profile_id(
     profile_id: str | int | None = None,
     *,
