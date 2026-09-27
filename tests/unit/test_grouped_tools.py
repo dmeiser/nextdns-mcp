@@ -1425,21 +1425,24 @@ class TestManageProfilesAccessAndValidation:
 
     @pytest.mark.asyncio
     async def test_list_denied_when_no_readable_profiles(self, mock_api_client, monkeypatch):
-        monkeypatch.setattr(profiles_module, "get_readable_profiles_set", lambda: None)
+        snapshot = config.ProfileAccessControl(read_only=False, readable=None, writable=None)
+        monkeypatch.setattr(profiles_module, "load_profile_access_control", lambda: snapshot)
         result = await server.manageProfiles("list")
         assert "error" in result
         assert "no profiles are readable" in result["error"].lower()
 
     @pytest.mark.asyncio
     async def test_create_denied_when_no_writable_profiles(self, mock_api_client, monkeypatch):
-        monkeypatch.setattr(profiles_module, "get_writable_profiles_set", lambda: None)
+        snapshot = config.ProfileAccessControl(read_only=False, readable=frozenset(), writable=None)
+        monkeypatch.setattr(profiles_module, "load_profile_access_control", lambda: snapshot)
         result = await server.manageProfiles("create", name="Test")
         assert "error" in result
         assert "no profiles are writable" in result["error"].lower()
 
     @pytest.mark.asyncio
     async def test_create_denied_in_read_only_mode(self, mock_api_client, monkeypatch):
-        monkeypatch.setattr(profiles_module, "is_read_only", lambda: True)
+        snapshot = config.ProfileAccessControl(read_only=True, readable=frozenset(), writable=frozenset())
+        monkeypatch.setattr(profiles_module, "load_profile_access_control", lambda: snapshot)
         result = await server.manageProfiles("create", name="Test")
         assert "error" in result
         assert "read-only" in result["error"].lower()
