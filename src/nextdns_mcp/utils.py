@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 import httpx
+import json
 
 from . import client
 from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError, _log_safe_error, _redacted
@@ -187,7 +188,16 @@ async def _api_request(method: str, url: str, params: dict[str, Any] | None = No
         response.raise_for_status()
         if response.status_code == 204 or not response.content:
             return {"success": True}
-        return response.json()
+        data = response.json()
+        # Check for API-level error in successful response
+        if isinstance(data, dict) and data.get("error"):
+            raise NextDNSError(
+                f"API error in {method} {url}: {data.get('error')}",
+                status_code=None,
+                response_body=json.dumps(data),
+                error_payload=data
+            )
+        return data
     except AccessDeniedError as e:
         # Raised by the ACL layer before any network request. Kept out of the
         # httpx.HTTPError branch: a real upstream 403 (raise_for_status) must

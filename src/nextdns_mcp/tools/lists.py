@@ -56,6 +56,8 @@ async def _lists_get(base_url: str) -> dict[str, Any]:
     try:
         return await _api_request("GET", base_url)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        if hasattr(e, 'error_payload') and e.error_payload is not None:
+            return e.error_payload
         cause = e.__cause__
         if cause is not None and isinstance(cause, httpx.HTTPError):
             return http_error_payload(str(e), cause)
@@ -75,6 +77,8 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
     try:
         return await _api_request("POST", base_url, json=body)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        if hasattr(e, 'error_payload') and e.error_payload is not None:
+            return e.error_payload
         cause = e.__cause__
         if cause is not None and isinstance(cause, httpx.HTTPError):
             return http_error_payload(str(e), cause)
@@ -130,6 +134,8 @@ async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | No
     try:
             return await _api_request("PUT", base_url, json=entries)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        if hasattr(e, 'error_payload') and e.error_payload is not None:
+            return e.error_payload
         cause = e.__cause__
         if cause is not None and isinstance(cause, httpx.HTTPError):
             return http_error_payload(str(e), cause)
@@ -158,6 +164,8 @@ async def _lists_update(
     try:
             return await _api_request("PATCH", f"{base_url}/{entry_id}", json=entry)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        if hasattr(e, 'error_payload') and e.error_payload is not None:
+            return e.error_payload
         cause = e.__cause__
         if cause is not None and isinstance(cause, httpx.HTTPError):
             return http_error_payload(str(e), cause)
@@ -172,6 +180,8 @@ async def _lists_remove(base_url: str, entry_id: str | None) -> dict[str, Any]:
     try:
             return await _api_request("DELETE", f"{base_url}/{entry_id}")
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        if hasattr(e, 'error_payload') and e.error_payload is not None:
+            return e.error_payload
         cause = e.__cause__
         if cause is not None and isinstance(cause, httpx.HTTPError):
             return http_error_payload(str(e), cause)

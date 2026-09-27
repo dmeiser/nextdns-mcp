@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
-from ..errors import ErrorCode, error_payload, http_error_payload
+from ..errors import ErrorCode, error_payload, http_error_payload, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
 from ..utils import _api_request, resolve_profile_id, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
 import httpx
 
@@ -45,6 +45,8 @@ async def _manage_settings_impl(
         try:
                     return await _api_request("GET", url)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            if hasattr(e, 'error_payload') and e.error_payload is not None:
+                return e.error_payload
             cause = e.__cause__
             if cause is not None and isinstance(cause, httpx.HTTPError):
                 return http_error_payload(str(e), cause)
@@ -59,6 +61,8 @@ async def _manage_settings_impl(
         try:
                     return await _api_request("PATCH", url, json=settings)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            if hasattr(e, 'error_payload') and e.error_payload is not None:
+                return e.error_payload
             cause = e.__cause__
             if cause is not None and isinstance(cause, httpx.HTTPError):
                 return http_error_payload(str(e), cause)

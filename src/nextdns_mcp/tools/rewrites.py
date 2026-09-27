@@ -47,6 +47,8 @@ async def _manage_rewrites_impl(
         try:
                     return await _api_request("GET", base_url)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            if hasattr(e, 'error_payload') and e.error_payload is not None:
+                return e.error_payload
             cause = e.__cause__
             if cause is not None and isinstance(cause, httpx.HTTPError):
                 return http_error_payload(str(e), cause)
@@ -59,6 +61,8 @@ async def _manage_rewrites_impl(
         try:
                     return await _api_request("POST", base_url, json={"name": name, "content": content})
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            if hasattr(e, 'error_payload') and e.error_payload is not None:
+                return e.error_payload
             cause = e.__cause__
             if cause is not None and isinstance(cause, httpx.HTTPError):
                 return http_error_payload(str(e), cause)
@@ -71,6 +75,8 @@ async def _manage_rewrites_impl(
         try:
                     return await _api_request("DELETE", f"{base_url}/{entry_id}")
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            if hasattr(e, 'error_payload') and e.error_payload is not None:
+                return e.error_payload
             cause = e.__cause__
             if cause is not None and isinstance(cause, httpx.HTTPError):
                 return http_error_payload(str(e), cause)
