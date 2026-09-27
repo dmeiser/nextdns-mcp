@@ -23,11 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 def _unlink_temp_file(path: str) -> None:
-    """Best-effort removal of a temp file; never masks the original error."""
+    """Best-effort removal of the temp file AND its mkdtemp parent; never masks the original error."""
     try:
         os.unlink(path)
     except OSError:
         logger.warning(f"Failed to remove temp log file: {path}")
+    try:
+        os.rmdir(os.path.dirname(path))  # the mkdtemp() parent is empty once the CSV is gone
+    except OSError:
+        pass
 
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
