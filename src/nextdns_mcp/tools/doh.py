@@ -120,7 +120,8 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
     target_profile, error = resolve_profile_id(profile_id)
     if error:
         return error
-    assert target_profile is not None
+    if target_profile is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
 
     # One snapshot for the whole lookup: this decision, the send-time gate in
     # doh_lookup() and the query they authorize all use these values.

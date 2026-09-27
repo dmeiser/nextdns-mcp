@@ -26,11 +26,15 @@ from nextdns_mcp.tools import settings as settings_module
 # One entry per tool site that narrows the resolved profile id before use.
 TOOL_CALLS = [
     pytest.param(doh_module, lambda: doh_module._dohLookup_impl("example.com"), id="doh"),
-    pytest.param(profiles_module, lambda: profiles_module._manage_profiles_impl("get", profile_id="abc123"), id="profiles"),
-    pytest.param(plots_module, lambda: plots_module._plot_analytics_series_impl("queries"), id="plots"),
+    pytest.param(
+        profiles_module, lambda: profiles_module._manage_profiles_impl("get", profile_id="abc123"), id="profiles"
+    ),
+    pytest.param(plots_module, lambda: plots_module._plot_analytics_series_impl("devices"), id="plots"),
     pytest.param(analytics_module, lambda: analytics_module._query_analytics_impl("domains", "abc123"), id="analytics"),
     pytest.param(logs_module, lambda: logs_module._manage_logs_impl("get", "abc123"), id="logs"),
-    pytest.param(settings_module, lambda: settings_module._manage_settings_impl("get", "general", "abc123"), id="settings"),
+    pytest.param(
+        settings_module, lambda: settings_module._manage_settings_impl("get", "general", "abc123"), id="settings"
+    ),
     pytest.param(lists_module, lambda: lists_module._manage_lists_impl("denylist", "get", "abc123"), id="lists"),
 ]
 

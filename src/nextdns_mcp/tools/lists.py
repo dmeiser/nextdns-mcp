@@ -146,7 +146,8 @@ async def _manage_lists_impl(
     target_profile, error = resolve_profile_id(profile_id, allow_default=False)
     if error:
         return error
-    assert target_profile is not None
+    if target_profile is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
 
     if entry_id is not None:
         error = _validate_entry_id(entry_id)
