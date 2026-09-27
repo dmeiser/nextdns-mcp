@@ -18,7 +18,7 @@ from ..client import AccessDeniedError, _log_safe_error
 from ..coercion import ProfileId
 from ..config import get_download_max_bytes
 from ..errors import ErrorCode, error_payload, http_error_payload
-from ..utils import _api_request, _build_query_params, _cap_limit, access_denied_payload, resolve_profile_id
+from ..utils import _api_request, _build_query_params, _cap_limit, access_denied_payload, resolve_profile_id, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
 
 logger = logging.getLogger(__name__)
 

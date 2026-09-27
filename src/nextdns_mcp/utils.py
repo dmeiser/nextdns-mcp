@@ -12,7 +12,15 @@ import httpx
 from . import client
 from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError, _log_safe_error, _redacted
 from .config import get_default_profile
-from .errors import ErrorCode, error_payload, http_error_payload, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
+from .errors import (
+    ErrorCode,
+    NextDNSAuthError,
+    NextDNSError,
+    NextDNSRateLimitError,
+    NextDNSServerError,
+    error_payload,
+    http_error_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -192,13 +200,13 @@ async def _api_request(method: str, url: str, params: dict[str, Any] | None = No
         status_code = getattr(e.response, 'status_code', None)
         response_body = getattr(e.response, 'text', None) if e.response is not None else None
         if status_code in (401, 403):
-            raise NextDNSAuthError(message, status_code=status_code, response_body=response_body)
+            raise NextDNSAuthError(message, status_code=status_code, response_body=response_body) from e
         elif status_code == 429:
-            raise NextDNSRateLimitError(message, status_code=status_code, response_body=response_body)
-        elif 500 <= status_code < 600:
-            raise NextDNSServerError(message, status_code=status_code, response_body=response_body)
+            raise NextDNSRateLimitError(message, status_code=status_code, response_body=response_body) from e
+        elif status_code is not None and 500 <= status_code < 600:
+            raise NextDNSServerError(message, status_code=status_code, response_body=response_body) from e
         else:
-            raise NextDNSError(message, status_code=status_code, response_body=response_body)
+            raise NextDNSError(message, status_code=status_code, response_body=response_body) from e
     except Exception as e:  # noqa: BLE001
         logger.error(f"Unexpected error in {method} {_redacted(url)}: {_log_safe_error(e)}")
         raise NextDNSError(f"Unexpected error in {method} {url}: {e}", status_code=None, response_body=str(e)) from e

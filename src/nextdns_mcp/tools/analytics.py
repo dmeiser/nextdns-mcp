@@ -6,8 +6,20 @@ SPDX-License-Identifier: MIT
 from typing import Any
 
 from ..coercion import ProfileId
-from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_query_params, _build_series_params, _cap_limit, resolve_profile_id
+import httpx
+
+from ..errors import ErrorCode, error_payload, http_error_payload
+from ..utils import (
+    NextDNSAuthError,
+    NextDNSError,
+    NextDNSRateLimitError,
+    NextDNSServerError,
+    _api_request,
+    _build_query_params,
+    _build_series_params,
+    _cap_limit,
+    resolve_profile_id,
+)
 from .metrics import NON_SERIES_METRICS, AnalyticsMetric
 
 # Server-side cap for the ``limit`` parameter (maximum accepted by the NextDNS API).

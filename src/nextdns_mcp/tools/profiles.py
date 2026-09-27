@@ -6,10 +6,19 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import OptionalProfileId
-from ..config import load_profile_access_control
-from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_query_params, resolve_profile_id, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
 import httpx
+
+from ..config import load_profile_access_control
+from ..errors import ErrorCode, error_payload, http_error_payload
+from ..utils import (
+    NextDNSAuthError,
+    NextDNSError,
+    NextDNSRateLimitError,
+    NextDNSServerError,
+    _api_request,
+    _build_query_params,
+    resolve_profile_id,
+)
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ProfileOperation = Literal["list", "create", "get", "update", "delete"]

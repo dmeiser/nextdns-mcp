@@ -6,8 +6,18 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
-from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _optional_entry_id_error, resolve_profile_id
+import httpx
+
+from ..errors import ErrorCode, error_payload, http_error_payload
+from ..utils import (
+    NextDNSAuthError,
+    NextDNSError,
+    NextDNSRateLimitError,
+    NextDNSServerError,
+    _api_request,
+    _optional_entry_id_error,
+    resolve_profile_id,
+)
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ListType = Literal[
