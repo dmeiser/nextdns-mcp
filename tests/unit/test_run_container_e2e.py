@@ -180,10 +180,24 @@ async def test_run_success_read_only(runner: ContainerE2ERunner):
     mock_session = AsyncMock()
     mock_session.list_tools.return_value = mock_tools_res
 
-    mock_call_res = MagicMock()
-    mock_call_res.is_error = False
-    mock_call_res.content = [TextContent(type="text", text='{"data":[{"id":"test-profile-id"}]}')]
-    mock_session.call_tool.return_value = mock_call_res
+    def _call_tool(name, arguments):
+        mock_res = MagicMock()
+        mock_res.is_error = False
+        if name == "dohLookup":
+            mock_res.content = [
+                TextContent(
+                    type="text",
+                    text='{"data":{"Status":0},"_metadata":{"profile_id":"test-profile-id",'
+                    '"query_domain":"example.com","query_type":"A",'
+                    '"doh_endpoint":"https://dns.nextdns.io/test-profile-id/dns-query?name=example.com&type=A",'
+                    '"status_description":"NOERROR"}}',
+                )
+            ]
+        else:
+            mock_res.content = [TextContent(type="text", text='{"data":[{"id":"test-profile-id"}]}')]
+        return mock_res
+
+    mock_session.call_tool.side_effect = _call_tool
 
     mock_read = AsyncMock()
     mock_write = AsyncMock()

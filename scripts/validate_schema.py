@@ -15,79 +15,48 @@ subtree rather than guessing a type.
 
 import json
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-# Mapping from grouped MCP tool names to the OpenAPI operationIds they dispatch to.
+# Mapping from grouped MCP tool names to the OpenAPI operationIds whose
+# response schemas are validated. Write operations that return a synthetic
+# ``{"success": True}`` payload (204-style) have no response body to validate
+# and are therefore not listed; every listed id must resolve to a schema in
+# the vendored spec (asserted at startup by assert_operation_coverage).
 # A response is valid if it conforms to at least one of the listed schemas.
 GROUPED_TOOL_OPERATIONS: dict[str, list[str]] = {
     "manageProfiles": [
         "listProfiles",
         "createProfile",
         "getProfile",
-        "updateProfile",
-        "deleteProfile",
     ],
     "manageSettings": [
         "getSettings",
-        "updateSettings",
         "getLogsSettings",
-        "updateLogsSettings",
         "getBlockPageSettings",
-        "updateBlockPageSettings",
         "getPerformanceSettings",
-        "updatePerformanceSettings",
         "getSecuritySettings",
-        "updateSecuritySettings",
         "getPrivacySettings",
-        "updatePrivacySettings",
         "getParentalControlSettings",
-        "updateParentalControlSettings",
     ],
     "manageLists": [
         "getDenylist",
-        "addToDenylist",
-        "replaceDenylist",
-        "updateDenylistEntry",
-        "removeFromDenylist",
         "getAllowlist",
-        "addToAllowlist",
-        "replaceAllowlist",
-        "updateAllowlistEntry",
-        "removeFromAllowlist",
         "getParentalControlServices",
-        "replaceParentalControlServices",
-        "addToParentalControlServices",
-        "updateParentalControlServiceEntry",
-        "removeFromParentalControlServices",
         "getParentalControlCategories",
-        "replaceParentalControlCategories",
-        "addToParentalControlCategories",
-        "updateParentalControlCategoryEntry",
-        "removeFromParentalControlCategories",
         "getSecurityTLDs",
-        "addSecurityTLD",
-        "replaceSecurityTLDs",
-        "removeSecurityTLD",
         "getPrivacyBlocklists",
-        "addPrivacyBlocklist",
-        "replacePrivacyBlocklists",
-        "removePrivacyBlocklist",
         "getPrivacyNatives",
-        "addPrivacyNative",
-        "replacePrivacyNatives",
-        "removePrivacyNative",
     ],
     "manageRewrites": [
         "listRewrites",
         "addRewrite",
-        "deleteRewrite",
     ],
     "manageLogs": [
         "getLogs",
-        "clearLogs",
         "downloadLogs",
     ],
     "queryAnalytics": [
@@ -186,6 +155,37 @@ def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> di
                             return schema
 
     return None
+
+
+def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str]) -> None:
+    """Hard-fail when the tool/operation mapping drifts from the spec or the server.
+
+    Every operationId listed in GROUPED_TOOL_OPERATIONS must resolve to a
+    response schema in ``spec``: an id that resolves to nothing used to
+    degrade to SKIPPED at validation time, which the E2E workflow counts as
+    neither pass nor fail. The key set must match ``expected_tools`` so a
+    tool added to the server without a mapping (or a mapping entry for a
+    tool the server no longer serves) fails here too.
+
+    Raises:
+        ValueError: listing the offending tools or operation ids.
+    """
+    expected = set(expected_tools)
+    mapped = set(GROUPED_TOOL_OPERATIONS)
+    missing = sorted(expected - mapped)
+    if missing:
+        raise ValueError(f"Tools missing from GROUPED_TOOL_OPERATIONS: {missing}")
+    extra = sorted(mapped - expected)
+    if extra:
+        raise ValueError(f"GROUPED_TOOL_OPERATIONS tools not in the server tool set: {extra}")
+    unresolvable = sorted(
+        op_id
+        for op_ids in GROUPED_TOOL_OPERATIONS.values()
+        for op_id in op_ids
+        if get_operation_response_schema(spec, op_id) is None
+    )
+    if unresolvable:
+        raise ValueError(f"operationIds that resolve to no response schema: {unresolvable}")
 
 
 def validate_field_type(value: Any, expected_type: str) -> bool:
