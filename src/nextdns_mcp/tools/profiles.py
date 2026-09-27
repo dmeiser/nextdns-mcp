@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import OptionalProfileId
-from ..config import get_readable_profiles_set, get_writable_profiles_set, is_read_only
+from ..config import load_profile_access_control
 from ..errors import ErrorCode, error_payload
 from ..utils import _api_request, _build_query_params, resolve_profile_id
 
@@ -15,7 +15,10 @@ ProfileOperation = Literal["list", "create", "get", "update", "delete"]
 
 
 async def _profiles_list(cursor: str | None = None) -> dict[str, Any]:
-    if get_readable_profiles_set() is None:
+    # One snapshot for the whole operation (issue #257), like the client
+    # request and dohLookup paths.
+    access = load_profile_access_control()
+    if not access.any_readable:
         return error_payload(ErrorCode.READ_ACCESS_DENIED, "Read access denied: no profiles are readable")
     params = _build_query_params(cursor=cursor)
     result = await _api_request("GET", "/profiles", params=params or None)
@@ -27,9 +30,12 @@ async def _profiles_list(cursor: str | None = None) -> dict[str, Any]:
 
 
 async def _profiles_create(name: str | None) -> dict[str, Any]:
-    if is_read_only():
+    # One snapshot for the whole operation (issue #257), so the read-only
+    # check and the writable-set check cannot disagree with each other.
+    access = load_profile_access_control()
+    if access.read_only:
         return error_payload(ErrorCode.WRITE_ACCESS_DENIED, "Write operation denied: server is in read-only mode")
-    if get_writable_profiles_set() is None:
+    if not access.any_writable:
         return error_payload(ErrorCode.WRITE_ACCESS_DENIED, "Write access denied: no profiles are writable")
     if not name:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for create operation")

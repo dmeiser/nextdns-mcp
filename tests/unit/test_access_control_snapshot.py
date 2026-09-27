@@ -20,6 +20,7 @@ import pytest
 from nextdns_mcp import client as client_module
 from nextdns_mcp import config
 from nextdns_mcp.tools import doh as doh_module
+from nextdns_mcp.tools import profiles as profiles_module
 
 ACL_ENV_VARS = (
     "NEXTDNS_READ_ONLY",
@@ -324,6 +325,37 @@ def test_convenience_wrappers_match_snapshot(monkeypatch):
     assert config.can_read_profile("abc123") is snapshot.can_read("abc123")
     assert config.can_write_profile("def456") is snapshot.can_write("def456")
     assert config.is_read_only() is snapshot.read_only
+
+
+# --- Collection tools share one snapshot for the whole operation (issue #257)
+
+
+@pytest.mark.parametrize(
+    ("operation", "kwargs", "env"),
+    [
+        ("list", {}, {"NEXTDNS_READABLE_PROFILES": "abc123"}),
+        ("create", {"name": "new"}, {"NEXTDNS_WRITABLE_PROFILES": "abc123"}),
+    ],
+)
+def test_collection_tool_takes_one_snapshot_per_operation(monkeypatch, operation, kwargs, env):
+    """manageProfiles reads the ACL environment once per logical call.
+
+    The tool's own checks used to take one snapshot each (two for
+    ``create``, which consults both the read-only flag and the writable
+    set), so a single MCP call read every ACL variable twice. The upstream
+    request is stubbed out here: this asserts the tool-side contract, the
+    client's own send-time re-check is covered by the request tests above.
+    """
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    counts = _counted_getenv(monkeypatch)
+
+    with patch.object(profiles_module, "_api_request", new_callable=AsyncMock) as mock_request:
+        mock_request.return_value = {"profiles": []}
+        result = run(profiles_module.manageProfiles(operation, **kwargs))
+
+    assert "error" not in result
+    assert counts == {var: 1 for var in ACL_ENV_VARS}
 
 
 # --- DoH lookups share the request's snapshot ------------------------------
