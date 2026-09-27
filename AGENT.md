@@ -36,7 +36,7 @@ This file contains repository-specific agent rules. Agents should follow these w
   - Tools must call `_api_request_payload()` (`src/nextdns_mcp/utils.py`); it awaits `_api_request()` and converts the typed `NextDNSError` hierarchy (auth 401/403, rate limit 429, server 5xx, each carrying `status_code`/`response_body`) into the standardized error payloads from `src/nextdns_mcp/errors.py`.
   - `_api_request()` RAISES for upstream failures and only RETURNS the access-control denial payload, so a new call site that awaits it directly would leak an exception instead of the error payload. A caller that needs the raw dict (e.g. `plots._fetch_series_payload`) must convert with `_handle_api_error()` and still detect the returned denial `code`.
 - **Replacing list contents:**
-  - Full-list replacement is an operation of the grouped tool: `manageLists(operation="replace", entries=[{"id": "value"}])`.
+  - Full-list replacement is an operation of the grouped tool, whose `list_type` and `profile_id` are required: `manageLists(list_type="privacy_blocklists", operation="replace", profile_id="abc123", entries=[{"id": "nextdns-recommended"}])`.
   - There are no separate per-list replacement tools and no `body=` argument; tools take typed parameters, not raw request bodies.
 - When in doubt, ask the repo owner for permission before making large design changes.
 - API Key: Ensure that a valid API key is not in any files that will be committed to git.

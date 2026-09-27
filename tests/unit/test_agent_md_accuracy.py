@@ -32,7 +32,7 @@ def test_no_reference_to_missing_todo_file(agent_md: str) -> None:
 
 
 def test_replacement_documented_against_manage_lists(agent_md: str) -> None:
-    """List replacement is `manageLists(operation="replace", entries=...)`.
+    """List replacement is `manageLists(..., operation="replace", entries=...)`.
 
     The removed `replaceDenylist`/`replaceAllowlist` tools and the
     `body=[...]` argument must not come back as instructions.
@@ -40,7 +40,8 @@ def test_replacement_documented_against_manage_lists(agent_md: str) -> None:
     assert "replaceDenylist" not in agent_md
     assert "replaceAllowlist" not in agent_md
     assert "Array-Body" not in agent_md
-    assert 'manageLists(operation="replace", entries=' in agent_md
+    assert 'operation="replace", profile_id=' in agent_md
+    assert 'entries=[{"id": "nextdns-recommended"}]' in agent_md
 
 
 def test_integration_section_matches_reality(agent_md: str) -> None:
