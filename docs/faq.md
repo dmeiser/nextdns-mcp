@@ -10,7 +10,7 @@ Set `NEXTDNS_DEFAULT_PROFILE` to a profile ID; tools that accept `profile_id` wi
 Set `NEXTDNS_READ_ONLY=true`.
 
 ## Which tools work without per-profile access?
-Only `dohLookup` bypasses per-profile checks. `manageProfiles(operation="list")` and `create` carry no `profile_id` but still respect the global denials: `list` requires at least one readable profile, and `create` requires write permission (see configuration.md).
+`dohLookup` does not bypass per-profile checks: it queries a separate DoH endpoint, but the queried profile must still be readable (`NEXTDNS_READABLE_PROFILES`). `manageProfiles(operation="list")` and `create` carry no `profile_id` but still respect the global denials: `list` requires at least one readable profile, and `create` requires write permission (see configuration.md).
 
 ## Where do I get logs and analytics?
 Use `manageLogs` and `queryAnalytics`; real-time log streaming (SSE) is not exposed as a tool. `manageLogs(operation="download")` provides CSV export of retained logs.
