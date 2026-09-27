@@ -3,49 +3,48 @@
 The documented local setup binds the streamable-HTTP transport to 127.0.0.1,
 but FastMCP's ``http_host_origin_protection`` defaults to ``False`` -- the one
 free control that mitigates DNS rebinding against that unauthenticated loopback
-endpoint is switched off. Both container images must ship the ``auto`` mode,
-which enforces origin checks when the bind is loopback, and the shipped value
-must stay in sync with what the documentation tells operators to expect.
+endpoint is switched off. ``configure()`` must therefore turn on ``auto`` mode,
+and a request that carries a foreign ``Host`` or ``Origin`` must be rejected
+before it reaches the MCP endpoint.
 """
 
 import os
 import subprocess
 import sys
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+import pytest
+
 ENV_VAR = "FASTMCP_HTTP_HOST_ORIGIN_PROTECTION"
-SHIPPED_VALUE = "auto"
-DOCKERFILES = ("Dockerfile", "Dockerfile.alpine")
+PROTECTION_AUTO = "auto"
+MCP_ENDPOINT = "/mcp"
+# The bind address ``get_mcp_run_options()`` defaults to; the ASGI scope's
+# ``server`` entry mirrors it, which is what FastMCP's guard keys on.
+LOOPBACK_BASE_URL = "http://127.0.0.1:8000"
 
 
-def _dockerfile_env(path: Path) -> dict[str, str]:
-    """Return the effective ``KEY=VALUE`` environment a built image inherits."""
-    pairs: dict[str, str] = {}
-    lines = path.read_text(encoding="utf-8").splitlines()
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if line.startswith("ENV "):
-            entries = [line[len("ENV ") :].strip()]
-            while entries[-1].endswith("\\"):
-                entries[-1] = entries[-1][:-1].strip()
-                index += 1
-                entries.append(lines[index].strip())
-            for entry in " ".join(entries).split():
-                key, _, value = entry.partition("=")
-                pairs[key] = value
-        index += 1
-    return pairs
+@pytest.fixture
+def http_app(monkeypatch):
+    """Return the ASGI app ``configure()`` produces, with ambient settings cleared."""
+    import fastmcp
+
+    from nextdns_mcp import server
+
+    monkeypatch.delenv(ENV_VAR, raising=False)
+    monkeypatch.setattr(fastmcp.settings, "http_host_origin_protection", False)
+    monkeypatch.setattr(server, "_mcp_server", None)
+
+    def build():
+        server.configure()
+        return server.get_mcp_server().http_app(transport="http", path=MCP_ENDPOINT)
+
+    return build
 
 
-def test_dockerfiles_ship_auto_origin_protection() -> None:
-    """Both images must set the origin protection to auto in their build environment."""
-    for name in DOCKERFILES:
-        env = _dockerfile_env(REPO_ROOT / name)
-        assert env.get(ENV_VAR) == SHIPPED_VALUE, (
-            f"{name} must set {ENV_VAR}={SHIPPED_VALUE}, got: {env.get(ENV_VAR)!r}"
-        )
+def _get(app, headers: dict[str, str]):
+    from starlette.testclient import TestClient
+
+    with TestClient(app, base_url=LOOPBACK_BASE_URL) as client:
+        return client.get(MCP_ENDPOINT, headers=headers)
 
 
 def test_env_var_enables_auto_mode_in_fastmcp() -> None:
@@ -54,36 +53,51 @@ def test_env_var_enables_auto_mode_in_fastmcp() -> None:
         [sys.executable, "-c", "from fastmcp import settings; print(settings.http_host_origin_protection)"],
         capture_output=True,
         text=True,
-        env={**os.environ, ENV_VAR: SHIPPED_VALUE},
+        env={**os.environ, ENV_VAR: PROTECTION_AUTO},
         check=True,
     )
-    assert result.stdout.strip() == SHIPPED_VALUE
+    assert result.stdout.strip() == PROTECTION_AUTO
 
 
-def test_documented_default_matches_the_shipped_value() -> None:
-    """The env-var reference must document the variable with the value the images ship."""
-    table = (REPO_ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
-    row = next((line for line in table.splitlines() if line.startswith(f"| {ENV_VAR} |")), None)
-    assert row is not None, f"docs/configuration.md must document {ENV_VAR} in its env-var table"
-    columns = [cell.strip() for cell in row.strip("|").split("|")]
-    assert SHIPPED_VALUE in columns[2], f"the documented default must be {SHIPPED_VALUE}: {row}"
+def test_configure_enables_auto_mode_by_default(http_app) -> None:
+    """The local loopback deployment the issue describes is the one guard covers."""
+    import fastmcp
+
+    http_app()
+
+    assert os.environ[ENV_VAR] == PROTECTION_AUTO
+    assert fastmcp.settings.http_host_origin_protection == PROTECTION_AUTO
 
 
-def _documented_env(path: Path) -> dict[str, str]:
-    """Return the variables a sample env file offers, commented or not, as a mapping."""
-    documented: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        entry = line.strip().lstrip("#").strip()
-        if "=" not in entry or entry.startswith("#"):
-            continue
-        key, _, value = entry.partition("=")
-        if key and key.replace("_", "").isalnum():
-            documented[key] = value
-    return documented
+def test_configure_keeps_an_explicit_operator_choice(http_app, monkeypatch) -> None:
+    """An operator who set the variable keeps it, as with the update check."""
+    import fastmcp
+
+    monkeypatch.setenv(ENV_VAR, "false")
+    http_app()
+
+    assert fastmcp.settings.http_host_origin_protection is False
 
 
-def test_env_example_documents_origin_protection() -> None:
-    """.env.example must offer the same value the container images ship."""
-    documented = _documented_env(REPO_ROOT / ".env.example")
-    assert ENV_VAR in documented, f".env.example must document {ENV_VAR}"
-    assert documented[ENV_VAR] == SHIPPED_VALUE
+def test_loopback_endpoint_rejects_a_rebound_host_header(http_app) -> None:
+    """DNS rebinding sends a foreign Host for a loopback socket: reject it."""
+    response = _get(http_app(), {"host": "evil.example"})
+
+    assert response.status_code == 421
+
+
+def test_loopback_endpoint_rejects_a_foreign_origin_header(http_app) -> None:
+    """A cross-origin browser request to the loopback endpoint is forbidden."""
+    response = _get(
+        http_app(),
+        {"host": "127.0.0.1:8000", "origin": "http://evil.example"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_loopback_endpoint_serves_its_own_host(http_app) -> None:
+    """The guard must not break the legitimate local client it is meant to protect."""
+    response = _get(http_app(), {"host": "127.0.0.1:8000"})
+
+    assert response.status_code != 421
