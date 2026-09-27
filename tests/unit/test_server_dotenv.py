@@ -117,3 +117,28 @@ class TestImportHasNoServerSideEffects:
         server.configure()
 
         assert fastmcp.settings.check_for_updates == "stable"
+
+    def test_entrypoint_applies_the_update_check_disable(self, monkeypatch):
+        """The shipped `python -m nextdns_mcp.server` path still disables update checks.
+
+        Import is now inert, so the entrypoint's own start path is what must
+        perform the disable; otherwise the server would start doing network
+        update checks in offline/CI environments again.
+        """
+        import fastmcp
+
+        from nextdns_mcp import server
+
+        ran: list = []
+        monkeypatch.setenv("NEXTDNS_API_KEY", "test_api_key_12345")
+        monkeypatch.delenv("FASTMCP_CHECK_FOR_UPDATES", raising=False)
+        monkeypatch.setattr(fastmcp.settings, "check_for_updates", "stable")
+        monkeypatch.setattr(server, "_mcp_server", None)
+        monkeypatch.setattr(server, "configure_logging", lambda: None)
+        monkeypatch.setattr(fastmcp.FastMCP, "run", lambda self, **kwargs: ran.append(kwargs))
+
+        server._run_server()
+
+        assert ran == [{}]  # stdio transport, no extra options
+        assert os.environ["FASTMCP_CHECK_FOR_UPDATES"] == "off"
+        assert fastmcp.settings.check_for_updates == "off"

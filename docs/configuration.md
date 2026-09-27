@@ -22,8 +22,10 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 | MCP_TRANSPORT | string | stdio | No | `stdio` (default) or `http` (streamable-HTTP). See "HTTP Transport" in the README |
 | MCP_HOST | string | 127.0.0.1 | No | Bind interface for HTTP transport. Loopback-only by default; a non-loopback value is an explicit opt-in that requires reverse-proxy/auth protection |
 | MCP_PORT | number | 8000 | No | Port for HTTP transport |
+| FASTMCP_CHECK_FOR_UPDATES | string | off | No | FastMCP's automatic update check, disabled by default because it slows startup and can hang offline/CI. Set an explicit FastMCP value (e.g. `stable`) to opt back in |
 
 Notes
+- `FASTMCP_CHECK_FOR_UPDATES` is applied by the server's `configure()` step (run by the `python -m nextdns_mcp.server` entrypoint) and only defaults to `off`; an explicit value you set is preserved.
 - `NEXTDNS_API_KEY` (or `NEXTDNS_API_KEY_FILE`) is required. An absent or empty key fails fast with `ConfigurationError` during client construction instead of creating an unauthenticated client.
 - `NEXTDNS_HTTP_TIMEOUT` must be a positive number of seconds. Invalid values (e.g. `abc`, `0`, empty) fail fast at startup with a clear `ConfigurationError` instead of a confusing crash deep in client construction.
 - Profile IDs are hexadecimal and matched case-insensitively: values in `NEXTDNS_READABLE_PROFILES`/`NEXTDNS_WRITABLE_PROFILES` and the `profile_id` being checked are both normalized to lowercase before comparison, so `2F4A9B` in the config matches a query for `2f4a9b`.
