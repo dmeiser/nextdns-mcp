@@ -46,7 +46,7 @@ The middleware only filters top-level tool arguments; fields nested inside an ar
 
 ## Network/DNS issues
 - Ensure outbound HTTPS to `api.nextdns.io` and `dns.nextdns.io`.
-- Increase `NEXTDNS_HTTP_TIMEOUT` if needed.
+- Increase `NEXTDNS_HTTP_TIMEOUT` if needed, then restart the server process: the timeout is read when the HTTP clients are built, so an in-place change has no effect (see [configuration.md](configuration.md)).
 
 ## No default profile
 - Some tools accept `profile_id`; if omitted, set `NEXTDNS_DEFAULT_PROFILE` or pass `--profile_id` explicitly.
