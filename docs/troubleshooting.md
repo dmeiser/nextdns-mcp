@@ -40,9 +40,10 @@ The middleware only filters top-level tool arguments; fields nested inside an ar
 ## Invalid JSON or array expected
 - Bulk tools require the parameter to be a JSON array string (e.g., `'["ads.example.com","tracker.net"]'`).
 - Use single quotes to avoid escaping inner quotes in shells.
-- `manageLists(operation="replace", ...)` validates each entry before forwarding: every entry must be an
-  object with a string `id`, otherwise it returns `invalid_argument` naming the offending `entries[<index>]`.
-  Extra keys inside an entry are forwarded as-is.
+- `manageLists` validates list entries before forwarding them. For `operation="add"`, `entry` must be a plain
+  id string or an object with a string `id`. For `operation="replace"`, every element of `entries` must be an
+  object with a string `id`. Anything else returns `invalid_argument` naming the offending `entry` or
+  `entries[<index>]` instead of reaching the API. Extra keys inside an entry are forwarded as-is.
 
 ## Network/DNS issues
 - Ensure outbound HTTPS to `api.nextdns.io` and `dns.nextdns.io`.
