@@ -764,21 +764,6 @@ class TestManageLogs:
         assert result["row_count"] == 11
         logs_module._unlink_temp_file(result["file_path"])
 
-    def test_download_max_bytes_defaults_and_env_override(self, monkeypatch):
-        """The total-size cap defaults when unset and honors a valid NEXTDNS_DOWNLOAD_MAX_BYTES (issue #264)."""
-        monkeypatch.delenv("NEXTDNS_DOWNLOAD_MAX_BYTES", raising=False)
-        assert logs_module.get_download_max_bytes() == logs_module.DOWNLOAD_MAX_TOTAL_BYTES
-        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "536_870_912")
-        assert logs_module.get_download_max_bytes() == 536_870_912
-
-    def test_download_max_bytes_invalid_value_falls_back_to_default(self, monkeypatch, caplog):
-        """A non-positive or non-integer NEXTDNS_DOWNLOAD_MAX_BYTES falls back to the default."""
-        for bad in ("abc", "0", "-5"):
-            monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", bad)
-            with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"):
-                assert logs_module.get_download_max_bytes() == logs_module.DOWNLOAD_MAX_TOTAL_BYTES
-            assert any("NEXTDNS_DOWNLOAD_MAX_BYTES" in rec.message for rec in caplog.records)
-
     def test_unlink_temp_file_removes_mkdtemp_parent(self):
         """Removing a temp log file also removes its (empty) mkdtemp parent (issue #264)."""
         parent = tempfile.mkdtemp(prefix="nextdns_logs_test_")

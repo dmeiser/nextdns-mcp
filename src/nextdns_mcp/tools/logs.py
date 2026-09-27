@@ -16,6 +16,7 @@ import httpx
 from .. import client
 from ..client import AccessDeniedError
 from ..coercion import ProfileId
+from ..config import get_download_max_bytes
 from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import _api_request, _build_query_params, _cap_limit, access_denied_payload, resolve_profile_id
 
@@ -136,40 +137,9 @@ async def _check_download_redirect_target(next_url: httpx.URL) -> None:
             f"Refusing log download redirect to {next_url.scheme}://{next_url.host}: host is not publicly routable"
         )
 
-# Hard cap on the total bytes a download may stream to disk, enforced WHILE
-# streaming (aborts the moment the running total is exceeded) so a single
-# download cannot fill the OS temp directory — the only writable location in
-# the container image. Generous by default so legitimate large exports still
-# succeed, but finite. Overridable via NEXTDNS_DOWNLOAD_MAX_BYTES.
-DOWNLOAD_MAX_TOTAL_BYTES = 1024 * 1024 * 1024  # 1 GiB
-
 
 class DownloadTooLargeError(Exception):
     """Raised when a download exceeds the total-size cap mid-stream."""
-
-
-def get_download_max_bytes() -> int:
-    """Return the total download size cap in bytes.
-
-    Defaults to :data:`DOWNLOAD_MAX_TOTAL_BYTES`. Overridable via the
-    ``NEXTDNS_DOWNLOAD_MAX_BYTES`` environment variable, which must be a
-    positive integer. An invalid or non-positive value falls back to the
-    default rather than aborting startup, matching the lenient handling of
-    non-security-critical limits.
-    """
-    raw = os.getenv("NEXTDNS_DOWNLOAD_MAX_BYTES")
-    if raw is None:
-        return DOWNLOAD_MAX_TOTAL_BYTES
-    try:
-        val = int(raw)
-        if val <= 0:
-            raise ValueError
-    except (ValueError, TypeError):
-        logger.warning(
-            f"Invalid NEXTDNS_DOWNLOAD_MAX_BYTES: {raw!r}; falling back to default {DOWNLOAD_MAX_TOTAL_BYTES} bytes."
-        )
-        return DOWNLOAD_MAX_TOTAL_BYTES
-    return val
 
 
 async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict[str, Any]:
@@ -178,7 +148,8 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     The full CSV is written straight to disk chunk by chunk; only a bounded
     preview of the leading lines is kept in memory. The total bytes written
     are tracked and, once the running total exceeds the total-size cap
-    (see :func:`get_download_max_bytes`), a :class:`DownloadTooLargeError`
+    (``NEXTDNS_DOWNLOAD_MAX_BYTES``, see :func:`get_download_max_bytes`),
+    a :class:`DownloadTooLargeError`
     is raised immediately — while streaming, not after the body is in hand —
     so a single download cannot fill the temp directory.
     """
@@ -394,10 +365,9 @@ async def manageLogs(
           ignored by the NextDNS download endpoint. The CSV is streamed to a
           temporary file; only the file path, size, row count, and a small
           capped preview are returned (the full text is never inlined).
-          A hard total-size cap bounds how much is streamed to disk (see
-          ``DOWNLOAD_MAX_TOTAL_BYTES`` / the ``NEXTDNS_DOWNLOAD_MAX_BYTES``
-          environment variable); a download that would exceed it is aborted
-          mid-stream and the partial file is removed. On success the temp
+          A hard total-size cap bounds how much is streamed to disk
+          (``NEXTDNS_DOWNLOAD_MAX_BYTES``); a download that would exceed it
+          is aborted mid-stream and the partial file is removed. On success the temp
           file is *not* cleaned up: the CSV stays in the OS temp directory
           (mode 0600) and the returned path is the only record of it, so
           delete it when it is no longer needed. Failed downloads do remove
