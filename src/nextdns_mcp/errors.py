@@ -19,6 +19,12 @@ MAX_RESPONSE_BODY_CHARS = 2048
 # Marker appended to a response body that was cut at the cap.
 TRUNCATION_MARKER = "... [truncated]"
 
+# Typed fields callers branch on (issue #148 contract): a *string* value under one
+# of these keys is surfaced verbatim when a structured error document is inlined
+# into a tool result. A dict or list under such a key is still bounded at every
+# depth, so a whole document cannot hide there.
+_UNBOUNDED_STRUCTURED_FIELDS = frozenset({"code", "error", "status_code"})
+
 
 # Typed error codes. These form a stable external contract: consumers branch on
 # the code, never on the free-form message. Add new codes here; do not reuse an
@@ -60,16 +66,75 @@ def error_payload(code: str, message: str, **extra: Any) -> dict[str, Any]:
     return payload
 
 
+def _bound_value(value: Any) -> tuple[Any, bool]:
+    """Bound every free-form string in a JSON value, at any depth.
+
+    Strings are capped at ``MAX_RESPONSE_BODY_CHARS`` and cut values carry
+    ``TRUNCATION_MARKER``; dicts and lists are rebuilt with their elements
+    bounded. Other scalars pass through unchanged.
+
+    Args:
+        value: Any JSON-decoded value.
+
+    Returns:
+        A ``(bounded_value, truncated)`` pair.
+    """
+    if isinstance(value, str):
+        if len(value) > MAX_RESPONSE_BODY_CHARS:
+            return value[:MAX_RESPONSE_BODY_CHARS] + TRUNCATION_MARKER, True
+        return value, False
+    if isinstance(value, dict):
+        bounded: dict[Any, Any] = {}
+        truncated = False
+        for key, item in value.items():
+            bounded[key], cut = _bound_value(item)
+            truncated = truncated or cut
+        return bounded, truncated
+    if isinstance(value, list):
+        bounded_items = [_bound_value(item) for item in value]
+        return [item for item, _ in bounded_items], any(cut for _, cut in bounded_items)
+    return value, False
+
+
+def _bound_structured_fields(payload: dict[str, Any]) -> bool:
+    """Bound free-form values in an inlined structured error document.
+
+    Every free-form string is capped at ``MAX_RESPONSE_BODY_CHARS`` (nested in
+    dicts and lists too) and cut values are flagged with ``TRUNCATION_MARKER``,
+    so a multi-hundred-KB upstream ``details`` field cannot crowd the LLM
+    context for a request that already failed (issue #297). The typed string
+    fields (``code``, ``error``) are exempt: the issue #148 contract has callers
+    branch on them, so their text is surfaced verbatim. A container under one of
+    those keys is *not* exempt - a whole document can be hidden there.
+
+    Args:
+        payload: The structured error document; bounded in place.
+
+    Returns:
+        True when at least one field was truncated.
+    """
+    truncated = False
+    for key, value in payload.items():
+        if key in _UNBOUNDED_STRUCTURED_FIELDS and isinstance(value, str):
+            continue
+        payload[key], cut = _bound_value(value)
+        truncated = truncated or cut
+    return truncated
+
+
 def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorCode.HTTP_ERROR) -> dict[str, Any]:
     """Build a typed error payload for a failed HTTP request.
 
     If the failed response body is a structured JSON error, its fields are
-    surfaced so they are not lost. Otherwise a generic payload built from
-    ``fallback_code`` is returned, always carrying ``status_code`` when the
-    response has one. An unparseable body is included only as a bounded prefix,
-    flagged with ``response_body_truncated``. (ACL denials do not reach this
-    helper: the access-control layer raises the typed ``AccessDeniedError``
-    instead of faking a response.)
+    surfaced so they are not lost, with every free-form string (top level or
+    nested in dicts and lists) bounded at ``MAX_RESPONSE_BODY_CHARS`` and the
+    payload flagged with ``response_body_truncated`` when any value was cut
+    (issue #297). Otherwise a generic payload built from ``fallback_code`` is
+    returned, always carrying ``status_code`` when the response has one. An
+    unparseable body is included only as a bounded prefix, flagged with
+    ``response_body_truncated``. (ACL denials do not reach this helper: the
+    access-control layer raises the typed ``AccessDeniedError`` instead of
+    faking a response.)
 
     Args:
         message: The human-readable message used when no structured body exists.
@@ -91,6 +156,8 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
             payload = dict(parsed)
             payload.setdefault("code", fallback_code)
             payload.setdefault("status_code", status_code)
+            if _bound_structured_fields(payload):
+                payload["response_body_truncated"] = True
             return payload
 
     payload = error_payload(fallback_code, message, status_code=status_code)
