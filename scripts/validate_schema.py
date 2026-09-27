@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 Validate JSON responses against OpenAPI schema definitions.
-Used by E2E tests to catch breaking API changes.
+Used by the E2E run as an advisory signal for breaking API changes.
 
 The grouped CRUD tools collapse many OpenAPI operations into a single MCP tool,
 so validation is performed against the union of response schemas for the
 underlying operations. A response is considered valid if it matches any of the
-expected schemas for that grouped tool.
+expected schemas for that grouped tool. Because most vendored schemas declare
+no ``required`` fields, a match is weak evidence rather than a conformance
+proof; assert_operation_coverage() is what keeps the mapping honest.
 
 Known limitation: a cyclic $ref whose target has no unambiguous expected type
 (e.g. a mixed anyOf/oneOf union) falls back to permissive validation of that
