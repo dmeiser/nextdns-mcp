@@ -821,16 +821,19 @@ class TestPlotFetchUsesSharedWrapper:
 
     @pytest.mark.asyncio
     async def test_fetch_series_payload_surfaces_wrapper_error(self, clean_env, monkeypatch, mock_api_client):
+        import json
+
         import nextdns_mcp.tools.plots as plots_module
         from nextdns_mcp.errors import NextDNSError
-        import json
 
         wrapped = AsyncMock(
             side_effect=NextDNSError(
                 "HTTP error in GET /x: boom",
                 status_code=None,
-                response_body=json.dumps({"error": "HTTP error in GET /x: boom", "code": "http_error", "status_code": 500}),
-                error_payload={"error": "HTTP error in GET /x: boom", "code": "http_error", "status_code": 500}
+                response_body=json.dumps(
+                    {"error": "HTTP error in GET /x: boom", "code": "http_error", "status_code": 500}
+                ),
+                error_payload={"error": "HTTP error in GET /x: boom", "code": "http_error", "status_code": 500},
             )
         )
         monkeypatch.setattr(plots_module, "_api_request", wrapped)

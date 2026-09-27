@@ -6,9 +6,15 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import ProfileId
-from ..errors import ErrorCode, error_payload, http_error_payload, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
-from ..utils import _api_request, _validate_entry_id, resolve_profile_id, _handle_api_error
-import httpx
+from ..errors import (
+    ErrorCode,
+    NextDNSAuthError,
+    NextDNSError,
+    NextDNSRateLimitError,
+    NextDNSServerError,
+    error_payload,
+)
+from ..utils import _api_request, _handle_api_error, _validate_entry_id, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 RewriteOperation = Literal["list", "add", "delete"]
@@ -35,7 +41,7 @@ async def _manage_rewrites_impl(
 
     if operation == "list":
         try:
-                    return await _api_request("GET", base_url)
+            return await _api_request("GET", base_url)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
             return _handle_api_error(e)
 
@@ -43,7 +49,7 @@ async def _manage_rewrites_impl(
         if not name or not content:
             return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name and content are required for add operation")
         try:
-                    return await _api_request("POST", base_url, json_body={"name": name, "content": content})
+            return await _api_request("POST", base_url, json_body={"name": name, "content": content})
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
             return _handle_api_error(e)
 
@@ -51,7 +57,7 @@ async def _manage_rewrites_impl(
         if not entry_id:
             return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for delete operation")
         try:
-                    return await _api_request("DELETE", f"{base_url}/{entry_id}")
+            return await _api_request("DELETE", f"{base_url}/{entry_id}")
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
             return _handle_api_error(e)
 

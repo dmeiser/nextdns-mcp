@@ -6,9 +6,15 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
-from ..errors import ErrorCode, error_payload, http_error_payload, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
-from ..utils import _api_request, _validate_entry_id, resolve_profile_id, _handle_api_error
-import httpx
+from ..errors import (
+    ErrorCode,
+    NextDNSAuthError,
+    NextDNSError,
+    NextDNSRateLimitError,
+    NextDNSServerError,
+    error_payload,
+)
+from ..utils import _api_request, _handle_api_error, _validate_entry_id, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ListType = Literal[
@@ -63,6 +69,7 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
         return await _api_request("POST", base_url, json_body=body)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
         return _handle_api_error(e)
+<<<<<<< HEAD
 
 
 def _validate_list_entry(entry: Any, label: str, operation: str, **extra: Any) -> dict[str, Any] | None:
@@ -89,6 +96,8 @@ def _validate_list_entry(entry: Any, label: str, operation: str, **extra: Any) -
             **extra,
         )
     return None
+=======
+>>>>>>> bd26c2a (Finish #181: apply handoff removals, fix lints, cover migrated handlers)
 
 
 def _validate_replace_entries(entries: list[Any]) -> dict[str, Any] | None:
@@ -111,7 +120,7 @@ async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | No
     if entry_error:
         return entry_error
     try:
-            return await _api_request("PUT", base_url, json_body=entries)
+        return await _api_request("PUT", base_url, json_body=entries)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
         return _handle_api_error(e)
 
@@ -135,7 +144,7 @@ async def _lists_update(
     if not isinstance(entry, dict):
         return error_payload(ErrorCode.INVALID_ARGUMENT, "entry must be a dict for update operation")
     try:
-            return await _api_request("PATCH", f"{base_url}/{entry_id}", json_body=entry)
+        return await _api_request("PATCH", f"{base_url}/{entry_id}", json_body=entry)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
         return _handle_api_error(e)
 
@@ -145,7 +154,7 @@ async def _lists_remove(base_url: str, entry_id: str | None) -> dict[str, Any]:
     if entry_id is None:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for remove operation")
     try:
-            return await _api_request("DELETE", f"{base_url}/{entry_id}")
+        return await _api_request("DELETE", f"{base_url}/{entry_id}")
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
         return _handle_api_error(e)
 

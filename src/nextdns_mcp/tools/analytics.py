@@ -6,7 +6,22 @@ SPDX-License-Identifier: MIT
 from typing import Any
 
 from ..coercion import ProfileId
+<<<<<<< HEAD
 import httpx
+=======
+from ..errors import ErrorCode, error_payload
+from ..utils import (
+    NextDNSAuthError,
+    NextDNSError,
+    NextDNSRateLimitError,
+    NextDNSServerError,
+    _api_request,
+    _build_query_params,
+    _cap_limit,
+    _handle_api_error,
+    resolve_profile_id,
+)
+>>>>>>> bd26c2a (Finish #181: apply handoff removals, fix lints, cover migrated handlers)
 
 from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import (
@@ -90,7 +105,7 @@ async def _query_analytics_impl(
         params.update(_build_query_params(status=status, root=root))
 
     try:
-            return await _api_request("GET", url, params=params)
+        return await _api_request("GET", url, params=params)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
         return _handle_api_error(e)
 

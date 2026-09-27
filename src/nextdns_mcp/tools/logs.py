@@ -354,13 +354,13 @@ async def _manage_logs_impl(
             **{"from": from_time, "to": to_time, "limit": capped_limit, "device": device, "search": user, "raw": raw}
         )
         try:
-                    return await _api_request("GET", base_url, params=params)
+            return await _api_request("GET", base_url, params=params)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
         return _handle_api_error(e)
 
     if operation == "clear":
         try:
-                    return await _api_request("DELETE", base_url)
+            return await _api_request("DELETE", base_url)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
         return _handle_api_error(e)
 
