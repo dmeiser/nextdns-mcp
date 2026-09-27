@@ -13,8 +13,8 @@ import pytest
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from nextdns_mcp import client as client_module
 from nextdns_mcp import openapi
-from nextdns_mcp.config import ConfigurationError
 from nextdns_mcp.openapi import (
     HEALTH_CACHE_TTL,
     HEALTH_PROBE_PATH,
@@ -157,38 +157,47 @@ async def test_health_never_leaks_key_material_or_the_probe_body(monkeypatch, mo
     assert body["reason"] == "NextDNS API rejected the configured credentials (HTTP 401)"
 
 
-async def test_health_returns_503_auth_class_when_no_api_key_is_usable(monkeypatch, mock_api_key):
+async def test_health_returns_503_auth_class_when_no_api_key_is_usable(monkeypatch):
     """A missing or empty API key is reported as 503 with the auth class, not a 500."""
-
-    def _no_client():
-        raise ConfigurationError("NEXTDNS_API_KEY is not set")
-
-    monkeypatch.setattr(openapi, "get_api_client", _no_client)
+    monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+    monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
+    monkeypatch.setattr(client_module, "_client", None)
     openapi._health_probe_cache = None
 
     status_code, body = await _call_health()
 
     assert status_code == 503
-    assert body["class"] == "auth"
     assert body["status"] == "error"
+    assert body["class"] == "auth"
     assert "API key" in body["reason"]
+
+
+async def test_health_reports_an_invalid_http_timeout_as_unreachable(monkeypatch, mock_api_key):
+    """An invalid NEXTDNS_HTTP_TIMEOUT is never mislabeled as an auth failure."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+    monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "not-a-number")
+    monkeypatch.setattr(client_module, "_client", None)
+    openapi._health_probe_cache = None
+
+    status_code, body = await _call_health()
+
+    assert status_code == 503
+    assert body["class"] == "unreachable"
+    assert "NEXTDNS_HTTP_TIMEOUT" in body["reason"]
 
 
 async def test_configuration_failure_is_cached_like_any_other_probe_result(monkeypatch):
     """Repeated polling inside the TTL reuses the configuration-failure result."""
-    attempts = 0
-
-    def _no_client():
-        nonlocal attempts
-        attempts += 1
-        raise ConfigurationError("NEXTDNS_API_KEY is not set")
-
-    monkeypatch.setattr(openapi, "get_api_client", _no_client)
+    monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+    monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
+    monkeypatch.setattr(client_module, "_client", None)
     openapi._health_probe_cache = None
 
     assert (await _call_health())[0] == 503
+    first_result = openapi._health_probe_cache
+
     assert (await _call_health())[0] == 503
-    assert attempts == 1
+    assert openapi._health_probe_cache is first_result
 
 
 async def test_health_returns_503_unreachable_class_on_timeout(monkeypatch, mock_api_key):

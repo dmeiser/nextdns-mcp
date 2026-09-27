@@ -37,7 +37,7 @@ from starlette.responses import JSONResponse
 
 from .client import get_api_client
 from .coercion import _is_integer
-from .config import ConfigurationError, get_default_profile
+from .config import ConfigurationError, get_api_key, get_default_profile
 
 logger = logging.getLogger(__name__)
 
@@ -329,9 +329,11 @@ async def _run_health_probe() -> HealthFailure | None:
         client = get_api_client()
         response = await client.raw_request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
     except ConfigurationError:
+        if not get_api_key():
+            return HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
         return HealthFailure(
-            HEALTH_FAILURE_AUTH,
-            "No usable NextDNS API key is configured",
+            HEALTH_FAILURE_UNREACHABLE,
+            "NextDNS client configuration is invalid (check NEXTDNS_HTTP_TIMEOUT)",
         )
     except httpx.TimeoutException:
         return HealthFailure(
