@@ -748,6 +748,36 @@ class TestManageLogs:
         assert not os.path.exists(created[0]), "mkdtemp parent directory leaked on the size-cap abort"
 
     @pytest.mark.asyncio
+    async def test_download_cap_abort_reports_only_bytes_actually_written(self, mock_api_client, monkeypatch):
+        """The abort message counts the bytes that reached disk, not the oversized chunk (issue #264)."""
+        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "2000")
+        row = "x" * 599 + "\n"  # 600 bytes
+        chunk = row * 5  # 3000 bytes, so the first chunk alone blows the 2000-byte cap
+        sizes_at_cleanup: list[int] = []
+        real_unlink = logs_module._unlink_temp_file
+
+        def recording_unlink(path):
+            if os.path.exists(path):
+                sizes_at_cleanup.append(os.path.getsize(path))
+            real_unlink(path)
+
+        monkeypatch.setattr(logs_module, "_unlink_temp_file", recording_unlink)
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.is_error = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([chunk])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert result["code"] == "download_too_large"
+        assert "aborted after 0 bytes" in result["error"]
+        assert sizes_at_cleanup == [0], "the oversized chunk must not be written before the cap check"
+
+    @pytest.mark.asyncio
     async def test_download_within_total_size_cap_succeeds(self, mock_api_client, monkeypatch):
         """A download under the (lowered) total-size cap still succeeds and is cleaned up by the caller."""
         monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "10_000")

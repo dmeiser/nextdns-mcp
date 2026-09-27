@@ -172,12 +172,12 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
             if not text:
                 continue
             chunk_bytes = len(text.encode("utf-8"))
-            written_bytes += chunk_bytes
-            if written_bytes > max_total:
+            if written_bytes + chunk_bytes > max_total:
                 raise DownloadTooLargeError(
                     f"Download exceeds the {max_total}-byte limit "
                     f"(NEXTDNS_DOWNLOAD_MAX_BYTES); aborted after {written_bytes} bytes."
                 )
+            written_bytes += chunk_bytes
             out.write(text)
             newlines = text.count("\n")
             row_count += newlines
