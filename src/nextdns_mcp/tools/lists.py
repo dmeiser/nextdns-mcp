@@ -55,6 +55,32 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
     return await _api_request("POST", base_url, json=body)
 
 
+def _validate_replace_entries(entries: list[Any]) -> dict[str, Any] | None:
+    """Return an error dict if a replace payload has a malformed entry (issue #189).
+
+    The OpenAPI schemas for every ``replace*`` list operation declare the body as an
+    array of objects with a required ``id`` field (e.g. ``[{"id": "blocked.com"}]``).
+    Nested body fields are not checked by ``StripExtraFieldsMiddleware``, so an entry
+    that is not an object, or that omits ``id``, used to be forwarded verbatim and
+    come back as an opaque upstream HTTP 400. Validate locally and report the
+    offending index so the caller gets a typed, actionable error instead.
+    """
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            return error_payload(
+                ErrorCode.INVALID_ARGUMENT,
+                f"entries[{index}] must be an object with an 'id' field for replace operation",
+                index=index,
+            )
+        if not isinstance(entry.get("id"), str):
+            return error_payload(
+                ErrorCode.INVALID_ARGUMENT,
+                f"entries[{index}] must have a string 'id' field for replace operation",
+                index=index,
+            )
+    return None
+
+
 async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | None) -> dict[str, Any]:
     """Replace the entire list with a new set of entries."""
     if entries is None:
@@ -62,6 +88,9 @@ async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | No
     entries = _coerce_json_arg(entries)
     if not isinstance(entries, list):
         return error_payload(ErrorCode.INVALID_ARGUMENT, "entries must be a JSON array")
+    entry_error = _validate_replace_entries(entries)
+    if entry_error:
+        return entry_error
     return await _api_request("PUT", base_url, json=entries)
 
 
@@ -154,7 +183,9 @@ async def manageLists(
         - ``update``: Toggle an existing entry by ``entry_id`` (pass ``entry={"active": True|False}``).
           Only supported for ``allowlist``, ``denylist``, ``parental_categories``, and
           ``parental_services``.
-        - ``replace``: Replace the entire list with ``entries`` (list of dicts).
+        - ``replace``: Replace the entire list with ``entries`` (list of dicts). Each entry must be
+          an object with a string ``id``; a malformed entry is rejected locally with
+          ``invalid_argument`` naming its index, rather than sent upstream.
 
     Examples:
         - get: ``manageLists(list_type="denylist", operation="get", profile_id="abc123")``
