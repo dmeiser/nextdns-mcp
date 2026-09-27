@@ -145,20 +145,40 @@ class TestErrorPayloadShape:
         assert payload["details"] == "d" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER
         assert payload["response_body_truncated"] is True
 
-    def test_http_error_payload_structured_non_string_fields_are_untouched(self):
-        # Only string field values are bounded; non-string values pass through.
+    def test_http_error_payload_structured_nested_values_are_bounded(self):
+        # Issue #297: an oversized value is bounded wherever it sits in the
+        # structured document, not only at the top level. Non-string scalars
+        # are surfaced unchanged.
         exc = httpx.HTTPError("boom")
         exc.response = MagicMock()
         exc.response.status_code = 429
         exc.response.json.return_value = {
             "error": "rate limit exceeded",
             "retryAfter": 10**9,
-            "context": ["x" * (100 * 1024)],
+            "context": ["x" * (100 * 1024), {"trace": "y" * (100 * 1024)}],
         }
         payload = http_error_payload("msg", exc)
         assert payload["error"] == "rate limit exceeded"
         assert payload["retryAfter"] == 10**9
-        assert payload["context"] == ["x" * (100 * 1024)]
+        assert payload["context"] == [
+            "x" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER,
+            {"trace": "y" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER},
+        ]
+        assert payload["response_body_truncated"] is True
+
+    def test_http_error_payload_structured_nested_small_values_are_untouched(self):
+        # A structured document whose nested values are all within the cap is
+        # surfaced whole and carries no truncation flag.
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 429
+        exc.response.json.return_value = {
+            "error": "rate limit exceeded",
+            "retryAfter": 10**9,
+            "context": ["first", {"trace": "abc"}],
+        }
+        payload = http_error_payload("msg", exc)
+        assert payload["context"] == ["first", {"trace": "abc"}]
         assert "response_body_truncated" not in payload
 
     def test_http_error_payload_structured_small_document_is_complete(self):
