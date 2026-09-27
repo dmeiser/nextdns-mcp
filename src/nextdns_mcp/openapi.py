@@ -184,7 +184,7 @@ class StripExtraFieldsMiddleware(Middleware):
                 # a None tool means FastMCP could not resolve the tool name and
                 # will reject the call immediately after this middleware returns,
                 # so there is no unstripped-argument request to make. The
-                # fail-closed branches above guard real failures; this branch
+                # fail-closed branches below guard real failures; this branch
                 # only avoids masking FastMCP's own unknown-tool error.
                 return arguments
 
