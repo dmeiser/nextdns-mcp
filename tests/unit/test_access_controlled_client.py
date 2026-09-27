@@ -735,3 +735,33 @@ class TestAccessControlledClientCallerPayloadIsolation:
         assert len(wire_bodies) == 2
         assert [json.loads(body) for body in wire_bodies] == [before, before]
         assert payload == before
+
+
+class TestAccessControlledClientRawRequest:
+    """The raw transport bypasses access control for server-level probes."""
+
+    @pytest.mark.asyncio
+    async def test_raw_request_bypasses_read_denial(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """A deny-all readable-profile config must not block a raw probe."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.raw_request("GET", "/profiles")
+
+        mock_super_request.assert_called_once()
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_raw_request_bypasses_write_denial(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Read-only mode must not block a raw probe either."""
+        clean_env("NEXTDNS_READ_ONLY", "true")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.raw_request("GET", "/profiles/abc123/settings")
+
+        mock_super_request.assert_called_once()
+        assert response.status_code == 200

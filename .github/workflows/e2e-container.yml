@@ -92,7 +92,10 @@ jobs:
           echo "Waiting for container HTTP endpoint to be ready..."
           READY=0
           for i in $(seq 1 30); do
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/mcp 2>/dev/null || echo "000")
+            # curl already prints 000 for a failed request; a `|| echo "000"`
+            # fallback would concatenate into "000000" and defeat the check
+            # below, declaring a still-booting container ready.
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8000/mcp 2>/dev/null || true)
             if [ "$HTTP_STATUS" != "000" ]; then
               echo "Container is ready (HTTP $HTTP_STATUS at attempt $i)"
               READY=1
@@ -107,6 +110,53 @@ jobs:
             exit 1
           fi
 
+      - name: Start container with an invalid credential for the /health check
+        run: |
+          # A deliberately invalid (not absent) key: the server starts and serves
+          # /health, so the readiness probe runs for real and must report the
+          # upstream authentication failure. Needs no NextDNS credential and
+          # performs no live write, so it runs on every PR including forks.
+          docker run -d \
+            --name nextdns-container-e2e-health \
+            -p 8001:8000 \
+            -e NEXTDNS_API_KEY="e2e-invalid-key-not-a-real-credential" \
+            -e NEXTDNS_READABLE_PROFILES="ALL" \
+            -e MCP_TRANSPORT="http" \
+            -e MCP_HOST="0.0.0.0" \
+            -e MCP_PORT="8000" \
+            nextdns-mcp:${{ matrix.variant }}
+
+          echo "Waiting for container HTTP endpoint to be ready..."
+          READY=0
+          for i in $(seq 1 30); do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8001/mcp 2>/dev/null || true)
+            if [ "$HTTP_STATUS" != "000" ]; then
+              echo "Container is ready (HTTP $HTTP_STATUS at attempt $i)"
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "❌ Container failed to respond within 30 seconds"
+            docker logs nextdns-container-e2e-health || true
+            docker rm -f nextdns-container-e2e-health || true
+            exit 1
+          fi
+
+      - name: Validate /health readiness probe with an invalid credential (${{ matrix.variant }})
+        run: |
+          uv run python scripts/run_container_e2e.py \
+            --health-url http://127.0.0.1:8001/health \
+            --health-only \
+            --expect-health not-ok \
+            --api-key "e2e-invalid-key-not-a-real-credential"
+
+      - name: Stop /health container (${{ matrix.variant }})
+        if: always()
+        run: docker logs nextdns-container-e2e-health || true; docker rm -f nextdns-container-e2e-health || true
+
       - name: Run E2E validation against container (${{ matrix.variant }})
         if: steps.check-secrets.outputs.has_secret == 'true'
         env:
@@ -116,7 +166,10 @@ jobs:
         run: |
           uv run python scripts/run_container_e2e.py \
             --endpoint http://127.0.0.1:8000/mcp \
-            --variant ${{ matrix.variant }}
+            --variant ${{ matrix.variant }} \
+            --health-url http://127.0.0.1:8000/health \
+            --expect-health ok \
+            --api-key "${NEXTDNS_API_KEY}"
 
       - name: Collect container logs and stop container (${{ matrix.variant }})
         if: always() && steps.check-secrets.outputs.has_secret == 'true'

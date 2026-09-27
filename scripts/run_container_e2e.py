@@ -28,6 +28,63 @@ from scripts.validate_schema import (
     validate_tool_response,
 )
 
+HEALTH_FAILURE_CLASSES = ("auth", "unreachable")
+
+
+def check_health_endpoint(health_url: str, api_key: str, expect_ok: bool, timeout: float = 15.0) -> tuple[bool, str]:
+    """Validate the served ``/health`` readiness endpoint over real HTTP.
+
+    ``/health`` is a readiness probe, not a liveness constant, so this asserts the
+    contract a client actually receives. ``expect_ok`` selects which side to
+    assert: ``True`` for a server whose configured credentials work (200 with
+    exactly ``{"status": "ok"}``), ``False`` for one whose credentials do not
+    (503 carrying a failure class and a short reason). Either way the response
+    body must not contain the API key.
+
+    Args:
+        health_url: Absolute URL of the ``/health`` route to GET.
+        api_key: The credential the server was configured with; used only to
+            assert it never appears in the response.
+        expect_ok: True to require 200, False to require 503.
+        timeout: Seconds to wait for the HTTP response.
+
+    Returns:
+        A (passed, detail) pair; ``detail`` states what was observed or why the
+        contract was not met.
+    """
+    try:
+        response = httpx.get(health_url, timeout=timeout)
+    except httpx.HTTPError as exc:
+        return False, f"GET {health_url} failed: {type(exc).__name__}"
+
+    if api_key and api_key in response.text:
+        return False, f"GET {health_url} leaked the API key in the response body"
+
+    try:
+        body = response.json()
+    except ValueError:
+        return False, f"GET {health_url} returned a non-JSON body (HTTP {response.status_code})"
+
+    if expect_ok:
+        if response.status_code != 200:
+            return False, f"expected HTTP 200 from {health_url}, got {response.status_code}: {body}"
+        if body != {"status": "ok"}:
+            return False, f'expected {{"status": "ok"}} from {health_url}, got {body}'
+        return True, f'GET {health_url} -> 200 {{"status": "ok"}}'
+
+    if response.status_code != 503:
+        return False, f"expected HTTP 503 from {health_url}, got {response.status_code}: {body}"
+    if not isinstance(body, dict) or body.get("status") != "error":
+        return False, f'expected status "error" in the {health_url} 503 body, got {body}'
+    failure_class = body.get("class")
+    if failure_class not in HEALTH_FAILURE_CLASSES:
+        return False, f"expected class in {HEALTH_FAILURE_CLASSES}, got {failure_class!r}"
+    reason = body.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return False, f"expected a non-empty reason in the {health_url} 503 body, got {body}"
+    return True, f"GET {health_url} -> 503 class={failure_class} reason={reason!r}"
+
+
 # Colors for terminal output
 RED = "\033[0;31m"
 GREEN = "\033[0;32m"
@@ -76,12 +133,21 @@ class ContainerE2ERunner:
         allow_live_writes: bool,
         plot_profile: str,
         artifacts_dir: Path,
+        health_url: str = "",
+        api_key: str = "",
+        expect_health_ok: bool = True,
+        health_only: bool = False,
     ) -> None:
         self.endpoint = endpoint
         self.variant = variant
         self.allow_live_writes = allow_live_writes
         self.plot_profile = plot_profile
         self.artifacts_dir = artifacts_dir
+        # /health sits beside the /mcp route on the same server unless overridden.
+        self.health_url = health_url or f"{endpoint.rsplit('/', 1)[0]}/health"
+        self.api_key = api_key
+        self.expect_health_ok = expect_health_ok
+        self.health_only = health_only
         self.report_file = artifacts_dir / f"tools_report_{variant}.jsonl"
 
         self.executed_count = 0
@@ -265,6 +331,15 @@ class ContainerE2ERunner:
         log_error(f"MCP endpoint at {self.endpoint} did not become ready after {max_attempts}s")
         return False
 
+    def check_health(self) -> bool:
+        """Validate the served /health readiness endpoint; True when it conforms."""
+        passed, detail = check_health_endpoint(self.health_url, self.api_key, self.expect_health_ok)
+        if passed:
+            log_success(detail)
+        else:
+            log_error(detail)
+        return passed
+
     async def run(self) -> int:
         """Run the full container E2E suite."""
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -278,7 +353,21 @@ class ContainerE2ERunner:
         log_info(f"Artifacts report: {self.report_file}")
         log_info("================================")
 
+        if self.health_only:
+            # Nothing listens on the /mcp endpoint in this mode, so the health
+            # check is the only thing to run and there is no boot wait for it.
+            if not self.check_health():
+                return 1
+            log_success("/health readiness probe validated over HTTP")
+            return 0
+
+        # Wait for the container to accept connections first: the health probe
+        # is a single un-retried request, so it must only run once the server
+        # is actually listening.
         if not await self.check_endpoint_readiness():
+            return 1
+
+        if not self.check_health():
             return 1
 
         created_profile_id = ""
@@ -983,6 +1072,28 @@ def parse_args() -> argparse.Namespace:
         default=PROJECT_ROOT / "artifacts",
         help="Directory to write tools_report_<variant>.jsonl (default: artifacts/)",
     )
+    parser.add_argument(
+        "--health-url",
+        default=os.environ.get("HEALTH_URL", ""),
+        help="/health URL to validate (default: derived from --endpoint)",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("NEXTDNS_API_KEY", ""),
+        help="Credential the server was configured with; only used to assert it is absent from /health responses",
+    )
+    parser.add_argument(
+        "--expect-health",
+        choices=["ok", "not-ok"],
+        default=os.environ.get("EXPECT_HEALTH", "ok"),
+        help="Assert /health returns 200 (ok) or 503 with a failure class (not-ok) (default: ok)",
+    )
+    parser.add_argument(
+        "--health-only",
+        action="store_true",
+        default=os.environ.get("HEALTH_ONLY", "false").lower() == "true",
+        help="Validate only the /health endpoint and skip the MCP tool suite (default: false)",
+    )
     return parser.parse_args()
 
 
@@ -994,6 +1105,10 @@ def main() -> int:
         allow_live_writes=args.allow_live_writes,
         plot_profile=args.plot_profile,
         artifacts_dir=args.artifacts_dir,
+        health_url=args.health_url,
+        api_key=args.api_key,
+        expect_health_ok=args.expect_health == "ok",
+        health_only=args.health_only,
     )
     return asyncio.run(runner.run())
 

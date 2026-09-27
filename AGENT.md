@@ -18,7 +18,7 @@ This file contains repository-specific agent rules. Agents should follow these w
 - Keep changes minimal and self-contained. Prefer adding new files rather than editing many unrelated files.
 - Use the `fastmcp` library to build the MCP server from the grouped CRUD tools in `src/nextdns_mcp/tools/`. Do NOT use `FastMCP.from_openapi()`: it was removed (issues #141/#146) because FastMCP 4.x's OpenAPI provider expects an `httpx2.AsyncClient` while our `AccessControlledClient` subclasses `httpx.AsyncClient`.
 - Configuration should be environment-variable first. Example: `NEXTDNS_API_KEY` for API access.
-- Provide a minimal health endpoint at `/health` returning 200 OK and JSON `{ "status": "ok" }`.
+- Provide a readiness endpoint at `/health`: it probes the NextDNS API with the configured API key and returns `200 OK` with `{ "status": "ok" }` only when that probe succeeds; otherwise it returns `503` with `{ "status": "error", "class": "auth" | "unreachable", "reason": "..." }`. The probe uses a 5 second timeout, bypasses profile access control so a local ACL denial cannot mask the upstream auth state, and its result is cached for 30 seconds.
 - Tests: add pytest-based unit tests for new functionality and run them with `uv run pytest`.
   - See "Code Quality Standards" section below for coverage requirements and quality metrics
 - Docker: provide a `Dockerfile` (primary, `python:3.14-slim`) and `Dockerfile.alpine` (Alpine variant) that produce small, runnable images.

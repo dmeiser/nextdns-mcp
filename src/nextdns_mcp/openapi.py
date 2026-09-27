@@ -23,18 +23,63 @@ SPDX-License-Identifier: MIT
 """
 
 import logging
-from typing import Any
+import time
+from typing import Any, NamedTuple
 
+import httpx
 import mcp.types
 from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
+from .client import get_api_client
 from .coercion import _is_integer
-from .config import get_default_profile
+from .config import ConfigurationError, get_api_key, get_default_profile
 
 logger = logging.getLogger(__name__)
+
+# --- /health readiness probe tuning -----------------------------------------
+
+HEALTH_PROBE_PATH = "/profiles"
+"""Cheapest authenticated read on the NextDNS API.
+
+``GET /profiles`` returns the caller's profile list, so a 2xx proves the API
+key is accepted without touching (or mutating) any specific profile."""
+
+HEALTH_PROBE_TIMEOUT = 5.0
+"""Seconds allowed for the readiness probe before NextDNS is called unreachable."""
+
+HEALTH_CACHE_TTL = 30.0
+"""Seconds a probe result is reused, so health polling cannot hammer the API."""
+
+HEALTH_FAILURE_AUTH = "auth"
+"""Failure class: NextDNS rejected the configured credentials, or no usable API key is
+configured locally (missing or empty NEXTDNS_API_KEY, unreadable NEXTDNS_API_KEY_FILE)."""
+
+HEALTH_FAILURE_UNREACHABLE = "unreachable"
+"""Failure class: NextDNS could not be probed, or answered unusably."""
+
+
+class HealthFailure(NamedTuple):
+    """A failed readiness probe.
+
+    Attributes:
+        failure_class: ``"auth"`` or ``"unreachable"``.
+        reason: Short operator-facing explanation. Built only from the HTTP
+            status code, the exception type name, and configuration state, so it
+            can never carry API key material, auth headers, or the upstream
+            response body.
+    """
+
+    failure_class: str
+    reason: str
+
+
+# Cached probe result as (monotonic timestamp, failure or None when healthy).
+_health_probe_cache: tuple[float, HealthFailure | None] | None = None
 
 
 class OpenApiSpecNotFound(FileNotFoundError):
@@ -215,4 +260,102 @@ def create_mcp_server(client: Any = None) -> FastMCP:
     if default_profile:
         logger.info(f"Default profile: {default_profile}")
 
+    _register_health_endpoint(mcp)
+
     return mcp
+
+
+def _register_health_endpoint(mcp: FastMCP) -> None:
+    """Register the ``/health`` readiness endpoint on the FastMCP HTTP app.
+
+    ``GET /health`` is a real readiness check, not a liveness constant: it
+    probes the NextDNS API with the configured API key and returns ``200 OK``
+    with ``{"status": "ok"}`` only when that probe succeeds. A failing probe
+    returns ``503`` together with the failure class (``auth`` or
+    ``unreachable``) and a short reason. Results are cached for
+    ``HEALTH_CACHE_TTL`` seconds so a polling load balancer cannot hammer the
+    API. The route is registered with FastMCP's ``custom_route`` so it is served
+    alongside the ``/mcp`` streamable-HTTP endpoint; in stdio mode there is no
+    HTTP surface, so the route is simply not reachable.
+
+    Args:
+        mcp: The FastMCP server to attach the route to.
+    """
+
+    async def health_check(_request: Request) -> JSONResponse:
+        """Report NextDNS API readiness as measured by a live credential probe."""
+        failure = await check_nextdns_readiness()
+        if failure is None:
+            return JSONResponse({"status": "ok"})
+        return JSONResponse(
+            {"status": "error", "class": failure.failure_class, "reason": failure.reason},
+            status_code=503,
+        )
+
+    mcp.custom_route("/health", methods=["GET"])(health_check)
+
+
+async def check_nextdns_readiness() -> HealthFailure | None:
+    """Return the readiness result, probing NextDNS at most once per cache window.
+
+    Returns:
+        None when the configured credentials work against NextDNS, otherwise a
+        HealthFailure describing why the service is not ready.
+    """
+    global _health_probe_cache
+
+    now = time.monotonic()
+    cached = _health_probe_cache
+    if cached is not None and now - cached[0] < HEALTH_CACHE_TTL:
+        logger.debug(f"Reusing cached /health readiness result (age {now - cached[0]:.1f}s)")
+        return cached[1]
+
+    failure = await _run_health_probe()
+    _health_probe_cache = (time.monotonic(), failure)
+    return failure
+
+
+async def _run_health_probe() -> HealthFailure | None:
+    """Probe the NextDNS API once with the configured credentials.
+
+    The request goes through the client's RAW transport (``raw_request``), which
+    bypasses profile access control: a local ACL denial must not mask the true
+    upstream authentication state. Only the status code and the exception type
+    name are reported, never the API key, the auth headers, or the response
+    body.
+
+    Returns:
+        None when NextDNS accepted the credentials, otherwise a HealthFailure.
+    """
+    try:
+        client = get_api_client()
+        response = await client.raw_request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
+    except ConfigurationError:
+        if not get_api_key():
+            return HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
+        return HealthFailure(
+            HEALTH_FAILURE_UNREACHABLE,
+            "NextDNS client configuration is invalid (check NEXTDNS_HTTP_TIMEOUT)",
+        )
+    except httpx.TimeoutException:
+        return HealthFailure(
+            HEALTH_FAILURE_UNREACHABLE,
+            f"NextDNS API did not respond within {HEALTH_PROBE_TIMEOUT:g}s",
+        )
+    except httpx.HTTPError as exc:
+        return HealthFailure(
+            HEALTH_FAILURE_UNREACHABLE,
+            f"Could not reach the NextDNS API ({type(exc).__name__})",
+        )
+
+    if response.is_success:
+        return None
+    if response.status_code in (401, 403):
+        return HealthFailure(
+            HEALTH_FAILURE_AUTH,
+            f"NextDNS API rejected the configured credentials (HTTP {response.status_code})",
+        )
+    return HealthFailure(
+        HEALTH_FAILURE_UNREACHABLE,
+        f"NextDNS API answered with an unusable status (HTTP {response.status_code})",
+    )
