@@ -14,6 +14,7 @@ import sys
 import pytest
 
 ENV_VAR = "FASTMCP_HTTP_HOST_ORIGIN_PROTECTION"
+ALLOWED_HOSTS_VAR = "FASTMCP_HTTP_ALLOWED_HOSTS"
 PROTECTION_AUTO = "auto"
 MCP_ENDPOINT = "/mcp"
 # The bind address ``get_mcp_run_options()`` defaults to; the ASGI scope's
@@ -84,6 +85,37 @@ def test_loopback_endpoint_rejects_a_foreign_origin_header(build_app) -> None:
     )
 
     assert response.status_code == 403
+
+
+def test_documented_proxy_configuration_starts_and_allows_the_proxy_host(build_app) -> None:
+    """The recipe the docs prescribe: JSON allowlist + ``auto`` admits the proxy's Host.
+
+    ``FASTMCP_HTTP_ALLOWED_HOSTS`` is a pydantic-settings JSON list, so the
+    documented value is ``["name"]``; a bare hostname fails validation at import
+    and never reaches a request.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from fastmcp import settings; print(settings.http_allowed_hosts, settings.http_host_origin_protection)",
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            ENV_VAR: PROTECTION_AUTO,
+            ALLOWED_HOSTS_VAR: '["mcp.example.com"]',
+        },
+        check=True,
+    )
+    assert result.stdout.strip() == "['mcp.example.com'] auto"
+
+    app = build_app(host_origin_protection=PROTECTION_AUTO, allowed_hosts=["mcp.example.com"])
+    proxy_host = {"host": "mcp.example.com"}
+
+    assert _get(app, proxy_host).status_code == _get(build_app(host_origin_protection=False), proxy_host).status_code
+    assert _get(app, {"host": "evil.example"}).status_code == 421
 
 
 def test_loopback_endpoint_serves_its_own_host(build_app) -> None:
