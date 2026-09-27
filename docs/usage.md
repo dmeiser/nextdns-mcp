@@ -88,6 +88,10 @@ Set `series=true` for time-series data. The `destinations` metric requires
 Generate a PNG line chart for supported metrics. Use a profile with query
 history. Returns an MCP image or an error if no data is available.
 
+A series is capped server-side at 2000 points (the requested range divided by
+`interval`) with `interval` between 60 and 86400 seconds. A request past either
+limit is rejected with an `invalid_argument` error rather than silently adjusted.
+
 ### dohLookup
 Perform a DNS-over-HTTPS lookup through NextDNS:
 

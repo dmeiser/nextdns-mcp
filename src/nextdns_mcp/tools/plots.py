@@ -6,6 +6,8 @@ SPDX-License-Identifier: MIT
 import asyncio
 import io
 import logging
+import re
+import time
 from datetime import datetime
 from typing import Any
 
@@ -14,17 +16,25 @@ from fastmcp.utilities.types import Image
 
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_series_params, _cap_limit, resolve_profile_id
+from ..utils import _api_request, _build_series_params, resolve_profile_id
 from .metrics import PLOT_METRICS, PlotMetric
 
 logger = logging.getLogger(__name__)
 
-# Server-side caps for the ``limit`` and ``interval`` parameters of the
-# ``;series`` endpoint (issue #267). The plot path forwards both verbatim, so
-# without these a single call could ask the API for an unbounded number of
-# points per series, every one of which is buffered and then rendered.
-PLOT_LIMIT_MAX = 500
+# Server-side ceiling on the ``interval`` parameter, and the maximum number of
+# data points a single series response may contain (issue #267). The point count
+# is the requested range divided by the interval, so bounding the count - not
+# the interval argument alone - is what keeps a series response small enough to
+# buffer and then render. Both are enforced as typed rejections naming the limit,
+# never by silently rewriting the caller's request: the ``;series`` endpoints
+# take no ``limit`` parameter, so the range is the only exposure knob.
 PLOT_INTERVAL_MAX = 86400
+PLOT_MAX_POINTS = 2000
+
+# Relative from/to values such as "-1d" or "-7d", with their unit in seconds.
+# "y" is a 365-day year, matching how the analytics endpoints read a year.
+_RELATIVE_TIME_RE = re.compile(r"^(-?)(\d+)([smhdwy])$", re.IGNORECASE)
+_RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
 
 # matplotlib is imported lazily inside _render_series_chart (issue #165): the
 # import alone costs ~2s and every stdio cold start would pay it even though
@@ -138,12 +148,100 @@ def _render_series_chart(
     return buffer.getvalue()
 
 
+def _now() -> float:
+    """Return the current Unix time in seconds (indirection keeps tests deterministic)."""
+    return time.time()
+
+
+def _resolve_time_point(value: str | int, now: float) -> float | None:
+    """Resolve a ``from``/``to`` argument to Unix seconds, or None if unparseable.
+
+    Accepts the forms the analytics endpoints accept: Unix timestamps, ISO 8601
+    timestamps, ``now``, and relative offsets such as ``-1d`` or ``-7d``. An
+    unparseable value yields None so the caller can leave the request untouched
+    rather than reject a value the API itself might accept.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if text.lower() == "now":
+        return now
+    match = _RELATIVE_TIME_RE.match(text)
+    if match:
+        sign = -1.0 if match.group(1) else 1.0
+        return now + sign * int(match.group(2)) * _RELATIVE_UNIT_SECONDS[match.group(3).lower()]
+    try:
+        return float(int(text))
+    except ValueError:
+        pass
+    try:
+        return _parse_series_timestamp(text).timestamp()
+    except ValueError:
+        return None
+
+
+def _series_span_seconds(from_time: str | int, to_time: str | int, now: float) -> float | None:
+    """Return the length in seconds of the requested range, or None if unknown.
+
+    None means the range could not be resolved (an unparseable from/to value,
+    or an end that is not after the start). The series point budget cannot be
+    evaluated for such a request, so it is left to the API rather than rejected
+    on a guess.
+    """
+    start = _resolve_time_point(from_time, now)
+    end = _resolve_time_point(to_time, now)
+    if start is None or end is None:
+        return None
+    span = end - start
+    return span if span > 0 else None
+
+
+def _series_budget_error(
+    from_time: str | int,
+    to_time: str | int,
+    interval: int,
+    max_points: int = PLOT_MAX_POINTS,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    """Return a typed error when the series response would exceed the point budget.
+
+    The API returns one point per interval across the requested range, so a wide
+    range with a small interval asks for hundreds of thousands of points, all of
+    which ``_api_request`` buffers and ``_render_series_chart`` then plots. The
+    budget is enforced where the series request is constructed - as a rejection
+    naming the limit, never as a silent substitution of the caller's interval,
+    which would return a different series than the one asked for (issue #267).
+    """
+    if interval <= 0 or max_points <= 0:
+        return None
+    span = _series_span_seconds(from_time, to_time, _now() if now is None else now)
+    if span is None:
+        return None
+    max_span = max_points * interval
+    if span <= max_span:
+        return None
+    return error_payload(
+        ErrorCode.INVALID_ARGUMENT,
+        (
+            f"Requested range spans {span:.0f}s, more than the {max_points}-point series budget "
+            f"allows at interval={interval}s (max {max_span}s); use a larger interval or a shorter range"
+        ),
+        max_points=max_points,
+        max_span_seconds=max_span,
+        interval=interval,
+    )
+
+
 def _validate_plot_params(
     metric: str,
     interval: int,
     profile_id: OptionalProfileId,
+    from_time: str | int = "-1d",
+    to_time: str | int = "now",
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Validate metric, interval, and profile ID parameters for plotting."""
+    """Validate metric, interval, range, and profile ID parameters for plotting."""
     if metric not in PLOT_METRICS:
         return None, error_payload(
             ErrorCode.UNSUPPORTED_METRIC,
@@ -157,6 +255,18 @@ def _validate_plot_params(
             "interval must be at least 60 seconds",
             minimum_interval=60,
         )
+
+    if interval > PLOT_INTERVAL_MAX:
+        return None, error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"interval must not exceed {PLOT_INTERVAL_MAX} seconds, got {interval}",
+            max_interval=PLOT_INTERVAL_MAX,
+            interval=interval,
+        )
+
+    budget_error = _series_budget_error(from_time, to_time, interval)
+    if budget_error:
+        return None, budget_error
 
     return resolve_profile_id(profile_id, allow_default=True)
 
@@ -202,10 +312,9 @@ async def _plot_analytics_series_impl(
     alignment: str = "end",
     timezone: str = "GMT",
     partials: str = "none",
-    limit: int = 10,
 ) -> dict[str, Any] | mcp.types.ImageContent:
     """Generate a PNG line chart from a NextDNS analytics time-series endpoint."""
-    target_profile, val_error = _validate_plot_params(metric, interval, profile_id)
+    target_profile, val_error = _validate_plot_params(metric, interval, profile_id, from_time, to_time)
     if val_error:
         return val_error
     assert target_profile is not None
@@ -213,11 +322,10 @@ async def _plot_analytics_series_impl(
     params: dict[str, Any] = _build_series_params(
         from_time=from_time,
         to_time=to_time,
-        interval=_cap_limit(interval, PLOT_INTERVAL_MAX),
+        interval=interval,
         alignment=alignment,
         timezone=timezone,
         partials=partials,
-        limit=_cap_limit(limit, PLOT_LIMIT_MAX),
     )
 
     url = f"/profiles/{target_profile}/analytics/{metric};series"
@@ -256,7 +364,6 @@ async def plotAnalytics(
     alignment: str = "end",
     timezone: str = "GMT",
     partials: str = "none",
-    limit: int = 10,
 ) -> dict[str, Any] | mcp.types.ImageContent:
     """Generate a PNG line chart for a NextDNS analytics time-series metric.
 
@@ -269,9 +376,19 @@ async def plotAnalytics(
 
     Time values can be Unix timestamps or relative strings like ``-1d``.
 
+    The ``;series`` endpoint takes no ``limit`` parameter, so the requested
+    range is the only thing that bounds the response. Two server-side limits are
+    enforced before the request is built, and each is rejected with an
+    ``invalid_argument`` error naming the limit rather than silently adjusted:
+
+    - ``interval`` must be between 60 and 86400 seconds.
+    - The range spans at most 2000 intervals (at most 2000 points per series),
+      so a wide range needs a proportionally larger ``interval``.
+
     Examples:
         - ``plotAnalytics(metric="status", profile_id="abc123", from_time="-1d")``
         - ``plotAnalytics(metric="devices", profile_id="abc123", from_time="-7d", interval=86400)``
+        - a year of data: ``plotAnalytics(metric="status", profile_id="abc123", from_time="-1y", interval=43200)``
 
     Returns:
         An MCP ImageContent PNG chart, or an error dict if data is unavailable.
@@ -285,5 +402,4 @@ async def plotAnalytics(
         alignment=alignment,
         timezone=timezone,
         partials=partials,
-        limit=limit,
     )

@@ -56,15 +56,13 @@ async def _query_analytics_impl(
     if series:
         # Same ``;series`` endpoint as plotAnalytics: build the shared
         # parameter set through the one helper so the two paths cannot drift.
+        # from/to are already in ``params`` from the base call above.
         params.update(
             _build_series_params(
-                from_time=from_time,
-                to_time=to_time,
                 interval=interval,
                 alignment=alignment,
                 timezone=timezone,
                 partials=partials,
-                limit=capped_limit,
             )
         )
 
