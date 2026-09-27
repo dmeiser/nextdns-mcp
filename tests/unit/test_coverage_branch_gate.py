@@ -61,6 +61,18 @@ src/nextdns_mcp/client.py     10      0     48      1    98%   249->252
 TOTAL                        10      0     48      1    98%
 """
 
+# The reported failure mode (issue #278): with a repo-sized denominator a
+# handful of untaken branches still round to a displayed "100%", so a gate that
+# only reads the Cover column passes green while a branch is untaken. The exact
+# miss counts are what reveal it.
+BRANCH_PARTIAL_ROUNDS_TO_100_REPORT = """\
+Name                                 Stmts   Miss Branch BrPart  Cover
+--------------------------------------------------------------------
+src/nextdns_mcp/client.py              158      0     48      1   100%
+--------------------------------------------------------------------
+TOTAL                                1350      0    440      7   100%
+"""
+
 
 def _coverage_gate_script() -> str:
     """Return the shell script the unit-tests job executes for its coverage gate."""
@@ -120,6 +132,19 @@ def test_gate_rejects_a_partial_branch(tmp_path):
     result = _run_gate(tmp_path, BRANCH_PARTIAL_REPORT)
     assert result.returncode != 0, f"gate accepted a partial branch:\n{result.stdout}"
     assert "98%" in result.stdout, result.stdout
+
+
+def test_gate_rejects_a_partial_branch_that_rounds_to_100(tmp_path):
+    """An untaken branch must fail the gate even when Cover displays 100%.
+
+    `term-missing` rounds Cover to whole percent, so at this repository's size
+    (1350 statements, 440 branches) up to seven untaken branches still print
+    "100%". A gate that reads only the Cover column would go green here, which
+    is exactly how the `stream()` ACL bypass survived the statement-only gate.
+    """
+    result = _run_gate(tmp_path, BRANCH_PARTIAL_ROUNDS_TO_100_REPORT)
+    assert result.returncode != 0, f"gate accepted untaken branches hidden by rounding:\n{result.stdout}"
+    assert "7 untaken branch" in result.stdout, result.stdout
 
 
 def test_gate_accepts_complete_branch_coverage(tmp_path):

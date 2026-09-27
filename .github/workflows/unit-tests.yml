@@ -149,17 +149,6 @@ jobs:
             exit 1
           fi
           
-          # Extract overall coverage percentage
-          COVERAGE=$(grep "TOTAL" test_output.txt | awk '{print $NF}' | sed 's/%//')
-          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
-          echo "Overall Coverage: $COVERAGE%"
-          
-          # Check if overall coverage is 100%
-          if [ -z "$COVERAGE" ]; then
-            echo "❌ Could not extract coverage percentage"
-            exit 1
-          fi
-
           # Branch coverage is part of the 100% target, not just statements
           # (issue #278). A statement-only report cannot see an untested
           # branch, so require the branch columns `term-missing` only emits
@@ -169,8 +158,27 @@ jobs:
             exit 1
           fi
 
-          if ! awk "BEGIN {exit !($COVERAGE >= 100)}"; then
-            echo "❌ Overall coverage $COVERAGE% is below 100% threshold"
+          # With the branch columns present the row layout is
+          #   Name Stmts Miss Branch BrPart Cover [Missing]
+          # so Miss is field 3, BrPart field 5 and Cover field 6. The 100%
+          # contract is judged on the exact Miss/BrPart counts, because Cover
+          # is rounded to whole percent and still reads 100% while a few
+          # branches go untaken (issue #278).
+          TOTAL_ROW=$(grep "^TOTAL" test_output.txt)
+          COVERAGE=$(echo "$TOTAL_ROW" | awk '{print $6}' | sed 's/%//')
+          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+          echo "Overall Coverage: $COVERAGE%"
+
+          # Check if overall coverage is 100%
+          if [ -z "$COVERAGE" ]; then
+            echo "❌ Could not extract coverage percentage"
+            exit 1
+          fi
+
+          TOTAL_MISS=$(echo "$TOTAL_ROW" | awk '{print $3}')
+          TOTAL_BRPART=$(echo "$TOTAL_ROW" | awk '{print $5}')
+          if [ "$TOTAL_MISS" != "0" ] || [ "$TOTAL_BRPART" != "0" ]; then
+            echo "❌ Overall coverage $COVERAGE% is below 100%: $TOTAL_MISS missed statement(s), $TOTAL_BRPART untaken branch(es)"
             exit 1
           fi
 
@@ -187,18 +195,21 @@ jobs:
               continue
             fi
             
-            # Extract filename and coverage percentage
+            # Extract filename, coverage percentage and the exact miss counts
             FILENAME=$(echo "$line" | awk '{print $1}')
-            FILE_COVERAGE=$(echo "$line" | awk '{print $NF}' | sed 's/%//')
-            
-            # Skip if not a valid coverage line
-            if [ -z "$FILE_COVERAGE" ] || ! [[ "$FILE_COVERAGE" =~ ^[0-9]+$ ]]; then
+            FILE_COVERAGE=$(echo "$line" | awk '{print $6}')
+            FILE_MISS=$(echo "$line" | awk '{print $3}')
+            FILE_BRPART=$(echo "$line" | awk '{print $5}')
+
+            # Skip if not a coverage row (the 6th field is the Cover column)
+            if ! [[ "$FILE_COVERAGE" =~ ^[0-9]+%$ ]]; then
               continue
             fi
-            
-            # Check if file coverage is below threshold
-            if ! awk "BEGIN {exit !($FILE_COVERAGE >= $MIN_FILE_COVERAGE)}"; then
-              echo "❌ File $FILENAME has coverage $FILE_COVERAGE% (below $MIN_FILE_COVERAGE% threshold)"
+            FILE_COVERAGE=${FILE_COVERAGE%\%}
+
+            # Check if the file misses any statement or branch
+            if [ "$FILE_MISS" != "0" ] || [ "$FILE_BRPART" != "0" ]; then
+              echo "❌ File $FILENAME has coverage $FILE_COVERAGE% ($FILE_MISS missed statement(s), $FILE_BRPART untaken branch(es), below $MIN_FILE_COVERAGE% threshold)"
               FAILED_FILES="${FAILED_FILES}\n- $FILENAME: $FILE_COVERAGE%"
             else
               echo "✅ File $FILENAME: $FILE_COVERAGE%"
