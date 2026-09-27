@@ -197,6 +197,37 @@ class TestNonApprovedDestinationsRefused:
         assert seen == []
 
 
+class TestRawPathKeepsTheDestinationAllowList:
+    """raw_request() skips the profile ACL, never the destination allow-list.
+
+    raw_request() is the ACL-free transport path used by the /health readiness
+    probe, but it carries the same X-Api-Key client header as every other path,
+    so a caller-supplied off-site URL must still be refused there.
+    """
+
+    async def test_raw_request_to_off_site_host_is_refused(self, recorder: Callable[..., object]) -> None:
+        client, seen = recorder()
+        async with client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.raw_request("GET", "https://evil.example/profiles/abc123/settings")
+
+        assert exc_info.value.code == "access_denied"
+        assert seen == []
+
+    async def test_raw_request_to_approved_host_still_proceeds(
+        self, monkeypatch: pytest.MonkeyPatch, recorder: Callable[..., object]
+    ) -> None:
+        """The probe path is unaffected: a deny-all ACL still lets it reach the base host."""
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "")
+        client, seen = recorder()
+        async with client:
+            response = await client.raw_request("GET", "/health")
+
+        assert response.status_code == 200
+        assert seen[0].url.host == "api.nextdns.io"
+
+
 class TestStreamFailsClosed:
     """stream() applies the same URL classification as request() (issue #262).
 
