@@ -361,7 +361,10 @@ def validate_configuration() -> None:
     """Validate required configuration is present and valid.
 
     Raises:
-        MissingApiKeyError: If required configuration is missing.
+        MissingApiKeyError: If no API key is configured. This is a
+            ``ConfigurationError`` subclass, so a single
+            ``except ConfigurationError`` also covers the invalid-value cases
+            below.
         ConfigurationError: If configuration values are invalid.
     """
     if not get_api_key():
