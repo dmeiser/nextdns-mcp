@@ -69,6 +69,19 @@ def _redacted(url: str) -> str:
     return str(url).split("?", 1)[0]
 
 
+def _log_safe_error(error: Exception) -> str:
+    """Return exception text that is safe to log at INFO or above (issue #139).
+
+    httpx builds ``HTTPStatusError`` messages from the fully merged request
+    URL, so they carry the very query string :func:`_redacted` strips from the
+    request argument. Only the status is logged; the verbatim text stays in the
+    error payload returned to the caller that supplied the query.
+    """
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"{error.response.status_code} {error.response.reason_phrase}"
+    return str(error)
+
+
 # Match the first path segment case-insensitively; anything under a
 # /profiles segment that does not yield a safe id is unclassifiable (issue #285).
 _PROFILE_PREFIX = re.compile(r"^/profiles/([^/]+)(?:/|$)", re.IGNORECASE)

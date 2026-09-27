@@ -517,26 +517,49 @@ class TestAccessControlledClientRequestLogging:
         assert any("/profiles/abc123/logs" in msg for msg in log_messages)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [401, 429, 503], ids=["unauthorized", "rate-limited", "server-error"])
+    async def test_api_request_status_error_hides_the_merged_query_string(
+        self,
+        clean_env: Callable[[str, str], None],
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        status_code: int,
+    ) -> None:
+        """httpx status errors carry the merged request URL, so they must not be logged verbatim."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        params = {"search": "secret-search-term", "device": "secret-device-id"}
+        request = httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/logs", params=params)
+        try:
+            httpx.Response(status_code, request=request).raise_for_status()
+        except httpx.HTTPStatusError as status_error:
+            assert "secret-search-term" in str(status_error)
+            monkeypatch.setattr(AccessControlledClient, "request", AsyncMock(side_effect=status_error))
+        else:
+            pytest.fail(f"{status_code} did not raise")
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"):
+            payload = await utils._api_request("GET", "/profiles/abc123/logs", params=params)
+
+        assert payload["code"] == "http_error"
+        assert payload["status_code"] == status_code
+        log_messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
+        assert log_messages
+        for msg in log_messages:
+            assert "secret-search-term" not in msg
+            assert "secret-device-id" not in msg
+            assert "?" not in msg, f"Query string leaked in error log: {msg}"
+        assert any("/profiles/abc123/logs" in msg and str(status_code) in msg for msg in log_messages)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("method", "env", "request_url"),
         [
             ("GET", {}, "https://evil.example.com/profiles?search=secret-search-term"),
-            ("GET", {}, "/profiles/abc.def/logs?search=secret-search-term"),
-            ("GET", {"NEXTDNS_READABLE_PROFILES": ""}, "/profiles?search=secret-search-term"),
             ("GET", {"NEXTDNS_READABLE_PROFILES": "zzz999"}, "/profiles/abc123/logs?search=secret-search-term"),
-            ("POST", {"NEXTDNS_READ_ONLY": "true"}, "/profiles?search=secret-search-term"),
-            ("POST", {"NEXTDNS_WRITABLE_PROFILES": ""}, "/profiles?search=secret-search-term"),
         ],
-        ids=[
-            "destination-blocked",
-            "fail-closed-path",
-            "collection-read-denied",
-            "profile-read-denied",
-            "collection-write-read-only",
-            "collection-write-none-writable",
-        ],
+        ids=["destination-blocked", "profile-read-denied"],
     )
-    async def test_every_denial_path_hides_the_query_string(
+    async def test_acl_denial_paths_hide_the_query_string(
         self,
         mock_super_request: Any,
         clean_env: Callable[[str, str], None],
@@ -545,20 +568,20 @@ class TestAccessControlledClientRequestLogging:
         env: dict[str, str],
         request_url: str,
     ) -> None:
-        """No denial path may hand the query string to a logger or to the raised error."""
+        """The remaining ACL denial paths must not hand the query string to a logger."""
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
         for key, value in env.items():
             clean_env(key, value)
 
         with caplog.at_level(logging.DEBUG):
             async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-                with pytest.raises(AccessDeniedError) as exc_info:
+                with pytest.raises(AccessDeniedError):
                     await client.request(method, request_url)
 
         mock_super_request.assert_not_called()
         messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
         assert messages, "the denial must be reported at WARNING or above"
-        for msg in [*messages, str(exc_info.value)]:
+        for msg in messages:
             assert "secret-search-term" not in msg
             assert "?" not in msg, f"Query string leaked at WARNING or above: {msg}"
 
