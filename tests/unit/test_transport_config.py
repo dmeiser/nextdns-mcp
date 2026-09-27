@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from nextdns_mcp.config import ConfigurationError
 from nextdns_mcp.server import get_mcp_run_options
 
 
@@ -56,9 +57,9 @@ def test_custom_host_and_port():
 
 
 def test_invalid_port_raises_error():
-    """Verify invalid port value raises ValueError."""
+    """Verify invalid port value raises ConfigurationError (#283)."""
     with (
         patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "invalid"}),
-        pytest.raises(ValueError),
+        pytest.raises(ConfigurationError),
     ):
         get_mcp_run_options()

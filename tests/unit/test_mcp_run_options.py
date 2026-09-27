@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from nextdns_mcp.config import ConfigurationError
-from nextdns_mcp.server import _is_loopback_host, _resolve_transport, get_mcp_run_options
+from nextdns_mcp.server import _is_loopback_host, _parse_port, _resolve_transport, get_mcp_run_options
 
 
 class TestGetMcpRunOptions:
@@ -100,11 +100,11 @@ class TestGetMcpRunOptions:
             get_mcp_run_options()
             mock_warning.assert_not_called()
 
-    def test_invalid_port_raises_value_error(self):
-        """Test that invalid port value raises ValueError."""
+    def test_invalid_port_raises_configuration_error(self):
+        """Test that an invalid port value raises ConfigurationError (#283)."""
         with (
             patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "invalid"}),
-            pytest.raises(ValueError),
+            pytest.raises(ConfigurationError),
         ):
             get_mcp_run_options()
 
@@ -165,6 +165,44 @@ class TestResolveTransport:
         with (
             patch.dict(os.environ, {"MCP_TRANSPORT": raw}, clear=True),
             pytest.raises(ConfigurationError),
+        ):
+            get_mcp_run_options()
+
+
+class TestParsePort:
+    """Test _parse_port validation for MCP_PORT (#283).
+
+    A malformed MCP_PORT must fail fast with the project's typed
+    ConfigurationError, naming the variable the operator set, exactly as
+    NEXTDNS_HTTP_TIMEOUT does, instead of a bare ValueError from int().
+    """
+
+    def test_unset_defaults_to_8000(self):
+        """With MCP_PORT unset, the default port is 8000."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert _parse_port() == 8000
+
+    @pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("8000", 8000), ("65535", 65535)])
+    def test_valid_ports_parse_to_int(self, raw, expected):
+        """A port in range parses to the integer mcp.run() expects."""
+        with patch.dict(os.environ, {"MCP_PORT": raw}, clear=True):
+            assert _parse_port() == expected
+
+    @pytest.mark.parametrize("raw", ["invalid", "", "  ", "8000.5", "0", "-1", "65536", "99999"])
+    def test_invalid_ports_raise_configuration_error(self, raw):
+        """Non-numeric, empty, and out-of-range ports fail with ConfigurationError."""
+        with (
+            patch.dict(os.environ, {"MCP_PORT": raw}, clear=True),
+            pytest.raises(ConfigurationError, match="MCP_PORT"),
+        ):
+            _parse_port()
+
+    @pytest.mark.parametrize("raw", ["invalid", "", "0", "65536"])
+    def test_invalid_ports_raise_through_get_mcp_run_options(self, raw):
+        """The typed failure surfaces through get_mcp_run_options, not a bare ValueError."""
+        with (
+            patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": raw}, clear=True),
+            pytest.raises(ConfigurationError, match="MCP_PORT"),
         ):
             get_mcp_run_options()
 
