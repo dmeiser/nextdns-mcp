@@ -7,7 +7,7 @@ from typing import Any
 
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, _build_query_params, _cap_limit, resolve_profile_id
+from ..utils import _api_request, _build_query_params, _build_series_params, _cap_limit, resolve_profile_id
 from .metrics import NON_SERIES_METRICS, AnalyticsMetric
 
 # Server-side cap for the ``limit`` parameter (maximum accepted by the NextDNS API).
@@ -48,18 +48,23 @@ async def _query_analytics_impl(
     suffix = ";series" if series else ""
     url = f"/profiles/{target_profile}/analytics/{metric}{suffix}"
 
-    capped_limit, _ = _cap_limit(limit, ANALYTICS_LIMIT_MAX)
+    capped_limit = _cap_limit(limit, ANALYTICS_LIMIT_MAX)
     params: dict[str, Any] = _build_query_params(
         **{"from": from_time, "to": to_time, "limit": capped_limit, "cursor": cursor, "device": device}
     )
 
     if series:
+        # Same ``;series`` endpoint as plotAnalytics: build the shared
+        # parameter set through the one helper so the two paths cannot drift.
         params.update(
-            _build_query_params(
+            _build_series_params(
+                from_time=from_time,
+                to_time=to_time,
                 interval=interval,
                 alignment=alignment,
                 timezone=timezone,
                 partials=partials,
+                limit=capped_limit,
             )
         )
 
