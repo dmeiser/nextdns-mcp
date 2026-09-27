@@ -201,6 +201,20 @@ class TestStripExtraFieldsMiddleware:
         assert middleware._get_schema_property_types("not-a-dict") == set()
         assert middleware._get_schema_property_types({}) == set()
 
+    def test_get_schema_property_types_tolerates_malformed_subschemas(self, middleware):
+        """Malformed ``anyOf``/``oneOf`` entries contribute no types instead of raising.
+
+        A subschema that is not an object, or whose ``type`` is neither a string
+        nor a list, carries no coercible type, so it is skipped rather than
+        crashing the middleware on a schema it does not recognize.
+        """
+        assert middleware._get_schema_property_types({"anyOf": ["string", {"type": "boolean"}]}) == {"boolean"}
+        assert middleware._get_schema_property_types({"oneOf": [{"const": "x"}, {"type": ["number", "null"]}]}) == {
+            "number",
+            "null",
+        }
+        assert middleware._get_schema_property_types({"anyOf": [{"type": None}, {"type": {"name": "string"}}]}) == set()
+
     def test_coerce_string_value_respects_schema(self, middleware):
         """Test that string coercion only happens for expected schema types."""
         assert middleware._coerce_string_value("true", {"boolean"}) is True
