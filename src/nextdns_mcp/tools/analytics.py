@@ -91,6 +91,8 @@ async def _query_analytics_impl(
     try:
             return await _api_request("GET", url, params=params)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        if hasattr(e, 'error_payload') and e.error_payload is not None:
+            return e.error_payload
         cause = e.__cause__
         if cause is not None and isinstance(cause, httpx.HTTPError):
             return http_error_payload(str(e), cause)

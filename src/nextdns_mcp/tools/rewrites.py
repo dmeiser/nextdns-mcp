@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import ProfileId
-from ..errors import ErrorCode, error_payload, http_error_payload
-from ..utils import _api_request, _validate_entry_id, resolve_profile_id, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
+from ..errors import ErrorCode, error_payload, http_error_payload, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
+from ..utils import _api_request, _validate_entry_id, resolve_profile_id
 import httpx
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
@@ -37,6 +37,8 @@ async def _manage_rewrites_impl(
         try:
                     return await _api_request("GET", base_url)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            if hasattr(e, 'error_payload') and e.error_payload is not None:
+                return e.error_payload
             cause = e.__cause__
             if cause is not None and isinstance(cause, httpx.HTTPError):
                 return http_error_payload(str(e), cause)
@@ -49,6 +51,8 @@ async def _manage_rewrites_impl(
         try:
                     return await _api_request("POST", base_url, json={"name": name, "content": content})
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            if hasattr(e, 'error_payload') and e.error_payload is not None:
+                return e.error_payload
             cause = e.__cause__
             if cause is not None and isinstance(cause, httpx.HTTPError):
                 return http_error_payload(str(e), cause)
@@ -61,6 +65,8 @@ async def _manage_rewrites_impl(
         try:
                     return await _api_request("DELETE", f"{base_url}/{entry_id}")
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            if hasattr(e, 'error_payload') and e.error_payload is not None:
+                return e.error_payload
             cause = e.__cause__
             if cause is not None and isinstance(cause, httpx.HTTPError):
                 return http_error_payload(str(e), cause)

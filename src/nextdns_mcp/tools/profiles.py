@@ -34,11 +34,14 @@ async def _profiles_list(cursor: str | None = None) -> dict[str, Any]:
     try:
             result = await _api_request("GET", "/profiles", params=params or None)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        cause = e.__cause__
-        if cause is not None and isinstance(cause, httpx.HTTPError):
-            result = http_error_payload(str(e), cause)
+        if hasattr(e, 'error_payload') and e.error_payload is not None:
+            result = e.error_payload
         else:
-            result = error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+            cause = e.__cause__
+            if cause is not None and isinstance(cause, httpx.HTTPError):
+                result = http_error_payload(str(e), cause)
+            else:
+                result = error_payload(ErrorCode.INTERNAL_ERROR, str(e))
     if isinstance(result, dict) and "meta" in result and isinstance(result["meta"], dict):
         pagination = result["meta"].get("pagination")
         if isinstance(pagination, dict) and pagination.get("cursor"):
@@ -59,6 +62,8 @@ async def _profiles_create(name: str | None) -> dict[str, Any]:
     try:
             return await _api_request("POST", "/profiles", json={"name": name})
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        if hasattr(e, 'error_payload') and e.error_payload is not None:
+            return e.error_payload
         cause = e.__cause__
         if cause is not None and isinstance(cause, httpx.HTTPError):
             return http_error_payload(str(e), cause)
@@ -72,6 +77,8 @@ async def _profiles_update(url: str, name: str | None) -> dict[str, Any]:
     try:
             return await _api_request("PATCH", url, json={"name": name})
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+        if hasattr(e, 'error_payload') and e.error_payload is not None:
+            return e.error_payload
         cause = e.__cause__
         if cause is not None and isinstance(cause, httpx.HTTPError):
             return http_error_payload(str(e), cause)
@@ -102,6 +109,8 @@ async def _manage_profiles_impl(
         try:
                     return await _api_request("GET", url)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            if hasattr(e, 'error_payload') and e.error_payload is not None:
+                return e.error_payload
             cause = e.__cause__
             if cause is not None and isinstance(cause, httpx.HTTPError):
                 return http_error_payload(str(e), cause)
@@ -113,6 +122,8 @@ async def _manage_profiles_impl(
         try:
                     return await _api_request("DELETE", url)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+            if hasattr(e, 'error_payload') and e.error_payload is not None:
+                return e.error_payload
             cause = e.__cause__
             if cause is not None and isinstance(cause, httpx.HTTPError):
                 return http_error_payload(str(e), cause)

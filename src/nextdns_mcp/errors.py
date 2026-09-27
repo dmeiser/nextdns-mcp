@@ -103,19 +103,23 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
 
 class NextDNSError(RuntimeError):
     """Base exception for NextDNS API errors."""
-    def __init__(self, message: str, status_code: int | None = None, response_body: str | None = None):
+    def __init__(self, message: str, status_code: int | None = None, response_body: str | None = None, error_payload: dict[str, Any] | None = None):
         super().__init__(message)
         self.status_code = status_code
         self.response_body = response_body
+        self.error_payload = error_payload
 
 class NextDNSAuthError(NextDNSError):
     """Raised for 401 and 403 errors."""
-    pass
+    def __init__(self, message: str, status_code: int | None = None, response_body: str | None = None, error_payload: dict[str, Any] | None = None):
+        super().__init__(message, status_code=status_code, response_body=response_body, error_payload=error_payload)
 
 class NextDNSRateLimitError(NextDNSError):
     """Raised for 429 errors."""
-    pass
+    def __init__(self, message: str, status_code: int | None = None, response_body: str | None = None, error_payload: dict[str, Any] | None = None):
+        super().__init__(message, status_code=status_code, response_body=response_body, error_payload=error_payload)
 
 class NextDNSServerError(NextDNSError):
     """Raised for 5xx errors."""
-    pass
+    def __init__(self, message: str, status_code: int | None = None, response_body: str | None = None, error_payload: dict[str, Any] | None = None):
+        super().__init__(message, status_code=status_code, response_body=response_body, error_payload=error_payload)
