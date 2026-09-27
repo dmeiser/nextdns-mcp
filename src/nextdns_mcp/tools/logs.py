@@ -143,7 +143,9 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     preview: list[str] = []
     preview_bytes = 0
     row_count = 0
-    total_chars = 0
+    total_bytes = 0
+    # End-of-stream flag, not per-chunk state: it is recomputed for every
+    # chunk and is only true when the last chunk left a line unterminated.
     open_line = False
     # fdopen (not open) so the file handle stays usable from the event loop
     # without tripping ASYNC230; per-chunk writes are small and cheap.
@@ -154,7 +156,7 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
             out.write(text)
             if not text:
                 continue
-            total_chars += len(text)
+            total_bytes += len(text.encode("utf-8"))
             newlines = text.count("\n")
             row_count += newlines
             open_line = not text.endswith("\n")
@@ -162,10 +164,11 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
                 for line in text.splitlines(keepends=True):
                     if len(preview) >= DOWNLOAD_PREVIEW_MAX_LINES:
                         break
-                    if preview_bytes + len(line) > DOWNLOAD_PREVIEW_MAX_BYTES:
+                    line_bytes = len(line.encode("utf-8"))
+                    if preview_bytes + line_bytes > DOWNLOAD_PREVIEW_MAX_BYTES:
                         break
                     preview.append(line)
-                    preview_bytes += len(line)
+                    preview_bytes += line_bytes
     if open_line:
         row_count += 1
     size = os.path.getsize(path)
@@ -179,7 +182,7 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
             "text": text_preview,
             "line_count": len(preview),
             "bytes": preview_bytes,
-            "truncated": len(text_preview) < total_chars,
+            "truncated": preview_bytes < total_bytes,
         },
     }
 
@@ -322,6 +325,10 @@ async def manageLogs(
           ignored by the NextDNS download endpoint. The CSV is streamed to a
           temporary file; only the file path, size, row count, and a small
           capped preview are returned (the full text is never inlined).
+          On success the temp file is *not* cleaned up: the CSV stays in the
+          OS temp directory (mode 0600) and the returned path is the only
+          record of it, so delete it when it is no longer needed. Failed
+          downloads do remove the temp file and its parent directory.
 
     Time values can be Unix timestamps or relative strings like ``-1d`` or ``-7d``.
     They are only used by ``get``.

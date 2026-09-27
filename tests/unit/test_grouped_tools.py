@@ -555,7 +555,7 @@ class TestManageLogs:
         assert "text" not in result
         assert os.path.isfile(result["file_path"])
         assert await asyncio.to_thread(Path(result["file_path"]).read_text, encoding="utf-8") == csv_text
-        os.unlink(result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_download_large_is_capped_not_inline(self, mock_api_client):
@@ -580,7 +580,7 @@ class TestManageLogs:
         assert result["preview"]["line_count"] <= 20
         assert result["preview"]["bytes"] <= 256 * 1024
         assert "x" * 1000 * 2 not in result["preview"]["text"]
-        await asyncio.to_thread(os.unlink, result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_download_empty_chunk_is_skipped(self, mock_api_client):
@@ -596,7 +596,30 @@ class TestManageLogs:
         assert result["row_count"] == 2
         assert result["preview"]["line_count"] == 2
         assert result["preview"]["truncated"] is False
-        await asyncio.to_thread(os.unlink, result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_download_preview_capped_by_utf8_bytes_not_chars(self, mock_api_client):
+        """The preview cap counts UTF-8 bytes, not characters, and reports the true byte total."""
+        header = "date,time,question,answer\n"
+        # Half the byte cap in characters, but twice the cap once encoded.
+        multibyte_line = "é" * (150 * 1024) + "\n"
+        assert len(multibyte_line) < logs_module.DOWNLOAD_PREVIEW_MAX_BYTES
+        assert len(multibyte_line.encode("utf-8")) > logs_module.DOWNLOAD_PREVIEW_MAX_BYTES
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([header + multibyte_line])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert result["preview"]["text"] == header
+        assert result["preview"]["bytes"] == len(result["preview"]["text"].encode("utf-8"))
+        assert result["preview"]["bytes"] == len(header.encode("utf-8"))
+        assert result["preview"]["bytes"] <= logs_module.DOWNLOAD_PREVIEW_MAX_BYTES
+        assert result["preview"]["truncated"] is True
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_download_preview_capped_by_bytes(self, mock_api_client):
@@ -614,7 +637,7 @@ class TestManageLogs:
         assert result["preview"]["text"] == header
         assert result["preview"]["truncated"] is True
         assert result["row_count"] == 2
-        await asyncio.to_thread(os.unlink, result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_download_final_line_without_newline_counts_as_row(self, mock_api_client):
@@ -629,7 +652,7 @@ class TestManageLogs:
         result = await server.manageLogs("download", "abc123")
         assert result["row_count"] == 2
         assert result["preview"]["line_count"] == 2
-        await asyncio.to_thread(os.unlink, result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     def test_unlink_temp_file_missing_path_logs_warning(self, caplog):
         """A failed temp-file removal logs a warning and never raises."""
@@ -668,7 +691,7 @@ class TestManageLogs:
         args, kwargs = mock_api_client.stream.call_args
         assert kwargs.get("follow_redirects") is not True
         assert all(arg is not True for arg in args)
-        os.unlink(result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
 
 def _fake_dns(monkeypatch, public_address: str = "93.184.216.34") -> list[str]:
@@ -769,7 +792,7 @@ class TestManageLogsDownloadRedirects:
         assert str(fake.last_request.url) == "https://api.nextdns.io/logs/abc123/signed.csv?sig=1"
         # ...and it carried no API key header.
         assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
-        os.unlink(result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_relative_location_resolved_against_origin(self, mock_api_client, monkeypatch):
@@ -785,7 +808,7 @@ class TestManageLogsDownloadRedirects:
         assert result["size"] == 8
         assert str(fake.last_request.url) == "https://api.nextdns.io/redirects/abc123.csv"
         assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
-        os.unlink(result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_redirect_loop_is_bounded(self, mock_api_client, monkeypatch):
