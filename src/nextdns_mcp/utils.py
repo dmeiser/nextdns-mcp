@@ -51,9 +51,9 @@ def is_safe_entry_id(value: str) -> bool:
 def is_integer_shaped(value: str) -> bool:
     """Return True if value is a string that represents an integer.
 
-    Only ASCII-style decimal digits (optionally signed with ``-``) qualify, so
-    Unicode digit-like characters such as ``"²"`` are rejected instead of
-    relying on ``int()`` accepting them.
+    Decimal digits (optionally signed with ``-``) qualify, so non-decimal
+    digit-like characters such as ``"²"`` are rejected instead of relying on
+    ``int()`` accepting them inconsistently.
     """
     try:
         int(value)
