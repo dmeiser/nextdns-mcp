@@ -145,8 +145,10 @@ class TestErrorPayloadShape:
         assert payload["details"] == "d" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER
         assert payload["response_body_truncated"] is True
 
-    def test_http_error_payload_structured_non_string_fields_are_untouched(self):
-        # Only string field values are bounded; non-string values pass through.
+    def test_http_error_payload_bounds_nested_structured_values(self):
+        # Issue #297: nested containers are bounded too - a huge list or nested
+        # object of free-form strings is cut just like a top-level field, and
+        # the payload is flagged. Non-string scalars pass through unchanged.
         exc = httpx.HTTPError("boom")
         exc.response = MagicMock()
         exc.response.status_code = 429
@@ -154,11 +156,26 @@ class TestErrorPayloadShape:
             "error": "rate limit exceeded",
             "retryAfter": 10**9,
             "context": ["x" * (100 * 1024)],
+            "meta": {"reason": "y" * (100 * 1024), "ok": True},
         }
         payload = http_error_payload("msg", exc)
         assert payload["error"] == "rate limit exceeded"
         assert payload["retryAfter"] == 10**9
-        assert payload["context"] == ["x" * (100 * 1024)]
+        assert payload["context"] == ["x" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER]
+        assert payload["meta"] == {"reason": "y" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER, "ok": True}
+        assert payload["response_body_truncated"] is True
+
+    def test_http_error_payload_nested_small_document_is_complete(self):
+        # Nested content within the cap is surfaced whole, with no flag.
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 429
+        exc.response.json.return_value = {
+            "error": "rate limit exceeded",
+            "context": ["quota exceeded", "retry in 10s"],
+        }
+        payload = http_error_payload("msg", exc)
+        assert payload["context"] == ["quota exceeded", "retry in 10s"]
         assert "response_body_truncated" not in payload
 
     def test_http_error_payload_structured_small_document_is_complete(self):

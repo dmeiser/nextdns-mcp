@@ -64,15 +64,45 @@ def error_payload(code: str, message: str, **extra: Any) -> dict[str, Any]:
     return payload
 
 
-def _bound_structured_fields(payload: dict[str, Any]) -> bool:
-    """Bound string values in an inlined structured error document.
+def _bound_value(value: Any) -> tuple[Any, bool]:
+    """Bound every free-form string in a JSON value, at any depth.
 
-    Each free-form string field is capped at ``MAX_RESPONSE_BODY_CHARS`` and cut
-    values are flagged with ``TRUNCATION_MARKER``, so a multi-hundred-KB
-    upstream ``details`` field cannot crowd the LLM context for a request that
-    already failed (issue #297). Typed fields (``code``, ``error``,
-    ``status_code``) are exempt: the issue #148 contract has callers branch on
-    them, so they are surfaced verbatim. Non-string values pass through.
+    Strings are capped at ``MAX_RESPONSE_BODY_CHARS`` and cut values carry
+    ``TRUNCATION_MARKER``; dicts and lists are rebuilt with their elements
+    bounded. Other scalars pass through unchanged.
+
+    Args:
+        value: Any JSON-decoded value.
+
+    Returns:
+        A ``(bounded_value, truncated)`` pair.
+    """
+    if isinstance(value, str):
+        if len(value) > MAX_RESPONSE_BODY_CHARS:
+            return value[:MAX_RESPONSE_BODY_CHARS] + TRUNCATION_MARKER, True
+        return value, False
+    if isinstance(value, dict):
+        bounded: dict[Any, Any] = {}
+        truncated = False
+        for key, item in value.items():
+            bounded[key], cut = _bound_value(item)
+            truncated = truncated or cut
+        return bounded, truncated
+    if isinstance(value, list):
+        bounded_items = [_bound_value(item) for item in value]
+        return [item for item, _ in bounded_items], any(cut for _, cut in bounded_items)
+    return value, False
+
+
+def _bound_structured_fields(payload: dict[str, Any]) -> bool:
+    """Bound free-form values in an inlined structured error document.
+
+    Every free-form string is capped at ``MAX_RESPONSE_BODY_CHARS`` (nested in
+    dicts and lists too) and cut values are flagged with ``TRUNCATION_MARKER``,
+    so a multi-hundred-KB upstream ``details`` field cannot crowd the LLM
+    context for a request that already failed (issue #297). Typed fields
+    (``code``, ``error``, ``status_code``) are exempt: the issue #148 contract
+    has callers branch on them, so they are surfaced verbatim.
 
     Args:
         payload: The structured error document; bounded in place.
@@ -82,11 +112,10 @@ def _bound_structured_fields(payload: dict[str, Any]) -> bool:
     """
     truncated = False
     for key, value in payload.items():
-        if key in _UNBOUNDED_STRUCTURED_FIELDS or not isinstance(value, str):
+        if key in _UNBOUNDED_STRUCTURED_FIELDS:
             continue
-        if len(value) > MAX_RESPONSE_BODY_CHARS:
-            payload[key] = value[:MAX_RESPONSE_BODY_CHARS] + TRUNCATION_MARKER
-            truncated = True
+        payload[key], cut = _bound_value(value)
+        truncated = truncated or cut
     return truncated
 
 
