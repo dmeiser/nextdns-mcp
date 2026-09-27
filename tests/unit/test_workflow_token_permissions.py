@@ -714,9 +714,7 @@ def test_skipped_e2e_validation_does_not_satisfy_the_gate(workflow: Workflow) ->
     still concludes ``success``. The gate must require the validation step's
     own check run to have concluded ``success`` -- a skip is not an E2E pass.
     """
-    run = run_workflow(
-        workflow, "auto-merge", check_conclusion="success", e2e_validation_conclusion="skipped"
-    )
+    run = run_workflow(workflow, "auto-merge", check_conclusion="success", e2e_validation_conclusion="skipped")
     assert run.denied == [], "least-privilege token blocked a required operation:\n" + _report(run)
     gh_ops = [c.operation for c in run.calls if c.source == "gh"]
     assert "gh pr review" not in gh_ops and "gh pr merge" not in gh_ops, (

@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from nextdns_mcp.server import _GROUPED_TOOLS
 from scripts.validate_schema import (
     load_openapi_spec,
     validate_tool_response,
@@ -109,16 +110,10 @@ def log_error(msg: str) -> None:
     print(f"{RED}[ERROR]{NC} {msg}", file=sys.stderr)
 
 
-EXPECTED_TOOLS = [
-    "dohLookup",
-    "manageLists",
-    "manageLogs",
-    "manageProfiles",
-    "manageRewrites",
-    "manageSettings",
-    "plotAnalytics",
-    "queryAnalytics",
-]
+# Derived from the server's registered tools so the E2E suite validates
+# exactly the tool surface the server exposes and the two cannot drift
+# (issue #271).
+EXPECTED_TOOLS = sorted(t.__name__ for t in _GROUPED_TOOLS)
 
 SPEC_PATH = PROJECT_ROOT / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
 
