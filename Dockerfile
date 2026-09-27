@@ -12,9 +12,9 @@ WORKDIR /app
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy dependency files and source code for build
-COPY pyproject.toml uv.lock README.md ./
-COPY src/ ./src/
+# Copy only the dependency files: the export and install below read nothing else,
+# so src/ stays out of the builder and its dependency layer cache
+COPY pyproject.toml uv.lock ./
 
 # Install dependencies into a version-independent directory
 # --frozen: use exact versions from uv.lock without updating
@@ -24,8 +24,7 @@ COPY src/ ./src/
 # Installing into /install keeps the layout free of a python3.x path component, so
 # the runtime stage never has to name the builder's Python minor version.
 RUN uv export --frozen --no-dev --no-emit-project --output-file /tmp/requirements.txt && \
-    uv pip install --target /install --requirement /tmp/requirements.txt && \
-    rm -f /tmp/requirements.txt
+    uv pip install --target /install --requirement /tmp/requirements.txt
 
 # 2. Final stage: Create the runtime image
 FROM python:3.14-slim
