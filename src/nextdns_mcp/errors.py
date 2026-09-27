@@ -10,6 +10,15 @@ SPDX-License-Identifier: MIT
 
 from typing import Any
 
+# Server-side cap on the number of characters of an unparseable upstream
+# response body inlined into an error payload. The tool result is read by an
+# LLM client, so a multi-hundred-KB HTML error page must not be copied
+# verbatim into the context window for a request that already failed.
+MAX_RESPONSE_BODY_CHARS = 2048
+
+# Marker appended to a response body that was cut at the cap.
+TRUNCATION_MARKER = "... [truncated]"
+
 
 # Typed error codes. These form a stable external contract: consumers branch on
 # the code, never on the free-form message. Add new codes here; do not reuse an
@@ -56,8 +65,10 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
     If the failed response body is a structured JSON error, its fields are
     surfaced so they are not lost. Otherwise a generic payload built from
     ``fallback_code`` is returned, always carrying ``status_code`` when the
-    response has one. (ACL denials do not reach this helper: the access-control
-    layer raises the typed ``AccessDeniedError`` instead of faking a response.)
+    response has one. An unparseable body is included only as a bounded prefix,
+    flagged with ``response_body_truncated``. (ACL denials do not reach this
+    helper: the access-control layer raises the typed ``AccessDeniedError``
+    instead of faking a response.)
 
     Args:
         message: The human-readable message used when no structured body exists.
@@ -84,5 +95,7 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
     payload = error_payload(fallback_code, message, status_code=status_code)
     body = getattr(response, "text", None) if response is not None else None
     if body:
-        payload["response_body"] = body
+        truncated = len(body) > MAX_RESPONSE_BODY_CHARS
+        payload["response_body"] = body[:MAX_RESPONSE_BODY_CHARS] + (TRUNCATION_MARKER if truncated else "")
+        payload["response_body_truncated"] = truncated
     return payload
