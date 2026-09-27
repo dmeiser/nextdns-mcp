@@ -8,7 +8,7 @@ import posixpath
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, NoReturn
+from typing import Any
 
 import httpx
 
@@ -171,18 +171,6 @@ def _is_unclassifiable_profiles_path(path: str | None) -> bool:
     return _PROFILE_ROOT.search(path.rstrip("/")) is not None
 
 
-def _forbidden_url(url: str, method: str, profile_id: str = "") -> NoReturn:
-    """Log and raise the fail-closed denial for an unclassifiable request URL.
-
-    Shared by ``request()`` and ``stream()`` so both raise the identical typed
-    error for a URL that cannot be matched against the profile ACL.
-    """
-    logged_path = str(url).split("?", 1)[0]
-    error_msg = f"Forbidden URL: {url!s}"
-    logger.warning(f"Forbidden URL: {logged_path} (method={method})")
-    raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED, profile_id=profile_id)
-
-
 class AccessControlledClient(httpx.AsyncClient):
     """HTTP client wrapper that enforces profile access control."""
 
@@ -342,7 +330,11 @@ class AccessControlledClient(httpx.AsyncClient):
             # Fail closed: absolute/authority-bearing URLs, traversal payloads, and
             # unclassifiable /profiles paths cannot be matched against the profile
             # ACL, so deny them instead of letting them bypass the check entirely.
-            _forbidden_url(url_str, method, profile_id or "")
+            logged_path = url_str.split("?", 1)[0]
+            logger.warning(f"Forbidden URL: {logged_path} (method={method})")
+            raise AccessDeniedError(
+                f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or ""
+            )
         else:
             self._check_collection_access(method, url_str, access)
 
