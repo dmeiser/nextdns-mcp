@@ -26,7 +26,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 
 Notes
 - `FASTMCP_CHECK_FOR_UPDATES` is applied by the server's `configure()` step (run by the `python -m nextdns_mcp.server` entrypoint) and only defaults to `off`; an explicit value you set is preserved.
-- `NEXTDNS_API_KEY` (or `NEXTDNS_API_KEY_FILE`) is required. An absent or empty key fails fast with `ConfigurationError` during client construction instead of creating an unauthenticated client.
+- `NEXTDNS_API_KEY` (or `NEXTDNS_API_KEY_FILE`) is required. An absent or empty key fails fast instead of creating an unauthenticated client: at startup as `MissingApiKeyError`, and again on first client construction as `ConfigurationError`. `MissingApiKeyError` is a subclass of `ConfigurationError`, so a single `except ConfigurationError` covers both.
 - `NEXTDNS_HTTP_TIMEOUT` must be a positive number of seconds. Invalid values (e.g. `abc`, `0`, empty) fail fast at startup with a clear `ConfigurationError` instead of a confusing crash deep in client construction.
 - Profile IDs are hexadecimal and matched case-insensitively: values in `NEXTDNS_READABLE_PROFILES`/`NEXTDNS_WRITABLE_PROFILES` and the `profile_id` being checked are both normalized to lowercase before comparison, so `2F4A9B` in the config matches a query for `2f4a9b`.
 - Per-profile checks match the `profile_id` in the URL. Collection profile endpoints (`GET /profiles` for `manageProfiles(operation="list")`, `POST /profiles` for `create`) carry no `profile_id` but still respect the global denials above: collection reads are denied when both profile sets are unset, and collection writes are denied in read-only mode or when `NEXTDNS_WRITABLE_PROFILES` is unset.
