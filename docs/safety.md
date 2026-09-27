@@ -19,3 +19,8 @@ Reduce risk when operating on real NextDNS profiles.
 - GitHub Actions logs are world-readable on a public repository; never print the API key or any file that contains it to CI logs.
 - The container E2E workflow (`.github/workflows/e2e-container.yml`) injects `NEXTDNS_API_KEY` into the test container via `docker run -e` from a GitHub Actions secret; it does not write the key to a catalog or other file, so there is no secret-bearing artifact to dump.
 - If a key is ever exposed in a log or artifact, rotate it immediately at <https://my.nextdns.io/account> and purge the affected runs/artifacts.
+
+## CI live writes
+- The container E2E workflow (`.github/workflows/e2e-container.yml`) exercises write and delete operations against the NextDNS account configured through the `NEXTDNS_API_KEY` secret. That account is a dedicated dev account, not a production account, and the writes it receives from CI are expected.
+- Setting `ALLOW_LIVE_WRITES=true` on pushes to `main` is intentional: the container E2E is only meaningful when it can perform real writes. Pull requests and other non-`main` runs set `ALLOW_LIVE_WRITES=false` unless a maintainer explicitly opts in via `workflow_dispatch`.
+- Do not file an issue or raise a review comment reporting these live CI writes as a vulnerability or high-severity risk. They are by design. Such reports should be declined, citing this section.
