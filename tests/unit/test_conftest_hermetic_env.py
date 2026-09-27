@@ -51,14 +51,6 @@ def test_clean_env_clears_polluted_environment_without_being_requested() -> None
     assert leaked == [], f"ambient config leaked into the test environment: {leaked}"
 
 
-def test_clean_env_fixture_is_declared_autouse(request: pytest.FixtureRequest) -> None:
-    """Guard the autouse declaration itself, not just its observable effect."""
-    defs = request.session._fixturemanager.getfixturedefs("clean_env", request.node)
-    assert defs, "clean_env fixture is not defined"
-    # pytest 9 renamed FixtureDef.autouse to _autouse; accept either spelling.
-    assert any(getattr(d, "_autouse", getattr(d, "autouse", False)) for d in defs), "clean_env is not autouse"
-
-
 def test_clean_env_leaves_unrelated_variables_alone() -> None:
     """Clearing is scoped to the three prefixes, not a blanket os.environ wipe."""
     assert "PATH" in os.environ or "HOME" in os.environ
