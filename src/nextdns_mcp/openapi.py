@@ -180,7 +180,12 @@ class StripExtraFieldsMiddleware(Middleware):
         try:
             tool = await fastmcp_server.get_tool(tool_name)
             if tool is None:
-                # Tool not found, pass arguments through untouched
+                # Deliberate pass-through (covered by test_handles_tool_not_found):
+                # a None tool means FastMCP could not resolve the tool name and
+                # will reject the call immediately after this middleware returns,
+                # so there is no unstripped-argument request to make. The
+                # fail-closed branches above guard real failures; this branch
+                # only avoids masking FastMCP's own unknown-tool error.
                 return arguments
 
             parameters = tool.parameters
