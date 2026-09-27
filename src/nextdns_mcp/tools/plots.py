@@ -421,11 +421,11 @@ async def plotAnalytics(
     Time values can be Unix timestamps or relative strings like ``-1d``.
 
     The ``;series`` endpoint takes no ``limit`` parameter: ``limit`` is part of
-    this tool's published surface, is capped at 500, and is never forwarded, so
-    the requested range is the only thing that bounds the response. Three
-    server-side limits are enforced before the request is built, and each is
-    rejected with an ``invalid_argument`` error naming the limit rather than
-    silently adjusted:
+    this tool's published surface, is rejected above 500 rather than clamped,
+    and is never forwarded, so the requested range is the only thing that bounds
+    the response. Three server-side limits are enforced before the request is
+    built, and each is rejected with an ``invalid_argument`` error naming the
+    limit rather than silently adjusted:
 
     - ``interval`` must be between 60 and 86400 seconds.
     - ``limit`` must not exceed 500.
