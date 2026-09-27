@@ -5,8 +5,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import shutil
+import socket
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
