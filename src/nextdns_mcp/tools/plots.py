@@ -334,11 +334,18 @@ async def _fetch_series_payload(
     same error handling, logging, and any future retry/rate-limit/telemetry
     behavior as every other tool (issue #183). Failures surface as the
     wrapper's standardized error payloads, so no behavior changes for callers.
+
+    Raised failures go through the shared ``_handle_api_error`` conversion, the
+    same one ``_api_request_payload`` applies. An ACL denial is the one failure
+    ``_api_request`` returns instead of raising, so it is matched by ``code``
+    below; a 2xx body that merely happens to carry an ``error`` key is data.
     """
     try:
         payload = await _api_request("GET", url, params=params)
     except NextDNSError as e:
         return None, _handle_api_error(e)
+    # The ACL layer's denial payload is returned, not raised: surface it as a
+    # failure rather than reading the denial dict as an empty time series.
     if payload.get("code") in _ACCESS_DENIED_CODES:
         return None, payload
     return payload, None
