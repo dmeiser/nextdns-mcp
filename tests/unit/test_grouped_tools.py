@@ -15,7 +15,8 @@ import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import coercion, server, utils
+from nextdns_mcp import coercion, config, server, utils
+from nextdns_mcp.config import ConfigurationError
 from nextdns_mcp.tools import lists as lists_module
 from nextdns_mcp.tools import logs as logs_module
 from nextdns_mcp.tools import profiles as profiles_module
@@ -763,6 +764,20 @@ class TestManageLogs:
         assert result["size"] == len(csv_text.encode("utf-8"))
         assert result["row_count"] == 11
         logs_module._unlink_temp_file(result["file_path"])
+
+    def test_download_max_bytes_defaults_and_env_override(self, monkeypatch):
+        """The total-size cap defaults when unset and honors a valid NEXTDNS_DOWNLOAD_MAX_BYTES (issue #264)."""
+        monkeypatch.delenv("NEXTDNS_DOWNLOAD_MAX_BYTES", raising=False)
+        assert config.get_download_max_bytes() == 1024 * 1024 * 1024
+        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "536_870_912")
+        assert config.get_download_max_bytes() == 536_870_912
+
+    def test_download_max_bytes_invalid_value_raises_configuration_error(self, monkeypatch):
+        """A non-positive or non-integer NEXTDNS_DOWNLOAD_MAX_BYTES fails fast, as for other env vars."""
+        for bad in ("abc", "0", "-5"):
+            monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", bad)
+            with pytest.raises(ConfigurationError, match="NEXTDNS_DOWNLOAD_MAX_BYTES"):
+                config.get_download_max_bytes()
 
     def test_unlink_temp_file_removes_mkdtemp_parent(self):
         """Removing a temp log file also removes its (empty) mkdtemp parent (issue #264)."""

@@ -148,8 +148,9 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     The full CSV is written straight to disk chunk by chunk; only a bounded
     preview of the leading lines is kept in memory. The total bytes written
     are tracked and, once the running total exceeds the total-size cap
-    (``NEXTDNS_DOWNLOAD_MAX_BYTES``, see :func:`get_download_max_bytes`),
-    a :class:`DownloadTooLargeError`
+    (the ``NEXTDNS_DOWNLOAD_MAX_BYTES`` environment variable, default 1 GiB,
+    see :func:`nextdns_mcp.config.get_download_max_bytes`), a
+    :class:`DownloadTooLargeError`
     is raised immediately — while streaming, not after the body is in hand —
     so a single download cannot fill the temp directory.
     """
@@ -365,9 +366,10 @@ async def manageLogs(
           ignored by the NextDNS download endpoint. The CSV is streamed to a
           temporary file; only the file path, size, row count, and a small
           capped preview are returned (the full text is never inlined).
-          A hard total-size cap bounds how much is streamed to disk
-          (``NEXTDNS_DOWNLOAD_MAX_BYTES``); a download that would exceed it
-          is aborted mid-stream and the partial file is removed. On success the temp
+          A hard total-size cap bounds how much is streamed to disk (the
+          ``NEXTDNS_DOWNLOAD_MAX_BYTES`` environment variable, default 1 GiB);
+          a download that would exceed it is aborted mid-stream and the
+          partial file is removed. On success the temp
           file is *not* cleaned up: the CSV stays in the OS temp directory
           (mode 0600) and the returned path is the only record of it, so
           delete it when it is no longer needed. Failed downloads do remove

@@ -106,6 +106,9 @@ def get_http_timeout() -> float:
 def get_download_max_bytes() -> int:
     """Get the total download size cap in bytes.
 
+    The cap is read from the ``NEXTDNS_DOWNLOAD_MAX_BYTES`` environment
+    variable; see :data:`DEFAULT_DOWNLOAD_MAX_BYTES` for the default.
+
     Returns:
         int: Configured maximum bytes a log download may stream to disk
             (default 1 GiB).
