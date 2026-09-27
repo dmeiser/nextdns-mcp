@@ -1,17 +1,22 @@
 """Integration tests for AccessControlledClient HTTP interception."""
 
+import ast
 import copy
 import json
 import logging
 import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+from nextdns_mcp import utils
 from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
+
+SRC_DIR = Path(__file__).resolve().parents[2] / "src" / "nextdns_mcp"
 
 
 @pytest.fixture(autouse=True)
@@ -442,6 +447,110 @@ class TestAccessControlledClientRequestLogging:
             assert "secret-device-id" not in msg
             assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
         assert any("/profiles/abc.def/logs" in msg for msg in warning_messages)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "env", "expected_code"),
+        [
+            ("GET", {"NEXTDNS_READABLE_PROFILES": ""}, "read_access_denied"),
+            ("POST", {"NEXTDNS_READ_ONLY": "true"}, "write_access_denied"),
+            ("POST", {"NEXTDNS_WRITABLE_PROFILES": ""}, "write_access_denied"),
+        ],
+        ids=["collection-read-deny-all", "collection-write-read-only", "collection-write-none-writable"],
+    )
+    async def test_collection_denial_query_string_not_logged_at_warning(
+        self,
+        mock_super_request: Any,
+        clean_env: Callable[[str, str], None],
+        caplog: pytest.LogCaptureFixture,
+        method: str,
+        env: dict[str, str],
+        expected_code: str,
+    ) -> None:
+        """Collection-denial WARNINGs must log only method + path, never the query string."""
+        for key, value in env.items():
+            clean_env(key, value)
+
+        request_url = "/profiles?search=secret-search-term&device=secret-device-id"
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.client"):
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                with pytest.raises(AccessDeniedError) as exc_info:
+                    await client.request(method, request_url)
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == expected_code
+        warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
+        assert warning_messages
+        for msg in warning_messages:
+            assert "secret-search-term" not in msg
+            assert "secret-device-id" not in msg
+            assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
+        assert any(f"method={method}, url=/profiles" in msg for msg in warning_messages)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raised",
+        [
+            AccessDeniedError("denied"),
+            httpx.ConnectError("connection refused"),
+            RuntimeError("boom"),
+        ],
+        ids=["access-denied", "http-error", "unexpected-error"],
+    )
+    async def test_api_request_error_query_string_not_logged(
+        self,
+        clean_env: Callable[[str, str], None],
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        raised: Exception,
+    ) -> None:
+        """_api_request's warning/error wrapper must log method + path, never the query string."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.setattr(AccessControlledClient, "request", AsyncMock(side_effect=raised))
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"):
+            await utils._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
+
+        log_messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
+        assert log_messages
+        for msg in log_messages:
+            assert "secret-search-term" not in msg
+            assert "?" not in msg, f"Query string leaked in error log: {msg}"
+        assert any("/profiles/abc123/logs" in msg for msg in log_messages)
+
+
+def _formats_bare_url(node: ast.expr) -> bool:
+    """Return True if the log-argument expression interpolates the bare ``url`` variable."""
+    if isinstance(node, ast.Name):
+        return node.id == "url"
+    if isinstance(node, ast.JoinedStr):
+        return any(_formats_bare_url(value.value) for value in node.values if isinstance(value, ast.FormattedValue))
+    return False
+
+
+def _unredacted_url_log_sites() -> list[str]:
+    """Return every source location whose logger.warning/error call formats a bare ``url``."""
+    sites: list[str] = []
+    for path in sorted(SRC_DIR.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in ("warning", "error"):
+                continue
+            receiver = node.func.value
+            if not (isinstance(receiver, ast.Name) and receiver.id == "logger"):
+                continue
+            formatted = [*node.args, *(keyword.value for keyword in node.keywords)]
+            if any(_formats_bare_url(arg) for arg in formatted):
+                sites.append(f"{path.name}:{node.lineno}")
+    return sites
+
+
+def test_no_logger_warning_or_error_formats_a_bare_url() -> None:
+    """Every warning/error log must use the redaction helper, never a bare url (issue #263)."""
+    assert _unredacted_url_log_sites() == []
 
 
 class TestAccessControlledClientStreamLogging:

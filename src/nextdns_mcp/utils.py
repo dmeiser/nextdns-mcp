@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from . import client
-from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError
+from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError, _redacted
 from .config import get_default_profile
 from .errors import ErrorCode, error_payload, http_error_payload
 
@@ -140,12 +140,12 @@ async def _api_request(method: str, url: str, params: dict[str, Any] | None = No
         # Raised by the ACL layer before any network request. Kept out of the
         # httpx.HTTPError branch: a real upstream 403 (raise_for_status) must
         # keep its existing http_error path.
-        logger.warning(f"Access denied in {method} {url}: {e}")
+        logger.warning(f"Access denied in {method} {_redacted(url)}: {e}")
         return access_denied_payload(e)
     except httpx.HTTPError as e:
-        logger.error(f"HTTP error in {method} {url}: {e}")
+        logger.error(f"HTTP error in {method} {_redacted(url)}: {e}")
         message = f"HTTP error in {method} {url}: {e}"
         return http_error_payload(message, e, fallback_code=ErrorCode.HTTP_ERROR)
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Unexpected error in {method} {url}: {e}")
+        logger.error(f"Unexpected error in {method} {_redacted(url)}: {e}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error in {method} {url}: {e}")
