@@ -196,7 +196,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ "$HAS_SECRET" != "true" ]; then
-            echo "⚠️ **Skipped**: NEXTDNS_API_KEY secret is not available (e.g. fork PR). Image build succeeded." >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **E2E skipped**: NEXTDNS_API_KEY secret is not available (e.g. fork PR). Image build and /health readiness probe passed; the MCP tool suite was not exercised, so this run is not an E2E pass." >> $GITHUB_STEP_SUMMARY
           elif [ -f "$REPORT_FILE" ]; then
             TOTAL=$(wc -l < "$REPORT_FILE")
             PASSED=$(grep -c '"status":"OK"' "$REPORT_FILE" || true)
