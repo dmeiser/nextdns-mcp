@@ -163,8 +163,9 @@ def _is_unclassifiable_profiles_path(path: str | None) -> bool:
     the global any_readable/any_writable gates and never per-profile
     membership, silently bypassing the profile ACL (issue #285).
 
-    Shared by ``request()`` and ``stream()`` so the two paths cannot diverge
-    again.
+    Called from the single ``_authorize()`` decision point that both
+    ``request()`` and ``stream()`` go through, so the two entry points cannot
+    diverge again.
     """
     if path is None:
         return False
