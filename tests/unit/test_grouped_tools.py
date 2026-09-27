@@ -638,6 +638,23 @@ class TestManageLogs:
         assert not os.path.exists("/nonexistent/nextdns_logs_missing.csv")
         assert any("Failed to remove temp log file" in rec.message for rec in caplog.records)
 
+    def test_unlink_temp_file_removes_mkdtemp_parent(self, tmp_path):
+        """Removing a temp log file also removes its (empty) mkdtemp parent (issue #264)."""
+        import tempfile
+
+        parent = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_test_"), "download.csv")
+        try:
+            with open(parent, "w") as f:
+                f.write("csv,data\n")
+            assert os.path.exists(os.path.dirname(parent))
+            logs_module._unlink_temp_file(parent)
+            assert not os.path.exists(parent)
+            assert not os.path.exists(os.path.dirname(parent)), "mkdtemp parent directory leaked"
+        finally:
+            import shutil
+
+            shutil.rmtree(os.path.dirname(parent), ignore_errors=True)
+
     @pytest.mark.asyncio
     async def test_download_does_not_pass_follow_redirects_to_authenticated_client(self, mock_api_client):
         """The authenticated client must never follow redirects (issue #130)."""
