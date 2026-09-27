@@ -1,39 +1,6 @@
-"""Grouped analytics query tool for NextDNS MCP Server.
-
-SPDX-License-Identifier: MIT
-"""
-
-from typing import Any
-
 from ..coercion import ProfileId
-<<<<<<< HEAD
-=======
-<<<<<<< HEAD
-import httpx
-=======
 from ..errors import ErrorCode, error_payload
-from ..utils import (
-    _api_request_payload,
-    _build_query_params,
-    _cap_limit,
-    resolve_profile_id,
-)
->>>>>>> bd26c2a (Finish #181: apply handoff removals, fix lints, cover migrated handlers)
->>>>>>> cfeadb9 (no-mistakes(review): consolidate API error handling into shared payload helper)
-
-from ..errors import ErrorCode, error_payload, http_error_payload
-from ..utils import (
-    NextDNSAuthError,
-    NextDNSError,
-    NextDNSRateLimitError,
-    NextDNSServerError,
-    _api_request,
-    _build_query_params,
-    _build_series_params,
-    _cap_limit,
-    _handle_api_error,
-    resolve_profile_id,
-)
+from ..utils import _api_request_payload, _build_query_params, _build_series_params, _cap_limit, resolve_profile_id
 from .metrics import NON_SERIES_METRICS, AnalyticsMetric
 
 # Server-side cap for the ``limit`` parameter (maximum accepted by the NextDNS API).

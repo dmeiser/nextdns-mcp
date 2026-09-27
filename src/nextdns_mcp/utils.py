@@ -218,7 +218,7 @@ async def _api_request(
         status_code = getattr(response, "status_code", None) if response is not None else None
         response_body = getattr(response, "text", None) if response is not None else None
         raise _typed_http_error(message, status_code, response_body) from e
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.error(f"Unexpected error in {method} {_redacted(url)}: {_log_safe_error(e)}")
         raise NextDNSError(f"Unexpected error in {method} {url}: {e}", status_code=None) from e
 

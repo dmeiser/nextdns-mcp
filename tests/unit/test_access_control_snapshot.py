@@ -350,7 +350,7 @@ def test_collection_tool_takes_one_snapshot_per_operation(monkeypatch, operation
         monkeypatch.setenv(var, value)
     counts = _counted_getenv(monkeypatch)
 
-    with patch.object(profiles_module, "_api_request", new_callable=AsyncMock) as mock_request:
+    with patch.object(profiles_module, "_api_request_payload", new_callable=AsyncMock) as mock_request:
         mock_request.return_value = {"profiles": []}
         result = run(profiles_module.manageProfiles(operation, **kwargs))
 

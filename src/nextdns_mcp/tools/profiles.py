@@ -6,7 +6,6 @@ SPDX-License-Identifier: MIT
 from typing import Any, Literal
 
 from ..coercion import OptionalProfileId
-
 from ..config import load_profile_access_control
 from ..errors import (
     ErrorCode,

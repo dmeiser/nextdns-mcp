@@ -11,8 +11,6 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
-
 import mcp.types
 from fastmcp.utilities.types import Image
 
