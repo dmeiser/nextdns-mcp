@@ -25,5 +25,5 @@ A Model Context Protocol (MCP) server that exposes the NextDNS API as tools for 
 - Internet access to api.nextdns.io and dns.nextdns.io
 
 ## Notes
-- MCP servers use stdio (no HTTP port). The Docker container reads/writes on stdin/stdout.
+- MCP servers use stdio by default; the Docker container reads/writes on stdin/stdout. A streamable-HTTP transport is also supported - see the README's HTTP Transport section and [Configuration](configuration.md).
 - Write operations can be restricted or fully disabled; see [Configuration](configuration.md) and [Safety](safety.md).

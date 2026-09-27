@@ -47,9 +47,11 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
    ```env
    NEXTDNS_API_KEY=your_api_key_here
    NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional
-   NEXTDNS_TEST_PROFILE=test_profile_id     # For write operation tests
-   
-   # Optional: Profile access control (see Profile Access Control section)
+
+   # Optional: Profile access control (see Profile Access Control section).
+   # NEXTDNS_WRITABLE_PROFILES / NEXTDNS_READ_ONLY are the write guards: there
+   # is no separate "test profile" variable, so sandbox writes by listing a
+   # dedicated test profile there.
    # NEXTDNS_READABLE_PROFILES=profile1,profile2
    # NEXTDNS_WRITABLE_PROFILES=test_profile
    # NEXTDNS_READ_ONLY=false
