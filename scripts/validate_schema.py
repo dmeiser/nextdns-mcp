@@ -161,9 +161,13 @@ def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> di
 
 def validate_field_type(value: Any, expected_type: str) -> bool:
     """Validate that a value matches the expected OpenAPI type."""
+    # bool is a subclass of int in Python, so isinstance(True, int) is True;
+    # an exact-type check keeps a boolean from satisfying an integer schema.
+    if expected_type == "integer":
+        return type(value) is int
+
     type_map: dict[str, type | tuple[type, ...]] = {
         "string": str,
-        "integer": int,
         "number": (int, float),
         "boolean": bool,
         "array": list,
