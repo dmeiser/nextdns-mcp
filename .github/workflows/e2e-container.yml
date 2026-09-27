@@ -92,7 +92,10 @@ jobs:
           echo "Waiting for container HTTP endpoint to be ready..."
           READY=0
           for i in $(seq 1 30); do
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/mcp 2>/dev/null || echo "000")
+            # curl already prints 000 for a failed request; a `|| echo "000"`
+            # fallback would concatenate into "000000" and defeat the check
+            # below, declaring a still-booting container ready.
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8000/mcp 2>/dev/null || true)
             if [ "$HTTP_STATUS" != "000" ]; then
               echo "Container is ready (HTTP $HTTP_STATUS at attempt $i)"
               READY=1
@@ -126,7 +129,7 @@ jobs:
           echo "Waiting for container HTTP endpoint to be ready..."
           READY=0
           for i in $(seq 1 30); do
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8001/mcp 2>/dev/null || echo "000")
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8001/mcp 2>/dev/null || true)
             if [ "$HTTP_STATUS" != "000" ]; then
               echo "Container is ready (HTTP $HTTP_STATUS at attempt $i)"
               READY=1
