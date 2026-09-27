@@ -2,10 +2,11 @@
 
 ``AccessControlledClient`` attaches ``X-Api-Key`` as a client-level default
 header, so it follows every request to whatever host the request URL names.
-These tests pin the contract that a request only ever leaves the process for an
-approved NextDNS host (the REST API base, or the DoH host ``dohLookup`` uses),
-on both the normal request path and the streaming path, and that a refusal
-reaches the transport neither at all nor with the key attached.
+These tests pin the contract that a request only ever leaves the process for a
+host on the client's allow-list (the REST API base, the NextDNS DoH host, the
+host of the client's own base URL, and loopback test doubles), on both the
+normal request path and the streaming path, and that a refusal reaches the
+transport neither at all nor with the key attached.
 """
 
 from collections.abc import Callable
@@ -24,7 +25,7 @@ DOH_HOST = "https://dns.nextdns.io"
 
 @pytest.fixture(autouse=True)
 def acl_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Deny-all ACL environment, so a denial can only come from the checks under test."""
+    """Fully-permissive ACL environment, so a denial can only come from the checks under test."""
     for var in ("NEXTDNS_READ_ONLY", "NEXTDNS_READABLE_PROFILES", "NEXTDNS_WRITABLE_PROFILES"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
