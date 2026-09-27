@@ -50,20 +50,18 @@ def test_env_example_timeout_default_matches_code():
     default = int(DEFAULT_HTTP_TIMEOUT)
 
     stated = re.search(
-        rf"HTTP request timeout in seconds \(default:\s*(\d+)\)",
+        r"HTTP request timeout in seconds \(default:\s*(\d+)\)",
         env_example,
     )
     assert stated is not None, ".env.example must state the HTTP timeout default"
     assert int(stated.group(1)) == default, (
-        f".env.example states an HTTP timeout default of {stated.group(1)} but "
-        f"config.DEFAULT_HTTP_TIMEOUT is {default}"
+        f".env.example states an HTTP timeout default of {stated.group(1)} but config.DEFAULT_HTTP_TIMEOUT is {default}"
     )
 
     example = re.search(r"^# NEXTDNS_HTTP_TIMEOUT=(\S+)\s*$", env_example, re.MULTILINE)
     assert example is not None, ".env.example must show an example NEXTDNS_HTTP_TIMEOUT value"
     assert int(example.group(1)) == default, (
-        f".env.example shows NEXTDNS_HTTP_TIMEOUT={example.group(1)} but "
-        f"config.DEFAULT_HTTP_TIMEOUT is {default}"
+        f".env.example shows NEXTDNS_HTTP_TIMEOUT={example.group(1)} but config.DEFAULT_HTTP_TIMEOUT is {default}"
     )
 
 
@@ -80,6 +78,4 @@ def test_docs_index_does_not_claim_stdio_only():
         "docs/index.md still claims 'no HTTP port'; the streamable-HTTP transport is supported. "
         "See the README's HTTP Transport section and docs/configuration.md."
     )
-    assert "streamable-HTTP" in notes, (
-        "docs/index.md's Notes must point at the opt-in streamable-HTTP transport"
-    )
+    assert "streamable-HTTP" in notes, "docs/index.md's Notes must point at the opt-in streamable-HTTP transport"
