@@ -139,7 +139,9 @@ By default the server uses **stdio**, which is what MCP clients (Claude Desktop,
 | `MCP_HOST` | `127.0.0.1` | Interface to bind. Loopback-only by default |
 | `MCP_PORT` | `8000` | Port to listen on |
 
-Because there is no authentication, the default bind is **loopback-only** (`127.0.0.1`). This means the HTTP endpoint is only reachable from the same host, which is safe for local development and same-host proxies.
+Because there is no authentication, the default bind is **loopback-only** (`127.0.0.1`), so the HTTP endpoint is only reachable from the same host. That keeps it off the network, but on its own it does not stop a browser on that host from being tricked into reaching it (DNS rebinding) — the header validation below is what addresses that.
+
+FastMCP's Host/Origin header validation (`FASTMCP_HTTP_HOST_ORIGIN_PROTECTION`, which mitigates DNS rebinding against that unauthenticated endpoint) is **not** enabled by default for application runs, because on a loopback bind it also enforces a Host allowlist and would reject the name your proxy or clients present. Behind a TLS-terminating proxy, enabling it takes three steps: make the server trust that proxy's forwarded headers (the `FORWARDED_ALLOW_IPS` environment variable, which defaults to `127.0.0.1` and so already covers a same-host proxy — set it to the proxy's address otherwise, and never to `*`), then set the public host in `FASTMCP_HTTP_ALLOWED_HOSTS='["mcp.example.com"]'` (a JSON array, not a bare hostname), and only then set `FASTMCP_HTTP_HOST_ORIGIN_PROTECTION=auto`. Skipping the allowlist answers `421 Misdirected Request`; skipping the trusted forwarded headers makes the server compare an `http` origin against the browser's `https` `Origin` and answer `403`. See [configuration](docs/configuration.md).
 
 In HTTP mode the server also serves `GET /health`, a readiness check that probes the NextDNS API with the configured key: it returns 200 only when the credentials work, and 503 with a failure class (`auth` or `unreachable`) when they do not. See the [FAQ](docs/faq.md).
 
@@ -154,7 +156,7 @@ A non-loopback bind is **only** production-suitable when it is fronted by a reve
 - Bind the MCP server itself to a private interface or `127.0.0.1` behind the proxy where possible.
 
 ```bash
-# Loopback-only (default, safe for local use):
+# Loopback-only (default; see the Host/Origin validation note above):
 MCP_TRANSPORT=http uv run python -m nextdns_mcp.server
 
 # Non-loopback bind — MUST be placed behind an authenticating reverse proxy:

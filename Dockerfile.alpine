@@ -54,7 +54,8 @@ RUN adduser -D -s /sbin/nologin appuser
 USER appuser
 
 ENV PYTHONPATH=/install:/app/src \
-    FASTMCP_CHECK_FOR_UPDATES=off
+    FASTMCP_CHECK_FOR_UPDATES=off \
+    FASTMCP_HTTP_HOST_ORIGIN_PROTECTION=auto
 
 # Expose port for HTTP transport mode (optional)
 EXPOSE 8000

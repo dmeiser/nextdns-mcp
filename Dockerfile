@@ -68,7 +68,8 @@ USER appuser
 # Set PYTHONPATH to include the dependency install dir and /app/src so Python can
 # find the installed packages and the nextdns_mcp module
 ENV PYTHONPATH=/install:/app/src \
-    FASTMCP_CHECK_FOR_UPDATES=off
+    FASTMCP_CHECK_FOR_UPDATES=off \
+    FASTMCP_HTTP_HOST_ORIGIN_PROTECTION=auto
 
 # Command to run the application
 CMD ["python", "-m", "nextdns_mcp.server"]
