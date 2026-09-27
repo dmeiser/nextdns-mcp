@@ -14,7 +14,7 @@ from typing import Any, Literal
 import httpx
 
 from .. import client
-from ..client import AccessDeniedError
+from ..client import AccessDeniedError, _log_safe_error
 from ..coercion import ProfileId
 from ..config import get_download_max_bytes
 from ..errors import ErrorCode, error_payload, http_error_payload
@@ -296,7 +296,7 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
         # Raised by the ACL layer (via stream()) before any network request;
         # kept out of the httpx.HTTPError branch so a real upstream 403 keeps
         # its existing http_error path.
-        logger.warning(f"Access denied downloading logs: {e}")
+        logger.warning(f"Access denied downloading logs: {_log_safe_error(e)}")
         return access_denied_payload(e)
     except DownloadTooLargeError as e:
         # Raised mid-stream when the total-size cap is exceeded; the partially
@@ -304,10 +304,10 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
         logger.warning(f"Download aborted, size cap exceeded: {e}")
         return error_payload(ErrorCode.DOWNLOAD_TOO_LARGE, str(e))
     except httpx.HTTPError as e:
-        logger.error(f"HTTP error downloading logs: {e}")
+        logger.error(f"HTTP error downloading logs: {_log_safe_error(e)}")
         return http_error_payload(f"HTTP error while downloading logs: {e}", e, fallback_code=ErrorCode.HTTP_ERROR)
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Unexpected error downloading logs: {e}")
+        logger.error(f"Unexpected error downloading logs: {_log_safe_error(e)}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")
     finally:
         if not downloaded:
