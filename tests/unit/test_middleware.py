@@ -312,5 +312,5 @@ class TestStripExtraFieldsMiddleware:
 
     def test_coerce_string_value_int_value_error_fallback(self, middleware, monkeypatch):
         """Test fallback to original string if int() raises ValueError."""
-        monkeypatch.setattr("nextdns_mcp.openapi._is_integer", lambda _s: True)
+        monkeypatch.setattr("nextdns_mcp.openapi.is_integer_shaped", lambda _s: True)
         assert middleware._coerce_string_value("invalid", {"integer"}) == "invalid"
