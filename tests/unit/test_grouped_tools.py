@@ -1586,10 +1586,10 @@ class TestPlotAnalyticsValidation:
 class TestHttpErrorPropagation:
     """HTTP failures raised by the shared wrapper are converted to typed payloads.
 
-    Every grouped tool's per-call ``try/except`` handler (issue #181) must turn a
-    typed ``NextDNSError`` raised by ``_api_request`` into the standardized error
-    payload - ``code``/``status_code`` preserved, never a success. These tests
-    drive a real httpx failure through each migrated call site.
+    Every migrated call site awaits ``_api_request_payload`` (issue #181), which
+    turns a typed ``NextDNSError`` raised by ``_api_request`` into the
+    standardized error payload - ``code``/``status_code`` preserved, never a
+    success. These tests drive a real httpx failure through each call site.
     """
 
     @staticmethod
