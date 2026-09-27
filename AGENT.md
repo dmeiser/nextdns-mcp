@@ -113,9 +113,9 @@ open htmlcov/index.html
 ```
 
 **Coverage Validation**:
-- Check overall percentage in terminal output
+- Check the `Miss` and `BrPart` columns in the terminal output, not just the rounded `Cover` percentage (see the Branch standard above)
 - Review HTML report for per-file coverage
-- Ensure no file falls below 100%
+- Ensure no file falls below 100% statements and branches
 - Document any intentional gaps with inline comments explaining why they're untestable
 - **All tests must pass** - zero failures, zero errors
 
@@ -149,8 +149,8 @@ Before claiming work is complete:
 - [ ] Run `uv run ruff check --fix src/ tests/`
 - [ ] Run `uv run ruff format src/ tests/`
 - [ ] Run `uv run mypy src/` (0 errors)
-- [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (100% coverage, **ALL tests pass**)
-- [ ] Verify per-file coverage: all files 100% in `htmlcov/index.html`
+- [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (100% statements and branches, **ALL tests pass**)
+- [ ] Verify per-file coverage: all files 100% in `htmlcov/index.html` (statements and branches; see section 2)
 - [ ] Run `uv run radon cc src/ scripts/run_container_e2e.py -a` (verify grade A)
 - [ ] Run `uv run radon cc src/ scripts/run_container_e2e.py -nc` (verify no functions exceed grade B)
 - [ ] Commit formatting changes as final commit before validation

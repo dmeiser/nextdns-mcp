@@ -4,7 +4,7 @@ on:
   workflow_call:
     outputs:
       coverage:
-        description: "Overall coverage percentage"
+        description: "Overall coverage percentage (statements and branches)"
         value: ${{ jobs.unit-tests.outputs.coverage }}
       failed_files:
         description: "List of files below threshold"
@@ -255,8 +255,8 @@ jobs:
             COVERAGE="${{ steps.tests.outputs.coverage }}"
             
             echo "- **Tests**: ✅ $TOTAL_TESTS passed" >> $GITHUB_STEP_SUMMARY
-            echo "- **Overall Coverage**: $COVERAGE% (100% required)" >> $GITHUB_STEP_SUMMARY
-            echo "- **Per-File Coverage**: All files 100%" >> $GITHUB_STEP_SUMMARY
+            echo "- **Overall Coverage**: $COVERAGE% (100% of statements and branches required)" >> $GITHUB_STEP_SUMMARY
+            echo "- **Per-File Coverage**: All files 100% statement and branch coverage" >> $GITHUB_STEP_SUMMARY
             
             if [ -n "${{ steps.tests.outputs.failed_files }}" ]; then
               echo "" >> $GITHUB_STEP_SUMMARY
