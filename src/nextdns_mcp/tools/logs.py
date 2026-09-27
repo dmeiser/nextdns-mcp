@@ -333,7 +333,7 @@ async def _manage_logs_impl(
     base_url = f"/profiles/{target_profile}/logs"
 
     if operation == "get":
-        capped_limit, _ = _cap_limit(limit, LOGS_LIMIT_MAX)
+        capped_limit = _cap_limit(limit, LOGS_LIMIT_MAX)
         params = _build_query_params(
             **{"from": from_time, "to": to_time, "limit": capped_limit, "device": device, "search": user, "raw": raw}
         )

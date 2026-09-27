@@ -14,10 +14,17 @@ from fastmcp.utilities.types import Image
 
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request, resolve_profile_id
+from ..utils import _api_request, _build_series_params, _cap_limit, resolve_profile_id
 from .metrics import PLOT_METRICS, PlotMetric
 
 logger = logging.getLogger(__name__)
+
+# Server-side caps for the ``limit`` and ``interval`` parameters of the
+# ``;series`` endpoint (issue #267). The plot path forwards both verbatim, so
+# without these a single call could ask the API for an unbounded number of
+# points per series, every one of which is buffered and then rendered.
+PLOT_LIMIT_MAX = 500
+PLOT_INTERVAL_MAX = 86400
 
 # matplotlib is imported lazily inside _render_series_chart (issue #165): the
 # import alone costs ~2s and every stdio cold start would pay it even though
@@ -203,15 +210,15 @@ async def _plot_analytics_series_impl(
         return val_error
     assert target_profile is not None
 
-    params: dict[str, Any] = {
-        "from": from_time,
-        "to": to_time,
-        "interval": interval,
-        "alignment": alignment,
-        "timezone": timezone,
-        "partials": partials,
-        "limit": limit,
-    }
+    params: dict[str, Any] = _build_series_params(
+        from_time=from_time,
+        to_time=to_time,
+        interval=_cap_limit(interval, PLOT_INTERVAL_MAX),
+        alignment=alignment,
+        timezone=timezone,
+        partials=partials,
+        limit=_cap_limit(limit, PLOT_LIMIT_MAX),
+    )
 
     url = f"/profiles/{target_profile}/analytics/{metric};series"
     logger.info(f"Plotting analytics series: {metric} for profile {target_profile}")
