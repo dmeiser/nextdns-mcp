@@ -211,7 +211,7 @@ jobs:
             echo "- **Failed**: ❌ $FAILED" >> $GITHUB_STEP_SUMMARY
             echo "- **Skipped**: ⏭️ $SKIPPED" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Schema Validation" >> $GITHUB_STEP_SUMMARY
+            echo "### Schema Validation (advisory)" >> $GITHUB_STEP_SUMMARY
             echo "- **Valid**: ✅ $SCHEMA_VALID" >> $GITHUB_STEP_SUMMARY
             echo "- **Invalid**: ❌ $SCHEMA_INVALID" >> $GITHUB_STEP_SUMMARY
             echo "- **Skipped**: ⏭️ $SCHEMA_SKIPPED" >> $GITHUB_STEP_SUMMARY
