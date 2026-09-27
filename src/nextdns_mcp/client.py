@@ -286,7 +286,8 @@ def create_nextdns_client() -> AccessControlledClient:
             and access control
 
     Raises:
-        ConfigurationError: If the API key is absent or empty.
+        ConfigurationError: If the API key is absent or empty, or
+            NEXTDNS_HTTP_TIMEOUT is not a positive number of seconds.
     """
     key = get_api_key()
     if not key or not key.strip():

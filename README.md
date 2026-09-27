@@ -141,6 +141,8 @@ By default the server uses **stdio**, which is what MCP clients (Claude Desktop,
 
 Because there is no authentication, the default bind is **loopback-only** (`127.0.0.1`). This means the HTTP endpoint is only reachable from the same host, which is safe for local development and same-host proxies.
 
+In HTTP mode the server also serves `GET /health`, a readiness check that probes the NextDNS API with the configured key: it returns 200 only when the credentials work, and 503 with a failure class (`auth` or `unreachable`) when they do not. See the [FAQ](docs/faq.md).
+
 ### Binding to a non-loopback interface (explicit opt-in)
 
 To make the endpoint reachable from other hosts you must **explicitly** set `MCP_HOST` to a non-loopback address (e.g. `0.0.0.0` or a specific IP). The server logs a prominent `SECURITY` warning on startup when this happens, because it exposes every tool — and the full reachability of your NextDNS API key — to anyone who can reach the port.
