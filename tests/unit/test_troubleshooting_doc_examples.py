@@ -29,7 +29,6 @@ _EXAMPLE_RE = re.compile(r"'(\[[^']*\])'")
 
 def _section() -> str:
     text = TROUBLESHOOTING.read_text(encoding="utf-8")
-    assert TROUBLESHOOTING.exists(), "docs/troubleshooting.md must exist in the repository"
     start = text.index(SECTION_HEADING)
     rest = text[start + len(SECTION_HEADING) :]
     end = rest.find("\n## ")
