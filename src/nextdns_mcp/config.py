@@ -49,8 +49,6 @@ def configure_logging() -> None:
 # Core API configuration
 NEXTDNS_BASE_URL = "https://api.nextdns.io"
 
-# MCP Transport configuration
-
 # Default HTTP request timeout in seconds
 DEFAULT_HTTP_TIMEOUT: float = 30.0
 
@@ -69,7 +67,7 @@ def get_api_key() -> str | None:
     if key:
         return key.strip()
 
-    # 2. Check file specified in environment variable
+    # Fall back to a file (Docker secret)
     key_file = os.getenv("NEXTDNS_API_KEY_FILE")
     if key_file:
         try:

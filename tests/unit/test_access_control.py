@@ -360,11 +360,14 @@ class TestSafeIdValidation:
     def test_is_safe_entry_id_allows_domains(self):
         assert is_safe_entry_id("example.com") is True
         assert is_safe_entry_id("nextdns-recommended") is True
+        assert is_safe_entry_id("a.b") is True  # single dots are fine
 
     def test_is_safe_entry_id_rejects_path_traversal(self):
         assert is_safe_entry_id("../settings") is False
         assert is_safe_entry_id("foo/bar") is False
         assert is_safe_entry_id("") is False
+        assert is_safe_entry_id("a..b") is False  # embedded parent-directory sequence
+        assert is_safe_entry_id("foo\\bar") is False  # backslash separator
 
 
 class TestExtractProfileIdFromUrlValidation:
