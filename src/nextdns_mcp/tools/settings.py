@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from ..coercion import ProfileId, _coerce_json_arg
 from ..errors import ErrorCode, error_payload, http_error_payload, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
-from ..utils import _api_request, resolve_profile_id, NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError
+from ..utils import _api_request, resolve_profile_id, _handle_api_error
 import httpx
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
@@ -44,13 +44,7 @@ async def _manage_settings_impl(
         try:
                     return await _api_request("GET", url)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-            if hasattr(e, 'error_payload') and e.error_payload is not None:
-                return e.error_payload
-            cause = e.__cause__
-            if cause is not None and isinstance(cause, httpx.HTTPError):
-                return http_error_payload(str(e), cause)
-            else:
-                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+            return _handle_api_error(e)
     if operation == "update":
         if settings is None:
             return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "settings is required for update operation")
@@ -60,13 +54,7 @@ async def _manage_settings_impl(
         try:
                     return await _api_request("PATCH", url, json=settings)
         except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-            if hasattr(e, 'error_payload') and e.error_payload is not None:
-                return e.error_payload
-            cause = e.__cause__
-            if cause is not None and isinstance(cause, httpx.HTTPError):
-                return http_error_payload(str(e), cause)
-            else:
-                return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+            return _handle_api_error(e)
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 

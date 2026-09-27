@@ -25,6 +25,7 @@ from ..utils import (
     NextDNSServerError,
     _api_request,
     _build_series_params,
+    _handle_api_error,
     resolve_profile_id,
 )
 from .metrics import PLOT_METRICS, PlotMetric
@@ -338,13 +339,7 @@ async def _fetch_series_payload(
     try:
         payload = await _api_request("GET", url, params=params)
     except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        if hasattr(e, 'error_payload') and e.error_payload is not None:
-            return None, e.error_payload
-        cause = e.__cause__
-        if cause is not None and isinstance(cause, httpx.HTTPError):
-            return None, http_error_payload(str(e), cause)
-        else:
-            return None, error_payload(ErrorCode.INTERNAL_ERROR, str(e))
+        return None, _handle_api_error(e)
     return payload, None
 
 
