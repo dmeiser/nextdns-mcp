@@ -389,4 +389,13 @@ async def manageLogs(
         - download: ``manageLogs(operation="download", profile_id="abc123", from_time="-1d")``
         - clear: ``manageLogs(operation="clear", profile_id="abc123")``
     """
-    return await _manage_logs_impl(operation, profile_id, from_time, to_time, limit, user, device, raw)
+    return await _manage_logs_impl(
+        operation=operation,
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        user=user,
+        device=device,
+        raw=raw,
+    )

@@ -104,4 +104,9 @@ async def manageProfiles(
         - create:      ``manageProfiles(operation="create", name="Home Network")``
         - get:         ``manageProfiles(operation="get", profile_id="abc123")``
     """
-    return await _manage_profiles_impl(operation, profile_id, name, cursor)
+    return await _manage_profiles_impl(
+        operation=operation,
+        profile_id=profile_id,
+        name=name,
+        cursor=cursor,
+    )
