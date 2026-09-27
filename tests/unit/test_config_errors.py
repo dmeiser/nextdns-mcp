@@ -339,16 +339,17 @@ def test_validate_configuration_raises_on_boundary_zero_timeout(monkeypatch, act
     assert "'0'" in str(exc_info.value)
 
 
-def test_validate_configuration_raises_on_invalid_download_max_bytes(monkeypatch, active_config):
-    """An invalid download cap refuses startup, like every other NEXTDNS_* value."""
+def test_validate_configuration_raises_on_boundary_zero_download_max_bytes(monkeypatch, active_config):
+    """A non-positive download cap refuses startup too, like a zero timeout."""
     monkeypatch.setenv("NEXTDNS_API_KEY", "test-key")
-    monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "abc")
+    monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "0")
 
     with pytest.raises(ConfigurationError) as exc_info:
         active_config.validate_configuration()
 
     assert "NEXTDNS_DOWNLOAD_MAX_BYTES" in str(exc_info.value)
-    assert "'abc'" in str(exc_info.value)
+    assert "'0'" in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
 
 
 def test_missing_api_key_is_catchable_as_configuration_error(active_config):
