@@ -3,29 +3,15 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Any, Literal
+from typing import Any
 
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload
 from ..utils import _api_request, _build_query_params, _cap_limit, resolve_profile_id
+from .metrics import NON_SERIES_METRICS, AnalyticsMetric
 
 # Server-side cap for the ``limit`` parameter (maximum accepted by the NextDNS API).
 ANALYTICS_LIMIT_MAX = 500
-
-# Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
-AnalyticsMetric = Literal[
-    "status",
-    "domains",
-    "queryTypes",
-    "reasons",
-    "ips",
-    "dnssec",
-    "encryption",
-    "ipVersions",
-    "protocols",
-    "devices",
-    "destinations",
-]
 
 
 async def _query_analytics_impl(
@@ -51,7 +37,7 @@ async def _query_analytics_impl(
         return error
     assert target_profile is not None
 
-    if series and metric == "domains":
+    if series and metric in NON_SERIES_METRICS:
         return error_payload(
             ErrorCode.UNSUPPORTED_PARAMETER,
             "series=true is not supported for the 'domains' metric",
