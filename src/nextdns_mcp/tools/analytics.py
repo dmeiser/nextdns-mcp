@@ -116,8 +116,9 @@ async def queryAnalytics(
     Time values can be Unix timestamps or relative strings like ``-1d``.
     Note: ``series=true`` is not supported when ``metric="domains"``.
 
-    ``limit`` is capped server-side at 500 (the maximum accepted by the
-    NextDNS API).
+    ``limit`` is clamped server-side to the range 1-500 (the range accepted by
+    the NextDNS API): values above 500 are reduced to 500 and non-positive
+    values to 1. The clamp is silent, so ask for at most 500.
 
     Optional filters:
         - ``cursor``: Pagination cursor from a previous response.
