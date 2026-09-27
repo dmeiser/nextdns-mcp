@@ -39,7 +39,11 @@ def is_safe_entry_id(value: str) -> bool:
     Rejects path separators and parent-directory sequences that could be used
     for path traversal when the ID is embedded in a URL path.
     """
-    if not value or "/" in value or "\\" in value or ".." in value:
+    # "." is an allowed character (domain-like entry IDs contain dots), so a
+    # regex-only traversal guard would need a negative lookahead such as
+    # "^(?!.*\.\.)..."; keep the explicit check instead. Empty values and path
+    # separators are already rejected by the character class below.
+    if ".." in value:
         return False
     return bool(SAFE_ENTRY_ID_PATTERN.match(value))
 
