@@ -1,6 +1,7 @@
 """Integration tests for AccessControlledClient HTTP interception."""
 
 import copy
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -642,4 +643,35 @@ class TestAccessControlledClientCallerPayloadIsolation:
         second_body = mock_super_request.call_args_list[1].kwargs["json"]
         assert first_body == before
         assert second_body == before
+        assert payload == before
+
+    @pytest.mark.asyncio
+    async def test_wire_body_equals_caller_payload_over_real_send_path(
+        self,
+        clean_env: Callable[[str, str], None],
+        payload: dict[str, Any],
+    ) -> None:
+        """The bytes httpx serializes onto the wire equal the caller's payload.
+
+        Unlike the tests above this exercises the real send path (no mocked
+        ``super().request``), so it proves the invariant on the actual HTTP
+        body rather than on forwarded keyword arguments.
+        """
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+        before = copy.deepcopy(payload)
+        wire_bodies: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            wire_bodies.append(request.content)
+            return httpx.Response(200, json={"data": "success"})
+
+        async with AccessControlledClient(
+            base_url="https://api.nextdns.io",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            await client.request("PATCH", "/profiles/abc123", json=payload)
+            await client.request("PATCH", "/profiles/abc123", json=payload)
+
+        assert len(wire_bodies) == 2
+        assert [json.loads(body) for body in wire_bodies] == [before, before]
         assert payload == before
