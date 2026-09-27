@@ -1,4 +1,4 @@
-# AGENTS.md — Rules and behaviors for AI agents
+# AGENT.md — Rules and behaviors for AI agents
 
 This file contains repository-specific agent rules. Agents should follow these when making changes.
 
@@ -22,9 +22,8 @@ This file contains repository-specific agent rules. Agents should follow these w
 - Tests: add pytest-based unit tests for new functionality and run them with `uv run pytest`.
   - See "Code Quality Standards" section below for coverage requirements and quality metrics
 - Docker: provide a `Dockerfile` (primary, `python:3.14-slim`) and `Dockerfile.alpine` (Alpine variant) that produce small, runnable images.
-- Keep `TODO.md` progress indicators in sync with the current phase while executing tasks.
 - **Write Operation Safety Rules:**
-  - Write operations (create, update) are only allowed against designated test profiles
+  - Write scoping is enforced by the environment: `NEXTDNS_WRITABLE_PROFILES` limits writes to the listed profile ids (unset means writes are denied), the special value `ALL` removes per-profile scoping and grants writes to every profile in the account, production ones included, so it belongs only to a dev account, and `NEXTDNS_READ_ONLY=true` denies every write. See `docs/safety.md`.
   - Always verify the target profile ID before any write operation
 - **Development Workflow:**
   - The server is built from the grouped CRUD tools in `src/nextdns_mcp/tools/`; `create_mcp_server()` (src/nextdns_mcp/openapi.py) creates a `FastMCP` instance whose lifespan (`_server_lifespan` in that module) closes the two long-lived singletons on shutdown — the shared authenticated API client (`client.close_api_client()`) and the DoH client (`tools.doh.close_doh_client()`) — so any new long-lived client must be closed there too, and server.py registers the tools on it.
@@ -37,10 +36,9 @@ This file contains repository-specific agent rules. Agents should follow these w
 - **Tool API error handling (issue #181):**
   - Tools must call `_api_request_payload()` (`src/nextdns_mcp/utils.py`); it awaits `_api_request()` and converts the typed `NextDNSError` hierarchy (auth 401/403, rate limit 429, server 5xx, each carrying `status_code`/`response_body`) into the standardized error payloads from `src/nextdns_mcp/errors.py`.
   - `_api_request()` RAISES for upstream failures and only RETURNS the access-control denial payload, so a new call site that awaits it directly would leak an exception instead of the error payload. A caller that needs the raw dict (e.g. `plots._fetch_series_payload`) must convert with `_handle_api_error()` and still detect the returned denial `code`.
-- **Array-body Endpoints (FastMCP 3.x):**
-  - FastMCP 3.x supports array bodies natively via the `body` parameter.
-  - Use `body=[{"id":"value"}]` for list replacement tools (e.g., `replaceDenylist`, `replaceAllowlist`).
-  - Do not use legacy `update*` custom tools (they no longer exist).
+- **Replacing list contents:**
+  - Full-list replacement is an operation of the grouped tool, whose `list_type` and `profile_id` are required: `manageLists(list_type="privacy_blocklists", operation="replace", profile_id="abc123", entries=[{"id": "nextdns-recommended"}])`.
+  - There are no separate per-list replacement tools and no `body=` argument; tools take typed parameters, not raw request bodies.
 - When in doubt, ask the repo owner for permission before making large design changes.
 - API Key: Ensure that a valid API key is not in any files that will be committed to git.
 - Logging: no log record at INFO or above may contain a query string or httpx's merged-URL exception text; use `_redacted()` / `_log_safe_error()` from `src/nextdns_mcp/client.py` at any new log site, and keep the `httpx`/`httpcore` loggers at WARNING. See docs/safety.md.
@@ -54,9 +52,10 @@ This file contains repository-specific agent rules. Agents should follow these w
    - See "Code Quality Standards" section for coverage requirements
    - Must achieve 100% code coverage
 
-2. **Integration Tests** (`tests/integration/`)
-   - Server initialization and creation tests
-   - Verify tool registration, OpenAPI loading, and access control initialization
+2. **Container E2E** (`scripts/run_container_e2e.py`, run in CI by `.github/workflows/e2e-container.yml`)
+   - The integration layer: builds and runs the container and exercises the real MCP endpoint
+   - Verifies tool registration over the wire and the `/health` readiness endpoint
+   - `tests/integration/` holds no tests; server creation and tool registration are covered by the unit suite (`tests/unit/test_mcp_server.py`). OpenAPI-based tool generation was removed, so no spec is loaded at startup.
 
 Merging policy: small, incremental PRs. Preserve existing README/CI content; when adding new top-level files, update README to reflect run/test/build instructions.
 

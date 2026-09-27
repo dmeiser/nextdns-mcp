@@ -4,7 +4,7 @@ Reduce risk when operating on real NextDNS profiles.
 
 ## Recommendations
 - Enable read-only mode while exploring: `NEXTDNS_READ_ONLY=true`.
-- Limit writes to a dedicated test profile via `NEXTDNS_WRITABLE_PROFILES`.
+- Limit writes to a dedicated test profile via `NEXTDNS_WRITABLE_PROFILES`. The special value `ALL` is not a wider list: it drops the per-profile scoping entirely and grants writes to every profile in the account, production profiles included, so set it only for a dev account.
 - Always verify `profile_id` before write or delete operations.
 
 ## Destructive operations
