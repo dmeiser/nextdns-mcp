@@ -44,9 +44,7 @@ def test_dockerfiles_enable_auto_origin_protection() -> None:
         path = REPO_ROOT / name
         assert path.exists(), f"{name} must exist in the repository"
         block = _env_block(path.read_text(encoding="utf-8"))
-        assert f"{ENV_VAR}=auto" in block.split(), (
-            f"{name} must set {ENV_VAR}=auto in its ENV block, got: {block}"
-        )
+        assert f"{ENV_VAR}=auto" in block.split(), f"{name} must set {ENV_VAR}=auto in its ENV block, got: {block}"
 
 
 def test_configuration_docs_document_origin_protection() -> None:
