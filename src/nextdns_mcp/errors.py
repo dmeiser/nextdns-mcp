@@ -19,8 +19,10 @@ MAX_RESPONSE_BODY_CHARS = 2048
 # Marker appended to a response body that was cut at the cap.
 TRUNCATION_MARKER = "... [truncated]"
 
-# Typed fields callers branch on (issue #148 contract): never bounded when a
-# structured error document is inlined into a tool result.
+# Typed fields callers branch on (issue #148 contract): a *string* value under one
+# of these keys is surfaced verbatim when a structured error document is inlined
+# into a tool result. A dict or list under such a key is still bounded at every
+# depth, so a whole document cannot hide there.
 _UNBOUNDED_STRUCTURED_FIELDS = frozenset({"code", "error", "status_code"})
 
 
@@ -124,14 +126,15 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
     """Build a typed error payload for a failed HTTP request.
 
     If the failed response body is a structured JSON error, its fields are
-    surfaced so they are not lost, with free-form string fields bounded at
-    ``MAX_RESPONSE_BODY_CHARS`` and the payload flagged with
-    ``response_body_truncated`` when any field was cut (issue #297). Otherwise a
-    generic payload built from ``fallback_code`` is returned, always carrying
-    ``status_code`` when the response has one. An unparseable body is included
-    only as a bounded prefix, flagged with ``response_body_truncated``. (ACL
-    denials do not reach this helper: the access-control layer raises the typed
-    ``AccessDeniedError`` instead of faking a response.)
+    surfaced so they are not lost, with every free-form string (top level or
+    nested in dicts and lists) bounded at ``MAX_RESPONSE_BODY_CHARS`` and the
+    payload flagged with ``response_body_truncated`` when any value was cut
+    (issue #297). Otherwise a generic payload built from ``fallback_code`` is
+    returned, always carrying ``status_code`` when the response has one. An
+    unparseable body is included only as a bounded prefix, flagged with
+    ``response_body_truncated``. (ACL denials do not reach this helper: the
+    access-control layer raises the typed ``AccessDeniedError`` instead of
+    faking a response.)
 
     Args:
         message: The human-readable message used when no structured body exists.
