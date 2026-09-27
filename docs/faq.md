@@ -4,7 +4,7 @@
 Run the `manageProfiles` tool with `operation="list"` (or check your NextDNS dashboard URL: `https://my.nextdns.io/<profile_id>`) and copy the `id` of the desired profile.
 
 ## Can I use the tools without specifying profile_id?
-Set `NEXTDNS_DEFAULT_PROFILE` to a profile ID; tools that accept `profile_id` will use it when omitted.
+Set `NEXTDNS_DEFAULT_PROFILE` to a profile ID; tools that accept `profile_id` will use it when omitted. Tools that require a `profile_id` ignore the default and return `missing_profile_id` when it is omitted (see [troubleshooting.md](troubleshooting.md)).
 
 ## How do I disable all write operations?
 Set `NEXTDNS_READ_ONLY=true`.

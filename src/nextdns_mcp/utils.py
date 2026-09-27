@@ -72,7 +72,12 @@ def resolve_profile_id(
             )
         return str(target_profile), None
 
-    if profile_id is None or not is_safe_profile_id(profile_id):
+    if not profile_id:
+        return None, error_payload(
+            ErrorCode.MISSING_PROFILE_ID,
+            "profile_id is required for this tool; NEXTDNS_DEFAULT_PROFILE is not used by this operation",
+        )
+    if not is_safe_profile_id(profile_id):
         return None, error_payload(
             ErrorCode.INVALID_PROFILE_ID,
             f"Invalid profile_id format: {profile_id}",

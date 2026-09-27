@@ -50,3 +50,4 @@ The middleware only filters top-level tool arguments; fields nested inside an ar
 
 ## No default profile
 - Some tools accept `profile_id`; if omitted, set `NEXTDNS_DEFAULT_PROFILE` or pass `--profile_id` explicitly.
+- The other tools (`manageProfiles` get/update/delete, `manageSettings`, `manageLists`, `manageLogs`, `manageRewrites`, `queryAnalytics`) require `profile_id` and never fall back to `NEXTDNS_DEFAULT_PROFILE`. They report the two failure modes with distinct codes: an omitted (or blank) `profile_id` returns `missing_profile_id`, while a malformed one returns `invalid_profile_id` with the rejected value quoted back.
