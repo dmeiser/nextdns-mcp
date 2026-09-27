@@ -160,12 +160,21 @@ jobs:
             exit 1
           fi
 
+          # Branch coverage is part of the 100% target, not just statements
+          # (issue #278). A statement-only report cannot see an untested
+          # branch, so require the branch columns `term-missing` only emits
+          # when [tool.coverage.run] branch = true is set in pyproject.toml.
+          if ! grep -q "^Name.*Branch" test_output.txt; then
+            echo "❌ Coverage report has no branch columns: set [tool.coverage.run] branch = true in pyproject.toml"
+            exit 1
+          fi
+
           if ! awk "BEGIN {exit !($COVERAGE >= 100)}"; then
             echo "❌ Overall coverage $COVERAGE% is below 100% threshold"
             exit 1
           fi
 
-          echo "✅ Overall coverage: $COVERAGE% (100% required)"
+          echo "✅ Overall coverage: $COVERAGE% (100% of statements and branches required)"
 
           # Check per-file coverage (no file below 100%)
           echo "Checking per-file coverage..."
@@ -206,7 +215,7 @@ jobs:
           fi
           
           echo ""
-          echo "✅ All files have coverage $MIN_FILE_COVERAGE%"
+          echo "✅ All files have $MIN_FILE_COVERAGE% statement and branch coverage"
           echo "✅ All unit tests passed!"
 
       - name: Generate coverage report

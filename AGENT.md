@@ -100,7 +100,8 @@ The last commits before a successful validation run MUST be formatting/type-chec
 **Minimum Coverage Standards**:
 - **Project-wide**: 100% code coverage
 - **Per-file**: No single file may have <100% coverage
-- **Exceptions**: Only for truly untestable code (e.g., `if __name__ == "__main__"`, module-level `sys.exit()`). Every exception must be covered by an explicit `# pragma: no cover` with a comment explaining why.
+- **Branch**: The 100% target covers statements *and* branches (`[tool.coverage.run] branch = true` in `pyproject.toml`). A statement-only report cannot see an untested branch.
+- **Exceptions**: Only for truly untestable code (e.g., `if __name__ == "__main__"`, module-level `sys.exit()`). Every exception must be covered by an explicit `# pragma: no cover` with a comment explaining why, or `# pragma: no branch` for a branch that cannot be taken.
 
 **Running Coverage**:
 ```bash
