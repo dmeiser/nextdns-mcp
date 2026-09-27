@@ -373,6 +373,42 @@ class TestPlotAnalyticsSeriesImpl:
         assert "limit" not in params
 
     @pytest.mark.asyncio
+    async def test_plot_and_query_series_send_the_same_series_params(self, clean_env, mock_api_client, monkeypatch):
+        """Both ``;series`` callers put identical query params on the wire (issue #267).
+
+        ``plotAnalytics`` and ``queryAnalytics(series=True)`` read the same
+        endpoint, so a shared builder keeps them from drifting; this asserts the
+        observable request both tools actually issue.
+        """
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        shared = {
+            # Absolute timestamps, so the request is deterministic without a clock patch.
+            "from_time": 1_700_000_000 - 86_400,
+            "to_time": 1_700_000_000,
+            "interval": 3600,
+            "alignment": "start",
+            "timezone": "UTC",
+            "partials": "both",
+        }
+
+        await plots_module._plot_analytics_series_impl("status", profile_id="abc123", **shared)
+        plot_call = mock_api_client.request.call_args
+        await server.queryAnalytics("status", "abc123", series=True, **shared)
+        query_call = mock_api_client.request.call_args
+
+        assert plot_call.args[1] == query_call.args[1] == "/profiles/abc123/analytics/status;series"
+        assert plot_call.kwargs["params"] == query_call.kwargs["params"]
+        assert plot_call.kwargs["params"] == {
+            "from": 1_700_000_000 - 86_400,
+            "to": 1_700_000_000,
+            "interval": 3600,
+            "alignment": "start",
+            "timezone": "UTC",
+            "partials": "both",
+        }
+
+    @pytest.mark.asyncio
     async def test_issue_scenario_one_year_minute_interval_is_rejected(self, clean_env, mock_api_client, monkeypatch):
         """The issue scenario - a 1y range at a 1-minute interval - never reaches the API.
 
