@@ -13,6 +13,7 @@ from fastmcp import FastMCP
 from .client import get_api_client
 from .config import (
     NEXTDNS_BASE_URL,
+    ConfigurationError,
     configure_logging,
     get_http_timeout,
     validate_configuration,
@@ -127,6 +128,33 @@ def _is_loopback_host(host: str) -> bool:
     return host in ("127.0.0.1", "::1", "localhost")
 
 
+# The only transports the server supports. Anything else is a configuration
+# error (issue #294) rather than a silent downgrade to stdio.
+_VALID_TRANSPORTS = frozenset({"stdio", "http"})
+
+
+def _resolve_transport() -> str:
+    """Resolve ``MCP_TRANSPORT`` to a supported transport name.
+
+    The value is stripped and lowercased so an env-file trailing space or a
+    case variant (``HTTP``) still resolves. A value that does not match the
+    recognized set fails loudly instead of silently downgrading to stdio, which
+    is the single most common way an operator ends up with a server that speaks
+    no HTTP and no warning.
+
+    Returns:
+        str: The resolved transport name (``stdio`` or ``http``).
+
+    Raises:
+        ConfigurationError: If MCP_TRANSPORT is not a recognized transport.
+    """
+    raw = os.getenv("MCP_TRANSPORT", "stdio")
+    mode = raw.strip().lower()
+    if mode not in _VALID_TRANSPORTS:
+        raise ConfigurationError(f"Invalid MCP_TRANSPORT: {raw!r}. Expected one of: {sorted(_VALID_TRANSPORTS)}.")
+    return mode
+
+
 def get_mcp_run_options() -> dict[str, Any]:
     """Build MCP server run options based on environment configuration.
 
@@ -139,7 +167,7 @@ def get_mcp_run_options() -> dict[str, Any]:
         MCP_HOST and requires the operator to provide reverse-proxy/auth
         protection before exposing the port.
     """
-    transport_mode = os.getenv("MCP_TRANSPORT", "stdio").lower()
+    transport_mode = _resolve_transport()
 
     if transport_mode == "http":
         host = os.getenv("MCP_HOST", "127.0.0.1")
