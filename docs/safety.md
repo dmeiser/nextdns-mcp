@@ -27,6 +27,12 @@ Reduce risk when operating on real NextDNS profiles.
 - A refused hop returns the `http_error` payload `Refusing log download redirect to a non-public or non-https destination` before the target is contacted, so no foreign body is written to the temporary CSV or returned to the caller. See troubleshooting.md.
 - Documented limits of the check: the name is resolved here and again by the HTTP client when it connects (DNS rebinding is not closed), and a name that fails to resolve is let through, since it cannot be connected to anyway and the resulting connection error is reported through the normal HTTP-error path.
 
+## Local log downloads
+- `manageLogs(operation="download")` streams the CSV to a file in the OS temp directory and returns the path; the full log text is never inlined into the tool payload.
+- A successful download is not cleaned up: the CSV (mode 0600) and its `nextdns_logs_*` parent directory stay on disk, and the returned path is the only record of them. There is no retention TTL or automatic sweep, so delete the file when it is no longer needed.
+- Every non-successful download removes the temp file and its parent directory, including access denial, HTTP error, unexpected error, and cancellation or timeout of the awaiting client.
+- A hard cap bounds the total bytes a download may stream to disk, enforced while streaming: the cap defaults to 1 GiB and is set via the `NEXTDNS_DOWNLOAD_MAX_BYTES` environment variable (a positive integer of bytes; an invalid value fails fast with a configuration error at startup, same as `NEXTDNS_HTTP_TIMEOUT`). A download that would exceed the cap is aborted mid-stream, the partial CSV and its parent directory are removed, and the tool returns the `download_too_large` error. This prevents a single download from filling the container's only writable location.
+
 ## CI credentials
 - GitHub Actions logs are world-readable on a public repository; never print the API key or any file that contains it to CI logs.
 - The container E2E workflow (`.github/workflows/e2e-container.yml`) injects `NEXTDNS_API_KEY` into the test container via `docker run -e` from a GitHub Actions secret; it does not write the key to a catalog or other file, so there is no secret-bearing artifact to dump.
