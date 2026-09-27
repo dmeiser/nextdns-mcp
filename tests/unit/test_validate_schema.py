@@ -1,11 +1,19 @@
 """Unit tests for the E2E schema validator."""
 
+from pathlib import Path
+
+import pytest
+
+from scripts.run_container_e2e import EXPECTED_TOOLS
 from scripts.validate_schema import (
     _extract_schema_type,
     resolve_schema,
     validate_schema,
     validate_tool_response,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REAL_SPEC_PATH = REPO_ROOT / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
 
 
 def test_resolve_schema_repeated_refs_in_siblings():
@@ -228,24 +236,200 @@ def test_extract_schema_type_coverage():
 
 
 def test_validate_tool_response_manage_logs_download():
-    """manageLogs download CSV envelope should validate successfully."""
+    """manageLogs download CSV envelope should validate successfully.
+
+    The envelope validates through the normal candidate-schema union: it is a
+    JSON object, so it matches getLogs' object schema. The former
+    content_type/size/data special case is gone.
+    """
     from scripts.validate_schema import validate_tool_response
+
+    spec = {
+        "paths": {
+            "/profiles/{profile_id}/logs": {
+                "get": {
+                    "operationId": "getLogs",
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "data": {"type": "array", "items": {"type": "object"}},
+                                            "cursor": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            },
+            "/profiles/{profile_id}/logs/download": {
+                "get": {
+                    "operationId": "downloadLogs",
+                    "responses": {"200": {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}},
+                }
+            },
+        }
+    }
+    response_data = {
+        "content_type": "text/csv",
+        "size": 128,
+        "file_path": "/tmp/nextdns_logs_e2e/download.csv",
+        "row_count": 1,
+        "preview": {"text": "timestamp,domain", "line_count": 1, "bytes": 15, "truncated": False},
+    }
+    status, errors = validate_tool_response("manageLogs", response_data, spec)
+    assert status == "VALID"
+    assert errors == []
+
+
+def test_validate_field_type_boolean_does_not_satisfy_integer():
+    """A boolean must not satisfy an integer schema.
+
+    bool is a subclass of int in Python, so isinstance(True, int) is True;
+    the validator must require an exact int for integer-typed fields.
+    """
+    from scripts.validate_schema import validate_field_type
+
+    assert validate_field_type(True, "integer") is False
+    assert validate_field_type(False, "integer") is False
+    assert validate_field_type(7, "integer") is True
+
+
+def test_integer_typed_property_rejects_boolean_value():
+    """End-to-end: a bool value fails an integer-typed property instead of passing."""
+    spec = {
+        "paths": {
+            "/things": {
+                "get": {
+                    "operationId": "getThing",
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {"count": {"type": "integer"}},
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+    status, errors = validate_tool_response("getThing", {"count": True}, spec)
+    assert status == "INVALID"
+    assert any("expected integer, got bool" in e for e in errors)
+
+
+def test_get_operation_response_schema_resolves_text_csv():
+    """downloadLogs declares only text/csv; the extractor must consider it."""
+    from scripts.validate_schema import get_operation_response_schema
 
     spec = {
         "paths": {
             "/profiles/{profile_id}/logs/download": {
                 "get": {
                     "operationId": "downloadLogs",
-                    "responses": {"200": {"content": {"text/csv": {}}}},
+                    "responses": {"200": {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}},
                 }
             }
         }
     }
-    response_data = {
+    assert get_operation_response_schema(spec, "downloadLogs") == {"type": "string", "format": "binary"}
+
+
+def test_manage_logs_download_envelope_not_short_circuited():
+    """The dead content_type/size/data special case is gone.
+
+    The download envelope is validated against the resolved candidate schemas
+    like any other response: a dict envelope fails downloadLogs' string schema.
+    """
+    spec = {
+        "paths": {
+            "/profiles/{profile_id}/logs/download": {
+                "get": {
+                    "operationId": "downloadLogs",
+                    "responses": {"200": {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}},
+                }
+            }
+        }
+    }
+    envelope = {
         "content_type": "text/csv",
         "size": 128,
-        "data": "timestamp,domain,client\n1700000000,example.com,client-1",
+        "file_path": "/tmp/nextdns_logs_x/download.csv",
+        "row_count": 3,
+        "preview": {"text": "timestamp,domain", "line_count": 1, "bytes": 15, "truncated": False},
     }
-    status, errors = validate_tool_response("manageLogs", response_data, spec)
+    status, errors = validate_tool_response("manageLogs", envelope, spec)
+    assert status == "INVALID"
+    assert any("expected string, got dict" in e for e in errors)
+
+
+def test_doh_lookup_response_validated_against_literal_schema():
+    """dohLookup has no OpenAPI operation; it validates against a literal response schema."""
+    spec = {"paths": {}}
+    ok_payload = {
+        "data": {"Status": 0, "Answer": []},
+        "_metadata": {
+            "profile_id": "abc123",
+            "query_domain": "example.com",
+            "query_type": "A",
+            "doh_endpoint": "https://dns.nextdns.io/abc123/dns-query?name=example.com&type=A",
+            "status_description": "NOERROR",
+        },
+    }
+    status, errors = validate_tool_response("dohLookup", ok_payload, spec)
     assert status == "VALID"
     assert errors == []
+
+    status, errors = validate_tool_response("dohLookup", {"data": {"Status": 0}}, spec)
+    assert status == "INVALID"
+    assert any("missing required field '_metadata'" in e for e in errors)
+
+
+def test_assert_operation_coverage_accepts_fully_resolved_mapping():
+    """The real spec must resolve every operationId in GROUPED_TOOL_OPERATIONS."""
+    from scripts.validate_schema import assert_operation_coverage, load_openapi_spec
+
+    spec = load_openapi_spec(str(REAL_SPEC_PATH))
+    assert_operation_coverage(spec, EXPECTED_TOOLS)
+
+
+def test_assert_operation_coverage_rejects_unresolvable_ids():
+    """An id that resolves to no schema is a hard error, not a silent SKIPPED."""
+    from scripts.validate_schema import assert_operation_coverage
+
+    with pytest.raises(ValueError, match="resolve to no response schema"):
+        assert_operation_coverage({"paths": {}}, EXPECTED_TOOLS)
+
+
+def test_assert_operation_coverage_rejects_tools_without_any_candidate_schema(monkeypatch):
+    """A mapped tool with no resolvable op id and no literal schema is a hard error."""
+    from scripts import validate_schema
+
+    monkeypatch.setitem(
+        validate_schema.GROUPED_TOOL_OPERATIONS,
+        "brandNewTool",
+        [],
+    )
+    spec = validate_schema.load_openapi_spec(str(REAL_SPEC_PATH))
+    with pytest.raises(ValueError, match=r"no candidate response schema: \['brandNewTool'\]"):
+        validate_schema.assert_operation_coverage(spec, [*EXPECTED_TOOLS, "brandNewTool"])
+
+
+def test_assert_operation_coverage_rejects_key_set_mismatch():
+    """The mapping's key set must match the server's tool set."""
+    from scripts.validate_schema import assert_operation_coverage, load_openapi_spec
+
+    spec = load_openapi_spec(str(REAL_SPEC_PATH))
+    with pytest.raises(ValueError, match="missing from GROUPED_TOOL_OPERATIONS"):
+        assert_operation_coverage(spec, [*EXPECTED_TOOLS, "brandNewTool"])
+    with pytest.raises(ValueError, match="not in the server tool set"):
+        assert_operation_coverage(spec, [t for t in EXPECTED_TOOLS if t != "dohLookup"])

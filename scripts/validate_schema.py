@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 Validate JSON responses against OpenAPI schema definitions.
-Used by E2E tests to catch breaking API changes.
+Used by the E2E run as an advisory signal for breaking API changes.
 
 The grouped CRUD tools collapse many OpenAPI operations into a single MCP tool,
 so validation is performed against the union of response schemas for the
 underlying operations. A response is considered valid if it matches any of the
-expected schemas for that grouped tool.
+expected schemas for that grouped tool. Because most vendored schemas declare
+no ``required`` fields, a match is weak evidence rather than a conformance
+proof; assert_operation_coverage() is what keeps the mapping honest.
 
 Known limitation: a cyclic $ref whose target has no unambiguous expected type
 (e.g. a mixed anyOf/oneOf union) falls back to permissive validation of that
@@ -15,79 +17,48 @@ subtree rather than guessing a type.
 
 import json
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-# Mapping from grouped MCP tool names to the OpenAPI operationIds they dispatch to.
+# Mapping from grouped MCP tool names to the OpenAPI operationIds whose
+# response schemas are validated. Write operations that return a synthetic
+# ``{"success": True}`` payload (204-style) have no response body to validate
+# and are therefore not listed; every listed id must resolve to a schema in
+# the vendored spec (asserted at startup by assert_operation_coverage).
 # A response is valid if it conforms to at least one of the listed schemas.
 GROUPED_TOOL_OPERATIONS: dict[str, list[str]] = {
     "manageProfiles": [
         "listProfiles",
         "createProfile",
         "getProfile",
-        "updateProfile",
-        "deleteProfile",
     ],
     "manageSettings": [
         "getSettings",
-        "updateSettings",
         "getLogsSettings",
-        "updateLogsSettings",
         "getBlockPageSettings",
-        "updateBlockPageSettings",
         "getPerformanceSettings",
-        "updatePerformanceSettings",
         "getSecuritySettings",
-        "updateSecuritySettings",
         "getPrivacySettings",
-        "updatePrivacySettings",
         "getParentalControlSettings",
-        "updateParentalControlSettings",
     ],
     "manageLists": [
         "getDenylist",
-        "addToDenylist",
-        "replaceDenylist",
-        "updateDenylistEntry",
-        "removeFromDenylist",
         "getAllowlist",
-        "addToAllowlist",
-        "replaceAllowlist",
-        "updateAllowlistEntry",
-        "removeFromAllowlist",
         "getParentalControlServices",
-        "replaceParentalControlServices",
-        "addToParentalControlServices",
-        "updateParentalControlServiceEntry",
-        "removeFromParentalControlServices",
         "getParentalControlCategories",
-        "replaceParentalControlCategories",
-        "addToParentalControlCategories",
-        "updateParentalControlCategoryEntry",
-        "removeFromParentalControlCategories",
         "getSecurityTLDs",
-        "addSecurityTLD",
-        "replaceSecurityTLDs",
-        "removeSecurityTLD",
         "getPrivacyBlocklists",
-        "addPrivacyBlocklist",
-        "replacePrivacyBlocklists",
-        "removePrivacyBlocklist",
         "getPrivacyNatives",
-        "addPrivacyNative",
-        "replacePrivacyNatives",
-        "removePrivacyNative",
     ],
     "manageRewrites": [
         "listRewrites",
         "addRewrite",
-        "deleteRewrite",
     ],
     "manageLogs": [
         "getLogs",
-        "clearLogs",
         "downloadLogs",
     ],
     "queryAnalytics": [
@@ -127,6 +98,31 @@ GROUPED_TOOL_OPERATIONS: dict[str, list[str]] = {
     "dohLookup": [],
 }
 
+# Response shapes for tools that have no OpenAPI operation to derive a schema
+# from. dohLookup queries dns.nextdns.io directly (outside the NextDNS API
+# spec), so its response shape is pinned here instead: the raw DNS JSON
+# response under ``data`` and lookup context under ``_metadata``.
+TOOL_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "dohLookup": {
+        "type": "object",
+        "required": ["data", "_metadata"],
+        "properties": {
+            "data": {"type": "object"},
+            "_metadata": {
+                "type": "object",
+                "required": ["profile_id", "query_domain", "query_type", "doh_endpoint"],
+                "properties": {
+                    "profile_id": {"type": "string"},
+                    "query_domain": {"type": "string"},
+                    "query_type": {"type": "string"},
+                    "doh_endpoint": {"type": "string"},
+                    "status_description": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
 
 def load_openapi_spec(spec_path: str) -> dict[str, Any]:
     """Load and parse OpenAPI specification."""
@@ -137,6 +133,10 @@ def load_openapi_spec(spec_path: str) -> dict[str, Any]:
 def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> dict[str, Any] | None:
     """
     Extract the 200 response schema for a given operationId.
+
+    Both ``application/json`` and ``text/csv`` content are considered: some
+    operations (e.g. downloadLogs) declare only a CSV body, and their schema
+    is just as much part of the API contract as a JSON one.
 
     Returns the schema object or None if not found.
     """
@@ -151,19 +151,64 @@ def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> di
                 for success_code in ("200", "201"):
                     success_response = responses.get(success_code, {})
                     content = success_response.get("content", {})
-                    json_content = content.get("application/json", {})
-                    schema = json_content.get("schema")
-                    if schema:
-                        return schema
+                    for media_type in ("application/json", "text/csv"):
+                        schema = content.get(media_type, {}).get("schema")
+                        if schema:
+                            return schema
 
     return None
 
 
+def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str]) -> None:
+    """Hard-fail when the tool/operation mapping drifts from the spec or the server.
+
+    Every operationId listed in GROUPED_TOOL_OPERATIONS must resolve to a
+    response schema in ``spec``: an id that resolves to nothing used to
+    degrade to SKIPPED at validation time, which the E2E workflow counts as
+    neither pass nor fail. The key set must match ``expected_tools`` so a
+    tool added to the server without a mapping (or a mapping entry for a
+    tool the server no longer serves) fails here too. A mapped tool must end
+    up with at least one candidate schema, from either its operationIds or
+    TOOL_RESPONSE_SCHEMAS, so that it is validated rather than skipped.
+
+    Raises:
+        ValueError: listing the offending tools or operation ids.
+    """
+    expected = set(expected_tools)
+    mapped = set(GROUPED_TOOL_OPERATIONS)
+    missing = sorted(expected - mapped)
+    if missing:
+        raise ValueError(f"Tools missing from GROUPED_TOOL_OPERATIONS: {missing}")
+    extra = sorted(mapped - expected)
+    if extra:
+        raise ValueError(f"GROUPED_TOOL_OPERATIONS tools not in the server tool set: {extra}")
+    unresolvable = sorted(
+        op_id
+        for op_ids in GROUPED_TOOL_OPERATIONS.values()
+        for op_id in op_ids
+        if get_operation_response_schema(spec, op_id) is None
+    )
+    if unresolvable:
+        raise ValueError(f"operationIds that resolve to no response schema: {unresolvable}")
+    unvalidated = sorted(
+        tool
+        for tool, op_ids in GROUPED_TOOL_OPERATIONS.items()
+        if not any(get_operation_response_schema(spec, op_id) is not None for op_id in op_ids)
+        and tool not in TOOL_RESPONSE_SCHEMAS
+    )
+    if unvalidated:
+        raise ValueError(f"tools with no candidate response schema: {unvalidated}")
+
+
 def validate_field_type(value: Any, expected_type: str) -> bool:
     """Validate that a value matches the expected OpenAPI type."""
+    # bool is a subclass of int in Python, so isinstance(True, int) is True;
+    # an exact-type check keeps a boolean from satisfying an integer schema.
+    if expected_type == "integer":
+        return type(value) is int
+
     type_map: dict[str, type | tuple[type, ...]] = {
         "string": str,
-        "integer": int,
         "number": (int, float),
         "boolean": bool,
         "array": list,
@@ -366,16 +411,6 @@ def validate_tool_response(
     if response_data == {"success": True}:
         return "SKIPPED", []
 
-    # downloadLogs returns CSV data wrapped in a JSON envelope because MCP tools return JSON.
-    if (
-        tool_name == "manageLogs"
-        and isinstance(response_data, dict)
-        and "content_type" in response_data
-        and "size" in response_data
-        and isinstance(response_data.get("data"), str)
-    ):
-        return "VALID", []
-
     operation_ids = [tool_name]
     if tool_name in GROUPED_TOOL_OPERATIONS:
         operation_ids = GROUPED_TOOL_OPERATIONS[tool_name]
@@ -385,6 +420,11 @@ def validate_tool_response(
         schema = get_operation_response_schema(spec, op_id)
         if schema is not None:
             schemas.append((op_id, schema))
+
+    # Tools without an OpenAPI operation validate against their literal schema.
+    literal_schema = TOOL_RESPONSE_SCHEMAS.get(tool_name)
+    if literal_schema is not None:
+        schemas.append((tool_name, literal_schema))
 
     if not schemas:
         return "SKIPPED", [f"No schemas found for tool '{tool_name}'"]

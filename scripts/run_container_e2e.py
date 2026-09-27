@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.validate_schema import (
+    assert_operation_coverage,
     load_openapi_spec,
     validate_tool_response,
 )
@@ -158,6 +159,10 @@ class ContainerE2ERunner:
         self.spec: dict[str, Any] = {}
         if SPEC_PATH.exists():
             self.spec = load_openapi_spec(str(SPEC_PATH))
+            # Hard-fail on mapping drift: an operationId that resolves to no
+            # schema would otherwise degrade to SKIPPED at validation time,
+            # which the workflow counts as neither pass nor fail.
+            assert_operation_coverage(self.spec, EXPECTED_TOOLS)
         else:
             log_warn(f"OpenAPI spec not found at {SPEC_PATH}; schema validation disabled")
 

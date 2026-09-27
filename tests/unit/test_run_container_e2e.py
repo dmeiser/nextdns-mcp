@@ -180,10 +180,24 @@ async def test_run_success_read_only(runner: ContainerE2ERunner):
     mock_session = AsyncMock()
     mock_session.list_tools.return_value = mock_tools_res
 
-    mock_call_res = MagicMock()
-    mock_call_res.is_error = False
-    mock_call_res.content = [TextContent(type="text", text='{"data":[{"id":"test-profile-id"}]}')]
-    mock_session.call_tool.return_value = mock_call_res
+    def _call_tool(name, arguments):
+        mock_res = MagicMock()
+        mock_res.is_error = False
+        if name == "dohLookup":
+            mock_res.content = [
+                TextContent(
+                    type="text",
+                    text='{"data":{"Status":0},"_metadata":{"profile_id":"test-profile-id",'
+                    '"query_domain":"example.com","query_type":"A",'
+                    '"doh_endpoint":"https://dns.nextdns.io/test-profile-id/dns-query?name=example.com&type=A",'
+                    '"status_description":"NOERROR"}}',
+                )
+            ]
+        else:
+            mock_res.content = [TextContent(type="text", text='{"data":[{"id":"test-profile-id"}]}')]
+        return mock_res
+
+    mock_session.call_tool.side_effect = _call_tool
 
     mock_read = AsyncMock()
     mock_write = AsyncMock()
@@ -475,3 +489,24 @@ def test_parse_args_health_overrides(monkeypatch):
         assert args.health_only is True
         # The command line wins over the environment.
         assert args.expect_health == "ok"
+
+
+def test_runner_startup_fails_when_mapping_unresolvable(tmp_path: Path, monkeypatch):
+    """A spec whose mapped operations do not resolve is a hard error at startup.
+
+    Before the coverage assertion, an unresolvable operationId degraded to
+    SKIPPED at validation time, which the E2E workflow counts as neither pass
+    nor fail.
+    """
+    empty_spec = tmp_path / "empty-spec.yaml"
+    empty_spec.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr("scripts.run_container_e2e.SPEC_PATH", empty_spec)
+
+    with pytest.raises(ValueError, match="resolve to no response schema"):
+        ContainerE2ERunner(
+            endpoint="http://127.0.0.1:8000/mcp",
+            variant="slim",
+            allow_live_writes=False,
+            plot_profile="",
+            artifacts_dir=tmp_path,
+        )
