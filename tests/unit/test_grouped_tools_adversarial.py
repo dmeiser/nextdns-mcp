@@ -28,7 +28,6 @@ Threat classes covered
   ``write_access_denied`` payloads, never as a success.
 """
 
-import asyncio
 import json
 import os
 import socket
@@ -409,7 +408,7 @@ class TestDownloadAclAndRedirect:
         assert result["content_type"] == "text/csv"
         assert result["row_count"] == 2
         assert os.path.isfile(result["file_path"])
-        await asyncio.to_thread(os.unlink, result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_redirect_key_never_crosses_to_target(self, live_client, restricted_env, monkeypatch):
@@ -460,7 +459,7 @@ class TestDownloadAclAndRedirect:
         result = await server.manageLogs("download", "abc123")
         assert result["content_type"] == "text/csv"
         assert result["row_count"] == 2
-        await asyncio.to_thread(os.unlink, result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
         # The initial (authenticated) request did carry the key...
         assert initial_headers["hdrs"].get("x-api-key") == API_KEY

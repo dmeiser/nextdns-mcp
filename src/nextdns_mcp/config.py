@@ -32,12 +32,18 @@ def configure_logging() -> None:
 
     Called only from the ``__main__`` entrypoint so that importing this
     module has no logging side effects.
+
+    The ``httpx`` and ``httpcore`` loggers are pinned to WARNING: httpx logs
+    every request at INFO with the fully merged URL, whose query string can
+    carry the PII the client redacts from its own request line (issue #139).
     """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    for library_logger in ("httpx", "httpcore"):
+        logging.getLogger(library_logger).setLevel(logging.WARNING)
 
 
 # Core API configuration
@@ -47,6 +53,11 @@ NEXTDNS_BASE_URL = "https://api.nextdns.io"
 
 # Default HTTP request timeout in seconds
 DEFAULT_HTTP_TIMEOUT: float = 30.0
+
+# Default hard cap on the total bytes a log download may stream to disk, in
+# bytes. The cap is enforced while streaming so a single download cannot fill
+# the OS temp directory. Overridable via NEXTDNS_DOWNLOAD_MAX_BYTES.
+DEFAULT_DOWNLOAD_MAX_BYTES: int = 1024 * 1024 * 1024  # 1 GiB
 
 # Constants for profile access control
 ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
@@ -93,6 +104,35 @@ def get_http_timeout() -> float:
     except (ValueError, TypeError):
         raise ConfigurationError(
             f"Invalid NEXTDNS_HTTP_TIMEOUT: {raw!r}. Expected a positive number of seconds."
+        ) from None
+
+    return val
+
+
+def get_download_max_bytes() -> int:
+    """Get the total download size cap in bytes.
+
+    The cap is read from the ``NEXTDNS_DOWNLOAD_MAX_BYTES`` environment
+    variable; see :data:`DEFAULT_DOWNLOAD_MAX_BYTES` for the default.
+
+    Returns:
+        int: Configured maximum bytes a log download may stream to disk
+            (default 1 GiB).
+
+    Raises:
+        ConfigurationError: If NEXTDNS_DOWNLOAD_MAX_BYTES is not a positive integer.
+    """
+    raw = os.getenv("NEXTDNS_DOWNLOAD_MAX_BYTES")
+    if raw is None:
+        return DEFAULT_DOWNLOAD_MAX_BYTES
+
+    try:
+        val = int(raw)
+        if val <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise ConfigurationError(
+            f"Invalid NEXTDNS_DOWNLOAD_MAX_BYTES: {raw!r}. Expected a positive integer of bytes."
         ) from None
 
     return val
@@ -375,6 +415,7 @@ def validate_configuration() -> None:
         )
 
     get_http_timeout()
+    get_download_max_bytes()
     _log_access_control_settings()
 
 

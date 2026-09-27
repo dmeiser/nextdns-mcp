@@ -31,12 +31,14 @@ This file contains repository-specific agent rules. Agents should follow these w
   - Importing `src/nextdns_mcp/server.py` must stay side-effect free: no `load_dotenv()`, no environment mutation, and no module-level server instance. Call `configure()` (as `python -m nextdns_mcp.server` and the tests do) to build the shared server and disable FastMCP's update check. Enforced by `tests/unit/test_server_dotenv.py`.
   - `src/nextdns_mcp/nextdns-openapi.yaml` is a reference specification (used by `scripts/validate_schema.py`); it is NOT used for tool generation.
   - The fastmcp library handles MCP protocol implementation, routing, and tool registration
+  - Each public tool in `src/nextdns_mcp/tools/` keeps a thin wrapper over a private `_impl` so the MCP-facing signature and docstring stay separate from the request logic. The wrapper must re-declare the exact parameter list of its `_impl` and forward every argument **by keyword**; a positional forward can bind to the wrong parameter silently. Both invariants are enforced by `tests/unit/test_tool_wrapper_forwarding.py`, so register any new wrapper there.
 - **Array-body Endpoints (FastMCP 3.x):**
   - FastMCP 3.x supports array bodies natively via the `body` parameter.
   - Use `body=[{"id":"value"}]` for list replacement tools (e.g., `replaceDenylist`, `replaceAllowlist`).
   - Do not use legacy `update*` custom tools (they no longer exist).
 - When in doubt, ask the repo owner for permission before making large design changes.
 - API Key: Ensure that a valid API key is not in any files that will be committed to git.
+- Logging: no log record at INFO or above may contain a query string or httpx's merged-URL exception text; use `_redacted()` / `_log_safe_error()` from `src/nextdns_mcp/client.py` at any new log site, and keep the `httpx`/`httpcore` loggers at WARNING. See docs/safety.md.
 
 ## Testing Strategy
 

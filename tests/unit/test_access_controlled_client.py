@@ -4,14 +4,17 @@ import copy
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+from nextdns_mcp import utils
 from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
+from nextdns_mcp.config import configure_logging
+from nextdns_mcp.tools import logs as logs_module
 
 
 @pytest.fixture(autouse=True)
@@ -432,7 +435,7 @@ class TestAccessControlledClientRequestLogging:
 
         mock_super_request.assert_not_called()
         assert exc_info.value.code == "access_denied"
-        # The typed error's message still names the full URL.
+        # The typed error's message still names the full URL the caller passed.
         assert str(exc_info.value) == f"Forbidden URL: {request_url}"
         # No WARNING record may contain the query string.
         warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
@@ -442,6 +445,166 @@ class TestAccessControlledClientRequestLogging:
             assert "secret-device-id" not in msg
             assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
         assert any("/profiles/abc.def/logs" in msg for msg in warning_messages)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "env", "expected_code"),
+        [
+            ("GET", {"NEXTDNS_READABLE_PROFILES": ""}, "read_access_denied"),
+            ("POST", {"NEXTDNS_READ_ONLY": "true"}, "write_access_denied"),
+            ("POST", {"NEXTDNS_WRITABLE_PROFILES": ""}, "write_access_denied"),
+        ],
+        ids=["collection-read-deny-all", "collection-write-read-only", "collection-write-none-writable"],
+    )
+    async def test_collection_denial_query_string_not_logged_at_warning(
+        self,
+        mock_super_request: Any,
+        clean_env: Callable[[str, str], None],
+        caplog: pytest.LogCaptureFixture,
+        method: str,
+        env: dict[str, str],
+        expected_code: str,
+    ) -> None:
+        """Collection-denial WARNINGs must log only method + path, never the query string."""
+        for key, value in env.items():
+            clean_env(key, value)
+
+        request_url = "/profiles?search=secret-search-term&device=secret-device-id"
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.client"):
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                with pytest.raises(AccessDeniedError) as exc_info:
+                    await client.request(method, request_url)
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == expected_code
+        warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
+        assert warning_messages
+        for msg in warning_messages:
+            assert "secret-search-term" not in msg
+            assert "secret-device-id" not in msg
+            assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
+        assert any(f"method={method}, url=/profiles" in msg for msg in warning_messages)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raised",
+        [
+            AccessDeniedError("denied"),
+            httpx.ConnectError("connection refused"),
+            RuntimeError("boom"),
+        ],
+        ids=["access-denied", "http-error", "unexpected-error"],
+    )
+    async def test_api_request_error_query_string_not_logged(
+        self,
+        clean_env: Callable[[str, str], None],
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        raised: Exception,
+    ) -> None:
+        """_api_request's warning/error wrapper must log method + path, never the query string."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.setattr(AccessControlledClient, "request", AsyncMock(side_effect=raised))
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"):
+            await utils._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
+
+        log_messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
+        assert log_messages
+        for msg in log_messages:
+            assert "secret-search-term" not in msg
+            assert "?" not in msg, f"Query string leaked in error log: {msg}"
+        assert any("/profiles/abc123/logs" in msg for msg in log_messages)
+
+    @pytest.mark.asyncio
+    async def test_denied_api_request_payload_verbatim_but_log_redacted(
+        self, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The caller gets the full URL back; only the log record loses the query string."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        request_url = "/profiles/abc.def/logs?search=secret-search-term"
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"):
+            payload = await utils._api_request("GET", request_url)
+
+        assert payload["code"] == "access_denied"
+        assert payload["error"] == f"Forbidden URL: {request_url}"
+        warning_messages = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+        assert warning_messages
+        for msg in warning_messages:
+            assert "secret-search-term" not in msg
+            assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
+        assert any("/profiles/abc.def/logs" in msg for msg in warning_messages)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [401, 429, 503], ids=["unauthorized", "rate-limited", "server-error"])
+    async def test_api_request_status_error_hides_the_merged_query_string(
+        self,
+        clean_env: Callable[[str, str], None],
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        status_code: int,
+    ) -> None:
+        """httpx status errors carry the merged request URL, so they must not be logged verbatim."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        params = {"search": "secret-search-term", "device": "secret-device-id"}
+        request = httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/logs", params=params)
+        try:
+            httpx.Response(status_code, request=request).raise_for_status()
+        except httpx.HTTPStatusError as status_error:
+            assert "secret-search-term" in str(status_error)
+            monkeypatch.setattr(AccessControlledClient, "request", AsyncMock(side_effect=status_error))
+        else:
+            pytest.fail(f"{status_code} did not raise")
+
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"):
+            payload = await utils._api_request("GET", "/profiles/abc123/logs", params=params)
+
+        assert payload["code"] == "http_error"
+        assert payload["status_code"] == status_code
+        log_messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
+        assert log_messages
+        for msg in log_messages:
+            assert "secret-search-term" not in msg
+            assert "secret-device-id" not in msg
+            assert "?" not in msg, f"Query string leaked in error log: {msg}"
+        assert any("/profiles/abc123/logs" in msg and str(status_code) in msg for msg in log_messages)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "env", "request_url"),
+        [
+            ("GET", {}, "https://evil.example.com/profiles?search=secret-search-term"),
+            ("GET", {"NEXTDNS_READABLE_PROFILES": "zzz999"}, "/profiles/abc123/logs?search=secret-search-term"),
+        ],
+        ids=["destination-blocked", "profile-read-denied"],
+    )
+    async def test_acl_denial_paths_hide_the_query_string(
+        self,
+        mock_super_request: Any,
+        clean_env: Callable[[str, str], None],
+        caplog: pytest.LogCaptureFixture,
+        method: str,
+        env: dict[str, str],
+        request_url: str,
+    ) -> None:
+        """The remaining ACL denial paths must not hand the query string to a logger."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        for key, value in env.items():
+            clean_env(key, value)
+
+        with caplog.at_level(logging.DEBUG):
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                with pytest.raises(AccessDeniedError):
+                    await client.request(method, request_url)
+
+        mock_super_request.assert_not_called()
+        messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
+        assert messages, "the denial must be reported at WARNING or above"
+        for msg in messages:
+            assert "secret-search-term" not in msg
+            assert "?" not in msg, f"Query string leaked at WARNING or above: {msg}"
 
 
 class TestAccessControlledClientStreamLogging:
@@ -501,6 +664,71 @@ class TestAccessControlledClientStreamLogging:
 
         info_messages = [record.message for record in caplog.records if record.levelno == logging.INFO]
         assert any("GET /profiles/abc123/logs/download" in msg for msg in info_messages)
+
+
+class TestLibraryLoggerRedaction:
+    """The library loggers must not print request URLs at INFO (issue #263)."""
+
+    @pytest.fixture
+    def configured_logging(self) -> Iterator[None]:
+        root = logging.getLogger()
+        saved = (root.level, {name: logging.getLogger(name).level for name in ("httpx", "httpcore")})
+        configure_logging()
+        yield
+        root.setLevel(saved[0])
+        for name, level in saved[1].items():
+            logging.getLogger(name).setLevel(level)
+
+    @pytest.mark.asyncio
+    async def test_client_request_query_string_never_reaches_the_log(
+        self, configured_logging: None, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        clean_env("NEXTDNS_READABLE_PROFILES", "abc123")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True})
+
+        with caplog.at_level(logging.INFO):
+            async with AccessControlledClient(
+                base_url="https://api.nextdns.io", transport=httpx.MockTransport(handler)
+            ) as client:
+                response = await client.get("/profiles/abc123/logs", params={"search": "secret-search-term"})
+
+        assert response.status_code == 200
+        messages = [record.getMessage() for record in caplog.records]
+        assert "HTTP Request: GET /profiles/abc123/logs" in messages
+        for msg in messages:
+            assert "secret-search-term" not in msg, f"Query string leaked into the log: {msg}"
+
+    @pytest.mark.asyncio
+    async def test_presigned_download_url_never_reaches_the_log(
+        self, configured_logging: None, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        signed_url = (
+            "https://cdn.example.com/profiles/abc123/logs.csv?X-Amz-Credential=AKIAEXAMPLE"
+            "&X-Amz-Signature=deadbeef&X-Amz-Expires=1"
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"date,time\n", headers={"content-type": "text/csv"})
+
+        real_async_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            logs_module.httpx,
+            "AsyncClient",
+            lambda *args, **kwargs: real_async_client(transport=httpx.MockTransport(handler)),
+        )
+
+        path = str(tmp_path / "download.csv")
+        with caplog.at_level(logging.INFO):
+            result = await logs_module._follow_redirects_to_tempfile(httpx.URL(signed_url), path)
+
+        assert result["content_type"] == "text/csv"
+        assert result["row_count"] == 1
+        for record in caplog.records:
+            msg = record.getMessage()
+            assert "X-Amz-Signature" not in msg, f"Pre-signed URL leaked into the log: {msg}"
+            assert "deadbeef" not in msg, f"Pre-signed URL leaked into the log: {msg}"
 
 
 class TestAccessDeniedError:

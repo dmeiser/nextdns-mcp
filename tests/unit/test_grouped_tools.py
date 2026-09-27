@@ -5,7 +5,9 @@ import ipaddress
 import json
 import logging
 import os
+import shutil
 import socket
+import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,7 +15,8 @@ import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import coercion, server, utils
+from nextdns_mcp import coercion, config, server, utils
+from nextdns_mcp.config import ConfigurationError
 from nextdns_mcp.tools import lists as lists_module
 from nextdns_mcp.tools import logs as logs_module
 from nextdns_mcp.tools import profiles as profiles_module
@@ -555,7 +558,7 @@ class TestManageLogs:
         assert "text" not in result
         assert os.path.isfile(result["file_path"])
         assert await asyncio.to_thread(Path(result["file_path"]).read_text, encoding="utf-8") == csv_text
-        os.unlink(result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_download_large_is_capped_not_inline(self, mock_api_client):
@@ -580,7 +583,7 @@ class TestManageLogs:
         assert result["preview"]["line_count"] <= 20
         assert result["preview"]["bytes"] <= 256 * 1024
         assert "x" * 1000 * 2 not in result["preview"]["text"]
-        await asyncio.to_thread(os.unlink, result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_download_empty_chunk_is_skipped(self, mock_api_client):
@@ -596,7 +599,30 @@ class TestManageLogs:
         assert result["row_count"] == 2
         assert result["preview"]["line_count"] == 2
         assert result["preview"]["truncated"] is False
-        await asyncio.to_thread(os.unlink, result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
+
+    @pytest.mark.asyncio
+    async def test_download_preview_capped_by_utf8_bytes_not_chars(self, mock_api_client):
+        """The preview cap counts UTF-8 bytes, not characters, and reports the true byte total."""
+        header = "date,time,question,answer\n"
+        # Half the byte cap in characters, but twice the cap once encoded.
+        multibyte_line = "é" * (150 * 1024) + "\n"
+        assert len(multibyte_line) < logs_module.DOWNLOAD_PREVIEW_MAX_BYTES
+        assert len(multibyte_line.encode("utf-8")) > logs_module.DOWNLOAD_PREVIEW_MAX_BYTES
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([header + multibyte_line])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert result["preview"]["text"] == header
+        assert result["preview"]["bytes"] == len(result["preview"]["text"].encode("utf-8"))
+        assert result["preview"]["bytes"] == len(header.encode("utf-8"))
+        assert result["preview"]["bytes"] <= logs_module.DOWNLOAD_PREVIEW_MAX_BYTES
+        assert result["preview"]["truncated"] is True
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_download_preview_capped_by_bytes(self, mock_api_client):
@@ -614,7 +640,7 @@ class TestManageLogs:
         assert result["preview"]["text"] == header
         assert result["preview"]["truncated"] is True
         assert result["row_count"] == 2
-        await asyncio.to_thread(os.unlink, result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_download_final_line_without_newline_counts_as_row(self, mock_api_client):
@@ -629,14 +655,171 @@ class TestManageLogs:
         result = await server.manageLogs("download", "abc123")
         assert result["row_count"] == 2
         assert result["preview"]["line_count"] == 2
-        await asyncio.to_thread(os.unlink, result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
-    def test_unlink_temp_file_missing_path_logs_warning(self, caplog):
-        """A failed temp-file removal logs a warning and never raises."""
+    def test_unlink_temp_file_never_created_path_is_quiet(self, caplog):
+        """A temp file that was never written is not reported as a cleanup failure."""
+        parent = tempfile.mkdtemp(prefix="nextdns_logs_test_")
+        try:
+            with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"):
+                logs_module._unlink_temp_file(os.path.join(parent, "download.csv"))
+            assert not caplog.records, [rec.message for rec in caplog.records]
+            assert not os.path.exists(parent), "empty mkdtemp parent directory leaked"
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+
+    def test_unlink_temp_file_failure_logs_warning(self, tmp_path, caplog):
+        """A temp file that exists but cannot be unlinked logs a warning and never raises."""
+        undeletable = tmp_path / "download.csv"
+        undeletable.mkdir()
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"):
-            logs_module._unlink_temp_file("/nonexistent/nextdns_logs_missing.csv")
-        assert not os.path.exists("/nonexistent/nextdns_logs_missing.csv")
+            logs_module._unlink_temp_file(str(undeletable))
+        assert undeletable.exists()
         assert any("Failed to remove temp log file" in rec.message for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_download_cancelled_mid_stream_removes_temp_dir_and_partial_file(self, mock_api_client, monkeypatch):
+        """Cancelling a download mid-stream leaves no partial CSV and no mkdtemp parent (issue #264)."""
+        first_chunk_written = asyncio.Event()
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def recording_mkdtemp(*args, **kwargs):
+            path = real_mkdtemp(*args, **kwargs)
+            created.append(path)
+            return path
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", recording_mkdtemp)
+
+        async def stalling_chunks():
+            yield "date,time,question,answer\n2024-01-01,12:00:00,secret.example,1.2.3.4\n"
+            first_chunk_written.set()
+            await asyncio.sleep(3600)
+
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.is_error = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: stalling_chunks()
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+
+        task = asyncio.create_task(server.manageLogs("download", "abc123"))
+        await asyncio.wait_for(first_chunk_written.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert len(created) == 1
+        assert not os.path.exists(os.path.join(created[0], "download.csv")), "partial CSV survived cancellation"
+        assert not os.path.exists(created[0]), "mkdtemp parent directory leaked on cancellation"
+
+    @pytest.mark.asyncio
+    async def test_download_exceeding_total_size_cap_aborts_and_leaves_no_residue(self, mock_api_client, monkeypatch):
+        """A download over the total-size cap is aborted mid-stream and leaves no file or dir (issue #264)."""
+        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "1000")
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def recording_mkdtemp(*args, **kwargs):
+            path = real_mkdtemp(*args, **kwargs)
+            created.append(path)
+            return path
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", recording_mkdtemp)
+        row = "x" * 500 + "\n"
+        chunks = [row * 5 for _ in range(10)]  # 25_000 bytes total, far over the 1000-byte cap
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.is_error = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks(chunks)
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert result["code"] == "download_too_large"
+        assert "limit" in result["error"] and "1000" in result["error"]
+        assert len(created) == 1
+        assert not os.path.exists(os.path.join(created[0], "download.csv")), "partial CSV survived the size-cap abort"
+        assert not os.path.exists(created[0]), "mkdtemp parent directory leaked on the size-cap abort"
+
+    @pytest.mark.asyncio
+    async def test_download_cap_abort_reports_only_bytes_actually_written(self, mock_api_client, monkeypatch):
+        """The abort message counts the bytes that reached disk, not the oversized chunk (issue #264)."""
+        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "2000")
+        row = "x" * 599 + "\n"  # 600 bytes
+        chunk = row * 5  # 3000 bytes, so the first chunk alone blows the 2000-byte cap
+        sizes_at_cleanup: list[int] = []
+        real_unlink = logs_module._unlink_temp_file
+
+        def recording_unlink(path):
+            if os.path.exists(path):
+                sizes_at_cleanup.append(os.path.getsize(path))
+            real_unlink(path)
+
+        monkeypatch.setattr(logs_module, "_unlink_temp_file", recording_unlink)
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.is_error = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([chunk])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert result["code"] == "download_too_large"
+        assert "aborted after 0 bytes" in result["error"]
+        assert sizes_at_cleanup == [0], "the oversized chunk must not be written before the cap check"
+
+    @pytest.mark.asyncio
+    async def test_download_within_total_size_cap_succeeds(self, mock_api_client, monkeypatch):
+        """A download under the (lowered) total-size cap still succeeds and is cleaned up by the caller."""
+        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "10_000")
+        csv_text = "date,time,question,answer\n" + ("x" * 90 + "\n") * 10  # ~913 bytes, under the cap
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: _async_chunks([csv_text])
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+        result = await server.manageLogs("download", "abc123")
+        assert "code" not in result
+        assert result["size"] == len(csv_text.encode("utf-8"))
+        assert result["row_count"] == 11
+        logs_module._unlink_temp_file(result["file_path"])
+
+    def test_download_max_bytes_defaults_and_env_override(self, monkeypatch):
+        """The total-size cap defaults when unset and honors a valid NEXTDNS_DOWNLOAD_MAX_BYTES (issue #264)."""
+        monkeypatch.delenv("NEXTDNS_DOWNLOAD_MAX_BYTES", raising=False)
+        assert config.get_download_max_bytes() == 1024 * 1024 * 1024
+        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "536_870_912")
+        assert config.get_download_max_bytes() == 536_870_912
+
+    def test_download_max_bytes_invalid_value_raises_configuration_error(self, monkeypatch):
+        """A non-positive or non-integer NEXTDNS_DOWNLOAD_MAX_BYTES fails fast, as for other env vars."""
+        for bad in ("abc", "0", "-5"):
+            monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", bad)
+            with pytest.raises(ConfigurationError, match="NEXTDNS_DOWNLOAD_MAX_BYTES"):
+                config.get_download_max_bytes()
+
+    def test_unlink_temp_file_removes_mkdtemp_parent(self):
+        """Removing a temp log file also removes its (empty) mkdtemp parent (issue #264)."""
+        parent = tempfile.mkdtemp(prefix="nextdns_logs_test_")
+        try:
+            with open(os.path.join(parent, "download.csv"), "w") as f:
+                f.write("csv,data\n")
+            assert os.path.exists(parent)
+            logs_module._unlink_temp_file(os.path.join(parent, "download.csv"))
+            assert not os.path.exists(parent), "mkdtemp parent directory leaked"
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
 
     @pytest.mark.asyncio
     async def test_download_does_not_pass_follow_redirects_to_authenticated_client(self, mock_api_client):
@@ -651,7 +834,7 @@ class TestManageLogs:
         args, kwargs = mock_api_client.stream.call_args
         assert kwargs.get("follow_redirects") is not True
         assert all(arg is not True for arg in args)
-        os.unlink(result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
 
 def _fake_dns(monkeypatch, public_address: str = "93.184.216.34") -> list[str]:
@@ -752,7 +935,7 @@ class TestManageLogsDownloadRedirects:
         assert str(fake.last_request.url) == "https://api.nextdns.io/logs/abc123/signed.csv?sig=1"
         # ...and it carried no API key header.
         assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
-        os.unlink(result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_relative_location_resolved_against_origin(self, mock_api_client, monkeypatch):
@@ -768,7 +951,7 @@ class TestManageLogsDownloadRedirects:
         assert result["size"] == 8
         assert str(fake.last_request.url) == "https://api.nextdns.io/redirects/abc123.csv"
         assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
-        os.unlink(result["file_path"])
+        logs_module._unlink_temp_file(result["file_path"])
 
     @pytest.mark.asyncio
     async def test_redirect_loop_is_bounded(self, mock_api_client, monkeypatch):
@@ -840,7 +1023,7 @@ class TestManageLogsDownloadRedirects:
         assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
-    async def test_download_denied_profile_returns_403(self, monkeypatch):
+    async def test_download_denied_profile_returns_403(self, monkeypatch, caplog):
         """A profile outside NEXTDNS_READABLE_PROFILES gets a 403 on download, not a file."""
         # Restrict both read and write ACLs: the autouse fixture sets
         # WRITABLE_PROFILES=ALL, which would otherwise make abc123 implicitly
@@ -849,13 +1032,18 @@ class TestManageLogsDownloadRedirects:
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "xyz999")
         real_client = client_module.AccessControlledClient(base_url="https://api.nextdns.io")
         monkeypatch.setattr(logs_module.client, "api_client", real_client)
-        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+        with (
+            patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send,
+            caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"),
+        ):
             result = await server.manageLogs("download", "abc123")
         await real_client.aclose()
         mock_send.assert_not_called()
         assert result["status_code"] == 403
         assert "error" in result
         assert "file_path" not in result
+        # The temp file was never created, so cleanup must not report a failure.
+        assert not [rec.message for rec in caplog.records if "Failed to remove temp log file" in rec.message]
 
     @pytest.mark.asyncio
     async def test_download_denied_in_read_only_mode(self, monkeypatch):
@@ -1253,21 +1441,24 @@ class TestManageProfilesAccessAndValidation:
 
     @pytest.mark.asyncio
     async def test_list_denied_when_no_readable_profiles(self, mock_api_client, monkeypatch):
-        monkeypatch.setattr(profiles_module, "get_readable_profiles_set", lambda: None)
+        snapshot = config.ProfileAccessControl(read_only=False, readable=None, writable=None)
+        monkeypatch.setattr(profiles_module, "load_profile_access_control", lambda: snapshot)
         result = await server.manageProfiles("list")
         assert "error" in result
         assert "no profiles are readable" in result["error"].lower()
 
     @pytest.mark.asyncio
     async def test_create_denied_when_no_writable_profiles(self, mock_api_client, monkeypatch):
-        monkeypatch.setattr(profiles_module, "get_writable_profiles_set", lambda: None)
+        snapshot = config.ProfileAccessControl(read_only=False, readable=frozenset(), writable=None)
+        monkeypatch.setattr(profiles_module, "load_profile_access_control", lambda: snapshot)
         result = await server.manageProfiles("create", name="Test")
         assert "error" in result
         assert "no profiles are writable" in result["error"].lower()
 
     @pytest.mark.asyncio
     async def test_create_denied_in_read_only_mode(self, mock_api_client, monkeypatch):
-        monkeypatch.setattr(profiles_module, "is_read_only", lambda: True)
+        snapshot = config.ProfileAccessControl(read_only=True, readable=frozenset(), writable=frozenset())
+        monkeypatch.setattr(profiles_module, "load_profile_access_control", lambda: snapshot)
         result = await server.manageProfiles("create", name="Test")
         assert "error" in result
         assert "read-only" in result["error"].lower()

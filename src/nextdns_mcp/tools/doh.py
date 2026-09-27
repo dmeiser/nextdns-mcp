@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from ..client import _log_safe_error
 from ..coercion import OptionalProfileId
 from ..config import (
     DNS_STATUS_CODES,
@@ -96,12 +97,12 @@ async def doh_lookup(
             logger.debug(f"DoH lookup result: {domain} -> {metadata['status_description']}")
         return {"data": result, "_metadata": metadata}
     except httpx.HTTPError as e:
-        logger.error(f"HTTP error during DoH lookup for {domain}: {e!s}")
+        logger.error(f"HTTP error during DoH lookup for {domain}: {_log_safe_error(e)}")
         payload = http_error_payload(f"HTTP error during DoH lookup: {e!s}", e, fallback_code=ErrorCode.HTTP_ERROR)
         payload.update(profile_id=target_profile, domain=domain, type=record_type)
         return payload
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Unexpected error during DoH lookup for {domain}: {e!s}")
+        logger.error(f"Unexpected error during DoH lookup for {domain}: {_log_safe_error(e)}")
         return error_payload(
             ErrorCode.INTERNAL_ERROR,
             f"Unexpected error during DoH lookup: {e!s}",
@@ -154,4 +155,4 @@ async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_ty
         context under ``_metadata``, so the metadata can never collide with
         a DNS answer whose name is literally ``_metadata``.
     """
-    return await _dohLookup_impl(domain, profile_id, record_type)
+    return await _dohLookup_impl(domain=domain, profile_id=profile_id, record_type=record_type)

@@ -14,8 +14,9 @@ from typing import Any, Literal
 import httpx
 
 from .. import client
-from ..client import AccessDeniedError
+from ..client import AccessDeniedError, _log_safe_error
 from ..coercion import ProfileId
+from ..config import get_download_max_bytes
 from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import _api_request, _build_query_params, _cap_limit, access_denied_payload, resolve_profile_id
 
@@ -23,11 +24,19 @@ logger = logging.getLogger(__name__)
 
 
 def _unlink_temp_file(path: str) -> None:
-    """Best-effort removal of a temp file; never masks the original error."""
+    """Best-effort removal of the temp file AND its mkdtemp parent; never masks the original error."""
     try:
         os.unlink(path)
+    except FileNotFoundError:
+        # Nothing was ever written (e.g. the ACL refused before the file was
+        # opened), so there is nothing to remove and nothing to report.
+        pass
     except OSError:
         logger.warning(f"Failed to remove temp log file: {path}")
+    try:
+        os.rmdir(os.path.dirname(path))  # the mkdtemp() parent is empty once the CSV is gone
+    except OSError:
+        pass
 
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
@@ -39,7 +48,9 @@ LOGS_LIMIT_MAX = 1000
 
 # Caps for log downloads: the CSV is streamed to a temp file (never buffered
 # twice or inlined into the tool payload) and only a bounded preview is
-# returned so large multi-MB/GB downloads cannot blow up the LLM context.
+# returned so large downloads cannot blow up the LLM context. The total
+# download size itself is capped separately and configured in config.py
+# (NEXTDNS_DOWNLOAD_MAX_BYTES).
 DOWNLOAD_PREVIEW_MAX_LINES = 20
 DOWNLOAD_PREVIEW_MAX_BYTES = 256 * 1024
 
@@ -129,17 +140,30 @@ async def _check_download_redirect_target(next_url: httpx.URL) -> None:
         )
 
 
+class DownloadTooLargeError(Exception):
+    """Raised when a download exceeds the total-size cap mid-stream."""
+
+
 async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict[str, Any]:
     """Write a streaming response body to ``path`` without double-buffering.
 
     The full CSV is written straight to disk chunk by chunk; only a bounded
-    preview of the leading lines is kept in memory.
+    preview of the leading lines is kept in memory. The total bytes written
+    are tracked and, once the running total exceeds the total-size cap
+    (the ``NEXTDNS_DOWNLOAD_MAX_BYTES`` environment variable, default 1 GiB,
+    see :func:`nextdns_mcp.config.get_download_max_bytes`), a
+    :class:`DownloadTooLargeError`
+    is raised immediately — while streaming, not after the body is in hand —
+    so a single download cannot fill the temp directory.
     """
     response.raise_for_status()
+    max_total = get_download_max_bytes()
     preview: list[str] = []
     preview_bytes = 0
     row_count = 0
-    total_chars = 0
+    written_bytes = 0
+    # End-of-stream flag, not per-chunk state: it is recomputed for every
+    # chunk and is only true when the last chunk left a line unterminated.
     open_line = False
     # fdopen (not open) so the file handle stays usable from the event loop
     # without tripping ASYNC230; per-chunk writes are small and cheap.
@@ -147,10 +171,16 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
         os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8", errors="replace"
     ) as out:
         async for text in response.aiter_text():
-            out.write(text)
             if not text:
                 continue
-            total_chars += len(text)
+            chunk_bytes = len(text.encode("utf-8"))
+            if written_bytes + chunk_bytes > max_total:
+                raise DownloadTooLargeError(
+                    f"Download exceeds the {max_total}-byte limit "
+                    f"(NEXTDNS_DOWNLOAD_MAX_BYTES); aborted after {written_bytes} bytes."
+                )
+            written_bytes += chunk_bytes
+            out.write(text)
             newlines = text.count("\n")
             row_count += newlines
             open_line = not text.endswith("\n")
@@ -158,10 +188,11 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
                 for line in text.splitlines(keepends=True):
                     if len(preview) >= DOWNLOAD_PREVIEW_MAX_LINES:
                         break
-                    if preview_bytes + len(line) > DOWNLOAD_PREVIEW_MAX_BYTES:
+                    line_bytes = len(line.encode("utf-8"))
+                    if preview_bytes + line_bytes > DOWNLOAD_PREVIEW_MAX_BYTES:
                         break
                     preview.append(line)
-                    preview_bytes += len(line)
+                    preview_bytes += line_bytes
     if open_line:
         row_count += 1
     size = os.path.getsize(path)
@@ -175,7 +206,7 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
             "text": text_preview,
             "line_count": len(preview),
             "bytes": preview_bytes,
-            "truncated": len(text_preview) < total_chars,
+            "truncated": preview_bytes < size,
         },
     }
 
@@ -211,6 +242,18 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
         await unauthenticated.aclose()
 
 
+async def _stream_download_to_path(profile_id: ProfileId, path: str) -> dict[str, Any]:
+    """Stream the log download for ``profile_id`` into ``path`` and return the payload."""
+    async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download") as initial:
+        # A non-redirect response is written straight to disk;
+        # _write_stream_to_tempfile surfaces any HTTP error via
+        # raise_for_status.
+        if not initial.has_redirect_location or initial.is_error:
+            return await _write_stream_to_tempfile(initial, path)
+        redirect_url = initial.request.url.join(initial.headers["location"])
+    return await _follow_redirects_to_tempfile(redirect_url, path)
+
+
 async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
     """Stream a log CSV download to a temp file without double-buffering.
 
@@ -218,6 +261,11 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
     file), a bounded preview of the first lines is kept in memory, and the
     tool payload returns only the file path, size, row count, and preview —
     never the full CSV text.
+
+    Every exit that is not a successful download removes the temp file and its
+    mkdtemp parent, including cancellation of the awaiting task, so an
+    abandoned download leaves neither an empty directory nor a partial CSV
+    behind.
 
     The authenticated client is used only for the initial request to the
     NextDNS API, and never follows redirects: if the download endpoint
@@ -228,21 +276,18 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
     into a probe of an internal service.
     """
     path = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_"), "download.csv")
+    downloaded = False
     try:
-        async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download") as initial:
-            # A non-redirect response is written straight to disk;
-            # _write_stream_to_tempfile surfaces any HTTP error via
-            # raise_for_status.
-            if not initial.has_redirect_location or initial.is_error:
-                return await _write_stream_to_tempfile(initial, path)
-            redirect_url = initial.request.url.join(initial.headers["location"])
-        return await _follow_redirects_to_tempfile(redirect_url, path)
+        payload = await _stream_download_to_path(profile_id, path)
+        downloaded = True
+        return payload
     except DownloadRedirectRefusedError as e:
         # A redirect to a non-public or plaintext destination is refused
         # before any request is made to the target, so no foreign body is ever
         # written or returned. The message carries only scheme and host: the
-        # signed part of the URL never reaches the log or the payload.
-        _unlink_temp_file(path)
+        # signed part of the URL never reaches the log or the payload. The
+        # temp file and its parent are removed by the finally guard below,
+        # which covers every non-successful exit.
         logger.warning(f"Refusing log download redirect: {e}")
         return error_payload(
             ErrorCode.HTTP_ERROR, "Refusing log download redirect to a non-public or non-https destination"
@@ -251,17 +296,22 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
         # Raised by the ACL layer (via stream()) before any network request;
         # kept out of the httpx.HTTPError branch so a real upstream 403 keeps
         # its existing http_error path.
-        _unlink_temp_file(path)
-        logger.warning(f"Access denied downloading logs: {e}")
+        logger.warning(f"Access denied downloading logs: {_log_safe_error(e)}")
         return access_denied_payload(e)
+    except DownloadTooLargeError as e:
+        # Raised mid-stream when the total-size cap is exceeded; the partially
+        # written CSV and its parent are removed by the finally block below.
+        logger.warning(f"Download aborted, size cap exceeded: {e}")
+        return error_payload(ErrorCode.DOWNLOAD_TOO_LARGE, str(e))
     except httpx.HTTPError as e:
-        _unlink_temp_file(path)
-        logger.error(f"HTTP error downloading logs: {e}")
+        logger.error(f"HTTP error downloading logs: {_log_safe_error(e)}")
         return http_error_payload(f"HTTP error while downloading logs: {e}", e, fallback_code=ErrorCode.HTTP_ERROR)
     except Exception as e:  # noqa: BLE001
-        _unlink_temp_file(path)
-        logger.error(f"Unexpected error downloading logs: {e}")
+        logger.error(f"Unexpected error downloading logs: {_log_safe_error(e)}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")
+    finally:
+        if not downloaded:
+            _unlink_temp_file(path)
 
 
 async def _manage_logs_impl(
@@ -318,6 +368,14 @@ async def manageLogs(
           ignored by the NextDNS download endpoint. The CSV is streamed to a
           temporary file; only the file path, size, row count, and a small
           capped preview are returned (the full text is never inlined).
+          A hard total-size cap bounds how much is streamed to disk (the
+          ``NEXTDNS_DOWNLOAD_MAX_BYTES`` environment variable, default 1 GiB);
+          a download that would exceed it is aborted mid-stream and the
+          partial file is removed. On success the temp
+          file is *not* cleaned up: the CSV stays in the OS temp directory
+          (mode 0600) and the returned path is the only record of it, so
+          delete it when it is no longer needed. Failed downloads do remove
+          the temp file and its parent directory.
 
     Time values can be Unix timestamps or relative strings like ``-1d`` or ``-7d``.
     They are only used by ``get``.
@@ -333,4 +391,13 @@ async def manageLogs(
         - download: ``manageLogs(operation="download", profile_id="abc123", from_time="-1d")``
         - clear: ``manageLogs(operation="clear", profile_id="abc123")``
     """
-    return await _manage_logs_impl(operation, profile_id, from_time, to_time, limit, user, device, raw)
+    return await _manage_logs_impl(
+        operation=operation,
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        user=user,
+        device=device,
+        raw=raw,
+    )

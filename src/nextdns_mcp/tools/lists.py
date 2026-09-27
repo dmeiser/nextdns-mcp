@@ -195,4 +195,11 @@ async def manageLists(
         - add parental category: ``manageLists(list_type="parental_categories", operation="add", profile_id="abc123", entry={"id": "gambling"})``
         - update parental service: ``manageLists(list_type="parental_services", operation="update", profile_id="abc123", entry_id="tiktok", entry={"active": False})``
     """
-    return await _manage_lists_impl(list_type, operation, profile_id, entry_id, entry, entries)
+    return await _manage_lists_impl(
+        list_type=list_type,
+        operation=operation,
+        profile_id=profile_id,
+        entry_id=entry_id,
+        entry=entry,
+        entries=entries,
+    )

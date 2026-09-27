@@ -16,12 +16,13 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 | NEXTDNS_API_KEY_FILE | string (path) | - | No | Path to a file containing only the API key (e.g., Docker secret) |
 | NEXTDNS_DEFAULT_PROFILE | string | - | No | Default profile ID to use when a tool parameter omits profile_id |
 | NEXTDNS_HTTP_TIMEOUT | number (seconds) | 30 | No | HTTP timeout for API and DoH requests |
+| NEXTDNS_DOWNLOAD_MAX_BYTES | number (bytes) | 1073741824 (1 GiB) | No | Hard cap on the total bytes a single `manageLogs(operation="download")` may stream to disk; the download is aborted mid-stream when it would be exceeded |
 | NEXTDNS_READ_ONLY | bool (true/false/1/0/yes/no) | false | No | Disables all write operations when true |
 | NEXTDNS_READABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for reads; special value "ALL" allows reads of all profiles; empty/unset denies all reads |
 | NEXTDNS_WRITABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for writes; special value "ALL" allows writes to all profiles; empty/unset denies all writes; ignored if NEXTDNS_READ_ONLY=true |
 | MCP_TRANSPORT | string | stdio | No | `stdio` (default) or `http` (streamable-HTTP). Case-insensitive and trimmed. Any other value fails startup with `ConfigurationError`. See "HTTP Transport" in the README |
 | MCP_HOST | string | 127.0.0.1 | No | Bind interface for HTTP transport. Loopback-only by default; a non-loopback value is an explicit opt-in that requires reverse-proxy/auth protection |
-| MCP_PORT | number | 8000 | No | Port for HTTP transport |
+| MCP_PORT | number | 8000 | No | Port for HTTP transport. Must be an integer in 1-65535; an invalid value fails fast at startup with `ConfigurationError`, like `NEXTDNS_HTTP_TIMEOUT` |
 | FASTMCP_CHECK_FOR_UPDATES | string | off | No | FastMCP's automatic update check, disabled by default because it slows startup and can hang offline/CI. Set an explicit FastMCP value (e.g. `stable`) to opt back in |
 
 Notes
@@ -29,11 +30,13 @@ Notes
 - `NEXTDNS_API_KEY` (or `NEXTDNS_API_KEY_FILE`) is required. An absent or empty key fails fast instead of creating an unauthenticated client: at startup as `MissingApiKeyError`, and again on first client construction as `ConfigurationError`. `MissingApiKeyError` is a subclass of `ConfigurationError`, so a single `except ConfigurationError` covers both.
 - `NEXTDNS_HTTP_TIMEOUT` must be a positive number of seconds. Invalid values (e.g. `abc`, `0`, empty) fail fast at startup with a clear `ConfigurationError` instead of a confusing crash deep in client construction.
 - `MCP_TRANSPORT` must be `stdio` or `http` (case-insensitive, trimmed). An unrecognized value (e.g. `https`, `sse`, a typo, or a stray trailing space) fails fast at startup with a clear `ConfigurationError` instead of silently downgrading to a stdio server that speaks no HTTP.
+- `MCP_PORT` must be an integer in 1-65535. A non-numeric or out-of-range value (e.g. `abc`, an empty value, `0`, `65536`) fails fast at startup with a clear `ConfigurationError` naming `MCP_PORT`, like the timeout above.
+- `NEXTDNS_DOWNLOAD_MAX_BYTES` must be a positive integer of bytes. Invalid values (e.g. `abc`, `0`, `-5`) raise `ConfigurationError`, like the timeout above. See "Local log downloads" in safety.md.
 - Profile IDs are hexadecimal and matched case-insensitively: values in `NEXTDNS_READABLE_PROFILES`/`NEXTDNS_WRITABLE_PROFILES` and the `profile_id` being checked are both normalized to lowercase before comparison, so `2F4A9B` in the config matches a query for `2f4a9b`.
 - Per-profile checks match the `profile_id` in the URL. Collection profile endpoints (`GET /profiles` for `manageProfiles(operation="list")`, `POST /profiles` for `create`) carry no `profile_id` but still respect the global denials above: collection reads are denied when both profile sets are unset, and collection writes are denied in read-only mode or when `NEXTDNS_WRITABLE_PROFILES` is unset.
 - `dohLookup` uses a separate DoH endpoint, but it still enforces the per-profile read check: the queried profile must be in the effective readable set, i.e. `NEXTDNS_READABLE_PROFILES` or `NEXTDNS_WRITABLE_PROFILES` ("write implies read", below), or either set must be "ALL".
 - "Write implies read": profiles allowed for writes are automatically considered readable.
-- On the `AccessControlledClient` request and stream paths, and for the `dohLookup` send, access control settings are read once into an immutable snapshot (`nextdns_mcp.config.load_profile_access_control()`) that authorizes the checks and the decision to send the request upstream together, so a change to the environment applies from the next request onward, never midway through one in flight. No cache invalidation or restart is needed: there is no cross-request cache to expire. The `manageProfiles` `list`/`create` operations take their own read of the environment for the collection-denial checks above before the client snapshot; the client re-checks the same conditions, so that path still fails closed, but it is not covered by the single-snapshot guarantee.
+- On the `AccessControlledClient` request and stream paths, for the `dohLookup` send, and for the collection-denial checks in the `manageProfiles` `list`/`create` operations, access control settings are read once per operation into an immutable snapshot (`nextdns_mcp.config.load_profile_access_control()`) that authorizes all of that operation's checks together, so a change to the environment applies from the next request onward, never midway through one in flight. A single MCP call therefore reads each profile ACL variable once rather than once per check. No cache invalidation or restart is needed: there is no cross-request cache to expire.
 
 ## Examples
 
