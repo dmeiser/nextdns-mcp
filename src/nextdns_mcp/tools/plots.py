@@ -53,6 +53,8 @@ PLOT_LIMIT_MAX = 500
 _RELATIVE_TIME_RE = re.compile(r"^(-?)(\d+)([smhdwy])$")
 _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
 
+_ACCESS_DENIED_CODES = frozenset({ErrorCode.READ_ACCESS_DENIED, ErrorCode.WRITE_ACCESS_DENIED, ErrorCode.ACCESS_DENIED})
+
 # matplotlib is imported lazily inside _render_series_chart (issue #165): the
 # import alone costs ~2s and every stdio cold start would pay it even though
 # only the plot tool needs it. These module-level slots are filled once on the
@@ -337,6 +339,8 @@ async def _fetch_series_payload(
         payload = await _api_request("GET", url, params=params)
     except NextDNSError as e:
         return None, _handle_api_error(e)
+    if payload.get("code") in _ACCESS_DENIED_CODES:
+        return None, payload
     return payload, None
 
 

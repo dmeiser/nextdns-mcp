@@ -219,6 +219,18 @@ class TestAccessControlErrorContract:
         assert "Read access denied for profile: abc123" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_plot_read_denial_is_typed_with_reason(self, monkeypatch):
+        # The plot fetch must surface the denial payload the ACL layer returns
+        # rather than reading it as an empty time series.
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "xyz999")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "")
+        result = await server.plotAnalytics("status", "abc123")
+        _assert_error_contract(result)
+        assert result["code"] == ErrorCode.READ_ACCESS_DENIED
+        assert result["status_code"] == 403
+        assert "Read access denied for profile: abc123" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_write_denial_is_typed_with_reason(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "xyz999")
