@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import socket
+import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -654,12 +655,60 @@ class TestManageLogs:
         assert result["preview"]["line_count"] == 2
         logs_module._unlink_temp_file(result["file_path"])
 
-    def test_unlink_temp_file_missing_path_logs_warning(self, caplog):
-        """A failed temp-file removal logs a warning and never raises."""
+    def test_unlink_temp_file_never_created_path_is_quiet(self, tmp_path, caplog):
+        """A temp file that was never written is not reported as a cleanup failure."""
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"):
-            logs_module._unlink_temp_file("/nonexistent/nextdns_logs_missing.csv")
-        assert not os.path.exists("/nonexistent/nextdns_logs_missing.csv")
+            logs_module._unlink_temp_file(str(tmp_path / "download.csv"))
+        assert not caplog.records, [rec.message for rec in caplog.records]
+
+    def test_unlink_temp_file_failure_logs_warning(self, tmp_path, caplog):
+        """A temp file that exists but cannot be unlinked logs a warning and never raises."""
+        undeletable = tmp_path / "download.csv"
+        undeletable.mkdir()
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"):
+            logs_module._unlink_temp_file(str(undeletable))
+        assert undeletable.exists()
         assert any("Failed to remove temp log file" in rec.message for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_download_cancelled_mid_stream_removes_temp_dir_and_partial_file(
+        self, mock_api_client, monkeypatch, tmp_path
+    ):
+        """Cancelling a download mid-stream leaves no partial CSV and no mkdtemp parent (issue #264)."""
+        first_chunk_written = asyncio.Event()
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def recording_mkdtemp(*args, **kwargs):
+            path = real_mkdtemp(*args, **kwargs)
+            created.append(path)
+            return path
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", recording_mkdtemp)
+
+        async def stalling_chunks():
+            yield "date,time,question,answer\n2024-01-01,12:00:00,secret.example,1.2.3.4\n"
+            first_chunk_written.set()
+            await asyncio.sleep(3600)
+
+        response = MagicMock()
+        response.status_code = 200
+        response.has_redirect_location = False
+        response.is_error = False
+        response.headers = {"content-type": "text/csv"}
+        response.raise_for_status.return_value = None
+        response.aiter_text = lambda: stalling_chunks()
+        mock_api_client.stream = MagicMock(return_value=_stream_ctx(response))
+
+        task = asyncio.create_task(server.manageLogs("download", "abc123"))
+        await asyncio.wait_for(first_chunk_written.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert len(created) == 1
+        assert not os.path.exists(os.path.join(created[0], "download.csv")), "partial CSV survived cancellation"
+        assert not os.path.exists(created[0]), "mkdtemp parent directory leaked on cancellation"
 
     def test_unlink_temp_file_removes_mkdtemp_parent(self, tmp_path):
         """Removing a temp log file also removes its (empty) mkdtemp parent (issue #264)."""
@@ -880,7 +929,7 @@ class TestManageLogsDownloadRedirects:
         assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
-    async def test_download_denied_profile_returns_403(self, monkeypatch):
+    async def test_download_denied_profile_returns_403(self, monkeypatch, caplog):
         """A profile outside NEXTDNS_READABLE_PROFILES gets a 403 on download, not a file."""
         # Restrict both read and write ACLs: the autouse fixture sets
         # WRITABLE_PROFILES=ALL, which would otherwise make abc123 implicitly
@@ -889,13 +938,18 @@ class TestManageLogsDownloadRedirects:
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "xyz999")
         real_client = client_module.AccessControlledClient(base_url="https://api.nextdns.io")
         monkeypatch.setattr(logs_module.client, "api_client", real_client)
-        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+        with (
+            patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send,
+            caplog.at_level(logging.WARNING, logger="nextdns_mcp.tools.logs"),
+        ):
             result = await server.manageLogs("download", "abc123")
         await real_client.aclose()
         mock_send.assert_not_called()
         assert result["status_code"] == 403
         assert "error" in result
         assert "file_path" not in result
+        # The temp file was never created, so cleanup must not report a failure.
+        assert not [rec.message for rec in caplog.records if "Failed to remove temp log file" in rec.message]
 
     @pytest.mark.asyncio
     async def test_download_denied_in_read_only_mode(self, monkeypatch):

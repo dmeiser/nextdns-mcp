@@ -26,6 +26,10 @@ def _unlink_temp_file(path: str) -> None:
     """Best-effort removal of the temp file AND its mkdtemp parent; never masks the original error."""
     try:
         os.unlink(path)
+    except FileNotFoundError:
+        # Nothing was ever written (e.g. the ACL refused before the file was
+        # opened), so there is nothing to remove and nothing to report.
+        pass
     except OSError:
         logger.warning(f"Failed to remove temp log file: {path}")
     try:
@@ -216,6 +220,18 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
         await unauthenticated.aclose()
 
 
+async def _stream_download_to_path(profile_id: ProfileId, path: str) -> dict[str, Any]:
+    """Stream the log download for ``profile_id`` into ``path`` and return the payload."""
+    async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download") as initial:
+        # A non-redirect response is written straight to disk;
+        # _write_stream_to_tempfile surfaces any HTTP error via
+        # raise_for_status.
+        if not initial.has_redirect_location or initial.is_error:
+            return await _write_stream_to_tempfile(initial, path)
+        redirect_url = initial.request.url.join(initial.headers["location"])
+    return await _follow_redirects_to_tempfile(redirect_url, path)
+
+
 async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
     """Stream a log CSV download to a temp file without double-buffering.
 
@@ -223,6 +239,11 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
     file), a bounded preview of the first lines is kept in memory, and the
     tool payload returns only the file path, size, row count, and preview —
     never the full CSV text.
+
+    Every exit that is not a successful download removes the temp file and its
+    mkdtemp parent, including cancellation of the awaiting task, so an
+    abandoned download leaves neither an empty directory nor a partial CSV
+    behind.
 
     The authenticated client is used only for the initial request to the
     NextDNS API, and never follows redirects: if the download endpoint
@@ -233,21 +254,18 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
     into a probe of an internal service.
     """
     path = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_"), "download.csv")
+    downloaded = False
     try:
-        async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download") as initial:
-            # A non-redirect response is written straight to disk;
-            # _write_stream_to_tempfile surfaces any HTTP error via
-            # raise_for_status.
-            if not initial.has_redirect_location or initial.is_error:
-                return await _write_stream_to_tempfile(initial, path)
-            redirect_url = initial.request.url.join(initial.headers["location"])
-        return await _follow_redirects_to_tempfile(redirect_url, path)
+        payload = await _stream_download_to_path(profile_id, path)
+        downloaded = True
+        return payload
     except DownloadRedirectRefusedError as e:
         # A redirect to a non-public or plaintext destination is refused
         # before any request is made to the target, so no foreign body is ever
         # written or returned. The message carries only scheme and host: the
-        # signed part of the URL never reaches the log or the payload.
-        _unlink_temp_file(path)
+        # signed part of the URL never reaches the log or the payload. The
+        # temp file and its parent are removed by the finally guard below,
+        # which covers every non-successful exit.
         logger.warning(f"Refusing log download redirect: {e}")
         return error_payload(
             ErrorCode.HTTP_ERROR, "Refusing log download redirect to a non-public or non-https destination"
@@ -256,17 +274,17 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
         # Raised by the ACL layer (via stream()) before any network request;
         # kept out of the httpx.HTTPError branch so a real upstream 403 keeps
         # its existing http_error path.
-        _unlink_temp_file(path)
         logger.warning(f"Access denied downloading logs: {e}")
         return access_denied_payload(e)
     except httpx.HTTPError as e:
-        _unlink_temp_file(path)
         logger.error(f"HTTP error downloading logs: {e}")
         return http_error_payload(f"HTTP error while downloading logs: {e}", e, fallback_code=ErrorCode.HTTP_ERROR)
     except Exception as e:  # noqa: BLE001
-        _unlink_temp_file(path)
         logger.error(f"Unexpected error downloading logs: {e}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")
+    finally:
+        if not downloaded:
+            _unlink_temp_file(path)
 
 
 async def _manage_logs_impl(
