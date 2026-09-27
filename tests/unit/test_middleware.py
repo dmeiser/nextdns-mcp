@@ -314,3 +314,10 @@ class TestStripExtraFieldsMiddleware:
         """Test fallback to original string if int() raises ValueError."""
         monkeypatch.setattr("nextdns_mcp.openapi._is_integer", lambda _s: True)
         assert middleware._coerce_string_value("invalid", {"integer"}) == "invalid"
+
+
+def test_openapi_spec_not_found_class_is_removed():
+    """OpenApiSpecNotFound had no raise site, import, or test (issue #279); it must stay deleted."""
+    from nextdns_mcp import openapi as openapi_module
+
+    assert not hasattr(openapi_module, "OpenApiSpecNotFound")
