@@ -140,9 +140,9 @@ def staged_paths(commit_run: str) -> set[str] | None:
 def locked_version(root: Path) -> str:
     """The version ``uv.lock`` pins for this project, read the way uv writes it."""
     text = (root / LOCKFILE).read_text()
-    match = re.search(r'\[\[package\]\]\nname = "%s"\nversion = "([^"]+)"' % PROJECT_NAME, text)
-    assert match is not None, f"uv.lock pins no version for {PROJECT_NAME}:\n{text}"
-    return match.group(1)
+    match = re.search(rf'\[\[package\]\]\nname = "{PROJECT_NAME}"\nversion = "(?P<version>[^"]+)"', text)
+    assert match is not None, f"{LOCKFILE} pins no version for {PROJECT_NAME}:\n{text}"
+    return match.group("version")
 
 
 def manifest_version(root: Path) -> str:
@@ -270,9 +270,7 @@ def test_release_commit_stages_the_lockfile(workflow_name: str, job_id: str) -> 
 
 @requires_uv
 @pytest.mark.parametrize("workflow_name,job_id", sorted(RELEASE_JOBS.items()))
-def test_bump_leaves_the_ci_lockfile_check_passing(
-    workflow_name: str, job_id: str, tmp_path: Path
-) -> None:
+def test_bump_leaves_the_ci_lockfile_check_passing(workflow_name: str, job_id: str, tmp_path: Path) -> None:
     """End-to-end: run the job's own steps, and CI's ``uv lock --check`` must pass."""
     job = load_release_job(WORKFLOWS_DIR / workflow_name, job_id)
     edit, refresh, commit = job.version_edit(), job.lock_refresh(), job.commit()
