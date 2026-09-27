@@ -37,7 +37,7 @@ from starlette.responses import JSONResponse
 
 from .client import get_api_client
 from .coercion import _is_integer
-from .config import get_default_profile
+from .config import ConfigurationError, get_default_profile
 
 logger = logging.getLogger(__name__)
 
@@ -293,12 +293,6 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
     mcp.custom_route("/health", methods=["GET"])(health_check)
 
 
-def _reset_health_probe_cache() -> None:
-    """Discard the cached readiness result so the next call re-probes."""
-    global _health_probe_cache
-    _health_probe_cache = None
-
-
 async def check_nextdns_readiness() -> HealthFailure | None:
     """Return the readiness result, probing NextDNS at most once per cache window.
 
@@ -331,9 +325,14 @@ async def _run_health_probe() -> HealthFailure | None:
     Returns:
         None when NextDNS accepted the credentials, otherwise a HealthFailure.
     """
-    client = get_api_client()
     try:
+        client = get_api_client()
         response = await client.raw_request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
+    except ConfigurationError:
+        return HealthFailure(
+            HEALTH_FAILURE_AUTH,
+            "No usable NextDNS API key is configured",
+        )
     except httpx.TimeoutException:
         return HealthFailure(
             HEALTH_FAILURE_UNREACHABLE,

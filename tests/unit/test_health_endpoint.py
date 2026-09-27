@@ -14,12 +14,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from nextdns_mcp import openapi
+from nextdns_mcp.config import ConfigurationError
 from nextdns_mcp.openapi import (
     HEALTH_CACHE_TTL,
     HEALTH_PROBE_PATH,
     HEALTH_PROBE_TIMEOUT,
     _register_health_endpoint,
-    _reset_health_probe_cache,
     create_mcp_server,
 )
 from nextdns_mcp.server import get_mcp_server
@@ -57,7 +57,7 @@ def _install_client(monkeypatch, *outcomes: httpx.Response | Exception) -> FakeA
     """Point the health probe at a fake client and reset the result cache."""
     client = FakeApiClient(*outcomes)
     monkeypatch.setattr(openapi, "get_api_client", lambda: client)
-    _reset_health_probe_cache()
+    openapi._health_probe_cache = None
     return client
 
 
@@ -79,9 +79,9 @@ async def _call_health() -> tuple[int, dict]:
 @pytest.fixture(autouse=True)
 def _clear_probe_cache() -> Iterator[None]:
     """Keep the module-level readiness cache from leaking between tests."""
-    _reset_health_probe_cache()
+    openapi._health_probe_cache = None
     yield
-    _reset_health_probe_cache()
+    openapi._health_probe_cache = None
 
 
 def test_create_mcp_server_registers_health_route(mock_api_key, monkeypatch):
@@ -155,6 +155,40 @@ async def test_health_never_leaks_key_material_or_the_probe_body(monkeypatch, mo
     assert upstream_body not in serialized
     assert body["class"] == "auth"
     assert body["reason"] == "NextDNS API rejected the configured credentials (HTTP 401)"
+
+
+async def test_health_returns_503_auth_class_when_no_api_key_is_usable(monkeypatch, mock_api_key):
+    """A missing or empty API key is reported as 503 with the auth class, not a 500."""
+
+    def _no_client():
+        raise ConfigurationError("NEXTDNS_API_KEY is not set")
+
+    monkeypatch.setattr(openapi, "get_api_client", _no_client)
+    openapi._health_probe_cache = None
+
+    status_code, body = await _call_health()
+
+    assert status_code == 503
+    assert body["class"] == "auth"
+    assert body["status"] == "error"
+    assert "API key" in body["reason"]
+
+
+async def test_configuration_failure_is_cached_like_any_other_probe_result(monkeypatch):
+    """Repeated polling inside the TTL reuses the configuration-failure result."""
+    attempts = 0
+
+    def _no_client():
+        nonlocal attempts
+        attempts += 1
+        raise ConfigurationError("NEXTDNS_API_KEY is not set")
+
+    monkeypatch.setattr(openapi, "get_api_client", _no_client)
+    openapi._health_probe_cache = None
+
+    assert (await _call_health())[0] == 503
+    assert (await _call_health())[0] == 503
+    assert attempts == 1
 
 
 async def test_health_returns_503_unreachable_class_on_timeout(monkeypatch, mock_api_key):
