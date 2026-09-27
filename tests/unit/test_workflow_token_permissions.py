@@ -363,6 +363,7 @@ def _run_github_script_step(
         text=True,
         timeout=60,
         cwd=tmp,
+        check=False,
     )
     assert "__RESULT__" in proc.stdout, f"node harness produced no result:\n{proc.stdout}\n{proc.stderr}"
     result = json.loads(proc.stdout.split("__RESULT__", 1)[1].splitlines()[0])
@@ -463,7 +464,9 @@ def _run_shell_step(
         "GH_SCOPE_MAP": json.dumps([[list(prefix), scope, level] for prefix, scope, level in SCOPES_GH_CLI]),
         "GH_TOKEN": "ghs_fake_token_for_simulation",
     }
-    proc = subprocess.run(["bash", "-e", "-c", body], capture_output=True, text=True, timeout=60, env=env, cwd=tmp)
+    proc = subprocess.run(
+        ["bash", "-e", "-c", body], capture_output=True, text=True, timeout=60, env=env, cwd=tmp, check=False
+    )
     calls = [ApiCall(**json.loads(line)) for line in gh_log.read_text().splitlines() if line.strip()]
     return Step(**{**step.__dict__, "stdout": proc.stdout + proc.stderr, "exit_code": proc.returncode}), calls
 
@@ -517,7 +520,7 @@ def probe_token(permissions: dict[str, str]) -> int:
     probe_step = Step(name="probe", uses=None, run=None, script="return null;", condition=None)
     tmp = Path(tempfile.mkdtemp(prefix="wf-probe-"))
     try:
-        _, calls, extra = _run_github_script_step(
+        _, _, extra = _run_github_script_step(
             probe_step,
             permissions,
             {"repo": {"owner": "example", "repo": "nextdns-mcp"}, "issueNumber": 1, "actor": "dependabot[bot]"},
