@@ -82,10 +82,6 @@ class HealthFailure(NamedTuple):
 _health_probe_cache: tuple[float, HealthFailure | None] | None = None
 
 
-class OpenApiSpecNotFound(FileNotFoundError):
-    """Raised when the NextDNS OpenAPI spec file cannot be found."""
-
-
 class StripExtraFieldsMiddleware(Middleware):
     """Middleware that strips unknown fields and coerces types in tool arguments.
 
