@@ -127,6 +127,31 @@ GROUPED_TOOL_OPERATIONS: dict[str, list[str]] = {
     "dohLookup": [],
 }
 
+# Response shapes for tools that have no OpenAPI operation to derive a schema
+# from. dohLookup queries dns.nextdns.io directly (outside the NextDNS API
+# spec), so its response shape is pinned here instead: the raw DNS JSON
+# response under ``data`` and lookup context under ``_metadata``.
+TOOL_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "dohLookup": {
+        "type": "object",
+        "required": ["data", "_metadata"],
+        "properties": {
+            "data": {"type": "object"},
+            "_metadata": {
+                "type": "object",
+                "required": ["profile_id", "query_domain", "query_type", "doh_endpoint"],
+                "properties": {
+                    "profile_id": {"type": "string"},
+                    "query_domain": {"type": "string"},
+                    "query_type": {"type": "string"},
+                    "doh_endpoint": {"type": "string"},
+                    "status_description": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
 
 def load_openapi_spec(spec_path: str) -> dict[str, Any]:
     """Load and parse OpenAPI specification."""
@@ -137,6 +162,10 @@ def load_openapi_spec(spec_path: str) -> dict[str, Any]:
 def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> dict[str, Any] | None:
     """
     Extract the 200 response schema for a given operationId.
+
+    Both ``application/json`` and ``text/csv`` content are considered: some
+    operations (e.g. downloadLogs) declare only a CSV body, and their schema
+    is just as much part of the API contract as a JSON one.
 
     Returns the schema object or None if not found.
     """
@@ -151,10 +180,10 @@ def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> di
                 for success_code in ("200", "201"):
                     success_response = responses.get(success_code, {})
                     content = success_response.get("content", {})
-                    json_content = content.get("application/json", {})
-                    schema = json_content.get("schema")
-                    if schema:
-                        return schema
+                    for media_type in ("application/json", "text/csv"):
+                        schema = content.get(media_type, {}).get("schema")
+                        if schema:
+                            return schema
 
     return None
 
@@ -370,16 +399,6 @@ def validate_tool_response(
     if response_data == {"success": True}:
         return "SKIPPED", []
 
-    # downloadLogs returns CSV data wrapped in a JSON envelope because MCP tools return JSON.
-    if (
-        tool_name == "manageLogs"
-        and isinstance(response_data, dict)
-        and "content_type" in response_data
-        and "size" in response_data
-        and isinstance(response_data.get("data"), str)
-    ):
-        return "VALID", []
-
     operation_ids = [tool_name]
     if tool_name in GROUPED_TOOL_OPERATIONS:
         operation_ids = GROUPED_TOOL_OPERATIONS[tool_name]
@@ -389,6 +408,11 @@ def validate_tool_response(
         schema = get_operation_response_schema(spec, op_id)
         if schema is not None:
             schemas.append((op_id, schema))
+
+    # Tools without an OpenAPI operation validate against their literal schema.
+    literal_schema = TOOL_RESPONSE_SCHEMAS.get(tool_name)
+    if literal_schema is not None:
+        schemas.append((tool_name, literal_schema))
 
     if not schemas:
         return "SKIPPED", [f"No schemas found for tool '{tool_name}'"]

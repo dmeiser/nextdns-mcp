@@ -236,23 +236,52 @@ def test_extract_schema_type_coverage():
 
 
 def test_validate_tool_response_manage_logs_download():
-    """manageLogs download CSV envelope should validate successfully."""
+    """manageLogs download CSV envelope should validate successfully.
+
+    The envelope validates through the normal candidate-schema union: it is a
+    JSON object, so it matches getLogs' object schema. The former
+    content_type/size/data special case is gone.
+    """
     from scripts.validate_schema import validate_tool_response
 
     spec = {
         "paths": {
+            "/profiles/{profile_id}/logs": {
+                "get": {
+                    "operationId": "getLogs",
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "data": {"type": "array", "items": {"type": "object"}},
+                                            "cursor": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            },
             "/profiles/{profile_id}/logs/download": {
                 "get": {
                     "operationId": "downloadLogs",
-                    "responses": {"200": {"content": {"text/csv": {}}}},
+                    "responses": {
+                        "200": {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}
+                    },
                 }
-            }
+            },
         }
     }
     response_data = {
         "content_type": "text/csv",
         "size": 128,
-        "data": "timestamp,domain,client\n1700000000,example.com,client-1",
+        "file_path": "/tmp/nextdns_logs_e2e/download.csv",
+        "row_count": 1,
+        "preview": {"text": "timestamp,domain", "line_count": 1, "bytes": 15, "truncated": False},
     }
     status, errors = validate_tool_response("manageLogs", response_data, spec)
     assert status == "VALID"
