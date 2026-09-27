@@ -164,7 +164,7 @@ jobs:
           # contract is judged on the exact Miss/BrPart counts, because Cover
           # is rounded to whole percent and still reads 100% while a few
           # branches go untaken (issue #278).
-          TOTAL_ROW=$(grep "^TOTAL" test_output.txt)
+          TOTAL_ROW=$(grep "^TOTAL" test_output.txt || true)
           COVERAGE=$(echo "$TOTAL_ROW" | awk '{print $6}' | sed 's/%//')
           echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
           echo "Overall Coverage: $COVERAGE%"

@@ -74,6 +74,19 @@ TOTAL                                1350      0    440      7   100%
 """
 
 
+# Branch measurement on, but the report is truncated before its TOTAL row, so
+# there is no overall number to judge. The gate must say so rather than abort
+# silently: `TOTAL_ROW=$(grep ...)` propagates grep's exit status, and the step
+# runs under `set -e`, so an unguarded assignment kills the step before the
+# "Could not extract" diagnostic below it can run.
+BRANCH_REPORT_WITHOUT_TOTAL = """\
+Name                                 Stmts   Miss Branch BrPart  Cover
+--------------------------------------------------------------------------------
+src/nextdns_mcp/client.py              158      0     48      0   100%
+--------------------------------------------------------------------------------
+"""
+
+
 def _coverage_gate_script() -> str:
     """Return the shell script the unit-tests job executes for its coverage gate."""
     workflow = yaml.safe_load(WORKFLOW.read_text())
@@ -145,6 +158,19 @@ def test_gate_rejects_a_partial_branch_that_rounds_to_100(tmp_path):
     result = _run_gate(tmp_path, BRANCH_PARTIAL_ROUNDS_TO_100_REPORT)
     assert result.returncode != 0, f"gate accepted untaken branches hidden by rounding:\n{result.stdout}"
     assert "7 untaken branch" in result.stdout, result.stdout
+
+
+def test_gate_reports_a_missing_total_row_instead_of_aborting_silently(tmp_path):
+    """A report with no TOTAL row fails with a diagnostic, not a bare abort.
+
+    The step runs under `set -e`, so a bare `TOTAL_ROW=$(grep ...)` assignment
+    aborts the whole step with no output at all when the row is missing. The
+    gate must name the problem so a maintainer can tell a broken report apart
+    from a real coverage regression.
+    """
+    result = _run_gate(tmp_path, BRANCH_REPORT_WITHOUT_TOTAL)
+    assert result.returncode != 0, f"gate accepted a report with no TOTAL row:\n{result.stdout}"
+    assert "Could not extract" in result.stdout, f"gate failed without a diagnostic:\n{result.stdout}"
 
 
 def test_gate_accepts_complete_branch_coverage(tmp_path):
