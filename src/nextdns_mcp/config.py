@@ -126,7 +126,7 @@ def get_download_max_bytes() -> int:
             raise ValueError
     except (ValueError, TypeError):
         raise ConfigurationError(
-            f"Invalid NEXTDNS_DOWNLOAD_MAX_BYTES: {raw!r}. Expected a positive number of bytes."
+            f"Invalid NEXTDNS_DOWNLOAD_MAX_BYTES: {raw!r}. Expected a positive integer of bytes."
         ) from None
 
     return val

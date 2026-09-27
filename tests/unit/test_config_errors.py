@@ -284,7 +284,7 @@ def test_get_download_max_bytes_invalid_raises_configuration_error(monkeypatch, 
     err_msg = str(exc_info.value)
     assert "NEXTDNS_DOWNLOAD_MAX_BYTES" in err_msg
     assert repr(invalid_val) in err_msg
-    assert "Expected a positive number of bytes." in err_msg
+    assert "Expected a positive integer of bytes." in err_msg
     assert exc_info.value.__cause__ is None
     assert isinstance(exc_info.value, ValueError)
 
