@@ -173,7 +173,7 @@ class TestApiRequest:
             await utils._api_request("GET", "/profiles")
         raised_exc = exc_info.value
         assert raised_exc.status_code is None
-        assert raised_exc.response_body == "unexpected"
+        assert raised_exc.response_body is None
 
 
 class TestManageProfiles:

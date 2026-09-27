@@ -6,6 +6,20 @@ SPDX-License-Identifier: MIT
 from typing import Any
 
 from ..coercion import ProfileId
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+import httpx
+=======
+from ..errors import ErrorCode, error_payload
+from ..utils import (
+    _api_request_payload,
+    _build_query_params,
+    _cap_limit,
+    resolve_profile_id,
+)
+>>>>>>> bd26c2a (Finish #181: apply handoff removals, fix lints, cover migrated handlers)
+>>>>>>> cfeadb9 (no-mistakes(review): consolidate API error handling into shared payload helper)
 
 from ..errors import ErrorCode, error_payload, http_error_payload
 from ..utils import (
@@ -89,10 +103,7 @@ async def _query_analytics_impl(
     if metric == "domains":
         params.update(_build_query_params(status=status, root=root))
 
-    try:
-        return await _api_request("GET", url, params=params)
-    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        return _handle_api_error(e)
+    return await _api_request_payload("GET", url, params=params)
 
 
 async def queryAnalytics(

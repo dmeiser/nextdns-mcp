@@ -19,10 +19,7 @@ from fastmcp.utilities.types import Image
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
 from ..utils import (
-    NextDNSAuthError,
     NextDNSError,
-    NextDNSRateLimitError,
-    NextDNSServerError,
     _api_request,
     _build_series_params,
     _handle_api_error,
@@ -338,7 +335,7 @@ async def _fetch_series_payload(
     """
     try:
         payload = await _api_request("GET", url, params=params)
-    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
+    except NextDNSError as e:
         return None, _handle_api_error(e)
     return payload, None
 
