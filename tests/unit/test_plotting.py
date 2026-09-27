@@ -13,6 +13,15 @@ from nextdns_mcp import server
 from nextdns_mcp.tools import plots as plots_module
 
 
+def _make_response(json_data):
+    """Build a mock httpx.Response returning ``json_data``."""
+    response = MagicMock()
+    response.status_code = 200
+    response.content = b'{"dummy": true}'
+    response.json.return_value = json_data
+    return response
+
+
 def _png_is_complete(png: bytes) -> bool:
     """Return True if the PNG bytes end with a proper IEND chunk."""
     return png.endswith(b"IEND\xae\x42\x60\x82")
@@ -134,7 +143,9 @@ class TestParseSeriesTimestamp:
         assert ts.hour == 10
         assert ts.minute == 30
         assert ts.second == 0
-        assert ts.tzinfo is None
+        # A zone-less value is anchored to UTC so it denotes the same instant
+        # regardless of the host's local timezone.
+        assert ts.utcoffset() == timedelta(0)
 
     def test_parses_whole_second_with_z_via_fallback_format(self, monkeypatch):
         # Force the strptime fallback path and confirm the whole-second format
@@ -292,6 +303,12 @@ class TestConcurrentRenderIndependence:
 
 
 @pytest.fixture
+def now():
+    """A fixed clock so relative from/to values resolve deterministically."""
+    return 1_700_000_000.0
+
+
+@pytest.fixture
 def mock_api_client(monkeypatch):
     """Replace the module-level api_client with an AsyncMock.
 
@@ -340,6 +357,248 @@ class TestPlotAnalyticsSeriesImpl:
         result = await plots_module._plot_analytics_series_impl("status", interval=30)
         assert "error" in result
         assert "interval must be at least 60" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_request_within_budget_forwarded_unchanged(self, clean_env, mock_api_client, monkeypatch):
+        """A request that already fits the point budget is sent exactly as asked."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        # -1d at a 1-hour interval is 24 points, well inside the budget.
+        await plots_module._plot_analytics_series_impl("status", from_time="-1d", interval=3600)
+        params = mock_api_client.request.call_args.kwargs["params"]
+        assert params["interval"] == 3600
+        assert params["from"] == "-1d"
+        # The ;series endpoint takes no limit parameter, so none is invented.
+        assert "limit" not in params
+
+    @pytest.mark.asyncio
+    async def test_plot_and_query_series_send_the_same_series_params(self, clean_env, mock_api_client, monkeypatch):
+        """Both ``;series`` callers put identical query params on the wire (issue #267).
+
+        ``plotAnalytics`` and ``queryAnalytics(series=True)`` read the same
+        endpoint, so a shared builder keeps them from drifting; this asserts the
+        observable request both tools actually issue.
+        """
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        shared = {
+            # Absolute timestamps, so the request is deterministic without a clock patch.
+            "from_time": 1_700_000_000 - 86_400,
+            "to_time": 1_700_000_000,
+            "interval": 3600,
+            "alignment": "start",
+            "timezone": "UTC",
+            "partials": "both",
+        }
+
+        await plots_module._plot_analytics_series_impl("status", profile_id="abc123", **shared)
+        plot_call = mock_api_client.request.call_args
+        await server.queryAnalytics("status", "abc123", series=True, **shared)
+        query_call = mock_api_client.request.call_args
+
+        assert plot_call.args[1] == query_call.args[1] == "/profiles/abc123/analytics/status;series"
+        assert plot_call.kwargs["params"] == query_call.kwargs["params"]
+        assert plot_call.kwargs["params"] == {
+            "from": 1_700_000_000 - 86_400,
+            "to": 1_700_000_000,
+            "interval": 3600,
+            "alignment": "start",
+            "timezone": "UTC",
+            "partials": "both",
+        }
+
+    @pytest.mark.asyncio
+    async def test_issue_scenario_one_year_minute_interval_is_rejected(self, clean_env, mock_api_client, monkeypatch):
+        """The issue scenario - a 1y range at a 1-minute interval - never reaches the API.
+
+        Without the point budget the API would return ~525,600 points, all
+        buffered by ``_api_request`` and then plotted (issue #267).
+        """
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+
+        result = await plots_module._plot_analytics_series_impl("status", from_time="-1y", interval=60)
+
+        assert result["code"] == "invalid_argument"
+        assert result["max_points"] == plots_module.PLOT_MAX_POINTS
+        assert result["interval"] == 60
+        mock_api_client.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_coarse_request_is_never_refined(self, clean_env, mock_api_client, monkeypatch):
+        """A monthly interval over 10y is rejected, not silently refined into a denser series.
+
+        The reviewer trace from issue #267: clamping the interval to a maximum
+        moved 2592000s (monthly) down to 86400s, which would have *increased*
+        the number of points returned and rendered.
+        """
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        now = 1_700_000_000.0
+        monkeypatch.setattr(plots_module, "_now", lambda: now)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+
+        result = await plots_module._plot_analytics_series_impl("status", from_time="-10y", interval=2592000)
+
+        assert result["code"] == "invalid_argument"
+        assert result["max_interval"] == plots_module.PLOT_INTERVAL_MAX
+        assert result["interval"] == 2592000
+        mock_api_client.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_interval_at_ceiling_is_accepted(self, clean_env, mock_api_client, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        # -1y at the 86400s ceiling is 365 points, inside the budget.
+        await plots_module._plot_analytics_series_impl("status", from_time="-1y", interval=86400)
+        assert mock_api_client.request.call_args.kwargs["params"]["interval"] == 86400
+
+    @pytest.mark.parametrize(
+        ("from_time", "to_time", "interval", "over_budget"),
+        [
+            ("-1y", "now", 60, True),
+            ("-10y", "now", 2592000, False),  # 121 points: fits, and not a valid interval anyway
+            ("-1d", "now", 3600, False),
+            ("-1y", "now", 86400, False),
+        ],
+    )
+    def test_series_budget_error(self, now, from_time, to_time, interval, over_budget):
+        error = plots_module._series_budget_error(from_time, to_time, interval, now=now)
+        assert (error is not None) == over_budget
+        if over_budget:
+            assert error["max_points"] == plots_module.PLOT_MAX_POINTS
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("now", 1_700_000_000.0),
+            ("-1d", 1_700_000_000.0 - 86400),
+            ("-10y", 1_700_000_000.0 - 10 * 31536000),
+            ("-7d", 1_700_000_000.0 - 7 * 86400),
+            ("-30m", 1_700_000_000.0 - 1800),
+            ("-1w", 1_700_000_000.0 - 604800),
+            (1_600_000_000, 1_600_000_000.0),
+            ("1600000000", 1_600_000_000.0),
+            ("2024-01-15T10:00:00Z", 1705312800.0),
+        ],
+    )
+    def test_resolve_time_point(self, value, expected):
+        assert plots_module._resolve_time_point(value, 1_700_000_000.0) == expected
+
+    @pytest.mark.parametrize("value", ["not-a-time", "2024-13-45T99:99:99Z", True, "-1M", "-1D"])
+    def test_resolve_time_point_unparseable_returns_none(self, value):
+        assert plots_module._resolve_time_point(value, 1_700_000_000.0) is None
+
+    def test_resolve_time_point_uppercase_unit_is_not_folded_onto_its_lowercase_twin(self, now):
+        """``-1M`` is months upstream and must never be sized as the 60s of ``-1m``.
+
+        Folding case here would make a months-long range look like a one-minute
+        one, so the point budget would pass a request the API answers with tens
+        of thousands of points. The helper refuses the value instead.
+        """
+        assert plots_module._resolve_time_point("-1m", now) == now - 60
+        assert plots_module._resolve_time_point("-1M", now) is None
+
+    @pytest.mark.asyncio
+    async def test_uppercase_relative_unit_is_rejected_not_sized_as_minutes(
+        self, clean_env, mock_api_client, monkeypatch
+    ):
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+
+        result = await plots_module._plot_analytics_series_impl("status", from_time="-1M", to_time="now", interval=60)
+
+        assert result["code"] == "invalid_argument"
+        assert "Could not interpret the requested time range" in result["error"]
+        mock_api_client.request.assert_not_called()
+
+    @pytest.mark.parametrize("tz", ["UTC", "Asia/Tokyo", "America/New_York"])
+    def test_naive_iso_timestamp_is_read_as_utc(self, tz, monkeypatch):
+        """A zone-less ISO value denotes the same instant on every host."""
+        import time
+
+        monkeypatch.setenv("TZ", tz)
+        time.tzset()
+        try:
+            resolved = plots_module._resolve_time_point("2024-01-15T10:00:00", 1_700_000_000.0)
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+        assert resolved == 1_705_312_800.0
+
+    @pytest.mark.asyncio
+    async def test_limit_over_cap_is_rejected(self, clean_env, mock_api_client, monkeypatch):
+        """An over-cap ``limit`` is rejected, never clamped into the request.
+
+        ``limit`` stays on the published tool surface, so a caller passing the
+        old unbounded value gets a typed error naming the cap instead of a
+        silently different request.
+        """
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+
+        result = await plots_module._plot_analytics_series_impl("status", limit=501)
+
+        assert result["code"] == "invalid_argument"
+        assert result["max_limit"] == plots_module.PLOT_LIMIT_MAX
+        assert result["limit"] == 501
+        mock_api_client.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_limit_at_cap_is_accepted_and_not_forwarded(self, clean_env, mock_api_client, monkeypatch):
+        """A valid ``limit`` is accepted and never reaches the ``;series`` endpoint."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+
+        await plots_module._plot_analytics_series_impl("status", from_time="-1d", limit=plots_module.PLOT_LIMIT_MAX)
+
+        params = mock_api_client.request.call_args.kwargs["params"]
+        assert "limit" not in params
+
+    @pytest.mark.asyncio
+    async def test_uninterpretable_range_is_rejected(self, clean_env, mock_api_client, monkeypatch):
+        """A range the tool cannot size is rejected, not forwarded unchecked.
+
+        Failing open here would issue the very unbounded request the point
+        budget exists to stop, so an unparseable ``from``/``to`` value is a
+        typed error rather than a pass-through.
+        """
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+
+        result = await plots_module._plot_analytics_series_impl("status", from_time="-1 month", to_time="now")
+
+        assert result["code"] == "invalid_argument"
+        assert "Could not interpret the requested time range" in result["error"]
+        mock_api_client.request.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("from_time", "to_time", "interval"),
+        [
+            ("not-a-time", "now", 60),
+            ("now", "not-a-time", 60),
+        ],
+    )
+    def test_series_budget_error_unparseable_range_is_rejected(self, now, from_time, to_time, interval):
+        error = plots_module._series_budget_error(from_time, to_time, interval, now=now)
+        assert error is not None
+        assert error["code"] == "invalid_argument"
+        assert "-7d" in error["error"]
+        assert error["from_time"] == from_time
+        assert error["to_time"] == to_time
+
+    @pytest.mark.parametrize(("from_time", "to_time"), [("now", "-1d"), ("-1d", "-1d"), ("now", "now")])
+    def test_series_budget_error_non_positive_span_is_rejected(self, now, from_time, to_time):
+        error = plots_module._series_budget_error(from_time, to_time, 60, now=now)
+        assert error is not None
+        assert error["code"] == "invalid_argument"
+        assert "must end after it starts" in error["error"]
 
     @pytest.mark.asyncio
     async def test_no_profile_returns_error(self, clean_env):

@@ -1078,6 +1078,14 @@ class TestManageLogsDownloadRedirects:
         assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 10
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("limit", [-1, -99999, 0])
+    async def test_get_non_positive_limit_raised_to_one(self, mock_api_client, limit):
+        """A non-positive limit is clamped up to 1 rather than forwarded (issue #267)."""
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.manageLogs("get", "abc123", limit=limit)
+        assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 1
+
+    @pytest.mark.asyncio
     async def test_unsupported_operation(self):
         result = await logs_module._manage_logs_impl("nope", "abc123")
         assert "Unsupported operation" in result["error"]
@@ -1351,6 +1359,14 @@ class TestQueryAnalytics:
         mock_api_client.request.return_value = _make_response({"data": []})
         await server.queryAnalytics("status", "abc123", limit=500)
         assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 500
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("limit", [-1, -99999, 0])
+    async def test_non_positive_limit_raised_to_one(self, mock_api_client, limit):
+        """A non-positive limit is clamped up to 1 rather than forwarded (issue #267)."""
+        mock_api_client.request.return_value = _make_response({"data": []})
+        await server.queryAnalytics("status", "abc123", limit=limit)
+        assert mock_api_client.request.call_args.kwargs["params"]["limit"] == 1
 
     @pytest.mark.asyncio
     async def test_series(self, mock_api_client):

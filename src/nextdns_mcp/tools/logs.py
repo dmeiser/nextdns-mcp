@@ -333,7 +333,7 @@ async def _manage_logs_impl(
     base_url = f"/profiles/{target_profile}/logs"
 
     if operation == "get":
-        capped_limit, _ = _cap_limit(limit, LOGS_LIMIT_MAX)
+        capped_limit = _cap_limit(limit, LOGS_LIMIT_MAX)
         params = _build_query_params(
             **{"from": from_time, "to": to_time, "limit": capped_limit, "device": device, "search": user, "raw": raw}
         )
@@ -380,8 +380,10 @@ async def manageLogs(
     Time values can be Unix timestamps or relative strings like ``-1d`` or ``-7d``.
     They are only used by ``get``.
 
-    ``limit`` is capped server-side at 1000 entries for ``get`` (the maximum
-    accepted by the NextDNS API).
+    ``limit`` is clamped server-side to the range 1-1000 entries for ``get``
+    (the range accepted by the NextDNS API): values above 1000 are reduced to
+    1000 and non-positive values to 1. The clamp is silent, so ask for at
+    most 1000.
 
     Examples:
         - get recent: ``manageLogs(operation="get", profile_id="abc123", limit=10)``

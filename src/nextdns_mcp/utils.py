@@ -87,18 +87,49 @@ def _validate_entry_id(entry_id: str) -> dict[str, Any] | None:
     return None
 
 
-def _cap_limit(value: int | None, cap: int) -> tuple[int | None, bool]:
-    """Clamp a caller-supplied limit to a server-side cap.
+def _cap_limit(value: int | None, cap: int) -> int | None:
+    """Clamp a caller-supplied limit to the server-side range ``[1, cap]``.
 
-    Returns the (possibly capped) value and whether capping occurred.
-    Values at or below the cap pass through untouched; values above the cap
-    are clamped down to it.
+    Returns the clamped value, or None when the caller supplied no limit.
+    Values above the cap are clamped down to it and non-positive values are
+    raised to 1, so a bad caller value can never be forwarded upstream as
+    ``?limit=-1`` (issue #267).
     """
     if value is None:
-        return None, False
+        return None
+    if value < 1:
+        return 1
     if value > cap:
-        return cap, True
-    return value, False
+        return cap
+    return value
+
+
+def _build_series_params(
+    from_time: str | int | None = None,
+    to_time: str | int | None = None,
+    interval: int | None = None,
+    alignment: str | None = None,
+    timezone: str | None = None,
+    partials: str | None = None,
+) -> dict[str, Any]:
+    """Build the query-param dict shared by the analytics ``;series`` endpoints.
+
+    Both ``queryAnalytics(series=True)`` and ``plotAnalytics`` read the same
+    ``/analytics/{metric};series`` endpoint, so they build the same parameter
+    set through this one helper and cannot drift (issue #267). The ``;series``
+    endpoints take no ``limit``, so callers that expose one (as the plot tool
+    does) keep it out of this set and validate it on its own.
+    """
+    return _build_query_params(
+        **{
+            "from": from_time,
+            "to": to_time,
+            "interval": interval,
+            "alignment": alignment,
+            "timezone": timezone,
+            "partials": partials,
+        }
+    )
 
 
 def _build_query_params(**kwargs: Any) -> dict[str, Any]:
