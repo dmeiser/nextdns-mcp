@@ -1,0 +1,248 @@
+"""Regression tests for the client-layer destination allow-list (issue #262).
+
+``AccessControlledClient`` attaches ``X-Api-Key`` as a client-level default
+header, so it follows every request to whatever host the request URL names.
+These tests pin the contract that a request only ever leaves the process for an
+approved NextDNS host (the REST API base, or the DoH host ``dohLookup`` uses),
+on both the normal request path and the streaming path, and that a refusal
+reaches the transport neither at all nor with the key attached.
+"""
+
+from collections.abc import AsyncIterator, Callable
+from typing import ClassVar
+
+import httpx
+import pytest
+
+from nextdns_mcp import client as client_module
+from nextdns_mcp.client import AccessControlledClient, AccessDeniedError, allowed_destination_hosts
+
+API_KEY = "test-key-12345"
+API_BASE = "https://api.nextdns.io"
+DOH_HOST = "https://dns.nextdns.io"
+
+
+@pytest.fixture(autouse=True)
+def acl_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deny-all ACL environment, so a denial can only come from the checks under test."""
+    for var in ("NEXTDNS_READ_ONLY", "NEXTDNS_READABLE_PROFILES", "NEXTDNS_WRITABLE_PROFILES"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+
+
+@pytest.fixture
+def recorder() -> Callable[..., list[httpx.Request]]:
+    """Return a factory building a client whose transport records every request."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"data": "success"})
+
+    def build(base_url: str = API_BASE) -> tuple[AccessControlledClient, list[httpx.Request]]:
+        client = AccessControlledClient(
+            base_url=base_url,
+            transport=httpx.MockTransport(handler),
+            headers={"X-Api-Key": API_KEY},
+            follow_redirects=False,
+        )
+        return client, seen
+
+    return build
+
+
+async def _bare_client(base_url: str = "") -> AsyncIterator[AccessControlledClient]:
+    """Yield a client for the pure allow-list helpers (``base_url`` empty = no base)."""
+    async with AccessControlledClient(base_url=base_url) as client:
+        yield client
+
+
+class TestAllowedHosts:
+    """The allow-list is exactly the NextDNS hosts the code legitimately calls."""
+
+    def test_contains_the_api_and_doh_hosts(self) -> None:
+        hosts = allowed_destination_hosts()
+        assert "api.nextdns.io" in hosts
+        assert "dns.nextdns.io" in hosts
+
+    def test_includes_the_configured_base_url_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """NEXTDNS_BASE_URL stays consistent: pointing it at a proxy widens the allow-list.
+
+        This is the existing base-URL knob, so a self-hosted/proxy deployment
+        needs no second configuration mechanism; no new escape hatch is added.
+        """
+        monkeypatch.setattr(client_module, "NEXTDNS_BASE_URL", "https://nextdns.internal.example.com")
+        assert "nextdns.internal.example.com" in allowed_destination_hosts()
+
+    def test_loopback_is_allowed_for_local_test_doubles(self) -> None:
+        """Loopback hosts are allowed so local test servers / mock servers keep working."""
+        hosts = allowed_destination_hosts()
+        assert {"localhost", "127.0.0.1", "::1"} <= hosts
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("/profiles/abc123/settings", "api.nextdns.io"),
+            ("https://api.nextdns.io/profiles/abc123/settings", "api.nextdns.io"),
+            ("https://dns.nextdns.io/abc123/dns-query", "dns.nextdns.io"),
+            ("//dns.nextdns.io/abc123/dns-query", "dns.nextdns.io"),
+            ("https://API.NextDNS.IO./profiles/abc123", "api.nextdns.io"),
+            ("https://evil.example/profiles/abc123/settings", "evil.example"),
+            ("https://api.nextdns.io@evil.example/profiles/abc123", "evil.example"),
+        ],
+    )
+    async def test_destination_host_resolution(self, url: str, expected: str) -> None:
+        async for client in _bare_client(API_BASE):
+            assert client._destination_host(url) == expected
+
+    async def test_relative_url_without_a_base_url_resolves_to_nothing(self) -> None:
+        """No base URL means httpx itself rejects the request, so there is no host to allow."""
+        async for client in _bare_client():
+            assert client._destination_host("/profiles/abc123/settings") == ""
+            client._check_destination("GET", "/profiles/abc123/settings")
+
+
+class TestApprovedDestinationsProceed:
+    """A request to an approved host is sent, key attached, exactly as before."""
+
+    async def test_relative_request_to_api_host_proceeds(self, recorder: Callable[..., object]) -> None:
+        client, seen = recorder()
+        async with client:
+            response = await client.request("GET", "/profiles/abc123/settings")
+
+        assert response.status_code == 200
+        assert len(seen) == 1
+        assert seen[0].url.host == "api.nextdns.io"
+        assert seen[0].headers["X-Api-Key"] == API_KEY
+
+    async def test_absolute_request_to_approved_host_passes_the_destination_check(
+        self, recorder: Callable[..., object]
+    ) -> None:
+        client, _ = recorder()
+        async with client:
+            # The destination check accepts the approved host (the ACL's own
+            # fail-closed handling of absolute URLs is unchanged and separate).
+            client._check_destination("GET", f"{DOH_HOST}/abc123/dns-query")
+
+    async def test_stream_to_api_host_proceeds(self, recorder: Callable[..., object]) -> None:
+        client, seen = recorder()
+        async with client, client.stream("GET", "/profiles/abc123/logs/download") as response:
+            await response.aread()
+
+        assert response.status_code == 200
+        assert len(seen) == 1
+        assert seen[0].url.host == "api.nextdns.io"
+
+    @pytest.mark.parametrize("base_url", ["http://127.0.0.1:8080", "http://localhost:8080", "http://[::1]:8080"])
+    async def test_loopback_base_url_proceeds(self, base_url: str, recorder: Callable[..., object]) -> None:
+        """Local test doubles (loopback mock servers) stay testable."""
+        client, seen = recorder(base_url=base_url)
+        async with client:
+            response = await client.request("GET", "/profiles/abc123/settings")
+
+        assert response.status_code == 200
+        assert len(seen) == 1
+
+
+class TestNonApprovedDestinationsRefused:
+    """A request to any other host is refused before it reaches the transport."""
+
+    OFFSITE_URLS: ClassVar[list[str]] = [
+        "https://evil.example/profiles/abc123/settings",
+        "https://api.nextdns.io@evil.example/profiles/abc123/settings",
+        "//evil.example/profiles/abc123/settings",
+        "http://169.254.169.254/latest/meta-data/",
+    ]
+
+    @pytest.mark.parametrize("url", OFFSITE_URLS)
+    async def test_request_refused_without_network_call(self, url: str, recorder: Callable[..., object]) -> None:
+        client, seen = recorder()
+        async with client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", url)
+
+        assert exc_info.value.code == "access_denied"
+        assert seen == []
+
+    @pytest.mark.parametrize("url", OFFSITE_URLS)
+    async def test_stream_refused_without_network_call(self, url: str, recorder: Callable[..., object]) -> None:
+        client, seen = recorder()
+        async with client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                async with client.stream("GET", url):
+                    pass
+
+        assert exc_info.value.code == "access_denied"
+        assert seen == []
+
+    async def test_relative_request_refused_when_client_base_url_is_off_site(
+        self, recorder: Callable[..., object]
+    ) -> None:
+        """A client aimed off-site must not carry the key anywhere, not even relatively."""
+        client, seen = recorder(base_url="https://evil.example")
+        async with client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "/profiles/abc123/settings")
+
+        assert exc_info.value.code == "access_denied"
+        assert "evil.example" in str(exc_info.value)
+        assert seen == []
+
+    async def test_error_text_never_contains_the_key_or_query(self, recorder: Callable[..., object]) -> None:
+        """The refusal names the host only: no key, no path, no query string."""
+        client, seen = recorder()
+        async with client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "https://evil.example/profiles/abc123/settings?token=secret-cursor")
+
+        error = exc_info.value
+        assert API_KEY not in str(error)
+        assert "secret-cursor" not in str(error)
+        assert "/profiles/" not in str(error)
+        assert "evil.example" in str(error)
+        assert seen == []
+
+
+class TestStreamFailsClosed:
+    """stream() applies the same URL classification as request() (issue #262).
+
+    The four URLs below are exactly the classes request() denies: an
+    authority-bearing URL, a scheme-relative URL, a traversal payload, and a
+    /profiles path with no safe profile id. stream() used to send all four.
+    """
+
+    UNCLASSIFIABLE_URLS: ClassVar[list[str]] = [
+        "https://evil.example/profiles/abc123/settings",
+        "//evil.example/profiles/abc123/settings",
+        "/profiles/abc123/../../profiles/abc123/settings",
+        "/profiles/abc.def/settings",
+    ]
+
+    @pytest.mark.parametrize("url", UNCLASSIFIABLE_URLS)
+    async def test_stream_refuses_unclassifiable_urls(self, url: str, recorder: Callable[..., object]) -> None:
+        client, seen = recorder()
+        async with client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                async with client.stream("GET", url):
+                    pass
+
+        assert exc_info.value.code == "access_denied"
+        assert seen == []
+
+    async def test_stream_still_denies_unreadable_profile(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "abc123")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "")
+        seen: list[httpx.Request] = []
+        client = AccessControlledClient(
+            base_url=API_BASE,
+            transport=httpx.MockTransport(lambda request: seen.append(request) or httpx.Response(200)),  # type: ignore[func-returns-value]
+            headers={"X-Api-Key": API_KEY},
+        )
+        async with client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                async with client.stream("GET", "/profiles/xyz999/logs/download"):
+                    pass
+
+        assert exc_info.value.code == "read_access_denied"
+        assert seen == []

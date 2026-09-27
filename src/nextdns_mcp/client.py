@@ -29,6 +29,35 @@ logger = logging.getLogger(__name__)
 # parameter): 6 lowercase alphanumeric characters. Anything else 404s upstream.
 SAFE_PROFILE_ID_PATTERN = re.compile(r"^[a-z0-9]{6}$")
 
+# Hosts this client is allowed to send a request to. Every request carries the
+# X-Api-Key client header, so without a destination allow-list the account's API
+# key follows the request to whatever host the URL names (issue #262). These are
+# the two NextDNS hosts the code actually calls: the REST API base and the DoH
+# endpoint built by tools/doh.py. The host of NEXTDNS_BASE_URL is added as well
+# so pointing that existing constant at a self-hosted/proxy base keeps working
+# without inventing a second configuration mechanism.
+ALLOWED_DESTINATION_HOSTS = frozenset({"api.nextdns.io", "dns.nextdns.io"})
+
+# Loopback destinations are allowed so local test doubles and loopback mock
+# servers stay usable; no shipped tool ever targets them.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _normalized_host(host: str | None) -> str:
+    """Return a comparable form of a host: lowercased, without a trailing dot."""
+    return (host or "").strip().rstrip(".").lower()
+
+
+def allowed_destination_hosts() -> frozenset[str]:
+    """Return every host this client may send a request to.
+
+    See :data:`ALLOWED_DESTINATION_HOSTS` for the NextDNS endpoints and
+    :data:`LOOPBACK_HOSTS` for the local test-double allowance.
+    """
+    hosts = set(ALLOWED_DESTINATION_HOSTS) | set(LOOPBACK_HOSTS)
+    hosts.add(_normalized_host(httpx.URL(NEXTDNS_BASE_URL).host))
+    return frozenset(hosts)
+
 
 def _normalized_request_path(url: str) -> str | None:
     """Return the request path with a guaranteed leading slash.
@@ -184,13 +213,18 @@ class AccessControlledClient(httpx.AsyncClient):
             self._check_collection_read_access(method, url, access)
 
     async def raw_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        """Make an HTTP request WITHOUT any access-control check.
+        """Make an HTTP request WITHOUT any profile access-control check.
 
         This is the raw transport path: it goes straight to ``httpx`` and is
         used by server-level probes that must observe the true upstream state.
         The ``/health`` readiness check uses it because a local ACL denial (for
         example a deny-all readable-profile configuration) would otherwise be
         indistinguishable from a real NextDNS authentication failure.
+
+        The destination allow-list is still enforced (issue #262): this path
+        carries the X-Api-Key client header just like every other one, so the
+        key must never leave for a non-NextDNS host. Only the profile ACL is
+        skipped.
 
         Args:
             method: HTTP method
@@ -199,32 +233,58 @@ class AccessControlledClient(httpx.AsyncClient):
 
         Returns:
             The unmodified response from the API.
-        """
-        return await super().request(method, url, **kwargs)
-
-    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
-        """Make an HTTP request with access control checks.
-
-        Args:
-            method: HTTP method
-            url: Request URL
-            **kwargs: Additional request arguments
 
         Raises:
-            AccessDeniedError: If the request is denied by the profile access
-                control layer (read/write ACL, read-only mode, or fail-closed
-                URL classification). No network request is made.
-
-        Returns:
-            Response from the API
+            AccessDeniedError: If the destination host is not an approved
+                NextDNS host. No network request is made.
         """
-        # Query strings can carry sensitive data (search terms, device IDs, cursor
-        # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
-        logged_path = str(url).split("?", 1)[0]
-        logger.info(f"HTTP Request: {method} {logged_path}")
-        logger.debug(f"HTTP Request: {method} {url}")
+        self._check_destination(method, url)
+        return await super().request(method, url, **kwargs)
 
-        request_path = _normalized_request_path(str(url))
+    def _destination_host(self, url: Any) -> str:
+        """Return the host a request would actually be sent to.
+
+        Relative URLs resolve against this client's ``base_url``, exactly as
+        httpx merges them, so a client built on a non-NextDNS base is caught
+        here too. An unresolvable destination yields "" and is refused.
+        """
+        parsed = httpx.URL(str(url))
+        if parsed.is_absolute_url or parsed.scheme or parsed.host:
+            return _normalized_host(parsed.host)
+        return _normalized_host(httpx.URL(str(self.base_url)).host)
+
+    def _check_destination(self, method: str, url: Any) -> None:
+        """Refuse a request whose destination host is not an approved NextDNS host.
+
+        Runs before the request is handed to httpx, so nothing is sent and the
+        X-Api-Key header never leaves the process. The message carries the host
+        only - never the URL (which may hold query-string PII) and never any
+        credential.
+        """
+        host = self._destination_host(url)
+        if not host:
+            # No host resolves: the request is relative and this client has no
+            # base URL, so httpx itself rejects it before any I/O. There is no
+            # destination to allow or to protect, and no key to leak.
+            return
+        if host in allowed_destination_hosts():
+            return
+
+        error_msg = f"Blocked request to non-NextDNS host: {host or '(unresolved)'}"
+        logger.warning(f"{error_msg} (method={method})")
+        raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED)
+
+    def _authorize(self, method: str, url: Any) -> None:
+        """Apply the destination allow-list and the profile ACL to one request.
+
+        Shared by request() and stream() so the two entry points cannot drift:
+        no request leaves the process without both an approved destination host
+        and an access-control decision.
+        """
+        self._check_destination(method, url)
+
+        url_str = str(url)
+        request_path = _normalized_request_path(url_str)
         is_absolute_url = request_path is None
         contains_traversal = request_path is not None and ".." in request_path
         # /profiles paths that name something after the prefix but do not carry a
@@ -238,16 +298,43 @@ class AccessControlledClient(httpx.AsyncClient):
         access = load_profile_access_control()
 
         if profile_id:
-            self._check_access(profile_id, method, url, access)
+            self._check_access(profile_id, method, url_str, access)
         elif is_absolute_url or contains_traversal or unclassifiable_profiles_path:
             # Fail closed: absolute/authority-bearing URLs, traversal payloads, and
             # unclassifiable /profiles paths cannot be matched against the profile
             # ACL, so deny them instead of letting them bypass the check entirely.
-            error_msg = f"Forbidden URL: {url!s}"
+            logged_path = url_str.split("?", 1)[0]
             logger.warning(f"Forbidden URL: {logged_path} (method={method})")
-            raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or "")
+            raise AccessDeniedError(
+                f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or ""
+            )
         else:
-            self._check_collection_access(method, url, access)
+            self._check_collection_access(method, url_str, access)
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
+        """Make an HTTP request with access control checks.
+
+        Args:
+            method: HTTP method
+            url: Request URL
+            **kwargs: Additional request arguments
+
+        Raises:
+            AccessDeniedError: If the destination host is not an approved
+                NextDNS host, or if the request is denied by the profile access
+                control layer (read/write ACL, read-only mode, or fail-closed
+                URL classification). No network request is made.
+
+        Returns:
+            Response from the API
+        """
+        # Query strings can carry sensitive data (search terms, device IDs, cursor
+        # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
+        logged_path = str(url).split("?", 1)[0]
+        logger.info(f"HTTP Request: {method} {logged_path}")
+        logger.debug(f"HTTP Request: {method} {url}")
+
+        self._authorize(method, url)
 
         # No body coercion here: string values in JSON bodies are passed through
         # unchanged. Schema-aware coercion of tool arguments already happens in
@@ -257,22 +344,20 @@ class AccessControlledClient(httpx.AsyncClient):
 
     @asynccontextmanager
     async def stream(self, method: str, url: Any, **kwargs: Any) -> AsyncIterator[httpx.Response]:  # type: ignore[override]
-        """Stream a response with access control checks.
+        """Stream a response with the destination allow-list and access control checks.
 
-        httpx's ``stream()`` does not call ``request()``, so the ACL guard is
-        applied here as well. When access is denied, AccessDeniedError is raised
-        (propagating on ``__aenter__``) without any network request, exactly as
-        ``request()`` does.
+        httpx's ``stream()`` does not call ``request()``, so the guards are
+        applied here as well. When the destination host is not approved or
+        access is denied, AccessDeniedError is raised (propagating on
+        ``__aenter__``) without any network request, exactly as ``request()``
+        does (issue #262).
         """
         # Query strings can carry sensitive data (search terms, device IDs, cursor
         # tokens). Log only the path. (issue #249)
         logged_path = str(url).split("?", 1)[0]
         logger.info(f"HTTP Stream: {method} {logged_path}")
 
-        access = load_profile_access_control()
-        profile_id = extract_profile_id_from_url(str(url))
-        if profile_id:
-            self._check_access(profile_id, method, str(url), access)
+        self._authorize(method, url)
 
         async with super().stream(method, url, **kwargs) as response:
             yield response
