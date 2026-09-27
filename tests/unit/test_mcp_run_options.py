@@ -137,6 +137,7 @@ class TestResolveTransport:
             ("http ", "http"),  # trailing whitespace stripped
             ("  HTTP  ", "http"),
             ("stdio", "stdio"),
+            (" STDIO ", "stdio"),  # case-insensitive and trimmed
         ],
     )
     def test_valid_transports_resolve(self, raw, expected):
@@ -149,7 +150,7 @@ class TestResolveTransport:
         with patch.dict(os.environ, {}, clear=True):
             assert _resolve_transport() == "stdio"
 
-    @pytest.mark.parametrize("raw", ["http ", "https", "sse", "typo", "", " "])
+    @pytest.mark.parametrize("raw", ["https", "sse", "typo", "", " "])
     def test_invalid_transports_raise_configuration_error(self, raw):
         """An unrecognized transport fails loudly with ConfigurationError (#294)."""
         with (
