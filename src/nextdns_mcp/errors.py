@@ -110,12 +110,10 @@ class NextDNSError(RuntimeError):
         message: str,
         status_code: int | None = None,
         response_body: str | None = None,
-        error_payload: dict[str, Any] | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.response_body = response_body
-        self.error_payload = error_payload
 
 
 class NextDNSAuthError(NextDNSError):

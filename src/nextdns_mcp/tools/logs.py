@@ -20,18 +20,12 @@ from ..coercion import ProfileId
 from ..config import get_download_max_bytes
 from ..errors import (
     ErrorCode,
-    NextDNSAuthError,
-    NextDNSError,
-    NextDNSRateLimitError,
-    NextDNSServerError,
     error_payload,
-    http_error_payload,
 )
 from ..utils import (
-    _api_request,
+    _api_request_payload,
     _build_query_params,
     _cap_limit,
-    _handle_api_error,
     access_denied_payload,
     resolve_profile_id,
 )
@@ -353,16 +347,10 @@ async def _manage_logs_impl(
         params = _build_query_params(
             **{"from": from_time, "to": to_time, "limit": capped_limit, "device": device, "search": user, "raw": raw}
         )
-        try:
-            return await _api_request("GET", base_url, params=params)
-        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        return _handle_api_error(e)
+        return await _api_request_payload("GET", base_url, params=params)
 
     if operation == "clear":
-        try:
-            return await _api_request("DELETE", base_url)
-        except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        return _handle_api_error(e)
+        return await _api_request_payload("DELETE", base_url)
 
     if operation == "download":
         return await _download_logs_to_tempfile(target_profile)

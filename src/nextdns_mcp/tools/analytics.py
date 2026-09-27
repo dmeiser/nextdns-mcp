@@ -11,14 +11,9 @@ import httpx
 =======
 from ..errors import ErrorCode, error_payload
 from ..utils import (
-    NextDNSAuthError,
-    NextDNSError,
-    NextDNSRateLimitError,
-    NextDNSServerError,
-    _api_request,
+    _api_request_payload,
     _build_query_params,
     _cap_limit,
-    _handle_api_error,
     resolve_profile_id,
 )
 >>>>>>> bd26c2a (Finish #181: apply handoff removals, fix lints, cover migrated handlers)
@@ -104,10 +99,7 @@ async def _query_analytics_impl(
     if metric == "domains":
         params.update(_build_query_params(status=status, root=root))
 
-    try:
-        return await _api_request("GET", url, params=params)
-    except (NextDNSError, NextDNSAuthError, NextDNSRateLimitError, NextDNSServerError) as e:
-        return _handle_api_error(e)
+    return await _api_request_payload("GET", url, params=params)
 
 
 async def queryAnalytics(
