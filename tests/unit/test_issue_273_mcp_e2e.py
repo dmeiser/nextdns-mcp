@@ -95,8 +95,12 @@ async def test_leading_zero_strings_survive_the_full_mcp_round_trip(
     """The exact payload from issue #273 (``password: "0012"``) stays intact."""
     result = await mcp_client.call_tool(
         "manageSettings",
-        {"operation": "update", "category": "general", "profile_id": "abc123",
-         "settings": {"pin": "0012", "zip": "01234", "name": "315244", "flag": "true"}},
+        {
+            "operation": "update",
+            "category": "general",
+            "profile_id": "abc123",
+            "settings": {"pin": "0012", "zip": "01234", "name": "315244", "flag": "true"},
+        },
     )
     assert result.data == {"data": []}
 
