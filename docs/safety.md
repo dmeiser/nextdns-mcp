@@ -15,6 +15,11 @@ Reduce risk when operating on real NextDNS profiles.
 - `dohLookup` is not exempt: it queries a separate DoH endpoint, but it still enforces the per-profile read check, so the queried profile must be in `NEXTDNS_READABLE_PROFILES` or `NEXTDNS_WRITABLE_PROFILES` (write implies read), or one of them must be "ALL". See configuration.md.
 - `manageProfiles` collection operations (`list`, `create`) respect the global read/write denials; under the deny-all default (both profile sets unset) `list` is denied, and `create` is denied in read-only mode or when `NEXTDNS_WRITABLE_PROFILES` is unset. See configuration.md.
 
+## API key destination
+- Every request from the authenticated API client carries the `X-Api-Key` header, so that client refuses any request whose destination host is not on an allow-list, before any network I/O. Approved hosts are the NextDNS REST API host (`api.nextdns.io`), the NextDNS DoH host (`dns.nextdns.io`), the host of the configured API base URL, and loopback addresses (reserved for local test doubles). A refusal raises the same 403 access-denied error as the profile ACL, with the message `Blocked request to non-NextDNS host: <host>` (issue #262).
+- This check does not depend on a profile id being extractable from the URL, so a URL that names no profile cannot carry the account API key off-site.
+- `dohLookup` uses its own client against `dns.nextdns.io` and sends no API key, so the allow-list above governs the authenticated API client only.
+
 ## CI credentials
 - GitHub Actions logs are world-readable on a public repository; never print the API key or any file that contains it to CI logs.
 - The container E2E workflow (`.github/workflows/e2e-container.yml`) injects `NEXTDNS_API_KEY` into the test container via `docker run -e` from a GitHub Actions secret; it does not write the key to a catalog or other file, so there is no secret-bearing artifact to dump.

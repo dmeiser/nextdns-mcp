@@ -32,6 +32,7 @@ The middleware only filters top-level tool arguments; fields nested inside an ar
 - Check `NEXTDNS_READ_ONLY` (true disables all writes).
 - Verify `NEXTDNS_READABLE_PROFILES`/`NEXTDNS_WRITABLE_PROFILES` (unset denies all; use `ALL` to allow all).
 - Ensure the `profile_id` you call is permitted.
+- If the message is `Blocked request to non-NextDNS host: <host>`, the request targeted a host outside the client's destination allow-list and was refused before any request was sent. See [safety.md](safety.md).
 
 ## Invalid JSON or array expected
 - Bulk tools require the parameter to be a JSON array string (e.g., `'["ads.example.com","tracker.net"]'`).
