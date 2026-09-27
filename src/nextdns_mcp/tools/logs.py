@@ -43,6 +43,48 @@ DOWNLOAD_PREVIEW_MAX_BYTES = 256 * 1024
 # Maximum number of redirects followed when downloading logs.
 _MAX_DOWNLOAD_REDIRECTS = 5
 
+# SSRF guard for the download redirect chain (issue #266). NextDNS serves log
+# downloads from the API origin itself (the download endpoint redirects to
+# ``https://api.nextdns.io/logs/<profile>/<signed-token>``), so a ``Location``
+# is followed only while it stays on HTTPS and on the same host as the
+# original API request. Anything else -- a link-local IMDS endpoint, an
+# attacker-chosen host, or an http:// downgrade -- is refused rather than
+# fetched and handed back through the tool payload. Add an extra CDN host to
+# this set only if NextDNS is confirmed to serve downloads from it, with a
+# comment saying why it is trusted.
+ALLOWED_DOWNLOAD_SCHEMES = {"https"}
+
+
+class DownloadRedirectRefusedError(Exception):
+    """Raised when a log-download ``Location`` leaves the trusted scheme/host.
+
+    SSRF guard for the redirect chain: the unauthenticated follow-up fetch is
+    only ever aimed at the same origin as the authenticated API request, so a
+    compromised or malicious API response cannot use it to reach hosts the
+    server itself can reach (issue #266).
+    """
+
+
+def _check_download_redirect_target(next_url: httpx.URL, first_url: httpx.URL) -> None:
+    """Raise :class:`DownloadRedirectRefusedError` unless ``next_url`` stays on the API origin.
+
+    Args:
+        next_url: The resolved URL about to be fetched (the first hop's
+            ``Location`` or a later hop's).
+        first_url: The original authenticated request URL; its scheme and host
+            define what is trusted.
+
+    Raises:
+        DownloadRedirectRefusedError: If the scheme is not in
+            :data:`ALLOWED_DOWNLOAD_SCHEMES` or the host differs from the
+            original request's.
+    """
+    if next_url.scheme not in ALLOWED_DOWNLOAD_SCHEMES or next_url.host != first_url.host:
+        raise DownloadRedirectRefusedError(
+            f"Refusing log download redirect to {next_url.scheme}://{next_url.host}: "
+            f"not the NextDNS API host ({first_url.scheme}://{first_url.host})"
+        )
+
 
 async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict[str, Any]:
     """Write a streaming response body to ``path`` without double-buffering.
@@ -95,18 +137,23 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     }
 
 
-async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[str, Any]:
+async def _follow_redirects_to_tempfile(next_url: httpx.URL, first_url: httpx.URL, path: str) -> dict[str, Any]:
     """Follow a redirect chain to the final CSV, streaming it to ``path``.
 
     The ``Location`` chain is fetched with an unauthenticated client so the
     ``X-Api-Key`` header never crosses to a redirect target. Relative
     ``Location`` headers are resolved against the origin of the current URL.
-    Redirects are bounded so a loop cannot hang the call.
+    Redirects are bounded so a loop cannot hang the call, and every hop (the
+    first included) is confined to the scheme and host of the original request
+    so the fetch cannot be aimed at an arbitrary host.
     """
     redirects = 0
     unauthenticated = httpx.AsyncClient(timeout=client.get_http_timeout(), follow_redirects=False)
     try:
         while True:
+            # Checked before every fetch, so the first ``Location`` is covered
+            # by the same rule as the rest of the chain.
+            _check_download_redirect_target(next_url, first_url)
             async with unauthenticated.stream("GET", next_url) as response:
                 if response.has_redirect_location:
                     redirects += 1
@@ -133,7 +180,9 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
     NextDNS API, and never follows redirects: if the download endpoint
     redirects (S3-style object storage), the ``Location`` is fetched with an
     unauthenticated client so the ``X-Api-Key`` header is never sent to a
-    host outside the NextDNS API origin.
+    host outside the NextDNS API origin. That unauthenticated fetch is itself
+    confined to the API origin's scheme and host, so a hostile ``Location``
+    cannot turn the download into an SSRF primitive.
     """
     path = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_"), "download.csv")
     try:
@@ -144,7 +193,14 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
             if not initial.has_redirect_location or initial.is_error:
                 return await _write_stream_to_tempfile(initial, path)
             redirect_url = initial.request.url.join(initial.headers["location"])
-        return await _follow_redirects_to_tempfile(redirect_url, path)
+            first_url = initial.request.url
+        return await _follow_redirects_to_tempfile(redirect_url, first_url, path)
+    except DownloadRedirectRefusedError as e:
+        # A redirect that leaves the API origin is refused before any request
+        # is made to the target, so no foreign body is ever written or returned.
+        _unlink_temp_file(path)
+        logger.warning(f"Refusing log download redirect: {e}")
+        return error_payload(ErrorCode.HTTP_ERROR, "Refusing log download redirect to a non-NextDNS host")
     except AccessDeniedError as e:
         # Raised by the ACL layer (via stream()) before any network request;
         # kept out of the httpx.HTTPError branch so a real upstream 403 keeps

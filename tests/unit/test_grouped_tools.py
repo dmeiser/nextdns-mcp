@@ -708,9 +708,7 @@ class TestManageLogsDownloadRedirects:
         monkeypatch.setattr(
             logs_module.httpx,
             "AsyncClient",
-            self._route_through_redirect(
-                mock_api_client, "https://cdn.example.com/profiles/abc123/logs.csv?sig=1", fake
-            ),
+            self._route_through_redirect(mock_api_client, "https://api.nextdns.io/logs/abc123/signed.csv?sig=1", fake),
         )
 
         result = await server.manageLogs("download", "abc123")
@@ -723,8 +721,8 @@ class TestManageLogsDownloadRedirects:
         mock_api_client.stream.assert_called_once_with("GET", "/profiles/abc123/logs/download")
         assert mock_api_client.stream.call_args.kwargs.get("follow_redirects") is not True
 
-        # The redirected request went to the third-party host...
-        assert str(fake.last_request.url) == "https://cdn.example.com/profiles/abc123/logs.csv?sig=1"
+        # The redirected request went to the same-host signed object URL...
+        assert str(fake.last_request.url) == "https://api.nextdns.io/logs/abc123/signed.csv?sig=1"
         # ...and it carried no API key header.
         assert "x-api-key" not in {k.lower() for k in fake.last_request.headers}
         os.unlink(result["file_path"])
@@ -756,7 +754,7 @@ class TestManageLogsDownloadRedirects:
             def stream(self, method, url, **kwargs):
                 request = httpx.Request("GET", str(url))
                 response = httpx.Response(
-                    302, request=request, headers={"location": "https://cdn.example.com/again.csv"}
+                    302, request=request, headers={"location": "https://api.nextdns.io/again.csv"}
                 )
 
                 class _Ctx:
@@ -775,12 +773,12 @@ class TestManageLogsDownloadRedirects:
 
         class _RedirectCtx:
             async def __aenter__(self):
-                return self._redirect_response("https://cdn.example.com/logs.csv")
+                return self._redirect_response("https://api.nextdns.io/logs.csv")
 
             async def __aexit__(self, *exc):
                 return False
 
-        loop_redirect = self._redirect_response("https://cdn.example.com/logs.csv")
+        loop_redirect = self._redirect_response("https://api.nextdns.io/logs.csv")
 
         class _RedirectCtx:
             async def __aenter__(self):
@@ -868,6 +866,153 @@ class TestManageLogsDownloadRedirects:
     async def test_unsupported_operation(self):
         result = await logs_module._manage_logs_impl("nope", "abc123")
         assert "Unsupported operation" in result["error"]
+
+
+class _RecordingUnauthClient:
+    """Unauthenticated follow-up client that records every URL it was asked to fetch."""
+
+    def __init__(self, *args, **kwargs):
+        self.requested: list[str] = []
+
+    def stream(self, method, url, **kwargs):
+        self.requested.append(str(url))
+        request = httpx.Request("GET", str(url))
+        response = httpx.Response(200, request=request, headers={"content-type": "text/csv"}, content=b"csv,data")
+
+        class _Ctx:
+            async def __aenter__(self):
+                return response
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+    async def aclose(self) -> None:
+        pass
+
+
+class TestManageLogsDownloadRedirectSsrf:
+    """Regression tests for issue #266: a log-download ``Location`` must not leave the NextDNS origin.
+
+    A compromised or malicious API origin could otherwise point the unauthenticated
+    fetch at an arbitrary host/scheme (e.g. a cloud IMDS endpoint) and read the body
+    back through the tool payload.
+    """
+
+    def _redirect_initial(self, mock_api_client, location: str):
+        request = httpx.Request("GET", "https://api.nextdns.io/profiles/abc123/logs/download")
+        redirect = httpx.Response(302, request=request, headers={"location": location})
+
+        class _RedirectCtx:
+            async def __aenter__(self):
+                return redirect
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_api_client.stream = MagicMock(return_value=_RedirectCtx())
+
+    def _patch_unauth(self, monkeypatch, fake):
+        monkeypatch.setattr(logs_module.httpx, "AsyncClient", lambda *a, **k: fake)
+        return fake
+
+    @pytest.mark.asyncio
+    async def test_metadata_service_location_is_refused(self, mock_api_client, monkeypatch):
+        """A ``Location`` aimed at a link-local IMDS endpoint is never fetched."""
+        self._redirect_initial(
+            mock_api_client,
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+        )
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == []
+        assert result["code"] == "http_error"
+        assert result["error"] == "Refusing log download redirect to a non-NextDNS host"
+        assert "file_path" not in result
+
+    @pytest.mark.asyncio
+    async def test_off_https_host_is_refused(self, mock_api_client, monkeypatch):
+        """A same-scheme redirect to a host other than the API origin is refused."""
+        self._redirect_initial(mock_api_client, "https://cdn.example.com/profiles/abc123/logs.csv")
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == []
+        assert result["code"] == "http_error"
+        assert "non-NextDNS host" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_scheme_downgrade_to_http_is_refused(self, mock_api_client, monkeypatch):
+        """Even the API host is refused when the redirect downgrades to http://."""
+        self._redirect_initial(mock_api_client, "http://api.nextdns.io/logs/abc123/signed.csv")
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == []
+        assert result["code"] == "http_error"
+        assert "non-NextDNS host" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_off_host_hop_in_a_chain_is_refused(self, mock_api_client, monkeypatch):
+        """A later hop that leaves the origin is refused, even after a valid first hop."""
+        self._redirect_initial(mock_api_client, "https://api.nextdns.io/logs/abc123/hop1.csv")
+
+        class _ChainedClient:
+            def __init__(self, *args, **kwargs):
+                self.requested: list[str] = []
+
+            def stream(self, method, url, **kwargs):
+                self.requested.append(str(url))
+                request = httpx.Request("GET", str(url))
+                if len(self.requested) == 1:
+                    response = httpx.Response(
+                        302,
+                        request=request,
+                        headers={"location": "http://169.254.169.254/latest/meta-data/"},
+                    )
+                else:
+                    response = httpx.Response(
+                        200, request=request, headers={"content-type": "text/csv"}, content=b"csv,data"
+                    )
+
+                class _Ctx:
+                    async def __aenter__(self):
+                        return response
+
+                    async def __aexit__(self, *exc):
+                        return False
+
+                return _Ctx()
+
+            async def aclose(self) -> None:
+                pass
+
+        fake = self._patch_unauth(monkeypatch, _ChainedClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == ["https://api.nextdns.io/logs/abc123/hop1.csv"]
+        assert result["code"] == "http_error"
+        assert "non-NextDNS host" in result["error"]
+        assert "file_path" not in result
+
+    @pytest.mark.asyncio
+    async def test_same_origin_https_redirect_is_still_followed(self, mock_api_client, monkeypatch):
+        """The real NextDNS pattern (same-origin https signed object URL) still downloads."""
+        self._redirect_initial(mock_api_client, "https://api.nextdns.io/logs/abc123/signed.csv")
+        fake = self._patch_unauth(monkeypatch, _RecordingUnauthClient())
+
+        result = await server.manageLogs("download", "abc123")
+
+        assert fake.requested == ["https://api.nextdns.io/logs/abc123/signed.csv"]
+        assert result["content_type"] == "text/csv"
+        assert "error" not in result
+        os.unlink(result["file_path"])
 
 
 class TestQueryAnalytics:
