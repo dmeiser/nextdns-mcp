@@ -143,7 +143,6 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     preview: list[str] = []
     preview_bytes = 0
     row_count = 0
-    total_bytes = 0
     # End-of-stream flag, not per-chunk state: it is recomputed for every
     # chunk and is only true when the last chunk left a line unterminated.
     open_line = False
@@ -156,7 +155,6 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
             out.write(text)
             if not text:
                 continue
-            total_bytes += len(text.encode("utf-8"))
             newlines = text.count("\n")
             row_count += newlines
             open_line = not text.endswith("\n")
@@ -182,7 +180,7 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
             "text": text_preview,
             "line_count": len(preview),
             "bytes": preview_bytes,
-            "truncated": preview_bytes < total_bytes,
+            "truncated": preview_bytes < size,
         },
     }
 
