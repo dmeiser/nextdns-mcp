@@ -97,6 +97,33 @@ async def test_execute_call_error_in_json(runner: ContainerE2ERunner):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_value", ["", None, 0, [], {}])
+async def test_execute_call_error_key_marks_call_failed_even_when_value_is_falsy(
+    runner: ContainerE2ERunner, error_value
+):
+    """The presence of the "error" key decides the verdict, not the value's truthiness.
+
+    This harness exists to spot failures, so a payload carrying an error key with
+    a falsy value must still be recorded as FAILED and counted, never as OK.
+    """
+    session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.is_error = False
+    mock_result.content = [TextContent(type="text", text=json.dumps({"data": "ignored", "error": error_value}))]
+    session.call_tool.return_value = mock_result
+
+    ok, _ = await runner.execute_call(session, "manageProfiles", {"operation": "get", "profile_id": "bad"})
+
+    assert ok is False
+    assert runner.failed_count == 1
+    assert runner.executed_count == 0
+
+    record = json.loads(runner.report_file.read_text(encoding="utf-8").strip())
+    assert record["status"] == "FAILED"
+    assert "error" in record
+
+
+@pytest.mark.asyncio
 async def test_execute_call_retry_on_exception(runner: ContainerE2ERunner):
     """Test tool call retry on transient exception."""
     session = AsyncMock()

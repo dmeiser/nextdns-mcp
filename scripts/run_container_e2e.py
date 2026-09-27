@@ -322,9 +322,7 @@ class ContainerE2ERunner:
         args_str = " ".join(f"{k}={v}" for k, v in args.items())
         log_info(f"Executing: {tool_name} {args_str}")
 
-        duration, last_error, result = await self._call_with_retries(
-            session, tool_name, args, max_retries, retry_delay
-        )
+        duration, last_error, result = await self._call_with_retries(session, tool_name, args, max_retries, retry_delay)
 
         if last_error or result is None:
             log_error(f"{tool_name}: FAILED (call failed: {last_error})")
