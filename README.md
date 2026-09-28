@@ -47,9 +47,11 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
    ```env
    NEXTDNS_API_KEY=your_api_key_here
    NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional
-   NEXTDNS_TEST_PROFILE=test_profile_id     # For write operation tests
-   
-   # Optional: Profile access control (see Profile Access Control section)
+
+   # Optional: Profile access control (see docs/configuration.md).
+   # There is no separate test-profile variable for writes: list a dedicated
+   # sandbox profile in NEXTDNS_WRITABLE_PROFILES, or block writes entirely
+   # with NEXTDNS_READ_ONLY.
    # NEXTDNS_READABLE_PROFILES=profile1,profile2
    # NEXTDNS_WRITABLE_PROFILES=test_profile
    # NEXTDNS_READ_ONLY=false
@@ -105,7 +107,7 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
      nextdns-mcp:latest
    ```
 
-   Note: MCP servers use stdio (standard input/output) for communication, not HTTP ports.
+   Note: the commands above use stdio (standard input/output), the default transport. For the opt-in streamable-HTTP transport, see [HTTP Transport](#http-transport-network-access) below.
 
    **Alpine variant**
 
