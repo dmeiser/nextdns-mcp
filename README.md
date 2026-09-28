@@ -49,9 +49,9 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
    NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional
 
    # Optional: Profile access control (see Profile Access Control section).
-   # NEXTDNS_WRITABLE_PROFILES / NEXTDNS_READ_ONLY are the write guards: there
-   # is no separate "test profile" variable, so sandbox writes by listing a
-   # dedicated test profile there.
+   # There is no separate test-profile variable for writes: list a dedicated
+   # sandbox profile in NEXTDNS_WRITABLE_PROFILES, or block writes entirely
+   # with NEXTDNS_READ_ONLY.
    # NEXTDNS_READABLE_PROFILES=profile1,profile2
    # NEXTDNS_WRITABLE_PROFILES=test_profile
    # NEXTDNS_READ_ONLY=false
