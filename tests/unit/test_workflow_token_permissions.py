@@ -25,11 +25,12 @@ octokit raises a ``HttpError`` for JS callers.
 
 Issue #271 extends the harness to the gate's honesty about E2E: the fake
 ``actions.listWorkflowRunsForRepo`` response includes an ``E2E Container`` run
-and ``checks.listForRef`` reports the validation step's own check run, so the
-tests can prove that (a) the approval body is derived from the same
-``required_workflows`` list that gated the merge, and (b) a green E2E
-Container run whose validation step was *skipped* (no ``NEXTDNS_API_KEY``)
-does not satisfy the gate.
+and ``checks.listForRef`` reports check runs under the names GitHub actually
+gives them -- one per *job* (``E2E Container (slim)``), never one per *step*
+-- so the tests can prove that (a) the approval body is derived from the same
+``required_workflows`` list that gated the merge, (b) an E2E Container run that
+did not exercise the tool suite does not satisfy the gate, and (c) the gate
+never depends on a step-level check run, because GitHub does not create any.
 """
 
 from __future__ import annotations
@@ -547,15 +548,16 @@ def run_workflow(
     *,
     check_conclusion: str = "success",
     context: dict | None = None,
-    e2e_validation_conclusion: str | None = None,
+    e2e_conclusion: str | None = None,
 ) -> WorkflowRun:
     """Execute the job the way a runner would, against a permission-enforcing API.
 
     ``check_conclusion`` sets the conclusion of every workflow run the gate
-    polls. ``e2e_validation_conclusion`` sets the conclusion of the E2E
-    validation step's check run independently, so a test can model a green
-    ``E2E Container`` run whose validation step was skipped (issue #271);
-    it defaults to ``check_conclusion``.
+    polls. ``e2e_conclusion`` sets the conclusion of the ``E2E Container`` run
+    alone, so a test can model the run failing because the tool suite never
+    executed -- the fixed ``e2e-container.yml`` fails its own job when
+    ``NEXTDNS_API_KEY`` is unavailable (issue #271). It defaults to
+    ``check_conclusion``.
     """
     job = workflow.job(job_id)
     permissions = effective_permissions(workflow, job)
@@ -565,7 +567,7 @@ def run_workflow(
         "actor": "dependabot[bot]",
     }
     head_sha = "deadbeefcafe"
-    validation_conclusion = e2e_validation_conclusion or check_conclusion
+    e2e_run_conclusion = e2e_conclusion or check_conclusion
     responses = {
         "pulls.get": {"head": {"sha": head_sha}, "title": "chore(deps): bump pyyaml to 6.0.3"},
         "actions.listWorkflowRunsForRepo": {
@@ -574,19 +576,25 @@ def run_workflow(
                     "name": name,
                     "head_sha": head_sha,
                     "status": "completed",
-                    "conclusion": check_conclusion,
+                    "conclusion": e2e_run_conclusion if name == "E2E Container" else check_conclusion,
                     "created_at": "2024-01-01T00:00:00Z",
                 }
                 for name in ("Unit Tests", "CodeQL", "E2E Container")
             ]
         },
+        # GitHub creates one check run per job. The real E2E Container workflow
+        # reports "E2E Container (slim)" and "E2E Container (alpine)" -- the
+        # job names -- and never a check run for the "Run E2E validation
+        # against container" *step*. Naming the steps here instead would let a
+        # gate that depends on them pass a test it could never pass in
+        # production (issue #271).
         "checks.listForRef": {
             "check_runs": [
                 {
-                    "name": f"Run E2E validation against container ({variant})",
+                    "name": f"E2E Container ({variant})",
                     "head_sha": head_sha,
                     "status": "completed",
-                    "conclusion": validation_conclusion,
+                    "conclusion": e2e_run_conclusion,
                 }
                 for variant in ("slim", "alpine")
             ]
@@ -706,21 +714,41 @@ def test_approval_body_is_derived_from_required_workflows(workflow: Workflow) ->
 
 
 @requires_node
-def test_skipped_e2e_validation_does_not_satisfy_the_gate(workflow: Workflow) -> None:
-    """A green E2E Container run whose validation step was skipped must not pass.
+def test_e2e_run_without_a_real_tool_suite_does_not_satisfy_the_gate(workflow: Workflow) -> None:
+    """An E2E Container run that never exercised the tool suite must not pass.
 
     Issue #271: when ``NEXTDNS_API_KEY`` is unavailable (e.g. fork PRs) the
-    E2E Container job skips its live validation step, but the workflow run
-    still concludes ``success``. The gate must require the validation step's
-    own check run to have concluded ``success`` -- a skip is not an E2E pass.
+    E2E Container job skips its live validation step, and the build and
+    ``/health`` probe still succeed. The job now fails itself in that case, so
+    the gate sees a failed run instead of a green one that proved nothing.
     """
-    run = run_workflow(workflow, "auto-merge", check_conclusion="success", e2e_validation_conclusion="skipped")
+    run = run_workflow(workflow, "auto-merge", check_conclusion="success", e2e_conclusion="failure")
     assert run.denied == [], "least-privilege token blocked a required operation:\n" + _report(run)
     gh_ops = [c.operation for c in run.calls if c.source == "gh"]
     assert "gh pr review" not in gh_ops and "gh pr merge" not in gh_ops, (
-        f"a skipped E2E validation satisfied the gate:\n{gh_ops}"
+        f"an E2E run with no tool-suite result satisfied the gate:\n{gh_ops}"
     )
     assert "gh pr comment" in gh_ops, f"the failure comment was not posted:\n{gh_ops}"
+
+
+def test_gate_does_not_depend_on_a_step_level_check_run() -> None:
+    """The gate must not read a check run named after an individual step.
+
+    Issue #271: an earlier version required a check run whose name started with
+    ``Run E2E validation against container``. That is a *step* name; GitHub
+    creates one check run per job and exposes no API for step conclusions, so
+    that filter always matched nothing and the gate could never approve. The
+    fake API in this module returns only job-named check runs, so any reliance
+    on a step name shows up as a gate that never approves.
+    """
+    workflow = load_workflow(WORKFLOW_PATH)
+    script = next(s for s in workflow.job("auto-merge").steps if s.uses and s.uses.startswith("actions/github-script"))
+    assert "checks.listForRef" not in (script.script or ""), (
+        "the gate inspects check runs; GitHub reports one per job, so a skipped step is invisible to it (issue #271)"
+    )
+    assert "Run E2E validation against container" not in (script.script or ""), (
+        "the gate matches on a step name, which is not a check run name (issue #271)"
+    )
 
 
 @requires_node

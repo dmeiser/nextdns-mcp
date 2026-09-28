@@ -21,12 +21,10 @@ jobs:
     #   contents: read       - read-only repository metadata
     #   pull-requests: write - approve + comment + enable auto-merge
     #   actions: read        - list workflow runs for the PR head SHA
-    #   checks: read         - read check run status
     permissions:
       contents: read
       pull-requests: write
       actions: read
-      checks: read
 
     steps:
       - name: Wait for required workflows
@@ -40,12 +38,17 @@ jobs:
             const check_interval_seconds = 30;
             const max_checks = (max_wait_minutes * 60) / check_interval_seconds;
 
-            // E2E Container skips its live validation step when NEXTDNS_API_KEY is
-            // unavailable (e.g. fork PRs). A skipped step still leaves the
-            // workflow run green, so the run conclusion alone cannot prove the
-            // tool suite ran; the validation step's own check run reports
-            // 'success' only when it actually executed (issue #271).
-            const E2E_VALIDATION_CHECK_PREFIX = 'Run E2E validation against container';
+            // 'E2E Container' is gated because it is the only check that talks
+            // to the live NextDNS API. It would previously skip its validation
+            // step when NEXTDNS_API_KEY is unavailable (e.g. fork PRs) while
+            // the build and /health probe still succeeded, leaving a green run
+            // that no tool had exercised. That job now fails itself in that
+            // case, so the run conclusion below is a real E2E result.
+            //
+            // The verdict deliberately lives in the job and not here: GitHub
+            // creates one check run per job, never per step, so there is no
+            // step-level check run to inspect and no API that exposes one. The
+            // gate can only read the run conclusion (issue #271).
 
             console.log(`Waiting for required workflows on PR #${pr_number}`);
             console.log(`Required: ${required_workflows.join(', ')}`);
@@ -89,31 +92,6 @@ jobs:
                   status: latest_run.status,
                   conclusion: latest_run.conclusion
                 };
-
-                if (
-                  workflow_name === 'E2E Container' &&
-                  latest_run.status === 'completed' &&
-                  latest_run.conclusion === 'success'
-                ) {
-                  const check_runs = await github.rest.checks.listForRef({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    ref: head_sha
-                  });
-                  const validation_checks = check_runs.data.check_runs.filter(
-                    cr => cr.name.startsWith(E2E_VALIDATION_CHECK_PREFIX)
-                  );
-                  const validation_ran =
-                    validation_checks.length > 0 &&
-                    validation_checks.every(cr => cr.conclusion === 'success');
-                  if (!validation_ran) {
-                    console.log('E2E Container run is green but its validation step did not run');
-                    workflow_status[workflow_name] = {
-                      status: latest_run.status,
-                      conclusion: 'skipped'
-                    };
-                  }
-                }
               }
               
               console.log(`Check ${check + 1}/${max_checks}:`, JSON.stringify(workflow_status, null, 2));

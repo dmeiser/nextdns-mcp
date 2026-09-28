@@ -230,3 +230,17 @@ jobs:
           else
             echo "❌ No test report generated ($REPORT_FILE)" >> $GITHUB_STEP_SUMMARY
           fi
+
+      # Without NEXTDNS_API_KEY the job skips the validation step, but the build
+      # and /health probe still succeed, so the run would conclude 'success'
+      # and every consumer would read it as an E2E pass (issue #271). The
+      # Dependabot auto-merge gate requires this workflow's conclusion to be
+      # 'success', so the job has to say here that the tool suite never ran.
+      # A step's conclusion is not visible to the checks API -- GitHub creates
+      # one check run per job, not per step -- so the job itself must carry the
+      # verdict rather than leaving a later consumer to infer it.
+      - name: Fail the run when the E2E suite did not execute (${{ matrix.variant }})
+        if: always() && steps.check-secrets.outputs.has_secret != 'true'
+        run: |
+          echo "::error::NEXTDNS_API_KEY is not available, so the MCP tool suite was not exercised. This run is not an E2E pass."
+          exit 1
