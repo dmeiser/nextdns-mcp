@@ -5,8 +5,9 @@ Three defects were reported, all of them in operator-facing text:
 * ``NEXTDNS_TEST_PROFILE`` was documented in ``.env.example`` and ``README.md``
   but read by no code, so an operator who set it believed they had a guard they
   did not have.
-* ``.env.example`` stated a default HTTP timeout of 10 while the code's
-  ``DEFAULT_HTTP_TIMEOUT`` is 30.
+* ``.env.example`` showed ``NEXTDNS_HTTP_TIMEOUT=10`` as the example value
+  directly beneath a stated default of 30 seconds, which is the value the code
+  uses.
 * ``docs/index.md`` claimed the transport was stdio only, although the
   streamable-HTTP transport is supported and documented.
 
@@ -50,9 +51,10 @@ def _read(relative_path: str) -> str:
 def test_env_example_states_the_configured_http_timeout_default():
     """The default ``.env.example`` promises must be the default the code uses.
 
-    This is the guard that catches the reported defect: the template claimed 10
-    while ``config.DEFAULT_HTTP_TIMEOUT`` was 30, so an operator copying the
-    template believed the default was a third of what it is.
+    The reported defect was the template's ``NEXTDNS_HTTP_TIMEOUT=10`` example
+    contradicting the default stated right above it and used by the code; this
+    guard keeps the stated default and ``config.DEFAULT_HTTP_TIMEOUT`` in step
+    whichever of the two is edited.
     """
     env_example = _read(ENV_EXAMPLE)
     stated = TIMEOUT_STATED_DEFAULT.search(env_example)
