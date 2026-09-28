@@ -107,7 +107,7 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
      nextdns-mcp:latest
    ```
 
-   Note: MCP servers use stdio (standard input/output) for communication, not HTTP ports.
+   Note: the commands above use stdio (standard input/output), the default transport. For the opt-in streamable-HTTP transport, see [HTTP Transport](#http-transport-network-access) below.
 
    **Alpine variant**
 
