@@ -44,6 +44,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # The operator-facing files that document environment variables.
 ENV_EXAMPLE = ".env.example"
 README = "README.md"
+# AGENT.md documents the same environment variables as the operator docs, so it
+# is searched too.
+AGENT_GUIDE = "AGENT.md"
 
 # Every way a documented timeout is written: ``NEXTDNS_HTTP_TIMEOUT=45``,
 # ``# Example: NEXTDNS_HTTP_TIMEOUT=45``, ``NEXTDNS_HTTP_TIMEOUT=45 # seconds``.
@@ -59,10 +62,10 @@ def _read(relative_path: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _documented_timeout_examples(relative_path: str) -> list[tuple[int, str]]:
-    """Every timeout value the file shows, as (line number, value)."""
+def _documented_timeout_examples() -> list[tuple[int, str]]:
+    """Every timeout value the template shows, as (line number, value)."""
     examples: list[tuple[int, str]] = []
-    for line_number, line in enumerate(_read(relative_path).splitlines(), start=1):
+    for line_number, line in enumerate(_read(ENV_EXAMPLE).splitlines(), start=1):
         examples.extend((line_number, match.group("value")) for match in TIMEOUT_ASSIGNMENT.finditer(line))
     return examples
 
@@ -70,13 +73,16 @@ def _documented_timeout_examples(relative_path: str) -> list[tuple[int, str]]:
 def test_documented_http_timeout_examples_are_valid_configuration_values(monkeypatch):
     """Every ``NEXTDNS_HTTP_TIMEOUT`` example the template shows must be accepted.
 
-    The example documents how to set the variable, not that it equals the
-    default, so it only has to be a value the parser accepts: an unparseable or
-    non-positive one raises ``ConfigurationError`` on startup, which would make
-    the template document a setting that cannot be used. Deliberate override
-    examples (``docs/configuration.md`` shows 45) are legal and stay legal.
+    This guard scans ``.env.example`` only. The example documents how to set the
+    variable, not that it equals the default, so it only has to be a value the
+    parser accepts: an unparseable or non-positive one raises
+    ``ConfigurationError`` on startup, which would make the template document a
+    setting that cannot be used. That is also why the guard does not require the
+    example to equal the code default: deliberate override examples elsewhere in
+    the documentation (``docs/configuration.md`` shows 45) are legal by design
+    and are not scanned here.
     """
-    examples = _documented_timeout_examples(ENV_EXAMPLE)
+    examples = _documented_timeout_examples()
     assert examples, f"{ENV_EXAMPLE} must show an example NEXTDNS_HTTP_TIMEOUT value"
 
     for line_number, value in examples:
@@ -98,7 +104,7 @@ def test_removed_test_profile_variable_is_absent_from_operator_docs():
     without anyone remembering to add it to a list.
     """
     docs = sorted(str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "docs").rglob("*.md"))
-    surfaces = [ENV_EXAMPLE, README, *docs]
+    surfaces = [ENV_EXAMPLE, README, AGENT_GUIDE, *docs]
 
     offenders = [path for path in surfaces if "NEXTDNS_TEST_PROFILE" in _read(path)]
     assert offenders == [], (
