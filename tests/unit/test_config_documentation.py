@@ -4,22 +4,30 @@ Three defects were reported, all of them in operator-facing text:
 
 * ``NEXTDNS_TEST_PROFILE`` was documented in ``.env.example`` and ``README.md``
   but read by no code, so an operator who set it believed they had a guard they
-  did not have.
+  did not have. ``test_removed_test_profile_variable_is_absent_from_operator_docs``
+  reproduces this: the variable name is still present in the operator
+  documentation, and no code reads it.
 * ``.env.example`` showed ``NEXTDNS_HTTP_TIMEOUT=10`` as the example value
   directly beneath a stated default of 30 seconds, which is the value the code
-  uses.
+  uses. The stated ``(default: 30)`` prose was already correct at the base
+  commit, so this file cannot reproduce that half by itself; what it holds is
+  that a value the template shows is a value the parser accepts, whatever
+  syntax the example is written in.
 * ``docs/index.md`` claimed the transport was stdio only, although the
-  streamable-HTTP transport is supported and documented.
+  streamable-HTTP transport is supported and documented. Nothing here guards
+  that sentence: it has no executable surface, and the transport itself is
+  covered by ``tests/unit/test_transport_config.py`` and
+  ``tests/unit/test_mcp_run_options.py``.
 
-Why reading text is legitimate here, and when it is not: #275 is a
-documentation-only defect -- there is no interface to execute, so the operator
-facing text *is* the behaviour, and a narrow assertion on that text is the only
-thing that can hold the line. A test that greps documentation in order to prove
-a *behavioural* claim guards nothing instead, because a reword flips it while
-behaviour is unchanged; the configuration behaviour itself is covered by
-``tests/unit/test_config.py`` and friends, not here. So every test below either
-executes the configuration surface for the values the template documents, or
-asserts one specific fact about a specific sentence of prose.
+Why reading text is legitimate here, and when it is not: for the first defect
+the text is the behaviour -- no code reads the variable, so the only thing a
+test can execute is its absence from the documentation that misleads operators.
+The timeout test is different: it feeds the documented values to the real
+configuration parser, so it proves the template documents settings that work
+rather than that a sentence has a particular wording. A test that greps
+documentation in order to prove a *behavioural* claim guards nothing instead,
+because a reword flips it while behaviour is unchanged; the configuration
+behaviour itself is covered by ``tests/unit/test_config.py`` and friends.
 
 SPDX-License-Identifier: MIT
 """
@@ -27,7 +35,9 @@ SPDX-License-Identifier: MIT
 import re
 from pathlib import Path
 
-from nextdns_mcp.config import DEFAULT_HTTP_TIMEOUT, get_http_timeout
+import pytest
+
+from nextdns_mcp.config import ConfigurationError, get_http_timeout
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -35,11 +45,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ENV_EXAMPLE = ".env.example"
 README = "README.md"
 
-# ``# NEXTDNS_HTTP_TIMEOUT=30`` and the copy-paste-ready ``NEXTDNS_HTTP_TIMEOUT=30``.
-TIMEOUT_EXAMPLE = re.compile(r"^#?\s*NEXTDNS_HTTP_TIMEOUT=(?P<value>\S+)\s*$", re.MULTILINE)
-
-# The default the template promises the operator: "(default: 30)".
-TIMEOUT_STATED_DEFAULT = re.compile(r"HTTP request timeout in seconds \(default:\s*(?P<value>[0-9]+(?:\.[0-9]+)?)\)")
+# Every way a documented timeout is written: ``NEXTDNS_HTTP_TIMEOUT=45``,
+# ``# Example: NEXTDNS_HTTP_TIMEOUT=45``, ``NEXTDNS_HTTP_TIMEOUT=45 # seconds``.
+TIMEOUT_ASSIGNMENT = re.compile(r"NEXTDNS_HTTP_TIMEOUT=(?P<value>[^\s#]+)")
 
 
 def _read(relative_path: str) -> str:
@@ -48,44 +56,36 @@ def _read(relative_path: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_env_example_states_the_configured_http_timeout_default():
-    """The default ``.env.example`` promises must be the default the code uses.
-
-    The reported defect was the template's ``NEXTDNS_HTTP_TIMEOUT=10`` example
-    contradicting the default stated right above it and used by the code; this
-    guard keeps the stated default and ``config.DEFAULT_HTTP_TIMEOUT`` in step
-    whichever of the two is edited.
-    """
-    env_example = _read(ENV_EXAMPLE)
-    stated = TIMEOUT_STATED_DEFAULT.search(env_example)
-    assert stated is not None, (
-        f'{ENV_EXAMPLE} must state the HTTP timeout default as "HTTP request timeout in seconds (default: <seconds>)"'
-    )
-    assert float(stated.group("value")) == DEFAULT_HTTP_TIMEOUT, (
-        f"{ENV_EXAMPLE} states an HTTP timeout default of {stated.group('value')} "
-        f"but config.DEFAULT_HTTP_TIMEOUT is {DEFAULT_HTTP_TIMEOUT}"
-    )
+def _documented_timeout_examples(relative_path: str) -> list[tuple[int, str]]:
+    """Every timeout value the file shows, as (line number, value)."""
+    examples: list[tuple[int, str]] = []
+    for line_number, line in enumerate(_read(relative_path).splitlines(), start=1):
+        examples.extend((line_number, match.group("value")) for match in TIMEOUT_ASSIGNMENT.finditer(line))
+    return examples
 
 
 def test_documented_http_timeout_examples_are_valid_configuration_values(monkeypatch):
     """Every ``NEXTDNS_HTTP_TIMEOUT`` example the template shows must be accepted.
 
-    The example is documentation of how to set the variable, not a claim that it
-    equals the default, so it only has to be a legal, parseable value: the
-    default itself is checked by the test above. This asserts the claim its own
-    name makes -- the example is a real configuration value -- rather than
-    implying the example must be a no-op.
+    The example documents how to set the variable, not that it equals the
+    default, so it only has to be a value the parser accepts: an unparseable or
+    non-positive one raises ``ConfigurationError`` on startup, which would make
+    the template document a setting that cannot be used. Deliberate override
+    examples (``docs/configuration.md`` shows 45) are legal and stay legal.
     """
-    examples = [match.group("value") for match in TIMEOUT_EXAMPLE.finditer(_read(ENV_EXAMPLE))]
+    examples = _documented_timeout_examples(ENV_EXAMPLE)
     assert examples, f"{ENV_EXAMPLE} must show an example NEXTDNS_HTTP_TIMEOUT value"
 
-    for value in examples:
+    for line_number, value in examples:
         monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", value)
-        # An undocumented, unparseable value raises ConfigurationError here,
-        # which fails the test just as an assertion would.
-        configured = get_http_timeout()
+        try:
+            configured = get_http_timeout()
+        except ConfigurationError as error:
+            pytest.fail(
+                f"{ENV_EXAMPLE}:{line_number} documents NEXTDNS_HTTP_TIMEOUT={value}, which the server rejects: {error}"
+            )
         assert configured == float(value), (
-            f"{ENV_EXAMPLE} documents NEXTDNS_HTTP_TIMEOUT={value} but the configuration reads it back as {configured}"
+            f"{ENV_EXAMPLE}:{line_number} documents NEXTDNS_HTTP_TIMEOUT={value} but the configuration reads it back as {configured}"
         )
 
 
@@ -93,11 +93,14 @@ def test_removed_test_profile_variable_is_absent_from_operator_docs():
     """``NEXTDNS_TEST_PROFILE`` must stay out of the operator-facing docs.
 
     No code reads it: the e2e runner creates a throwaway profile or takes
-    ``--plot-profile`` instead. It is checked in exactly these two files, by
-    name, because those are the two that advertised it; a broader search of
-    documentation prose would guard nothing.
+    ``--plot-profile`` instead. The search is literal and covers every operator
+    documentation surface, so a new doc page advertising the variable is caught
+    without anyone remembering to add it to a list.
     """
-    offenders = [path for path in (ENV_EXAMPLE, README) if "NEXTDNS_TEST_PROFILE" in _read(path)]
+    docs = sorted(str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "docs").rglob("*.md"))
+    surfaces = [ENV_EXAMPLE, README, *docs]
+
+    offenders = [path for path in surfaces if "NEXTDNS_TEST_PROFILE" in _read(path)]
     assert offenders == [], (
         f"NEXTDNS_TEST_PROFILE is read by no code but is documented in {offenders}. "
         "Remove it and point operators at NEXTDNS_WRITABLE_PROFILES / NEXTDNS_READ_ONLY, "
