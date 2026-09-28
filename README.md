@@ -48,7 +48,7 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
    NEXTDNS_API_KEY=your_api_key_here
    NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional
 
-   # Optional: Profile access control (see Profile Access Control section).
+   # Optional: Profile access control (see [Configuration](docs/configuration.md)).
    # There is no separate test-profile variable for writes: list a dedicated
    # sandbox profile in NEXTDNS_WRITABLE_PROFILES, or block writes entirely
    # with NEXTDNS_READ_ONLY.

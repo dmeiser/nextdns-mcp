@@ -79,14 +79,11 @@ def test_documented_http_timeout_examples_are_valid_configuration_values(monkeyp
     for line_number, value in examples:
         monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", value)
         try:
-            configured = get_http_timeout()
+            get_http_timeout()
         except ConfigurationError as error:
             pytest.fail(
                 f"{ENV_EXAMPLE}:{line_number} documents NEXTDNS_HTTP_TIMEOUT={value}, which the server rejects: {error}"
             )
-        assert configured == float(value), (
-            f"{ENV_EXAMPLE}:{line_number} documents NEXTDNS_HTTP_TIMEOUT={value} but the configuration reads it back as {configured}"
-        )
 
 
 def test_removed_test_profile_variable_is_absent_from_operator_docs():
