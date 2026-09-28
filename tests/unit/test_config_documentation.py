@@ -47,7 +47,10 @@ README = "README.md"
 
 # Every way a documented timeout is written: ``NEXTDNS_HTTP_TIMEOUT=45``,
 # ``# Example: NEXTDNS_HTTP_TIMEOUT=45``, ``NEXTDNS_HTTP_TIMEOUT=45 # seconds``.
-TIMEOUT_ASSIGNMENT = re.compile(r"NEXTDNS_HTTP_TIMEOUT=(?P<value>[^\s#]+)")
+# The value is captured with ``*`` rather than ``+`` so an empty documented value
+# (``# NEXTDNS_HTTP_TIMEOUT=``) is fed to the parser and fails the guard, instead
+# of being skipped - the empty string is a rejected value, not an absent one.
+TIMEOUT_ASSIGNMENT = re.compile(r"NEXTDNS_HTTP_TIMEOUT=(?P<value>[^\s#]*)")
 
 
 def _read(relative_path: str) -> str:
