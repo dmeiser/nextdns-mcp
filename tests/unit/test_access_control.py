@@ -337,15 +337,21 @@ class TestIsWriteOperation:
 class TestSafeIdValidation:
     """Test safe identifier validation helpers."""
 
-    def test_is_safe_profile_id_accepts_spec_ids(self):
-        assert is_safe_profile_id("abc123") is True
+    def test_is_safe_profile_id_accepts_api_ids(self):
+        assert is_safe_profile_id("abc123") is True  # legacy 6-char shape
         assert is_safe_profile_id("def456") is True
+        assert is_safe_profile_id("abc123def0") is True  # current 10-char shape
+        assert is_safe_profile_id("52547adaed") is True  # ID issued by the live API in CI run 37139687479
 
-    def test_is_safe_profile_id_rejects_non_spec_ids(self):
-        # The spec pattern is ^[a-z0-9]{6}$: exactly 6 lowercase alphanumeric chars.
+    def test_is_safe_profile_id_rejects_non_api_ids(self):
+        # The pattern is ^(?:[a-z0-9]{6}|[a-z0-9]{10})$: exactly 6 or 10
+        # lowercase alphanumeric chars — the two shapes api.nextdns.io issues.
         assert is_safe_profile_id("a" * 40) is False  # wrong length
         assert is_safe_profile_id("abc") is False  # too short
-        assert is_safe_profile_id("abcdefg") is False  # too long
+        assert is_safe_profile_id("abcdefg") is False  # 7 chars, between shapes
+        assert is_safe_profile_id("abc123d") is False  # 7 chars, between shapes
+        assert is_safe_profile_id("abc123def") is False  # 9 chars, between shapes
+        assert is_safe_profile_id("abc123def01") is False  # 11 chars, beyond both shapes
         assert is_safe_profile_id("AbC123") is False  # mixed case
         assert is_safe_profile_id("ABCDEF") is False  # uppercase
         assert is_safe_profile_id("abc_def") is False  # underscore

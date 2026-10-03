@@ -259,6 +259,18 @@ class TestManageProfiles:
         assert result == {"data": {"id": "abc123"}}
 
     @pytest.mark.asyncio
+    async def test_get_accepts_10_char_profile_id(self, mock_api_client):
+        """Profiles created by the live API carry 10-char IDs; tools must accept them.
+
+        Regression test for main E2E failure in run 37139687479, where every
+        tool call with a freshly created profile ID was rejected locally.
+        """
+        mock_api_client.request.return_value = _make_response({"data": {"id": "abc123def0"}})
+        result = await server.manageProfiles("get", profile_id="abc123def0")
+        assert result == {"data": {"id": "abc123def0"}}
+        mock_api_client.request.assert_called_once_with("GET", "/profiles/abc123def0", params=None, json=None)
+
+    @pytest.mark.asyncio
     async def test_update(self, mock_api_client):
         mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
         result = await server.manageProfiles("update", profile_id="abc123", name="New")
