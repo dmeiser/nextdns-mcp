@@ -33,6 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Live-write runs against the shared dev account trip the upstream rate
+      # limit when both image variants hammer the API concurrently; serialize
+      # the matrix so at most one live suite runs at a time.
+      max-parallel: 1
       matrix:
         variant: [slim, alpine]
     env:
