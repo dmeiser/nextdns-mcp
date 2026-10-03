@@ -1350,7 +1350,7 @@ wheels = [
 
 [[package]]
 name = "nextdns-mcp"
-version = "3.2.2"
+version = "3.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },

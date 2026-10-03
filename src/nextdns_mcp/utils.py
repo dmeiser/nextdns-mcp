@@ -29,12 +29,7 @@ SAFE_ENTRY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 
 
 def is_safe_profile_id(value: str | int) -> bool:
-    """Return True if value is an API-shaped profile_id (6 or 10 lowercase alphanumeric chars).
-
-    The live API issues 10-character IDs for new profiles; legacy profiles
-    carry 6-character IDs. Anything else fails fast here instead of 404ing
-    upstream.
-    """
+    """Return True if value is a spec-shaped profile_id (6 lowercase alphanumeric chars)."""
     return bool(SAFE_PROFILE_ID_PATTERN.match(str(value)))
 
 
@@ -93,8 +88,8 @@ def resolve_profile_id(
 
     Returns:
         A tuple of ``(resolved_profile_id, error_payload)``. On success, the
-        first element is the validated profile ID string and the second is
-        None. On failure, the first element is None and the second
+        first element is the validated 6-character profile ID string and the
+        second is None. On failure, the first element is None and the second
         is a standardized error payload dict.
     """
     if allow_default:
