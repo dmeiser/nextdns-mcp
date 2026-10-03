@@ -17,6 +17,7 @@ on:
   pull_request:
     branches: [ main ]  # Run on all PRs to main
   workflow_dispatch:
+  merge_group:
 
 permissions:
   contents: read

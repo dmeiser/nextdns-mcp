@@ -19,6 +19,7 @@ on:
       - 'v*.*.*'  # Also run on version tags
   pull_request:
     branches: [ main ]  # Run on all PRs to main
+  merge_group:
 
 permissions:
   contents: read
