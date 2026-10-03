@@ -162,7 +162,12 @@ jobs:
         env:
           NEXTDNS_API_KEY: ${{ secrets.NEXTDNS_API_KEY }}
           NEXTDNS_PLOT_PROFILE: ${{ secrets.NEXTDNS_PLOT_PROFILE }}
-          ALLOW_LIVE_WRITES: ${{ github.event_name == 'pull_request' && 'false' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.allow_live_writes == 'true' && 'true' || 'false') || 'true') }}
+          # Live writes run whenever the NextDNS credential is available:
+          # on main/tag pushes, on workflow_dispatch per its input, and on PRs
+          # whose head branch lives in this repository (secrets are available).
+          # Fork PRs have no credential, so the live steps skip regardless; this
+          # stays 'false' for them so the run summary stays honest.
+          ALLOW_LIVE_WRITES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.allow_live_writes || (github.event.pull_request.head.repo.fork && 'false' || 'true') }}
         run: |
           uv run python scripts/run_container_e2e.py \
             --endpoint http://127.0.0.1:8000/mcp \

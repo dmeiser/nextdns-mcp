@@ -1,45 +1,81 @@
 name: Auto Release
 
+# A release is cut only AFTER the post-merge validation of a main push is
+# green. The E2E Container workflow (live writes against the dev account) is
+# the gate: if it fails, this workflow never runs, so no broken build is ever
+# published. The unit-test result for the same head is verified below as well.
+
 on:
-  pull_request:
-    types: [closed]
+  workflow_run:
+    workflows: ["E2E Container"]
+    types: [completed]
     branches: [main]
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   release:
-    # Only run if merged, not a fork, and has exactly one valid bump label (and no no-release label)
+    # Only a successful E2E run triggered by a main-branch push may release.
     if: |
-      github.event.pull_request.merged == true &&
-      !github.event.pull_request.head.repo.fork &&
-      !contains(github.event.pull_request.labels.*.name, 'no-release') &&
-      (
-        (
-          contains(github.event.pull_request.labels.*.name, 'bump-patch') &&
-          !contains(github.event.pull_request.labels.*.name, 'bump-minor') &&
-          !contains(github.event.pull_request.labels.*.name, 'bump-major')
-        ) ||
-        (
-          contains(github.event.pull_request.labels.*.name, 'bump-minor') &&
-          !contains(github.event.pull_request.labels.*.name, 'bump-patch') &&
-          !contains(github.event.pull_request.labels.*.name, 'bump-major')
-        ) ||
-        (
-          contains(github.event.pull_request.labels.*.name, 'bump-major') &&
-          !contains(github.event.pull_request.labels.*.name, 'bump-patch') &&
-          !contains(github.event.pull_request.labels.*.name, 'bump-minor')
-        )
-      )
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     steps:
+      - name: Verify unit tests passed for this head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          unit=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+            --jq '[.check_runs[] | select(.name == "unit-tests")] | .[0]')
+          if [ -z "$unit" ] || [ "$unit" = "null" ]; then
+            echo "❌ No unit-tests check-run found for $HEAD_SHA; refusing to release."
+            exit 1
+          fi
+          conclusion=$(echo "$unit" | jq -r .conclusion)
+          if [ "$conclusion" != "success" ]; then
+            echo "❌ unit-tests conclusion is '$conclusion' for $HEAD_SHA; refusing to release."
+            exit 1
+          fi
+          echo "✅ unit-tests passed for $HEAD_SHA"
+
+      - name: Find merged PR and validate release labels
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          merged=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
+            --jq '[.[] | select(.merged_at != null)] | .[0] | .number')
+          if [ -z "$merged" ] || [ "$merged" = "null" ]; then
+            echo "No merged PR found for $HEAD_SHA (direct push or unknown provenance); skipping release."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "proceed=$(gh api "repos/$REPO/pulls/$merged" --jq '
+            if .head.repo.fork then "false"
+            elif ([.labels[].name] | index("no-release")) then "false"
+            else
+              ([.labels[].name] | map(select(. == "bump-patch" or . == "bump-minor" or . == "bump-major"))) as $bumps
+              | if ($bumps | length) == 1 then "true" else "false" end
+            end')" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$merged" >> "$GITHUB_OUTPUT"
+
       - name: Checkout Code
+        if: steps.pr.outputs.proceed == 'true'
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Extract Project Version
+        if: steps.pr.outputs.proceed == 'true'
         id: version
         run: |
           # Use Python to reliably extract version from pyproject.toml
@@ -53,20 +89,21 @@ jobs:
           with p.open("rb") as f:
               data = tomllib.load(f)
               v = data["project"]["version"]
-          
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"tag=v{v}\n")
           PY
 
       - name: Generate Release Notes and Create Release
+        if: steps.pr.outputs.proceed == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const tagName = '${{ steps.version.outputs.tag }}';
-            const mergeSha = context.payload.pull_request.merge_commit_sha;
-            console.log(`Creating release for ${tagName} at commit ${mergeSha}...`);
-            
+            const headSha = context.payload.workflow_run.head_sha;
+            console.log(`Creating release for ${tagName} at commit ${headSha}...`);
+
             try {
               // 1. Check if release already exists to be idempotent
               try {
@@ -90,7 +127,7 @@ jobs:
                 tag_name: tagName,
                 target_commitish: 'main'
               });
-              
+
               // 3. Create the GitHub release
               await github.rest.repos.createRelease({
                 owner: context.repo.owner,
@@ -101,9 +138,9 @@ jobs:
                 draft: false,
                 prerelease: false,
                 generate_release_notes: false,
-                target_commitish: mergeSha
+                target_commitish: headSha
               });
-              
+
               console.log(`✅ Successfully created release ${tagName}`);
             } catch (error) {
               console.error(`❌ Failed to create release: ${error.message}`);
