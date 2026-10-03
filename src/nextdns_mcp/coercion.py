@@ -20,9 +20,10 @@ except ImportError:  # pragma: no cover
     BeforeValidator = None  # type: ignore
 
 
-# Profile IDs from CLI or MCP clients may arrive as integers when the 6-char hex ID
-# happens to contain only decimal digits (e.g., "315244"). Use BeforeValidator
-# to coerce int inputs to str while preserving None for the default-profile fallback.
+# Profile IDs from CLI or MCP clients may arrive as integers when an accepted ID
+# shape (see SAFE_PROFILE_ID_PATTERN in client.py) happens to contain only decimal
+# digits (e.g., "315244"). Use BeforeValidator to coerce int inputs to str while
+# preserving None for the default-profile fallback.
 def _coerce_profile_id(v: object) -> object:
     """Coerce non-None profile_id values to str; leave None as-is."""
     return str(v) if v is not None else v
