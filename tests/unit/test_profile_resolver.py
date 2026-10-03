@@ -51,6 +51,12 @@ class TestResolveProfileIdWithDefault:
         assert resolved == "abc123"
         assert error is None
 
+    def test_returns_explicit_valid_10_char_profile_string(self):
+        """New profiles from the live API carry 10-character IDs (see CI run 37139687479)."""
+        resolved, error = resolve_profile_id("abc123def0")
+        assert resolved == "abc123def0"
+        assert error is None
+
     def test_returns_explicit_valid_profile_int(self):
         resolved, error = resolve_profile_id(123456)
         assert resolved == "123456"
