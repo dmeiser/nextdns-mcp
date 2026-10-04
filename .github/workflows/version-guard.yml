@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [ main ]
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
 
 permissions:
   contents: read
@@ -13,7 +14,12 @@ jobs:
     name: Verify Release Labels
     runs-on: ubuntu-latest
     steps:
+      - name: Pass through in merge queue
+        if: github.event_name == 'merge_group'
+        run: echo "✅ Merge queue entry; release labels were validated on the PR before queueing."
+
       - name: Validate Labels
+        if: github.event_name != 'merge_group'
         run: |
           # Use exact matching against the labels array
           LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
