@@ -103,7 +103,7 @@ def _parse_series_timestamp(value: str) -> datetime:
         ):
             try:
                 # Anchored to UTC below, so the naive result is intentional.
-                parsed = datetime.strptime(value, fmt)  # noqa: DTZ007
+                parsed = datetime.strptime(value, fmt)
                 break
             except ValueError:
                 continue
