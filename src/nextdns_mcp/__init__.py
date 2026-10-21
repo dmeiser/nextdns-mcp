@@ -3,4 +3,4 @@
 SPDX-License-Identifier: MIT
 """
 
-__version__ = "3.2.8"
+__version__ = "3.2.9"
