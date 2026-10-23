@@ -17,13 +17,18 @@ jobs:
     if: github.actor == 'dependabot[bot]'
 
     # Least privilege: this workflow only approves/reviews, comments, and enables
-    # auto-merge on Dependabot PRs. It never pushes code, so contents stays read-only.
-    #   contents: read       - read-only repository metadata
+    # auto-merge on Dependabot PRs. It never checks out or executes PR code, so
+    # contents:write changes no attack surface: the token is never used to push
+    # code, and it is required because the enable-auto-merge API call
+    # (gh pr merge --auto -> enablePullRequestAutoMerge) fails with
+    # "Resource not accessible by integration" under contents:read, even though
+    # the approve call succeeds with pull-requests:write.
+    #   contents: write      - required for enablePullRequestAutoMerge
     #   pull-requests: write - approve + comment + enable auto-merge
     #   actions: read        - list workflow runs for the PR head SHA
     #   checks: read         - read check run status
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
       actions: read
       checks: read
