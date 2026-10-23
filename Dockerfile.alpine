@@ -1,7 +1,7 @@
 # Multi-stage build for a lean Alpine final image
 
 # Builder stage
-FROM python:3.14-alpine AS builder
+FROM python:3.15-alpine AS builder
 
 # Upgrade base packages and install build tooling for any wheels that need compilation
 RUN apk upgrade --no-cache && \
@@ -27,7 +27,7 @@ RUN uv export --frozen --no-dev --no-emit-project --output-file /tmp/requirement
     uv pip install --target /install --requirement /tmp/requirements.txt
 
 # Runtime stage
-FROM python:3.14-alpine
+FROM python:3.15-alpine
 
 # Upgrade base packages for security parity with the slim variant
 RUN apk upgrade --no-cache
@@ -46,7 +46,7 @@ LABEL org.opencontainers.image.description="Model Context Protocol server for Ne
 LABEL org.opencontainers.image.authors="NextDNS MCP Contributors"
 LABEL org.opencontainers.image.source="https://github.com/dmeiser/nextdns-mcp"
 LABEL org.opencontainers.image.documentation="https://github.com/dmeiser/nextdns-mcp/blob/main/README.md"
-LABEL org.opencontainers.image.version="3.2.8"
+LABEL org.opencontainers.image.version="3.2.9"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Create and switch to a non-root user for security
