@@ -19,6 +19,9 @@ updates:
     commit-message:
       prefix: "deps(uv)"
       include: "scope"
+    labels:
+      - dependencies
+      - no-release
   # --- Docker ---
   - package-ecosystem: "docker"
     directory: "/"                      # location of your Dockerfile
@@ -27,3 +30,6 @@ updates:
     commit-message:
       prefix: "deps(docker)"
       include: "scope"
+    labels:
+      - dependencies
+      - no-release
