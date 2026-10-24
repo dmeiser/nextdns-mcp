@@ -1,9 +1,11 @@
 """Least-privilege enforcement tests for .github/workflows/dependabot-auto-merge.yml.
 
-Issue #188 (opus deep-review finding NEW-12): the workflow granted
-``contents: write`` to its ``GITHUB_TOKEN`` while the job only needs
-``pull-requests: write`` to approve/comment/enable auto-merge. A token with
-``contents: write`` can push to any branch, including ``main``.
+Issue #188 (opus deep-review finding NEW-12): the workflow once granted
+``contents: write`` to its ``GITHUB_TOKEN``. At the time it was believed the
+job only needs ``pull-requests: write`` to approve/comment/enable
+auto-merge; that belief turned out to be wrong for the enable step (see the
+exception below). A token with ``contents: write`` can push to any branch,
+including ``main``, so the grant is never given lightly.
 
 These tests do not grep the workflow source. They:
 
@@ -16,12 +18,25 @@ These tests do not grep the workflow source. They:
    ``gh`` stub) against a fake GitHub API that *enforces* the resolved token
    permissions, and
 3. assert that the workflow still completes its job (approve + auto-merge,
-   and the failure comment path) while the token is refused write access to
-   repository contents -- i.e. it cannot push to ``main``.
+   and the failure comment path) without ever calling a contents endpoint,
+   and -- except for one documented exception -- that the token is refused
+   write access to repository contents, i.e. it cannot push to ``main``.
 
 A fake API call is rejected exactly the way GitHub rejects a token missing a
 scope: HTTP 403 with a ``Resource not accessible by integration`` body, and
 octokit raises a ``HttpError`` for JS callers.
+
+Exception: GitHub's ``enablePullRequestAutoMerge`` mutation requires
+``contents: write`` on the token. With ``contents: read`` the approve step
+succeeds (``pull-requests: write``) but ``gh pr merge --auto --squash``
+fails with ``Resource not accessible by integration
+(enablePullRequestAutoMerge)`` -- observed on Dependabot PRs #353-#359. The
+job therefore holds ``contents: write``, scoped to this workflow alone: it
+runs on ``pull_request_target`` but never checks out or executes PR code, so
+PR content cannot drive the write-capable token, and the tests below still
+prove the workflow itself never calls a contents endpoint. The exception is
+keyed by workflow path, so any OTHER workflow gaining ``contents: write``
+must still fail this guard.
 
 Issue #271 extends the harness to the gate's honesty about what it claims: the
 fake ``actions.listWorkflowRunsForRepo`` response also includes an ``E2E
@@ -49,6 +64,18 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "dependabot-auto-merge.yml"
+
+# Documented exception to the "no contents:write" rule, keyed by workflow
+# path so it cannot silently widen. GitHub's enablePullRequestAutoMerge
+# mutation requires contents:write on GITHUB_TOKEN: with contents:read the
+# approve step succeeds (pull-requests:write) but `gh pr merge --auto` fails
+# with "Resource not accessible by integration" -- observed on Dependabot
+# PRs #353-#359. This workflow runs on pull_request_target but never checks
+# out or executes PR code, so the write-capable token cannot be driven by
+# PR content. The tests below still assert the workflow never calls a
+# contents endpoint. Any workflow NOT listed here must still fail the guard
+# if it gains contents:write.
+CONTENTS_WRITE_EXCEPTION_PATHS = {WORKFLOW_PATH}
 
 # The pre-fix permissions block from base commit 9218fb2 (issue #188).
 # Used to prove the least-privilege check actually detects the regression.
@@ -633,11 +660,21 @@ def _report(run: WorkflowRun) -> str:
 
 
 def test_token_cannot_write_repository_contents(workflow: Workflow) -> None:
-    """The job token must hold read-only ``contents``: it cannot push to main."""
+    """The job token must not hold contents:write unless this file is the
+    documented ``enablePullRequestAutoMerge`` exception."""
     permissions = effective_permissions(workflow, workflow.job("auto-merge"))
-    assert not has_scope(permissions, "contents", "write"), (
-        f"GITHUB_TOKEN can push to any branch including main: {permissions}"
-    )
+    if WORKFLOW_PATH in CONTENTS_WRITE_EXCEPTION_PATHS:
+        # Documented exception: the enable-auto-merge API call requires it.
+        # The run tests below prove the workflow never uses the grant
+        # against a contents endpoint.
+        assert has_scope(permissions, "contents", "write"), (
+            f"exception listed but GITHUB_TOKEN lost contents:write "
+            f"(enablePullRequestAutoMerge would fail): {permissions}"
+        )
+    else:
+        assert not has_scope(permissions, "contents", "write"), (
+            f"GITHUB_TOKEN can push to any branch including main: {permissions}"
+        )
     assert has_scope(permissions, "contents", "read"), (
         f"GITHUB_TOKEN should still be able to read repository metadata: {permissions}"
     )
@@ -653,9 +690,20 @@ def test_auto_merge_succeeds_with_least_privilege_token(workflow: Workflow) -> N
     assert run.denied == [], "least-privilege token blocked a required operation:\n" + _report(run)
     gh_ops = [c.operation for c in run.calls if c.source == "gh"]
     assert "gh pr review" in gh_ops and "gh pr merge" in gh_ops, f"approve/auto-merge not executed: {gh_ops}"
-    assert run.push_probe_status == 403, (
-        f"token with contents write could push README.md to main (probe status {run.push_probe_status}): {_report(run)}"
-    )
+    if WORKFLOW_PATH in CONTENTS_WRITE_EXCEPTION_PATHS:
+        # The documented exception: the token CAN push (probe 200), so the
+        # guard is that the workflow never attempts it -- no contents call
+        # may appear in the run.
+        assert run.push_probe_status == 200
+        contents_calls = [c for c in run.calls if c.required_scope == "contents" and c.source != "probe"]
+        assert contents_calls == [], (
+            "workflow called a contents endpoint; the contents:write grant is only for "
+            "enablePullRequestAutoMerge:\n" + _report(run)
+        )
+    else:
+        assert run.push_probe_status == 403, (
+            f"token with contents write could push README.md to main (probe status {run.push_probe_status}): {_report(run)}"
+        )
 
 
 @requires_node
@@ -664,7 +712,17 @@ def test_failure_path_comments_without_write_token(workflow: Workflow) -> None:
     run = run_workflow(workflow, "auto-merge", check_conclusion="failure")
     assert run.denied == [], "least-privilege token blocked a required operation:\n" + _report(run)
     assert [c.operation for c in run.calls if c.source == "gh"] == ["gh pr comment"], _report(run)
-    assert run.push_probe_status == 403, _report(run)
+    if WORKFLOW_PATH in CONTENTS_WRITE_EXCEPTION_PATHS:
+        # Same documented exception as the happy path: the grant exists, the
+        # workflow must never use it.
+        assert run.push_probe_status == 200
+        contents_calls = [c for c in run.calls if c.required_scope == "contents" and c.source != "probe"]
+        assert contents_calls == [], (
+            "workflow called a contents endpoint; the contents:write grant is only for "
+            "enablePullRequestAutoMerge:\n" + _report(run)
+        )
+    else:
+        assert run.push_probe_status == 403, _report(run)
 
 
 def _approval_body(run: WorkflowRun) -> str:
@@ -762,4 +820,10 @@ def test_pre_fix_permissions_are_detected_as_regression(tmp_path: Path) -> None:
     assert has_scope(pre_run.permissions, "contents", "write")
     # ... and the fixed workflow's own permissions are what the tests above assert.
     fixed = load_workflow(WORKFLOW_PATH)
-    assert not has_scope(effective_permissions(fixed, fixed.job("auto-merge")), "contents", "write")
+    if WORKFLOW_PATH not in CONTENTS_WRITE_EXCEPTION_PATHS:
+        assert not has_scope(effective_permissions(fixed, fixed.job("auto-merge")), "contents", "write")
+    else:
+        # The documented exception holds contents:write by design. The
+        # pre-fix spec above still proves this check detects the grant, and
+        # the run tests keep the exception honest about never using it.
+        assert has_scope(effective_permissions(fixed, fixed.job("auto-merge")), "contents", "write")
