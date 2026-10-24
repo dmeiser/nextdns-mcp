@@ -129,7 +129,7 @@ jobs:
       - name: Determine release status
         if: github.event_name == 'workflow_run'
         id: release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const headSha = context.payload.workflow_run.head_sha;
