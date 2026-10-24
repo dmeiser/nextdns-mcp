@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Wait for required workflows
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         id: check-workflows
         with:
           script: |
