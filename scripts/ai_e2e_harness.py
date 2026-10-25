@@ -92,7 +92,7 @@ from typing import Any, Self
 
 try:
     from dotenv import load_dotenv as _load_dotenv
-except Exception:  # pragma: no cover - optional dependency
+except (ImportError, OSError):  # pragma: no cover - optional dependency
     _load_dotenv = None  # type: ignore[assignment]
 
 # --------------------------------------------------------------------------- #
@@ -452,6 +452,7 @@ class ActorRun:
     final_text: str = ""
     error: str = ""
     stderr: str = ""
+    raw_lines: list[str] = field(default_factory=list)
     duration_ms: int = 0
 
     def tools_used(self) -> list[str]:
@@ -652,7 +653,9 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
 
         err_text = stderr_bytes.decode("utf-8", errors="replace").strip()
         run.stderr = err_text
-        lines = stdout.decode("utf-8", errors="replace").splitlines()
+        raw = stdout.decode("utf-8", errors="replace").splitlines()
+        lines = raw
+        run.raw_lines = raw
         calls, final_text = parse_actor_events(lines)
         run.tool_calls = calls
         run.final_text = final_text
@@ -1017,6 +1020,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     report.actor_tools_used = run.tools_used()
     report.actor_final_text = run.final_text[:2000]
     report.actor_stderr = run.stderr[:4000]
+    report.actor_raw_lines = list(run.raw_lines)
     report.actor_duration_ms = run.duration_ms
     report.actor_command = run.command
 
@@ -1082,11 +1086,15 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
 # =========================================================================== #
 
 
-def write_report(report: Report, path: str) -> None:
+def write_report(report: Report, path: str, actor_log: str | None = None) -> None:
     if path == "-":
         for r in report.results:
             print(json.dumps(r.to_dict()))
         print(json.dumps({"summary": report.summary()}))
+        if report.actor_raw_lines:
+            print("--- actor event stream ---", file=sys.stderr)
+            for ln in report.actor_raw_lines:
+                print(ln, file=sys.stderr)
         return
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1094,6 +1102,12 @@ def write_report(report: Report, path: str) -> None:
         for r in report.results:
             fh.write(json.dumps(r.to_dict()) + "\n")
         fh.write(json.dumps({"summary": report.summary()}) + "\n")
+    # Sidecar: the actor's raw event stream, for debugging model behavior.
+    sidecar = Path(actor_log) if actor_log else out.with_name(out.stem + ".actor.jsonl")
+    if report.actor_raw_lines:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text("\n".join(report.actor_raw_lines) + "\n", encoding="utf-8")
+        print(f"Actor event stream written to {sidecar}", file=sys.stderr)
 
 
 def write_skip_report(path: str, reason: str = "NEXTDNS_API_KEY not set") -> None:
@@ -1144,6 +1158,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--quiet", action="store_true", help="do not print the text report")
     parser.add_argument("--env-file", help="path to a .env file to load (defaults to ./.env and <repo>/.env)")
+    parser.add_argument("--actor-log", help="path for the actor raw event stream (default: <report>.actor.jsonl)")
     parser.add_argument("--verbose", action="store_true", help="print the actor stderr on failure")
     args = parser.parse_args(argv)
 
@@ -1173,7 +1188,7 @@ def main(argv: list[str] | None = None) -> int:
         config.profile_name = args.profile_name
 
     report = asyncio.run(run_harness(api_key, config))
-    write_report(report, args.report)
+    write_report(report, args.report, args.actor_log)
     if args.report != "-":
         print(f"Report written to {args.report}")
     if not args.quiet:

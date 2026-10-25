@@ -234,6 +234,7 @@ class Report:
     actor_tools_used: list[str] = field(default_factory=list)
     actor_final_text: str = ""
     actor_stderr: str = ""
+    actor_raw_lines: list[str] = field(default_factory=list)
     actor_duration_ms: int = 0
 
     @property
