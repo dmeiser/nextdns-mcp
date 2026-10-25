@@ -1426,6 +1426,9 @@ def _check_single_command(run: ActorRun, step: Step) -> str | None:
                 f"It replied: {(run.final_text or '')[:200]!r}"
             )
         return None  # actor itself failed; failure reason comes from error events
+    # Only MCP operations count toward the contract. Built-in discovery calls
+    # (list_mcp_resources, execute search, etc.) are not server operations.
+    calls = [c for c in calls if c.name in ALLOWED_TOOLS]
     mine = [c for c in calls if c.name == step.tool]
     mine_ok = [c for c in mine if _call_succeeded(c)]
     other_ok = [c for c in calls if c.name != step.tool and _call_succeeded(c)]
