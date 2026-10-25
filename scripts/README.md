@@ -107,8 +107,15 @@ Usage:
 NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py
 NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --config my_run.json
 NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --model ollama-cloud/kimi-k2.7-code
+NEXTDNS_API_KEY=... NEXTDNS_E2E_MODEL=llama3 uv run python scripts/ai_e2e_harness.py
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --profile-name "TEST_PROFILE_{date}"
 uv run python scripts/ai_e2e_harness.py            # -> SKIP (no key)
 ```
+
+The test profile is named `TEST_PROFILE_YYYYMMDD` by default (overridable via
+`NEXTDNS_E2E_PROFILE_NAME` / `--profile-name`, with `{date}` / `{timestamp}`
+placeholders). The model can be chosen with `--model`, `NEXTDNS_E2E_MODEL`, or
+left to opencode's own configured default.
 
 See the module docstrings and `--help` for the full configuration reference.
 

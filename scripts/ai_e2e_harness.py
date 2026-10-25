@@ -198,6 +198,7 @@ class HarnessConfig:
 
     command: list[str] = field(default_factory=lambda: list(DEFAULT_HARNESS_COMMAND))
     model: str = ""  # empty => let the harness use its configured default
+    profile_name: str = ""  # empty => make_profile_name() (fixed name + date)
     prompt: str = ""  # empty => use the built-in task prompt
     workdir: str = ""  # empty => a fresh temporary directory
     server: dict[str, Any] = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_SERVER)))
@@ -215,6 +216,8 @@ class HarnessConfig:
                 cfg.model = str(data["model"])
             if "prompt" in data:
                 cfg.prompt = str(data["prompt"])
+            if "profile_name" in data:
+                cfg.profile_name = str(data["profile_name"])
             if "workdir" in data:
                 cfg.workdir = str(data["workdir"])
             if "timeout_s" in data:
@@ -234,6 +237,8 @@ class HarnessConfig:
             cfg.command = _as_argv(cmd)
         if env_model := os.environ.get("NEXTDNS_E2E_MODEL"):
             cfg.model = env_model
+        if env_profile := os.environ.get("NEXTDNS_E2E_PROFILE_NAME"):
+            cfg.profile_name = env_profile
         if srv_python := os.environ.get("NEXTDNS_MCP_PYTHON"):
             cfg.server["command"] = srv_python
         if srv_args := os.environ.get("NEXTDNS_MCP_ARGS"):
@@ -949,9 +954,10 @@ async def _profile_gone(m: MeasureClient, pid: str, targets: TaskTargets) -> boo
 # =========================================================================== #
 
 
-async def run_harness(api_key: str, config: HarnessConfig, profile_name: str) -> Report:
+async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     tag = common._random_tag()
-    targets = TaskTargets(profile_name=profile_name, tag=tag)
+    resolved_profile_name = common._resolve_profile_name(config.profile_name or None)
+    targets = TaskTargets(profile_name=resolved_profile_name, tag=tag)
     report = Report(started_at=time.time(), api_key_present=True, profile_name=targets.profile_name)
     report.actor_kind = "mcp-native-harness"
     report.actor_command = config.command
@@ -1080,6 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
         help="actor harness command line, e.g. 'opencode run --standalone ... --model ollama-cloud/x'",
     )
     parser.add_argument("--model", help="model for the {model} placeholder in the harness command")
+    parser.add_argument("--profile-name", help="test profile name (supports {date}/{timestamp} placeholders)")
     parser.add_argument(
         "--report", default="artifacts/ai_e2e_report.jsonl", help="path for the JSONL report, or '-' for stdout"
     )
@@ -1100,9 +1107,10 @@ def main(argv: list[str] | None = None) -> int:
         config.command = _as_argv(args.harness_cmd)
     if args.model:
         config.model = args.model
+    if args.profile_name:
+        config.profile_name = args.profile_name
 
-    profile_name = common.make_profile_name()
-    report = asyncio.run(run_harness(api_key, config, profile_name))
+    report = asyncio.run(run_harness(api_key, config))
     write_report(report, args.report)
     if args.report != "-":
         print(f"Report written to {args.report}")

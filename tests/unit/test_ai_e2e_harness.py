@@ -259,8 +259,11 @@ class TestRestHelpers:
         tag = h._random_tag(5)
         assert tag.startswith("e2eh") and len(tag) == 9  # "e2eh" + 5
         name = h.make_profile_name()
-        assert name.startswith("AI E2E Test Profile ")
-        assert h.make_profile_name() != h.make_profile_name()
+        assert name.startswith("TEST_PROFILE_")
+        import re
+        assert re.fullmatch(r"TEST_PROFILE_\d{8}", name) is not None
+        # date-based name is deterministic within a day
+        assert h.make_profile_name() == h.make_profile_name()
 
     def test_list_specs_shape(self, h):
         assert len(h._LIST_SPECS) == 7

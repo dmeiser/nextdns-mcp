@@ -160,9 +160,24 @@ def _random_tag(n: int = 6) -> str:
     return "e2eh" + "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
-def make_profile_name() -> str:
-    """A unique, identifiable test profile name (per the prompt's convention)."""
-    return f"AI E2E Test Profile {time.strftime('%Y%m%d%H%M%S')}-{_random_tag(4)}"
+def _resolve_profile_name(template: str | None = None) -> str:
+    """Resolve a profile-name template into a concrete name.
+
+    Supports the ``{date}`` placeholder (``YYYYMMDD``) and ``{timestamp}``
+    placeholder (``YYYYMMDDHHMMSS``). Defaults to ``TEST_PROFILE_{date}``
+    unless ``NEXTDNS_E2E_PROFILE_NAME`` overrides the template.
+    """
+    if template is None:
+        template = os.environ.get("NEXTDNS_E2E_PROFILE_NAME", "TEST_PROFILE_{date}")
+    return template.format(
+        date=time.strftime("%Y%m%d"),
+        timestamp=time.strftime("%Y%m%d%H%M%S"),
+    )
+
+
+def make_profile_name(template: str | None = None) -> str:
+    """The test profile name: a fixed name plus the date (overridable)."""
+    return _resolve_profile_name(template)
 
 
 # =========================================================================== #
