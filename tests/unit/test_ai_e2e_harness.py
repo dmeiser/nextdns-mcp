@@ -219,7 +219,7 @@ class TestRestHelpers:
     def test_list_added(self, h):
         assert h._list_added("allowlist", "abc") == "ai-e2e-allowlist-add-abc.example.com"
         assert h._list_added("denylist", "abc") == "ai-e2e-denylist-add-abc.example.com"
-        assert h._list_added("security_tlds", "abc") == "security_tlds-add-abc"
+        assert h._list_added("security_tlds", "abc") is None
 
     def test_list_contains(self, h):
         resp = {"ok": True, "body": {"data": [{"id": "a.com", "active": True}]}}

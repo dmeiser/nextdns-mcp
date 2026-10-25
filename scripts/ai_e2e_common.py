@@ -101,7 +101,7 @@ SETTINGS_CATEGORIES: dict[str, dict[str, Any]] = {
     },
     "logs": {
         "path": "/settings/logs",
-        "set": {"enabled": True, "retention": 7},
+        "set": {"enabled": True, "retention": 604800},
         "assert": {"enabled": True},
         "restore": {"enabled": False},
         "assert_restore": {"enabled": False},
@@ -462,10 +462,12 @@ def _list_values(name: str, tag: str) -> list[str]:
     raise ValueError(f"unknown list type {name}")
 
 
-def _list_added(name: str, tag: str) -> str:
+def _list_added(name: str, tag: str) -> str | None:
+    # Only free-form (domain) lists accept a synthetic "added" entry. Closed
+    # enums (natives, tlds, categories, services, blocklists) reject unknown ids.
     if name in ("allowlist", "denylist"):
         return f"ai-e2e-{name}-add-{tag}.example.com"
-    return f"{name}-add-{tag}"
+    return None
 
 
 def _list_contains(rest_resp: Any, values: list[str]) -> bool:

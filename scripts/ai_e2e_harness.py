@@ -207,7 +207,7 @@ class HarnessConfig:
     prompt: str = ""  # empty => use the built-in task prompt
     workdir: str = ""  # empty => a fresh temporary directory
     server: dict[str, Any] = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_SERVER)))
-    timeout_s: float = 900.0  # overall run budget
+    timeout_s: float = 7200.0  # overall run budget (99 sequential model steps)
     step_timeout_s: float = 300.0  # per-step actor timeout
 
     @classmethod
@@ -259,6 +259,11 @@ class HarnessConfig:
         if key := os.environ.get("NEXTDNS_API_KEY"):
             cfg.server["env"].setdefault("NEXTDNS_API_KEY", key)
         cfg.server["env"].setdefault("NEXTDNS_API_BASE", common.API_BASE)
+        # The MCP server applies its own read/write ACLs from these; without
+        # them every tool call is denied ("no profiles are readable").
+        for var in ("NEXTDNS_READABLE_PROFILES", "NEXTDNS_WRITABLE_PROFILES", "NEXTDNS_DEFAULT_PROFILE"):
+            if val := os.environ.get(var):
+                cfg.server["env"].setdefault(var, val)
         return cfg
 
     def render_argv(self, values: dict[str, str]) -> list[str]:
@@ -312,6 +317,18 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
     srv = config.server
     doc: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
+        # Side-channel tools are disabled so the ONLY way the model can act is
+        # through the nextdns MCP tools — one tool call per step, as designed.
+        "tools": {
+            "nextdns*": True,
+            "shell": False,
+            "bash": False,
+            "search": False,
+            "websearch": False,
+            "write": False,
+            "edit": False,
+            "patch": False,
+        },
         "mcp": {
             "nextdns": {
                 "type": "local",
@@ -496,11 +513,15 @@ def _tool_event_name(part: dict[str, Any]) -> str:
             else ""
         )
         # opencode invokes MCP tools as tools.nextdns["<tool>"](...), while
-        # other harnesses use a nextdns_<tool> prefix. Try the bracketed form
-        # first, then the underscore-prefixed identifier.
+        # other harnesses use a nextdns_<tool> prefix or a generic
+        # tools.mcp.call_tool({name: "<tool>", ...}) wrapper. Try each form.
         m = re.search(r'nextdns["\']?\s*\[\s*["\']([A-Za-z0-9_]+)', code)
         if not m:
             m = re.search(r"nextdns[._]([A-Za-z_][A-Za-z0-9_]*)", code)
+        if not m:
+            m = re.search(r'["\']nextdns_([A-Za-z][A-Za-z0-9_]*)["\']', code)
+        if not m:
+            m = re.search(r'call_tool\(\s*\{[^}]*?name["\']?\s*:\s*["\']([A-Za-z0-9_]+)', code)
         if m:
             name = m.group(1)
         else:
@@ -610,6 +631,12 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
     argv = config.render_argv(values)
     env = dict(os.environ)
     env.setdefault("NO_COLOR", "1")
+    # asyncio's cwd= sets the child's working directory but NOT the $PWD env
+    # var; opencode resolves its project config from $PWD. Without this it
+    # reads the harness's directory, finds no opencode.json, and never mounts
+    # the MCP server. OPENCODE_CONFIG pins the generated config explicitly.
+    env["PWD"] = str(workdir)
+    env["OPENCODE_CONFIG"] = str(Path(workdir) / "opencode.json")
 
     def _is_transient(err: str) -> bool:
         low = (err or "").lower()
@@ -1027,12 +1054,16 @@ class Step:
 def _step_prompt(instruction: str) -> str:
     """Wrap a single-step instruction with the actor contract."""
     return (
-        "You are a validation agent for the NextDNS MCP server. You have exactly these "
-        "NextDNS MCP tools available: " + ", ".join(ALLOWED_TOOLS) + ".\n\n"
+        "You are a validation agent for the NextDNS MCP server.\n\n"
+        "The ONLY tools you have are these NextDNS MCP tools, each available to you as "
+        "tools.nextdns.<tool>: " + ", ".join(ALLOWED_TOOLS) + ".\n"
+        "To call one, use the execute tool with exactly this code shape, e.g.:\n"
+        "  return await tools.nextdns.manageProfiles({\"operation\": \"list\"})\n"
+        "Do not use shell, search, or any file tools. Do NOT look for MCP resources.\n\n"
         + instruction
         + "\n\nRules:\n"
-        "- Use exactly the tool call described above and nothing else.\n"
-        "- Do not modify any code or configuration.\n"
+        "- Make exactly ONE tool call: the one described above, via execute + tools.nextdns.<tool>.\n"
+        "- If the tool is reported as unknown or not registered, wait a moment and retry the SAME call once.\n"
         "- If the call fails, report the error and stop.\n"
         "- When the call succeeds, stop immediately."
     )
@@ -1362,8 +1393,32 @@ def _summarize_calls(run: ActorRun) -> list[dict[str, Any]]:
     ]
 
 
+def _call_succeeded(c: ToolCall) -> bool:
+    """A call counts as successful only if the tool ran AND its payload is not
+    an error. opencode's execute wrapper reports ok=True even when the code
+    returned "Unknown tool" or the MCP call returned an error body."""
+    if not c.ok:
+        return False
+    rt = (c.result_text or "").strip()
+    if rt.startswith(("Unknown tool", "Error", "error:", "TypeError", "ReferenceError")):
+        return False
+    if rt.startswith("{"):
+        try:
+            d = json.loads(rt)
+        except (ValueError, TypeError):
+            d = None
+        if isinstance(d, dict) and d.get("error"):
+            return False
+    return True
+
+
 def _check_single_command(run: ActorRun, step: Step) -> str | None:
-    """Enforce the 1-command contract. Returns an error string on violation."""
+    """Enforce the 1-command contract: exactly ONE successful call to the
+    expected tool, and no successful calls to anything else.
+
+    Failed "probe" calls are tolerated: opencode registers MCP tools lazily, so
+    a model's first attempt can fail with "Unknown tool" before it retries.
+    """
     calls = run.tool_calls
     if not calls:
         if run.exit_code == 0:
@@ -1372,14 +1427,21 @@ def _check_single_command(run: ActorRun, step: Step) -> str | None:
                 f"It replied: {(run.final_text or '')[:200]!r}"
             )
         return None  # actor itself failed; failure reason comes from error events
-    if len(calls) > 1:
-        made = ", ".join(f"{c.name}({json.dumps(c.args)[:80]})" for c in calls)
-        return f"model made {len(calls)} tool calls instead of 1 (expected only '{step.tool}'): {made}"
-    c = calls[0]
-    if c.name != step.tool:
-        return f"model called '{c.name}' instead of the expected '{step.tool}' (args: {json.dumps(c.args)[:120]})"
-    if not c.ok:
-        return f"model's {step.tool} call failed: {(c.result_text or 'unknown error')[:300]}"
+    mine = [c for c in calls if c.name == step.tool]
+    mine_ok = [c for c in mine if _call_succeeded(c)]
+    other_ok = [c for c in calls if c.name != step.tool and _call_succeeded(c)]
+    probes = len(mine) - len(mine_ok)
+    if other_ok:
+        made = ", ".join(f"{c.name}({json.dumps(c.args)[:60]})" for c in other_ok)
+        return f"model successfully called tools other than '{step.tool}': {made}"
+    if not mine_ok:
+        first_err = (mine[0].result_text or "unknown error")[:250] if mine else "no call made"
+        return f"model's '{step.tool}' call did not succeed: {first_err}"
+    if len(mine_ok) > 1:
+        return f"model made {len(mine_ok)} successful '{step.tool}' calls instead of 1"
+    if probes:
+        # tolerated, but noted by the caller via feedback
+        return None
     return None
 
 
@@ -1459,19 +1521,36 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 continue
 
             prompt = step.prompt.replace("{profile_id}", pid)
-            _progress(f"[{i}/{len(steps)}] {step.id}")
-            run = await run_actor(step_cfg, prompt, workdir, retries=1)
-            total_events += len(run.tool_calls)
-            for t in run.tools_used():
-                if t not in tools_used:
-                    tools_used.append(t)
-            if run.stderr:
-                last_stderr = run.stderr
-            all_raw.extend(run.raw_lines)
+            run: ActorRun | None = None
+            status, error, reason = "failed", "", ""
+            rest_v: dict[str, Any] = {}
+            for attempt in (1, 2, 3):
+                _progress(f"[{i}/{len(steps)}] {step.id}" + (f" (retry {attempt-1})" if attempt > 1 else ""))
+                run = await run_actor(step_cfg, prompt, workdir, retries=1)
+                total_events += len(run.tool_calls)
+                for t in run.tools_used():
+                    if t not in tools_used:
+                        tools_used.append(t)
+                if run.stderr:
+                    last_stderr = run.stderr
+                all_raw.extend(run.raw_lines)
 
-            status, error, reason, rest_v = await _verify_step(m, targets, pid, step, run)
+                status, error, reason, rest_v = await _verify_step(m, targets, pid, step, run)
+                # opencode registers MCP tools lazily: a first attempt can fail
+                # with "Unknown tool" before registration completes. Retry the
+                # whole step on that transient only.
+                blob = " ".join(
+                    [error, reason]
+                    + [c.result_text or "" for c in run.tool_calls]
+                    + ([run.final_text] if run.final_text else [])
+                ).lower()
+                if status != "failed" or "unknown tool" not in blob:
+                    break
 
-            # Enforce the 1-command contract: exactly one call, the expected tool.
+            if run is None:  # pragma: no cover - defensive
+                run = ActorRun(command=list(step_cfg.command))
+
+            # Enforce the 1-command contract: exactly one successful call, the expected tool.
             violation = _check_single_command(run, step)
             if violation and status == "passed":
                 status, error = "failed", violation
@@ -1507,7 +1586,11 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             gone = await _profile_gone(m, pid, targets)
             if not gone:
                 _progress("safety cleanup: deleting the test profile via REST")
-                await m.rest_delete(f"/profiles/{pid}")
+                for attempt in range(4):
+                    resp = await m.rest_delete(f"/profiles/{pid}")
+                    if isinstance(resp, dict) and resp.get("ok"):
+                        break
+                    await asyncio.sleep(5 * (attempt + 1))
                 gone = await _profile_gone(m, pid, targets)
             report.cleanup = "clean: profile deleted and verified gone via REST" if gone else "FAILED (profile still present)"
             report.profile_id = pid
