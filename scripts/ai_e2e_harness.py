@@ -1349,7 +1349,10 @@ async def _verify_step(
                 "", {"endpoint": f"GET {base_profile}/logs", "rest_status": common._resp_status(rest)})
     if step.verify == "logs_download":
         rest = await _req("GET", f"{base_profile}/logs", params={"limit": 10})
-        has = common._analytics_has_data(rest)
+        # Log entries are mostly strings (domain, status, timestamps), so an
+        # analytics-style numeric-data check would wrongly report "no logs".
+        body = rest.get("body") if isinstance(rest, dict) else None
+        has = bool(isinstance(body, dict) and body.get("data"))
         if not has:
             return ("skipped", "", "no retained logs yet (NextDNS log delay on a fresh profile)",
                     {"endpoint": f"GET {base_profile}/logs"})
