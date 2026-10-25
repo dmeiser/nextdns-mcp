@@ -706,7 +706,7 @@ class MeasureClient:
 
         self.http = httpx.AsyncClient(
             base_url=common.API_BASE,
-            headers={"Authorization": f"Bearer {self.api_key}"},
+            headers={"X-Api-Key": self.api_key},
             timeout=30.0,
         )
         return self
