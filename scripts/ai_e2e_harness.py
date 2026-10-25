@@ -1348,7 +1348,8 @@ async def _verify_step(
                 "" if ok else "REST GET logs not ok",
                 "", {"endpoint": f"GET {base_profile}/logs", "rest_status": common._resp_status(rest)})
     if step.verify == "logs_download":
-        rest = await _req("GET", f"{base_profile}/logs", params={"limit": 10})
+        log_pid = os.environ.get("NEXTDNS_PLOT_PROFILE") or pid
+        rest = await _req("GET", f"/profiles/{log_pid}/logs", params={"limit": 10})
         # Log entries are mostly strings (domain, status, timestamps), so an
         # analytics-style numeric-data check would wrongly report "no logs".
         body = rest.get("body") if isinstance(rest, dict) else None
@@ -1483,8 +1484,9 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 continue
 
             prompt_pid = pid
-            if step.section == "plots" and os.environ.get("NEXTDNS_PLOT_PROFILE"):
-                prompt_pid = os.environ["NEXTDNS_PLOT_PROFILE"]
+            if step.section == "plots" or step.id == "logs.download":
+                if os.environ.get("NEXTDNS_PLOT_PROFILE"):
+                    prompt_pid = os.environ["NEXTDNS_PLOT_PROFILE"]
             prompt = step.prompt.replace("{profile_id}", prompt_pid)
             run: ActorRun | None = None
             status, error, reason = "failed", "", ""
