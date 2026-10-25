@@ -1061,7 +1061,7 @@ def _step_prompt(task: str) -> str:
         "You are a validation agent for the NextDNS MCP server.\n\n"
         "Task: " + task + "\n\n"
         "Rules:\n"
-        "- Perform exactly this one task with a single operation, then stop.\n"
+        "- Perform this task, then stop.\n"
         "- If a tool is reported as unknown or not registered, wait a moment and retry the same call once.\n"
         "- If the call fails, report the error and stop.\n"
         "- When the call succeeds, stop immediately."
@@ -1392,61 +1392,6 @@ def _summarize_calls(run: ActorRun) -> list[dict[str, Any]]:
     ]
 
 
-def _call_succeeded(c: ToolCall) -> bool:
-    """A call counts as successful only if the tool ran AND its payload is not
-    an error. opencode's execute wrapper reports ok=True even when the code
-    returned "Unknown tool" or the MCP call returned an error body."""
-    if not c.ok:
-        return False
-    rt = (c.result_text or "").strip()
-    if rt.startswith(("Unknown tool", "Error", "error:", "TypeError", "ReferenceError")):
-        return False
-    if rt.startswith("{"):
-        try:
-            d = json.loads(rt)
-        except (ValueError, TypeError):
-            d = None
-        if isinstance(d, dict) and d.get("error"):
-            return False
-    return True
-
-
-def _check_single_command(run: ActorRun, step: Step) -> str | None:
-    """Enforce the 1-command contract: exactly ONE successful call to the
-    expected tool, and no successful calls to anything else.
-
-    Failed "probe" calls are tolerated: opencode registers MCP tools lazily, so
-    a model's first attempt can fail with "Unknown tool" before it retries.
-    """
-    calls = run.tool_calls
-    if not calls:
-        if run.exit_code == 0:
-            return (
-                f"model made NO tool call (expected exactly one '{step.tool}' call). "
-                f"It replied: {(run.final_text or '')[:200]!r}"
-            )
-        return None  # actor itself failed; failure reason comes from error events
-    # Only MCP operations count toward the contract. Built-in discovery calls
-    # (list_mcp_resources, execute search, etc.) are not server operations.
-    calls = [c for c in calls if c.name in ALLOWED_TOOLS]
-    mine = [c for c in calls if c.name == step.tool]
-    mine_ok = [c for c in mine if _call_succeeded(c)]
-    other_ok = [c for c in calls if c.name != step.tool and _call_succeeded(c)]
-    probes = len(mine) - len(mine_ok)
-    if other_ok:
-        made = ", ".join(f"{c.name}({json.dumps(c.args)[:60]})" for c in other_ok)
-        return f"model successfully called tools other than '{step.tool}': {made}"
-    if not mine_ok:
-        first_err = (mine[0].result_text or "unknown error")[:250] if mine else "no call made"
-        return f"model's '{step.tool}' call did not succeed: {first_err}"
-    if len(mine_ok) > 1:
-        return f"model made {len(mine_ok)} successful '{step.tool}' calls instead of 1"
-    if probes:
-        # tolerated, but noted by the caller via feedback
-        return None
-    return None
-
-
 def _feedback_block(step: Step, run: ActorRun, status: str, error: str, reason: str,
                     rest_v: dict[str, Any]) -> list[str]:
     """Render the command -> actor -> verify -> result chain for one step."""
@@ -1552,11 +1497,8 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             if run is None:  # pragma: no cover - defensive
                 run = ActorRun(command=list(step_cfg.command))
 
-            # Enforce the 1-command contract: exactly one successful call, the expected tool.
-            violation = _check_single_command(run, step)
-            if violation and status == "passed":
-                status, error = "failed", violation
-
+            # Verdict comes from the task outcome (REST verification), not from
+            # how many tool calls the model needed to get there.
             fb = _feedback_block(step, run, status, error, reason, rest_v)
             for ln in fb:
                 _progress(ln)
