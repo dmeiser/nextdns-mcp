@@ -300,14 +300,12 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
     doc: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
         "mcp": {
-            "servers": {
-                "nextdns": {
-                    "type": "local",
-                    "command": [srv["command"], *[str(a) for a in srv["args"]]],
-                    "cwd": srv.get("cwd"),
-                    "environment": {str(k): str(v) for k, v in srv.get("env", {}).items()},
-                    "enabled": True,
-                }
+            "nextdns": {
+                "type": "local",
+                "command": [srv["command"], *[str(a) for a in srv["args"]]],
+                "cwd": srv.get("cwd"),
+                "environment": {str(k): str(v) for k, v in srv.get("env", {}).items()},
+                "enabled": True,
             }
         },
     }
@@ -517,7 +515,7 @@ def parse_actor_events(lines: list[str]) -> tuple[list[ToolCall], str]:
             continue
         try:
             ev = json.loads(line)
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             continue
         if not isinstance(ev, dict):
             continue

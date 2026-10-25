@@ -650,7 +650,7 @@ class TestMcpConfigGeneration:
         out = h.write_mcp_config(cfg, tmp_path)
         assert out == tmp_path / "opencode.json"
         doc = json.loads(out.read_text(encoding="utf-8"))
-        srv = doc["mcp"]["servers"]["nextdns"]
+        srv = doc["mcp"]["nextdns"]
         assert srv["type"] == "local"
         assert srv["command"][0] == cfg.server["command"]
         assert srv["command"][1:] == cfg.server["args"]
@@ -665,7 +665,7 @@ class TestMcpConfigGeneration:
         doc = json.loads(out.read_text(encoding="utf-8"))
         assert "$schema" in doc
         # The file must parse back cleanly (it is read by opencode at startup).
-        assert isinstance(doc["mcp"]["servers"], dict)
+        assert isinstance(doc["mcp"], dict)
 
 
 # =========================================================================== #

@@ -92,6 +92,26 @@ Use `--check` to verify that `docs/usage.md` matches `nextdns_usage_guide()` wit
 uv run python scripts/generate_usage_doc.py --check
 ```
 
+### MCP-Native, API-Verified E2E Harness
+
+- **`ai_e2e_harness.py`** - Python. An MCP-native LLM harness is the actor; the script measures.
+- **`ai_e2e_common.py`** - Python. Shared, pure (network-free) helpers (result model, constant tables, REST read-back).
+
+The harness provisions its own isolated test profile, drives the live MCP server
+through an MCP-native actor (default `opencode`, configurable), then independently
+verifies the resulting state against the NextDNS REST API and owns cleanup.
+
+Usage:
+
+```bash
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --config my_run.json
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --model ollama-cloud/kimi-k2.7-code
+uv run python scripts/ai_e2e_harness.py            # -> SKIP (no key)
+```
+
+See the module docstrings and `--help` for the full configuration reference.
+
 ### AI Agent E2E Validation
 
 See [ai_agent_e2e_prompt.md](ai_agent_e2e_prompt.md) for instructions on using an AI agent to validate tools against a live test profile.
