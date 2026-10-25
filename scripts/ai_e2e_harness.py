@@ -1484,9 +1484,8 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 continue
 
             prompt_pid = pid
-            if step.section == "plots" or step.id == "logs.download":
-                if os.environ.get("NEXTDNS_PLOT_PROFILE"):
-                    prompt_pid = os.environ["NEXTDNS_PLOT_PROFILE"]
+            if (step.section == "plots" or step.id == "logs.download") and os.environ.get("NEXTDNS_PLOT_PROFILE"):
+                prompt_pid = os.environ["NEXTDNS_PLOT_PROFILE"]
             prompt = step.prompt.replace("{profile_id}", prompt_pid)
             run: ActorRun | None = None
             status, error, reason = "failed", "", ""
