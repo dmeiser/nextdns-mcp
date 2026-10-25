@@ -90,6 +90,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
+try:
+    from dotenv import load_dotenv as _load_dotenv
+except Exception:  # pragma: no cover - optional dependency
+    _load_dotenv = None  # type: ignore[assignment]
+
 # --------------------------------------------------------------------------- #
 # Make the in-tree ``nextdns_mcp`` package importable when running as a script
 # (``uv run python scripts/ai_e2e_harness.py``) without needing an install.
@@ -987,6 +992,11 @@ async def _profile_gone(m: MeasureClient, pid: str, targets: TaskTargets) -> boo
 # =========================================================================== #
 
 
+def _progress(msg: str) -> None:
+    """Live progress feedback on stderr (never pollutes the JSONL report)."""
+    print(f"[e2e] {msg}", file=sys.stderr, flush=True)
+
+
 async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     tag = common._random_tag()
     resolved_profile_name = common._resolve_profile_name(config.profile_name or None)
@@ -996,10 +1006,13 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     report.actor_command = config.command
 
     prompt = config.prompt or build_task_prompt(targets)
+    _progress(f"profile name: {targets.profile_name}")
     workdir = Path(config.workdir) if config.workdir else Path(tempfile.mkdtemp(prefix="nextdns_e2e_"))
     workdir.mkdir(parents=True, exist_ok=True)
     write_mcp_config(config, workdir)
+    _progress(f"launching actor harness (timeout {config.timeout_s:.0f}s): {' '.join(config.command[:3])}...")
     run = await run_actor(config, prompt, workdir)
+    _progress(f"actor finished: exit={run.exit_code}, {len(run.tool_calls)} tool event(s), {run.duration_ms}ms")
     report.actor_tool_calls = len(run.tool_calls)
     report.actor_tools_used = run.tools_used()
     report.actor_final_text = run.final_text[:2000]
@@ -1010,12 +1023,16 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     _measure_actor_run(run, report)
 
     async with MeasureClient(api_key) as m:
+        _progress("measuring: profile provision + rename")
         prof = await _measure_profile(m, targets, report)
         if prof is not None:
             pid = str(prof.get("id"))
             report.profile_id = pid
+            _progress("measuring: settings (7 categories)")
             await _measure_settings(m, pid, report)
+            _progress("measuring: lists (7 types)")
             await _measure_lists(m, pid, targets, report)
+            _progress("measuring: rewrites")
             await _measure_rewrites(m, pid, targets, report)
             report.results.append(
                 _readonly_coverage(
@@ -1045,6 +1062,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                     "actor generated an analytics plot for the test profile",
                 )
             )
+            _progress("measuring: coverage + cleanup")
             _measure_coverage(run, report)
             await _cleanup(m, pid, targets, report)
         else:
@@ -1125,8 +1143,17 @@ def main(argv: list[str] | None = None) -> int:
         "--report", default="artifacts/ai_e2e_report.jsonl", help="path for the JSONL report, or '-' for stdout"
     )
     parser.add_argument("--quiet", action="store_true", help="do not print the text report")
+    parser.add_argument("--env-file", help="path to a .env file to load (defaults to ./.env and <repo>/.env)")
     parser.add_argument("--verbose", action="store_true", help="print the actor stderr on failure")
     args = parser.parse_args(argv)
+
+    # Load environment from a .env file if present (or the one given explicitly).
+    if _load_dotenv is not None:
+        for candidate in (_REPO_ROOT / ".env", Path.cwd() / ".env"):
+            if candidate.exists():
+                _load_dotenv(candidate, override=False)
+        if args.env_file:
+            _load_dotenv(args.env_file, override=True)
 
     api_key = os.environ.get("NEXTDNS_API_KEY")
     if not api_key:
