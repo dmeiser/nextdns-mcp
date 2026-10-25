@@ -261,6 +261,7 @@ class TestRestHelpers:
         name = h.make_profile_name()
         assert name.startswith("TEST_PROFILE_")
         import re
+
         assert re.fullmatch(r"TEST_PROFILE_\d{8}", name) is not None
         # date-based name is deterministic within a day
         assert h.make_profile_name() == h.make_profile_name()
