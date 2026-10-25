@@ -1051,19 +1051,19 @@ class Step:
     vdata: dict[str, Any] = field(default_factory=dict)
 
 
-def _step_prompt(instruction: str) -> str:
-    """Wrap a single-step instruction with the actor contract."""
+def _step_prompt(task: str) -> str:
+    """Wrap a single-step TASK (not a tool call) with the actor contract.
+
+    The model chooses which MCP tool and arguments to use; the harness only
+    verifies the resulting state via REST.
+    """
     return (
-        "You are a validation agent for the NextDNS MCP server.\n\n"
-        "The ONLY tools you have are these NextDNS MCP tools, each available to you as "
-        "tools.nextdns.<tool>: " + ", ".join(ALLOWED_TOOLS) + ".\n"
-        "To call one, use the execute tool with exactly this code shape, e.g.:\n"
-        "  return await tools.nextdns.manageProfiles({\"operation\": \"list\"})\n"
-        "Do not use shell, search, or any file tools. Do NOT look for MCP resources.\n\n"
-        + instruction
-        + "\n\nRules:\n"
-        "- Make exactly ONE tool call: the one described above, via execute + tools.nextdns.<tool>.\n"
-        "- If the tool is reported as unknown or not registered, wait a moment and retry the SAME call once.\n"
+        "You are a validation agent for the NextDNS MCP server.\n"
+        "NextDNS MCP tools are available to you: " + ", ".join(ALLOWED_TOOLS) + ".\n\n"
+        "Task: " + task + "\n\n"
+        "Rules:\n"
+        "- Perform exactly this one task with a single operation, then stop.\n"
+        "- If a tool is reported as unknown or not registered, wait a moment and retry the same call once.\n"
         "- If the call fails, report the error and stop.\n"
         "- When the call succeeds, stop immediately."
     )
@@ -1080,30 +1080,30 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     # ---- profiles -------------------------------------------------------
     steps.append(Step("profiles.create", "profiles", "manageProfiles",
         f"create the test profile {pn!r}",
-        _step_prompt(f"Use manageProfiles with operation 'create' to create a new profile named exactly '{pn}'."),
+        _step_prompt(f"Create a new NextDNS profile named exactly '{pn}'."),
         "profile_exists"))
     steps.append(Step("profiles.list", "profiles", "manageProfiles",
         "list all profiles and find the new one",
-        _step_prompt(f"Use manageProfiles with operation 'list' to list all profiles and confirm '{pn}' is present."),
+        _step_prompt(f"List all profiles and confirm '{pn}' is present."),
         "profile_exists"))
     steps.append(Step("profiles.get", "profiles", "manageProfiles",
         "get the test profile by id",
-        _step_prompt("Use manageProfiles with operation 'get' with profile_id '{profile_id}' to fetch the test profile."),
+        _step_prompt("Get the profile '{profile_id}' and report its details."),
         "profile_exists"))
     steps.append(Step("profiles.update", "profiles", "manageProfiles",
         f"rename the test profile to {rn!r}",
-        _step_prompt(f"Use manageProfiles with operation 'update' with profile_id '{{profile_id}}' to rename the profile to exactly '{rn}'."),
+        _step_prompt(f"Rename the profile '{{profile_id}}' to exactly '{rn}'."),
         "profile_renamed"))
 
     # ---- settings: read + update per category ---------------------------
     for cat, spec in SETTINGS_CATEGORIES.items():
         steps.append(Step(f"settings.{cat}.read", "settings", "manageSettings",
             f"{cat}: read current settings",
-            _step_prompt(f"Use manageSettings with operation 'get', category '{cat}', profile_id '{{profile_id}}' to read the current settings, and report them."),
+            _step_prompt(f"Read the current {cat} settings for profile '{{profile_id}}' and report them."),
             "settings_read", {"cat": cat, "spec": spec}))
         steps.append(Step(f"settings.{cat}.update", "settings", "manageSettings",
             f"{cat}: update to {json.dumps(spec['set'])}",
-            _step_prompt(f"Use manageSettings with operation 'update', category '{cat}', profile_id '{{profile_id}}', settings {json.dumps(spec['set'])} to update the settings."),
+            _step_prompt(f"Update the {cat} settings for profile '{{profile_id}}' to {json.dumps(spec['set'])}."),
             "settings_update", {"cat": cat, "spec": spec}))
 
     # ---- lists: read/replace/add/update/remove per type -----------------
@@ -1113,36 +1113,36 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         added = common._list_added(name, tag)
         steps.append(Step(f"lists.{name}.read", "lists", "manageLists",
             f"{name}: read current list",
-            _step_prompt(f"Use manageLists with operation 'get', list_type '{name}', profile_id '{{profile_id}}' to read the current list."),
+            _step_prompt(f"Read the current {name} for profile '{{profile_id}}'."),
             "list_read", {"name": name, "spec": lt}))
         steps.append(Step(f"lists.{name}.replace", "lists", "manageLists",
             f"{name}: replace with {values}",
-            _step_prompt(f"Use manageLists with operation 'replace', list_type '{name}', profile_id '{{profile_id}}', entries {json.dumps([{'id': v} for v in values])} to replace the whole list."),
+            _step_prompt(f"Replace the {name} for profile '{{profile_id}}' with exactly {json.dumps(values)}."),
             "list_replace", {"name": name, "spec": lt, "values": values}))
         if added is not None:
             steps.append(Step(f"lists.{name}.add", "lists", "manageLists",
                 f"{name}: add {added!r}",
-                _step_prompt(f"Use manageLists with operation 'add', list_type '{name}', profile_id '{{profile_id}}', entry '{added}' to add a second entry."),
+                _step_prompt(f"Add '{added}' to the {name} for profile '{{profile_id}}'."),
                 "list_add", {"name": name, "spec": lt, "values": values, "added": added}))
         if lt["updatable"]:
             steps.append(Step(f"lists.{name}.update", "lists", "manageLists",
                 f"{name}: update {values[0]!r} (active=false)",
-                _step_prompt(f"Use manageLists with operation 'update', list_type '{name}', profile_id '{{profile_id}}', entry_id '{values[0]}', entry {json.dumps({'active': False})} to update the entry."),
+                _step_prompt(f"Update the entry '{values[0]}' in the {name} for profile '{{profile_id}}' with {json.dumps({'active': False})}."),
                 "list_update", {"name": name, "spec": lt, "values": values}))
         steps.append(Step(f"lists.{name}.remove", "lists", "manageLists",
             f"{name}: remove {values[0]!r}",
-            _step_prompt(f"Use manageLists with operation 'remove', list_type '{name}', profile_id '{{profile_id}}', entry_id '{values[0]}' to remove that entry."),
+            _step_prompt(f"Remove '{values[0]}' from the {name} for profile '{{profile_id}}'."),
             "list_remove", {"name": name, "spec": lt, "values": values}))
         if added is not None:
             steps.append(Step(f"lists.{name}.remove_added", "lists", "manageLists",
                 f"{name}: remove the added entry {added!r}",
-                _step_prompt(f"Use manageLists with operation 'remove', list_type '{name}', profile_id '{{profile_id}}', entry_id '{added}' to remove the entry you added."),
+                _step_prompt(f"Remove '{added}' from the {name} for profile '{{profile_id}}'."),
                 "list_remove_added", {"name": name, "spec": lt, "values": values, "added": added}))
 
     # ---- rewrites: list, add each of 3, delete each ---------------------
     steps.append(Step("rewrites.list", "rewrites", "manageRewrites",
         "list existing rewrites",
-        _step_prompt("Use manageRewrites with operation 'list', profile_id '{profile_id}' to list the current rewrite records."),
+        _step_prompt("List the DNS rewrite records for profile '{profile_id}'."),
         "rewrite_list"))
     rewrite_records = [
         {"name": targets.rewrite_name, "content": targets.rewrite_content},
@@ -1152,25 +1152,25 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     for rec in rewrite_records:
         steps.append(Step(f"rewrites.add.{rec['name'].split('-')[2]}", "rewrites", "manageRewrites",
             f"add rewrite {rec['name']!r} -> {rec['content']!r}",
-            _step_prompt(f"Use manageRewrites with operation 'add', profile_id '{{profile_id}}', name '{rec['name']}', content '{rec['content']}' to add the rewrite record."),
+            _step_prompt(f"Add a DNS rewrite record for profile '{{profile_id}}': '{rec['name']}' -> '{rec['content']}'."),
             "rewrite_add", {"record": rec}))
     for rec in rewrite_records:
         steps.append(Step(f"rewrites.delete.{rec['name'].split('-')[2]}", "rewrites", "manageRewrites",
             f"delete rewrite {rec['name']!r}",
-            _step_prompt(f"Use manageRewrites with operation 'delete', profile_id '{{profile_id}}', name '{rec['name']}' to delete the rewrite record."),
+            _step_prompt(f"Delete the DNS rewrite record '{rec['name']}' from profile '{{profile_id}}'."),
             "rewrite_delete", {"record": rec}))
 
     # ---- analytics: aggregate + series per metric -----------------------
     for m in AGGREGATE_METRICS:
         vdata = {"metric": m}
-        instr = f"Use queryAnalytics with metric '{m}', profile_id '{{profile_id}}', from_time '-1d' to query aggregate totals"
+        instr = f"Query aggregate analytics for profile '{{profile_id}}' for metric '{m}' over the last day"
         if m == "destinations":
             instr += ", with destination_type 'countries'"
         steps.append(Step(f"analytics.aggregate.{m}", "analytics", "queryAnalytics",
             f"queryAnalytics aggregate {m}", _step_prompt(instr + "."), "analytics", vdata))
     for m in SERIES_METRICS:
         vdata_s: dict[str, Any] = {"metric": m, "series": True}
-        instr = f"Use queryAnalytics with metric '{m}', profile_id '{{profile_id}}', from_time '-1d', series true, interval 3600 to query the time series"
+        instr = f"Query the time series for profile '{{profile_id}}' for metric '{m}' over the last day (series=true, interval 3600)"
         if m == "destinations":
             instr += ", with destination_type 'countries'"
         steps.append(Step(f"analytics.series.{m}", "analytics", "queryAnalytics",
@@ -1179,34 +1179,34 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     # ---- doh -------------------------------------------------------------
     steps.append(Step("doh.lookup", "doh", "dohLookup",
         "dohLookup example.com through the test profile",
-        _step_prompt("Use dohLookup with domain 'example.com', profile_id '{profile_id}', record_type 'A' to perform a DNS-over-HTTPS lookup."),
+        _step_prompt("Perform a DNS-over-HTTPS lookup for example.com (A record) through profile '{profile_id}'."),
         "tool_ok"))
 
     # ---- plots: every metric --------------------------------------------
     for m in PLOT_METRICS:
         steps.append(Step(f"plots.{m}", "plots", "plotAnalytics",
             f"plotAnalytics {m} (PNG)",
-            _step_prompt(f"Use plotAnalytics with metric '{m}', profile_id '{{profile_id}}', from_time '-1d' to generate a plot image."),
+            _step_prompt(f"Generate an analytics plot for profile '{{profile_id}}' for metric '{m}' over the last day (PNG image)."),
             "plots", {"metric": m}))
 
     # ---- logs ------------------------------------------------------------
     steps.append(Step("logs.get", "logs", "manageLogs",
         "get recent query logs",
-        _step_prompt("Use manageLogs with operation 'get', profile_id '{profile_id}', limit 10 to retrieve recent query logs."),
+        _step_prompt("Retrieve the 10 most recent query logs for profile '{profile_id}'."),
         "logs_get"))
     steps.append(Step("logs.download", "logs", "manageLogs",
         "download retained logs (CSV)",
-        _step_prompt("Use manageLogs with operation 'download', profile_id '{profile_id}' to download the retained logs."),
+        _step_prompt("Download the retained query logs for profile '{profile_id}' as CSV."),
         "logs_download"))
     steps.append(Step("logs.clear", "logs", "manageLogs",
         "clear query logs",
-        _step_prompt("Use manageLogs with operation 'clear', profile_id '{profile_id}' to clear the query logs."),
+        _step_prompt("Clear the query logs for profile '{profile_id}'."),
         "logs_clear"))
 
     # ---- delete the profile (model performs the delete) -----------------
     steps.append(Step("profiles.delete", "profiles", "manageProfiles",
         f"delete the test profile {pn!r}",
-        _step_prompt("Use manageProfiles with operation 'delete' with profile_id '{profile_id}' to delete the test profile."),
+        _step_prompt("Delete the profile '{profile_id}'."),
         "profile_gone"))
 
     return steps
