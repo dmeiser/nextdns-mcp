@@ -1397,9 +1397,11 @@ def _feedback_block(step: Step, run: ActorRun, status: str, error: str, reason: 
     """Render the command -> actor -> verify -> result chain for one step."""
     out = [f"  COMMAND : {step.description}"]
     if run.tool_calls:
-        c = run.tool_calls[0]
-        out.append(f"  ACTOR   : called {c.name}({json.dumps(c.args)[:120]})"
-                   + ("" if c.ok else f"  -> ERROR: {(c.result_text or '')[:200]}"))
+        for c in run.tool_calls[:4]:
+            out.append(f"  ACTOR   : called {c.name}({json.dumps(c.args)[:120]})"
+                       + ("" if c.ok else f"  -> ERROR: {(c.result_text or '')[:200]}"))
+        if len(run.tool_calls) > 4:
+            out.append(f"  ACTOR   : ... {len(run.tool_calls) - 4} more call(s)")
     else:
         errs = _extract_error_events(run)
         if errs:
