@@ -1312,12 +1312,18 @@ async def _verify_step(
                 "", {"endpoint": f"GET {base_profile}/rewrites", "verified_absent": ok})
     if step.verify == "analytics":
         metric = vd["metric"]
-        suffix = ";series" if vd.get("series") else ""
-        rest = await _req("GET", f"{base_profile}/analytics/{metric}{suffix}")
+        series = bool(vd.get("series"))
+        suffix = ";series" if series else ""
+        params: dict[str, Any] = {"from": "-1d", "to": "now"}
+        if series:
+            params["interval"] = 3600
+        if metric == "destinations":
+            params["type"] = "countries"
+        rest = await _req("GET", f"{base_profile}/analytics/{metric}{suffix}", params=params)
         ok = bool(isinstance(rest, dict) and rest.get("ok"))
         return ("passed" if ok else "failed",
                 "" if ok else f"REST analytics {metric}{suffix} not ok",
-                "", {"endpoint": f"GET {base_profile}/analytics/{metric}{suffix}", "rest_status": common._resp_status(rest)})
+                "", {"endpoint": f"GET {base_profile}/analytics/{metric}{suffix}", "params": params, "rest_status": common._resp_status(rest)})
     if step.verify == "tool_ok":
         called_ok = any(c.name == step.tool and c.ok for c in run.tool_calls)
         if called_ok:
@@ -1325,7 +1331,8 @@ async def _verify_step(
         return ("failed", f"actor did not successfully call {step.tool}", "",
                 {"note": "no REST state to verify; relies on actor event stream"})
     if step.verify == "plots":
-        rest = await _req("GET", f"{base_profile}/analytics/status")
+        plot_pid = os.environ.get("NEXTDNS_PLOT_PROFILE") or pid
+        rest = await _req("GET", f"/profiles/{plot_pid}/analytics/status")
         has_data = common._analytics_has_data(rest)
         called_ok = any(c.name == step.tool and c.ok for c in run.tool_calls)
         if not has_data:
@@ -1469,7 +1476,10 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                                                   mcp_tool=step.tool, reason="test profile was not provisioned"))
                 continue
 
-            prompt = step.prompt.replace("{profile_id}", pid)
+            prompt_pid = pid
+            if step.section == "plots" and os.environ.get("NEXTDNS_PLOT_PROFILE"):
+                prompt_pid = os.environ["NEXTDNS_PLOT_PROFILE"]
+            prompt = step.prompt.replace("{profile_id}", prompt_pid)
             run: ActorRun | None = None
             status, error, reason = "failed", "", ""
             rest_v: dict[str, Any] = {}
@@ -1611,6 +1621,20 @@ def render_text_report(report: Report) -> str:
             lines.append(f"       error: {r.error}")
         elif r.status == "skipped" and r.reason and not fb:
             lines.append(f"       reason: {r.reason}")
+    lines.append("=" * 72)
+    # End-of-run summary: overall + per-section tally + failed steps.
+    lines.append("SUMMARY")
+    lines.append(f"  verdict: {s['verdict']}  ({s['passed']} passed, {s['skipped']} skipped, {s['failed']} failed of {s['total']} steps)")
+    by_section: dict[str, dict[str, int]] = {}
+    for r in report.results:
+        sec = by_section.setdefault(r.section, {"passed": 0, "skipped": 0, "failed": 0})
+        sec[r.status] += 1
+    for section, counts in by_section.items():
+        lines.append(f"  {section:12s}: {counts['passed']} passed, {counts['skipped']} skipped, {counts['failed']} failed")
+    failed_ids = [r.id for r in report.results if r.status == "failed"]
+    if failed_ids:
+        lines.append("  failed steps:")
+        lines.extend(f"    - {fid}" for fid in failed_ids)
     lines.append("=" * 72)
     return "\n".join(lines)
 
