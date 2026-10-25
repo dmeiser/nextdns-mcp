@@ -1058,8 +1058,7 @@ def _step_prompt(task: str) -> str:
     verifies the resulting state via REST.
     """
     return (
-        "You are a validation agent for the NextDNS MCP server.\n"
-        "NextDNS MCP tools are available to you: " + ", ".join(ALLOWED_TOOLS) + ".\n\n"
+        "You are a validation agent for the NextDNS MCP server.\n\n"
         "Task: " + task + "\n\n"
         "Rules:\n"
         "- Perform exactly this one task with a single operation, then stop.\n"
