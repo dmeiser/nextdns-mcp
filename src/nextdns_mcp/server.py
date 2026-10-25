@@ -59,6 +59,13 @@ def build_mcp_server() -> FastMCP:
     server.prompt(name="nextdns-usage-guide", description="Comprehensive guide for using the NextDNS MCP server tools")(
         nextdns_usage_guide
     )
+    # Also expose the guide as an MCP *resource* so models that discover tools
+    # by enumerating resources find actionable documentation, not an empty list.
+    server.resource(
+        "nextdns://usage",
+        name="nextdns-usage-guide",
+        description="Comprehensive guide for using the NextDNS MCP server tools",
+    )(nextdns_usage_guide)
     return server
 
 
