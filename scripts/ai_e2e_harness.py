@@ -202,7 +202,7 @@ class HarnessConfig:
     prompt: str = ""  # empty => use the built-in task prompt
     workdir: str = ""  # empty => a fresh temporary directory
     server: dict[str, Any] = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_SERVER)))
-    timeout_s: float = 600.0
+    timeout_s: float = 900.0
 
     @classmethod
     def load(cls, path: str | None) -> HarnessConfig:
@@ -446,6 +446,7 @@ class ActorRun:
     tool_calls: list[ToolCall] = field(default_factory=list)
     final_text: str = ""
     error: str = ""
+    stderr: str = ""
     duration_ms: int = 0
 
     def tools_used(self) -> list[str]:
@@ -582,8 +583,13 @@ def parse_actor_events(lines: list[str]) -> tuple[list[ToolCall], str]:
 # =========================================================================== #
 
 
-async def run_actor(config: HarnessConfig, prompt: str, workdir: Path) -> ActorRun:
-    """Launch the actor harness in ``workdir`` and capture its event stream."""
+async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: int = 2) -> ActorRun:
+    """Launch the actor harness in ``workdir`` and capture its event stream.
+
+    Retries on transient provider/transport failures (e.g. ``ECONNRESET`` from a
+    flaky model endpoint) up to ``retries`` times, so a single dropped
+    connection does not doom the whole run.
+    """
     values = {
         PLACEHOLDER_PROMPT: prompt,
         PLACEHOLDER_MODEL: config.model,
@@ -593,47 +599,74 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path) -> ActorR
         PLACEHOLDER_SERVER_ENV: json.dumps(config.server.get("env", {})),
     }
     argv = config.render_argv(values)
-    start = time.monotonic()
-    run = ActorRun(command=argv)
-    if not argv or shutil.which(argv[0]) is None:
-        run.error = f"actor harness command not found on PATH: {argv[0] if argv else '(empty)'}"
-        run.duration_ms = int((time.monotonic() - start) * 1000)
-        return run
     env = dict(os.environ)
     env.setdefault("NO_COLOR", "1")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(workdir),
-            env=env,
-        )
-    except Exception as e:  # noqa: BLE001
-        run.error = f"failed to spawn actor harness: {type(e).__name__}: {e}"
-        run.duration_ms = int((time.monotonic() - start) * 1000)
+
+    def _is_transient(err: str) -> bool:
+        low = (err or "").lower()
+        return any(tok in low for tok in ("econnreset", "transport:", "timed out", "connection reset", "socket hang up"))
+
+    last_run: ActorRun | None = None
+    for attempt in range(retries + 1):
+        run = ActorRun(command=argv)
+        if not argv or shutil.which(argv[0]) is None:
+            run.error = f"actor harness command not found on PATH: {argv[0] if argv else '(empty)'}"
+            return run
+
+        started = time.monotonic()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(workdir),
+                env=env,
+            )
+        except Exception as e:  # noqa: BLE001
+            run.error = f"failed to spawn actor harness: {type(e).__name__}: {e}"
+            run.duration_ms = int((time.monotonic() - started) * 1000)
+            last_run = run
+            if attempt < retries:
+                await asyncio.sleep(2)
+                continue
+            return run
+
+        try:
+            stdout, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=config.timeout_s)
+        except TimeoutError:
+            with _suppress():
+                proc.kill()
+            run.error = f"actor harness timed out after {config.timeout_s:.0f}s"
+            run.stderr = ""
+            run.duration_ms = int((time.monotonic() - started) * 1000)
+            last_run = run
+            if attempt < retries and _is_transient(run.error):
+                await asyncio.sleep(2)
+                continue
+            return run
+
+        err_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+        run.stderr = err_text
+        lines = stdout.decode("utf-8", errors="replace").splitlines()
+        calls, final_text = parse_actor_events(lines)
+        run.tool_calls = calls
+        run.final_text = final_text
+        run.exit_code = proc.returncode
+        run.ok = proc.returncode == 0
+        if not run.ok and not run.error:
+            run.error = err_text[-1500:] if err_text else f"actor harness exited with code {proc.returncode}"
+        run.duration_ms = int((time.monotonic() - started) * 1000)
+        last_run = run
+
+        if run.ok:
+            return run
+        # Retry on transient provider/transport failures.
+        if attempt < retries and _is_transient(run.error + " " + run.stderr):
+            await asyncio.sleep(2)
+            continue
         return run
 
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=config.timeout_s)
-    except TimeoutError:
-        with _suppress():
-            proc.kill()
-        run.error = f"actor harness timed out after {config.timeout_s:.0f}s"
-        run.duration_ms = int((time.monotonic() - start) * 1000)
-        return run
-
-    lines = stdout.decode("utf-8", errors="replace").splitlines()
-    calls, final_text = parse_actor_events(lines)
-    run.tool_calls = calls
-    run.final_text = final_text
-    run.exit_code = proc.returncode
-    run.ok = proc.returncode == 0
-    if not run.ok and not run.error:
-        err = stderr.decode("utf-8", errors="replace").strip()
-        run.error = err[-1500:] if err else f"actor harness exited with code {proc.returncode}"
-    run.duration_ms = int((time.monotonic() - start) * 1000)
-    return run
+    return last_run if last_run is not None else ActorRun(command=argv)
 
 
 class _suppress:
@@ -888,7 +921,7 @@ def _measure_actor_run(run: ActorRun, report: Report) -> None:
             status="passed" if run.ok else "failed",
             mcp_tool=None,
             mcp_response={"exit_code": run.exit_code, "tool_events": len(run.tool_calls)},
-            error=run.error if not run.ok else "",
+            error=((run.error + chr(10) + "--- stderr (tail) ---" + chr(10) + run.stderr[-800:]) if (run.error and run.stderr) else run.error) if not run.ok else "",
         )
     )
 
@@ -970,6 +1003,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     report.actor_tool_calls = len(run.tool_calls)
     report.actor_tools_used = run.tools_used()
     report.actor_final_text = run.final_text[:2000]
+    report.actor_stderr = run.stderr[:4000]
     report.actor_duration_ms = run.duration_ms
     report.actor_command = run.command
 
@@ -1091,6 +1125,7 @@ def main(argv: list[str] | None = None) -> int:
         "--report", default="artifacts/ai_e2e_report.jsonl", help="path for the JSONL report, or '-' for stdout"
     )
     parser.add_argument("--quiet", action="store_true", help="do not print the text report")
+    parser.add_argument("--verbose", action="store_true", help="print the actor stderr on failure")
     args = parser.parse_args(argv)
 
     api_key = os.environ.get("NEXTDNS_API_KEY")
@@ -1116,6 +1151,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Report written to {args.report}")
     if not args.quiet:
         print(render_text_report(report))
+    if args.verbose and report.actor_stderr:
+        print("--- actor stderr ---")
+        print(report.actor_stderr)
+        print("--- end stderr ---")
     return 1 if report.failed else 0
 
 

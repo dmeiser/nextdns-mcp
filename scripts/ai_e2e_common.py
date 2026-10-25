@@ -233,6 +233,7 @@ class Report:
     actor_tool_calls: int = 0
     actor_tools_used: list[str] = field(default_factory=list)
     actor_final_text: str = ""
+    actor_stderr: str = ""
     actor_duration_ms: int = 0
 
     @property
