@@ -207,7 +207,8 @@ class HarnessConfig:
     prompt: str = ""  # empty => use the built-in task prompt
     workdir: str = ""  # empty => a fresh temporary directory
     server: dict[str, Any] = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_SERVER)))
-    timeout_s: float = 900.0
+    timeout_s: float = 900.0  # overall run budget
+    step_timeout_s: float = 300.0  # per-step actor timeout
 
     @classmethod
     def load(cls, path: str | None) -> HarnessConfig:
@@ -227,6 +228,8 @@ class HarnessConfig:
                 cfg.workdir = str(data["workdir"])
             if "timeout_s" in data:
                 cfg.timeout_s = float(data["timeout_s"])
+            if "step_timeout_s" in data:
+                cfg.step_timeout_s = float(data["step_timeout_s"])
             if isinstance(data.get("server"), dict):
                 srv = data["server"]
                 if "command" in srv:
@@ -589,7 +592,7 @@ def parse_actor_events(lines: list[str]) -> tuple[list[ToolCall], str]:
 # =========================================================================== #
 
 
-async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: int = 2) -> ActorRun:
+async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: int = 1) -> ActorRun:
     """Launch the actor harness in ``workdir`` and capture its event stream.
 
     Retries on transient provider/transport failures (e.g. ``ECONNRESET`` from a
@@ -1000,83 +1003,522 @@ def _progress(msg: str) -> None:
     print(f"[e2e] {msg}", file=sys.stderr, flush=True)
 
 
+# =========================================================================== #
+# Per-step harness: the model performs ONE operation per step; the harness
+# verifies that step via REST before moving to the next. This mirrors the
+# ~90-step agent checklist exactly: "create the profile" then check it,
+# "update the profile" then check it, one at a time.
+# =========================================================================== #
+
+
+@dataclass
+class Step:
+    """One checklist operation: an actor prompt plus a REST verifier."""
+
+    id: str
+    section: str
+    tool: str  # the MCP tool the model is instructed to use
+    description: str
+    prompt: str  # instruction to the actor ("{profile_id}" rendered at run time)
+    verify: str  # verifier key in _verify_step
+    vdata: dict[str, Any] = field(default_factory=dict)
+
+
+def _step_prompt(instruction: str) -> str:
+    """Wrap a single-step instruction with the actor contract."""
+    return (
+        "You are a validation agent for the NextDNS MCP server. You have exactly these "
+        "NextDNS MCP tools available: " + ", ".join(ALLOWED_TOOLS) + ".\n\n"
+        + instruction
+        + "\n\nRules:\n"
+        "- Use exactly the tool call described above and nothing else.\n"
+        "- Do not modify any code or configuration.\n"
+        "- If the call fails, report the error and stop.\n"
+        "- When the call succeeds, stop immediately."
+    )
+
+
+def build_steps(targets: TaskTargets) -> list[Step]:
+    """Build the full per-step checklist (~89 steps) for this run."""
+    pn = targets.profile_name
+    rn = targets.renamed_name
+    tag = targets.tag
+    entries = targets.list_entries
+    steps: list[Step] = []
+
+    # ---- profiles -------------------------------------------------------
+    steps.append(Step("profiles.create", "profiles", "manageProfiles",
+        f"create the test profile {pn!r}",
+        _step_prompt(f"Use manageProfiles with operation 'create' to create a new profile named exactly '{pn}'."),
+        "profile_exists"))
+    steps.append(Step("profiles.list", "profiles", "manageProfiles",
+        "list all profiles and find the new one",
+        _step_prompt(f"Use manageProfiles with operation 'list' to list all profiles and confirm '{pn}' is present."),
+        "profile_exists"))
+    steps.append(Step("profiles.get", "profiles", "manageProfiles",
+        "get the test profile by id",
+        _step_prompt("Use manageProfiles with operation 'get' with profile_id '{profile_id}' to fetch the test profile."),
+        "profile_exists"))
+    steps.append(Step("profiles.update", "profiles", "manageProfiles",
+        f"rename the test profile to {rn!r}",
+        _step_prompt(f"Use manageProfiles with operation 'update' with profile_id '{{profile_id}}' to rename the profile to exactly '{rn}'."),
+        "profile_renamed"))
+
+    # ---- settings: read + update per category ---------------------------
+    for cat, spec in SETTINGS_CATEGORIES.items():
+        steps.append(Step(f"settings.{cat}.read", "settings", "manageSettings",
+            f"{cat}: read current settings",
+            _step_prompt(f"Use manageSettings with operation 'get', category '{cat}', profile_id '{{profile_id}}' to read the current settings, and report them."),
+            "settings_read", {"cat": cat, "spec": spec}))
+        steps.append(Step(f"settings.{cat}.update", "settings", "manageSettings",
+            f"{cat}: update to {json.dumps(spec['set'])}",
+            _step_prompt(f"Use manageSettings with operation 'update', category '{cat}', profile_id '{{profile_id}}', settings {json.dumps(spec['set'])} to update the settings."),
+            "settings_update", {"cat": cat, "spec": spec}))
+
+    # ---- lists: read/replace/add/update/remove per type -----------------
+    for lt in _LIST_SPECS:
+        name = lt["name"]
+        values = [entries[name]]
+        added = common._list_added(name, tag)
+        steps.append(Step(f"lists.{name}.read", "lists", "manageLists",
+            f"{name}: read current list",
+            _step_prompt(f"Use manageLists with operation 'get', list_type '{name}', profile_id '{{profile_id}}' to read the current list."),
+            "list_read", {"name": name, "spec": lt}))
+        steps.append(Step(f"lists.{name}.replace", "lists", "manageLists",
+            f"{name}: replace with {values}",
+            _step_prompt(f"Use manageLists with operation 'replace', list_type '{name}', profile_id '{{profile_id}}', entries {json.dumps([{'id': v} for v in values])} to replace the whole list."),
+            "list_replace", {"name": name, "spec": lt, "values": values}))
+        if added is not None:
+            steps.append(Step(f"lists.{name}.add", "lists", "manageLists",
+                f"{name}: add {added!r}",
+                _step_prompt(f"Use manageLists with operation 'add', list_type '{name}', profile_id '{{profile_id}}', entry '{added}' to add a second entry."),
+                "list_add", {"name": name, "spec": lt, "values": values, "added": added}))
+        if lt["updatable"]:
+            steps.append(Step(f"lists.{name}.update", "lists", "manageLists",
+                f"{name}: update {values[0]!r} (active=false)",
+                _step_prompt(f"Use manageLists with operation 'update', list_type '{name}', profile_id '{{profile_id}}', entry_id '{values[0]}', entry {json.dumps({'active': False})} to update the entry."),
+                "list_update", {"name": name, "spec": lt, "values": values}))
+        steps.append(Step(f"lists.{name}.remove", "lists", "manageLists",
+            f"{name}: remove {values[0]!r}",
+            _step_prompt(f"Use manageLists with operation 'remove', list_type '{name}', profile_id '{{profile_id}}', entry_id '{values[0]}' to remove that entry."),
+            "list_remove", {"name": name, "spec": lt, "values": values}))
+        if added is not None:
+            steps.append(Step(f"lists.{name}.remove_added", "lists", "manageLists",
+                f"{name}: remove the added entry {added!r}",
+                _step_prompt(f"Use manageLists with operation 'remove', list_type '{name}', profile_id '{{profile_id}}', entry_id '{added}' to remove the entry you added."),
+                "list_remove_added", {"name": name, "spec": lt, "values": values, "added": added}))
+
+    # ---- rewrites: list, add each of 3, delete each ---------------------
+    steps.append(Step("rewrites.list", "rewrites", "manageRewrites",
+        "list existing rewrites",
+        _step_prompt("Use manageRewrites with operation 'list', profile_id '{profile_id}' to list the current rewrite records."),
+        "rewrite_list"))
+    rewrite_records = [
+        {"name": targets.rewrite_name, "content": targets.rewrite_content},
+        {"name": f"ai-e2e-aaaa-{tag}.example.com", "content": "2001:db8::dead"},
+        {"name": f"ai-e2e-cname-{tag}.example.com", "content": f"ai-e2e-target-{tag}.example.com"},
+    ]
+    for rec in rewrite_records:
+        steps.append(Step(f"rewrites.add.{rec['name'].split('-')[2]}", "rewrites", "manageRewrites",
+            f"add rewrite {rec['name']!r} -> {rec['content']!r}",
+            _step_prompt(f"Use manageRewrites with operation 'add', profile_id '{{profile_id}}', name '{rec['name']}', content '{rec['content']}' to add the rewrite record."),
+            "rewrite_add", {"record": rec}))
+    for rec in rewrite_records:
+        steps.append(Step(f"rewrites.delete.{rec['name'].split('-')[2]}", "rewrites", "manageRewrites",
+            f"delete rewrite {rec['name']!r}",
+            _step_prompt(f"Use manageRewrites with operation 'delete', profile_id '{{profile_id}}', name '{rec['name']}' to delete the rewrite record."),
+            "rewrite_delete", {"record": rec}))
+
+    # ---- analytics: aggregate + series per metric -----------------------
+    for m in AGGREGATE_METRICS:
+        vdata = {"metric": m}
+        instr = f"Use queryAnalytics with metric '{m}', profile_id '{{profile_id}}', from_time '-1d' to query aggregate totals"
+        if m == "destinations":
+            instr += ", with destination_type 'countries'"
+        steps.append(Step(f"analytics.aggregate.{m}", "analytics", "queryAnalytics",
+            f"queryAnalytics aggregate {m}", _step_prompt(instr + "."), "analytics", vdata))
+    for m in SERIES_METRICS:
+        vdata_s: dict[str, Any] = {"metric": m, "series": True}
+        instr = f"Use queryAnalytics with metric '{m}', profile_id '{{profile_id}}', from_time '-1d', series true, interval 3600 to query the time series"
+        if m == "destinations":
+            instr += ", with destination_type 'countries'"
+        steps.append(Step(f"analytics.series.{m}", "analytics", "queryAnalytics",
+            f"queryAnalytics series {m}", _step_prompt(instr + "."), "analytics", vdata_s))
+
+    # ---- doh -------------------------------------------------------------
+    steps.append(Step("doh.lookup", "doh", "dohLookup",
+        "dohLookup example.com through the test profile",
+        _step_prompt("Use dohLookup with domain 'example.com', profile_id '{profile_id}', record_type 'A' to perform a DNS-over-HTTPS lookup."),
+        "tool_ok"))
+
+    # ---- plots: every metric --------------------------------------------
+    for m in PLOT_METRICS:
+        steps.append(Step(f"plots.{m}", "plots", "plotAnalytics",
+            f"plotAnalytics {m} (PNG)",
+            _step_prompt(f"Use plotAnalytics with metric '{m}', profile_id '{{profile_id}}', from_time '-1d' to generate a plot image."),
+            "plots", {"metric": m}))
+
+    # ---- logs ------------------------------------------------------------
+    steps.append(Step("logs.get", "logs", "manageLogs",
+        "get recent query logs",
+        _step_prompt("Use manageLogs with operation 'get', profile_id '{profile_id}', limit 10 to retrieve recent query logs."),
+        "logs_get"))
+    steps.append(Step("logs.download", "logs", "manageLogs",
+        "download retained logs (CSV)",
+        _step_prompt("Use manageLogs with operation 'download', profile_id '{profile_id}' to download the retained logs."),
+        "logs_download"))
+    steps.append(Step("logs.clear", "logs", "manageLogs",
+        "clear query logs",
+        _step_prompt("Use manageLogs with operation 'clear', profile_id '{profile_id}' to clear the query logs."),
+        "logs_clear"))
+
+    # ---- delete the profile (model performs the delete) -----------------
+    steps.append(Step("profiles.delete", "profiles", "manageProfiles",
+        f"delete the test profile {pn!r}",
+        _step_prompt("Use manageProfiles with operation 'delete' with profile_id '{profile_id}' to delete the test profile."),
+        "profile_gone"))
+
+    return steps
+
+
+async def _verify_step(
+    m: MeasureClient, targets: TaskTargets, pid: str, step: Step, run: ActorRun
+) -> tuple[str, str, str, dict[str, Any]]:
+    """REST-verify one step. Returns (status, error, reason, rest_verification)."""
+    vd = step.vdata
+    base_profile = f"/profiles/{pid}" if pid else None
+
+    async def _req(method: str, path: str, **kw: Any) -> Any:
+        if method == "GET":
+            return await m.rest_get(path, **kw)
+        return await m.rest_delete(path)
+
+    if step.verify == "profile_exists":
+        prof = await m.find_profile(targets.profile_name)
+        if prof is None:
+            prof = await m.find_profile(targets.renamed_name)
+        ok = prof is not None
+        return ("passed" if ok else "failed",
+                "" if ok else f"profile {targets.profile_name!r} not found via REST",
+                "", {"endpoint": "GET /profiles", "verified_present": ok})
+    if step.verify == "profile_renamed":
+        prof = await m.find_profile(targets.renamed_name)
+        ok = prof is not None and (not pid or str(prof.get("id")) == pid)
+        return ("passed" if ok else "failed",
+                "" if ok else f"profile not found under renamed name {targets.renamed_name!r}",
+                "", {"endpoint": "GET /profiles", "verified_renamed": ok})
+    if step.verify == "profile_gone":
+        gone = (not pid) or await _profile_gone(m, pid, targets)
+        return ("passed" if gone else "failed",
+                "" if gone else f"profile {pid} is still present after delete",
+                "", {"endpoint": f"GET /profiles/{pid}", "verified_gone": gone})
+    if step.verify == "settings_read":
+        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        ok = bool(isinstance(rest, dict) and rest.get("ok"))
+        return ("passed" if ok else "failed",
+                "" if ok else f"REST GET settings/{vd['cat']} not ok",
+                "", {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "rest_status": common._resp_status(rest)})
+    if step.verify == "settings_update":
+        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        ok = common._verify_settings_assert(rest, vd["spec"]["assert"])
+        return ("passed" if ok else "failed",
+                "" if ok else f"settings/{vd['cat']} read-back does not match {vd['spec']['assert']}",
+                "", {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified": ok})
+    if step.verify in ("list_read",):
+        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        ok = bool(isinstance(rest, dict) and rest.get("ok"))
+        return ("passed" if ok else "failed",
+                "" if ok else f"REST GET list {vd['name']} not ok",
+                "", {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "rest_status": common._resp_status(rest)})
+    if step.verify == "list_replace":
+        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        ok = common._list_contains(rest, vd["values"])
+        return ("passed" if ok else "failed",
+                "" if ok else f"list {vd['name']} does not contain {vd['values']}",
+                "", {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified": ok})
+    if step.verify == "list_add":
+        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        ok = common._list_contains(rest, vd["values"] + [vd["added"]])
+        return ("passed" if ok else "failed",
+                "" if ok else f"list {vd['name']} does not contain added entry {vd['added']!r}",
+                "", {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified": ok})
+    if step.verify == "list_update":
+        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        ok = common._list_contains(rest, vd["values"])
+        return ("passed" if ok else "failed",
+                "" if ok else f"list {vd['name']} lost entry {vd['values']} after update",
+                "", {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified": ok})
+    if step.verify == "list_remove":
+        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        ok = common._list_absent(rest, vd["values"])
+        return ("passed" if ok else "failed",
+                "" if ok else f"list {vd['name']} still contains {vd['values']}",
+                "", {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified_absent": ok})
+    if step.verify == "list_remove_added":
+        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        ok = common._list_absent(rest, [vd["added"]])
+        return ("passed" if ok else "failed",
+                "" if ok else f"list {vd['name']} still contains added entry {vd['added']!r}",
+                "", {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified_absent": ok})
+    if step.verify == "rewrite_list":
+        rest = await _req("GET", f"{base_profile}/rewrites")
+        ok = bool(isinstance(rest, dict) and rest.get("ok"))
+        return ("passed" if ok else "failed",
+                "" if ok else "REST GET rewrites not ok",
+                "", {"endpoint": f"GET {base_profile}/rewrites", "rest_status": common._resp_status(rest)})
+    if step.verify == "rewrite_add":
+        rec = vd["record"]
+        rest = await _req("GET", f"{base_profile}/rewrites")
+        ok = common._rewrites_contains(rest, [rec["name"]])
+        return ("passed" if ok else "failed",
+                "" if ok else f"rewrite {rec['name']!r} not found via REST",
+                "", {"endpoint": f"GET {base_profile}/rewrites", "verified": ok})
+    if step.verify == "rewrite_delete":
+        rec = vd["record"]
+        rest = await _req("GET", f"{base_profile}/rewrites")
+        ok = not common._rewrites_contains(rest, [rec["name"]])
+        return ("passed" if ok else "failed",
+                "" if ok else f"rewrite {rec['name']!r} still present after delete",
+                "", {"endpoint": f"GET {base_profile}/rewrites", "verified_absent": ok})
+    if step.verify == "analytics":
+        metric = vd["metric"]
+        suffix = ";series" if vd.get("series") else ""
+        rest = await _req("GET", f"{base_profile}/analytics/{metric}{suffix}")
+        ok = bool(isinstance(rest, dict) and rest.get("ok"))
+        return ("passed" if ok else "failed",
+                "" if ok else f"REST analytics {metric}{suffix} not ok",
+                "", {"endpoint": f"GET {base_profile}/analytics/{metric}{suffix}", "rest_status": common._resp_status(rest)})
+    if step.verify == "tool_ok":
+        called_ok = any(c.name == step.tool and c.ok for c in run.tool_calls)
+        if called_ok:
+            return ("passed", "", "", {"note": "read-only DoH resolution verified via actor event stream"})
+        return ("failed", f"actor did not successfully call {step.tool}", "",
+                {"note": "no REST state to verify; relies on actor event stream"})
+    if step.verify == "plots":
+        rest = await _req("GET", f"{base_profile}/analytics/status")
+        has_data = common._analytics_has_data(rest)
+        called_ok = any(c.name == step.tool and c.ok for c in run.tool_calls)
+        if not has_data:
+            return ("skipped", "", "no query history on the fresh profile; plot checks need data",
+                    {"endpoint": f"GET {base_profile}/analytics/status", "has_data": False})
+        return ("passed" if called_ok else "failed",
+                "" if called_ok else f"actor did not successfully call {step.tool}",
+                "", {"has_data": True, "note": "PNG payload verified via actor event stream"})
+    if step.verify == "logs_get":
+        rest = await _req("GET", f"{base_profile}/logs", params={"limit": 10})
+        ok = bool(isinstance(rest, dict) and rest.get("ok"))
+        return ("passed" if ok else "failed",
+                "" if ok else "REST GET logs not ok",
+                "", {"endpoint": f"GET {base_profile}/logs", "rest_status": common._resp_status(rest)})
+    if step.verify == "logs_download":
+        rest = await _req("GET", f"{base_profile}/logs", params={"limit": 10})
+        has = common._analytics_has_data(rest)
+        if not has:
+            return ("skipped", "", "no retained logs yet (NextDNS log delay on a fresh profile)",
+                    {"endpoint": f"GET {base_profile}/logs"})
+        called_ok = any(c.name == step.tool and c.ok for c in run.tool_calls)
+        return ("passed" if called_ok else "failed",
+                "" if called_ok else "actor did not successfully call manageLogs(download)",
+                "", {"note": "CSV download verified via actor event stream"})
+    if step.verify == "logs_clear":
+        rest = await m.rest_delete(f"{base_profile}/logs")
+        ok = bool(isinstance(rest, dict) and rest.get("ok"))
+        return ("passed" if ok else "failed",
+                "" if ok else "REST DELETE logs not ok",
+                "", {"endpoint": f"DELETE {base_profile}/logs", "rest_status": common._resp_status(rest)})
+    return ("failed", f"unknown verifier {step.verify!r}", "", {})
+
+
+def _tool_observed(run: ActorRun, tool: str) -> bool:
+    """Best-effort: was this tool used, by parsed events or raw stream text?"""
+    if any(c.name == tool for c in run.tool_calls):
+        return True
+    return any(tool in line for line in run.raw_lines)
+
+
+def _extract_error_events(run: ActorRun) -> list[str]:
+    """Pull provider/actor error messages out of the raw event stream."""
+    errs: list[str] = []
+    for line in run.raw_lines:
+        try:
+            ev = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "error":
+            e = ev.get("error") or {}
+            msg = e.get("message") if isinstance(e, dict) else str(e)
+            if msg:
+                errs.append(str(msg))
+    if run.error:
+        errs.append(run.error)
+    return errs
+
+
+def _summarize_calls(run: ActorRun) -> list[dict[str, Any]]:
+    """Compact record of each tool call the actor made."""
+    return [
+        {"tool": c.name, "args": c.args, "ok": c.ok, "result": (c.result_text or "")[:300]}
+        for c in run.tool_calls
+    ]
+
+
+def _check_single_command(run: ActorRun, step: Step) -> str | None:
+    """Enforce the 1-command contract. Returns an error string on violation."""
+    calls = run.tool_calls
+    if not calls:
+        if run.exit_code == 0:
+            return (
+                f"model made NO tool call (expected exactly one '{step.tool}' call). "
+                f"It replied: {(run.final_text or '')[:200]!r}"
+            )
+        return None  # actor itself failed; failure reason comes from error events
+    if len(calls) > 1:
+        made = ", ".join(f"{c.name}({json.dumps(c.args)[:80]})" for c in calls)
+        return f"model made {len(calls)} tool calls instead of 1 (expected only '{step.tool}'): {made}"
+    c = calls[0]
+    if c.name != step.tool:
+        return f"model called '{c.name}' instead of the expected '{step.tool}' (args: {json.dumps(c.args)[:120]})"
+    if not c.ok:
+        return f"model's {step.tool} call failed: {(c.result_text or 'unknown error')[:300]}"
+    return None
+
+
+def _feedback_block(step: Step, run: ActorRun, status: str, error: str, reason: str,
+                    rest_v: dict[str, Any]) -> list[str]:
+    """Render the command -> actor -> verify -> result chain for one step."""
+    out = [f"  COMMAND : {step.description}"]
+    if run.tool_calls:
+        c = run.tool_calls[0]
+        out.append(f"  ACTOR   : called {c.name}({json.dumps(c.args)[:120]})"
+                   + ("" if c.ok else f"  -> ERROR: {(c.result_text or '')[:200]}"))
+    else:
+        errs = _extract_error_events(run)
+        if errs:
+            out.append(f"  ACTOR   : no tool call — {errs[0][:250]}")
+        elif run.exit_code not in (0, None):
+            out.append(f"  ACTOR   : no tool call — harness exited code {run.exit_code}"
+                       + (f", stderr: {run.stderr[:200]}" if run.stderr else ""))
+        else:
+            out.append(f"  ACTOR   : no tool call — replied: {(run.final_text or '')[:200]!r}")
+    endpoint = rest_v.get("endpoint", "")
+    detail = {k: v for k, v in rest_v.items() if k not in ("endpoint",) and v not in (None, "", {}, [])}
+    out.append(f"  VERIFY  : {endpoint or '(no REST endpoint)'}"
+               + (f"  {json.dumps(detail)[:200]}" if detail else ""))
+    tag = {"passed": "PASS", "failed": "FAIL", "skipped": "SKIP"}[status]
+    why = error or reason
+    out.append(f"  RESULT  : {tag}" + (f"  — {why}" if why else ""))
+    return out
+
+
 async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     tag = common._random_tag()
     resolved_profile_name = common._resolve_profile_name(config.profile_name or None)
     targets = TaskTargets(profile_name=resolved_profile_name, tag=tag)
     report = Report(started_at=time.time(), api_key_present=True, profile_name=targets.profile_name)
-    report.actor_kind = "mcp-native-harness"
+    report.actor_kind = "mcp-native-harness (per-step)"
     report.actor_command = config.command
 
-    prompt = config.prompt or build_task_prompt(targets)
-    _progress(f"profile name: {targets.profile_name}")
+    steps = build_steps(targets)
+    _progress(f"profile name: {targets.profile_name}  ({len(steps)} steps)")
     workdir = Path(config.workdir) if config.workdir else Path(tempfile.mkdtemp(prefix="nextdns_e2e_"))
     workdir.mkdir(parents=True, exist_ok=True)
     write_mcp_config(config, workdir)
-    _progress(f"launching actor harness (timeout {config.timeout_s:.0f}s): {' '.join(config.command[:3])}...")
-    run = await run_actor(config, prompt, workdir)
-    _progress(f"actor finished: exit={run.exit_code}, {len(run.tool_calls)} tool event(s), {run.duration_ms}ms")
-    report.actor_tool_calls = len(run.tool_calls)
-    report.actor_tools_used = run.tools_used()
-    report.actor_final_text = run.final_text[:2000]
-    report.actor_stderr = run.stderr[:4000]
-    report.actor_raw_lines = list(run.raw_lines)
-    report.actor_duration_ms = run.duration_ms
-    report.actor_command = run.command
 
-    _measure_actor_run(run, report)
+    step_cfg = HarnessConfig()
+    step_cfg.command = list(config.command)
+    step_cfg.model = config.model
+    step_cfg.server = config.server
+    step_cfg.timeout_s = config.step_timeout_s
+
+    pid = ""
+    started = time.monotonic()
+    budget = config.timeout_s
+    total_events = 0
+    tools_used: list[str] = []
+    last_stderr = ""
+    all_raw: list[str] = []
 
     async with MeasureClient(api_key) as m:
-        _progress("measuring: profile provision + rename")
-        prof = await _measure_profile(m, targets, report)
-        if prof is not None:
-            pid = str(prof.get("id"))
+        # Remove stale same-name profiles left by earlier interrupted runs so
+        # they cannot pollute this run's verification.
+        for nm in (targets.profile_name, targets.renamed_name):
+            stale = await m.find_profile(nm)
+            if stale is not None:
+                _progress(f"removing stale profile {stale.get('id')} ({nm}) from an earlier run")
+                await m.rest_delete(f"/profiles/{stale['id']}")
+
+        for i, step in enumerate(steps, 1):
+            if time.monotonic() - started > budget:
+                rest = CheckResult(step.id, step.section, step.description, "skipped",
+                                   mcp_tool=step.tool, reason=f"overall time budget ({budget:.0f}s) exhausted")
+                report.results.append(rest)
+                continue
+            if step.section != "profiles" and not pid:
+                report.results.append(CheckResult(step.id, step.section, step.description, "skipped",
+                                                  mcp_tool=step.tool, reason="test profile was not provisioned"))
+                continue
+
+            prompt = step.prompt.replace("{profile_id}", pid)
+            _progress(f"[{i}/{len(steps)}] {step.id}")
+            run = await run_actor(step_cfg, prompt, workdir, retries=1)
+            total_events += len(run.tool_calls)
+            for t in run.tools_used():
+                if t not in tools_used:
+                    tools_used.append(t)
+            if run.stderr:
+                last_stderr = run.stderr
+            all_raw.extend(run.raw_lines)
+
+            status, error, reason, rest_v = await _verify_step(m, targets, pid, step, run)
+
+            # Enforce the 1-command contract: exactly one call, the expected tool.
+            violation = _check_single_command(run, step)
+            if violation and status == "passed":
+                status, error = "failed", violation
+
+            fb = _feedback_block(step, run, status, error, reason, rest_v)
+            for ln in fb:
+                _progress(ln)
+
+            r = CheckResult(
+                id=step.id, section=step.section, description=step.description, status=status,
+                mcp_tool=step.tool,
+                mcp_request={"prompt": prompt[:500], "exit_code": run.exit_code, "tool_events": len(run.tool_calls)},
+                mcp_response={
+                    "calls": _summarize_calls(run),
+                    "final_text": run.final_text[:1000],
+                    "error_events": _extract_error_events(run)[:3],
+                    "feedback": fb,
+                },
+                rest_verification=rest_v, reason=reason, error=error, duration_ms=run.duration_ms,
+            )
+            report.results.append(r)
+
+            # Capture the profile id as soon as the profile exists.
+            if not pid and status == "passed" and step.verify == "profile_exists":
+                prof = await m.find_profile(targets.profile_name) or await m.find_profile(targets.renamed_name)
+                if prof is not None:
+                    pid = str(prof.get("id"))
+                    report.profile_id = pid
+
+        # Safety net: if the model deleted the profile, verify; if not, the
+        # harness owns cleanup.
+        if pid:
+            gone = await _profile_gone(m, pid, targets)
+            if not gone:
+                _progress("safety cleanup: deleting the test profile via REST")
+                await m.rest_delete(f"/profiles/{pid}")
+                gone = await _profile_gone(m, pid, targets)
+            report.cleanup = "clean: profile deleted and verified gone via REST" if gone else "FAILED (profile still present)"
             report.profile_id = pid
-            _progress("measuring: settings (7 categories)")
-            await _measure_settings(m, pid, report)
-            _progress("measuring: lists (7 types)")
-            await _measure_lists(m, pid, targets, report)
-            _progress("measuring: rewrites")
-            await _measure_rewrites(m, pid, targets, report)
-            report.results.append(
-                _readonly_coverage(
-                    run,
-                    "queryAnalytics",
-                    "analytics",
-                    "analytics.query",
-                    "actor queried analytics for the test profile",
-                )
-            )
-            report.results.append(
-                _readonly_coverage(
-                    run, "dohLookup", "doh", "doh.lookup", "actor ran a DoH lookup through the test profile"
-                )
-            )
-            report.results.append(
-                _readonly_coverage(
-                    run, "manageLogs", "logs", "logs.ops", "actor performed query-log operations on the test profile"
-                )
-            )
-            report.results.append(
-                _readonly_coverage(
-                    run,
-                    "plotAnalytics",
-                    "plots",
-                    "plots.generate",
-                    "actor generated an analytics plot for the test profile",
-                )
-            )
-            _progress("measuring: coverage + cleanup")
-            _measure_coverage(run, report)
-            await _cleanup(m, pid, targets, report)
         else:
-            # Without a provisioned profile the per-section state checks cannot
-            # run; keep coverage (from the tool events) so the report is still
-            # informative, and skip the section-specific checks.
-            _measure_coverage(run, report)
-            report.skipped_sections = [s for s in common.SECTIONS if s not in ("profiles", "coverage", "actor")]
             report.cleanup = "skipped (test profile not found on the server)"
 
+    report.actor_tool_calls = total_events
+    report.actor_tools_used = tools_used
+    report.actor_stderr = last_stderr[:4000]
+    report.actor_raw_lines = all_raw[-500:]
+    report.actor_duration_ms = int((time.monotonic() - started) * 1000)
     report.finished_at = time.time()
     return report
 
@@ -1133,9 +1575,12 @@ def render_text_report(report: Report) -> str:
     for r in report.results:
         icon = {"passed": "PASS", "skipped": "SKIP", "failed": "FAIL"}[r.status]
         lines.append(f"[{icon}] {r.id}  —  {r.description}")
-        if r.status == "failed":
+        fb = (r.mcp_response or {}).get("feedback") if isinstance(r.mcp_response, dict) else None
+        if fb:
+            lines.extend(fb)
+        if r.status == "failed" and not fb:
             lines.append(f"       error: {r.error}")
-        elif r.status == "skipped" and r.reason:
+        elif r.status == "skipped" and r.reason and not fb:
             lines.append(f"       reason: {r.reason}")
     lines.append("=" * 72)
     return "\n".join(lines)
