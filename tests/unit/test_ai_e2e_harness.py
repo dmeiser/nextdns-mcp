@@ -666,6 +666,77 @@ class TestHarnessConfig:
         assert '{"K": "v"}' in argv
 
 
+class TestToolEventNameResolution:
+    """Tool-name extraction, including progressive-disclosure proxies."""
+
+    def test_direct_execute_call_resolves_tool(self, h):
+        part = {
+            "tool": "execute",
+            "state": {"input": {"code": "await tools.nextdns.manageProfiles({operation: 'list'})"}},
+        }
+        assert h._tool_event_name(part) == "manageProfiles"
+
+    def test_call_tool_proxy_resolves_proxied_name(self, h):
+        part = {
+            "tool": "execute",
+            "state": {
+                "input": {"code": "await tools.nextdns.call_tool({name: 'manageLists', arguments: {operation: 'get'}})"}
+            },
+        }
+        assert h._tool_event_name(part) == "manageLists"
+
+    def test_search_tools_stays_discovery(self, h):
+        part = {"tool": "execute", "state": {"input": {"code": "await tools.nextdns.search_tools({query: 'x'})"}}}
+        assert h._tool_event_name(part) == "search_tools"
+
+    def test_first_class_mcp_attempt_prefix_stripped(self, h):
+        part = {"tool": "tools.nextdns.search_tools", "state": {"input": {}, "status": "error"}}
+        assert h._tool_event_name(part) == "search_tools"
+
+
+class TestFeedbackBlockAttempts:
+    """Verbose feedback surfaces failed/unknown tool attempts (bm25 debugging)."""
+
+    def _run(self, h):
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [
+            h.ToolCall(
+                name="create_profile",
+                args={"code": "tools.nextdns.create_profile(...)"},
+                is_error=True,
+                result_text="Unknown tool",
+            ),
+            h.ToolCall(
+                name="session_rename",
+                args={"code": "tools.opencode.session_rename(...)"},
+                is_error=True,
+                result_text="no such session",
+            ),
+        ]
+        return run
+
+    def test_verbose_shows_attempts(self, h):
+        step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
+        out = h._feedback_block(step, self._run(h), "failed", "err", "", {}, verbose=True)
+        attempts = [ln for ln in out if ln.strip().startswith("ATTEMPT")]
+        assert len(attempts) == 2
+        assert any("create_profile" in ln for ln in attempts)
+        assert any("session_rename" in ln for ln in attempts)
+
+    def test_quiet_omits_attempts(self, h):
+        step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
+        out = h._feedback_block(step, self._run(h), "failed", "err", "", {}, verbose=False)
+        assert not any(ln.strip().startswith("ATTEMPT") for ln in out)
+
+    def test_discovery_calls_shown_when_no_direct_mcp_calls(self, h):
+        step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [h.ToolCall(name="search_tools", args={"code": "search_tools({query:'profile'})"})]
+        out = h._feedback_block(step, run, "passed", "", "", {})
+        assert any("search_tools" in ln for ln in out)
+        assert not any("no MCP operation observed" in ln for ln in out)
+
+
 # =========================================================================== #
 # generated MCP client config (opencode.json)
 # =========================================================================== #
