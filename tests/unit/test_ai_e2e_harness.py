@@ -562,6 +562,30 @@ class TestHarnessConfig:
         assert cfg.server["args"] == ["-m", "nextdns_mcp.server"]
         assert "PYTHONPATH" in cfg.server["env"]
 
+    def test_plot_profile_auto_protected(self, h, monkeypatch):
+        """NEXTDNS_PLOT_PROFILE is added to the server's write denylist."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_PLOT_PROFILE", "23228d")
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        cfg = h.HarnessConfig.load(None)
+        assert cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"] == "23228d"
+
+    def test_plot_profile_merges_existing_protected_list(self, h, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_PLOT_PROFILE", "23228d")
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "2c2b8f")
+        cfg = h.HarnessConfig.load(None)
+        ids = set(cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"].split(","))
+        assert ids == {"2c2b8f", "23228d"}
+
+    def test_plot_profile_not_duplicated_in_protected_list(self, h, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_PLOT_PROFILE", "23228d")
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "23228d")
+        cfg = h.HarnessConfig.load(None)
+        ids = cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"].split(",")
+        assert [p.lower() for p in ids].count("23228d") == 1
+
     def test_env_overrides_command_and_server(self, h, monkeypatch):
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
         monkeypatch.setenv("NEXTDNS_E2E_HARNESS_CMD", "claude -p --mcp-config /tmp/m.json")

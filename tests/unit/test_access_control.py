@@ -261,6 +261,44 @@ class TestCanWriteProfile:
         assert can_write_profile("xyz999") is False
 
 
+class TestProtectedProfiles:
+    """NEXTDNS_PROTECTED_PROFILES: a write denylist that overrides even ALL."""
+
+    def test_unset_protects_nothing(self, clean_env):
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        assert can_write_profile("abc123") is True
+
+    def test_protected_denies_write_even_when_all_writable(self, clean_env):
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "23228d")
+        assert can_write_profile("23228d") is False
+        assert can_write_profile("abc123") is True
+
+    def test_protected_denies_write_even_when_explicitly_writable(self, clean_env):
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "23228d,abc123")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "23228d")
+        assert can_write_profile("23228d") is False
+        assert can_write_profile("abc123") is True
+
+    def test_protected_is_case_insensitive(self, clean_env):
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "2F4A9B")
+        assert can_write_profile("2f4a9b") is False
+        assert can_write_profile("2F4A9B") is False
+
+    def test_reads_are_unaffected(self, clean_env):
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "23228d")
+        assert can_read_profile("23228d") is True
+
+    def test_multiple_protected_ids(self, clean_env):
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "23228d, 2c2b8f ,")
+        assert can_write_profile("23228d") is False
+        assert can_write_profile("2c2b8f") is False
+        assert can_write_profile("abc123") is True
+
+
 class TestExtractProfileIdFromUrl:
     """Test the extract_profile_id_from_url function."""
 

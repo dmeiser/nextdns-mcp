@@ -210,6 +210,8 @@ class AccessControlledClient(httpx.AsyncClient):
 
         if access.read_only:
             error_msg = "Write operation denied: server is in read-only mode"
+        elif profile_id.lower() in access.protected:
+            error_msg = f"Write access denied: profile {profile_id} is protected (NEXTDNS_PROTECTED_PROFILES)"
         else:
             error_msg = f"Write access denied for profile: {profile_id}"
 
