@@ -152,6 +152,12 @@ make_profile_name = common.make_profile_name
 # The 8 grouped tools the actor is expected to exercise (its target surface).
 ALLOWED_TOOLS = list(common.MCP_TOOLS)
 
+# Harness-side tools the actor may legitimately use (discovery, sandbox);
+# attempts outside these and ALLOWED_TOOLS are flagged in verbose feedback.
+_BUILTIN_TOOLS = frozenset(
+    {"execute", "glob", "read", "write", "edit", "bash", "search", "websearch", "patch", "search_tools", "call_tool"}
+)
+
 # Default way to launch the in-tree MCP server (overridden by config/env).
 # Uses the running interpreter (``sys.executable``) plus a PYTHONPATH pointing
 # at the in-tree package, so it works no matter how the harness itself was
@@ -209,6 +215,7 @@ class HarnessConfig:
     server: dict[str, Any] = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_SERVER)))
     timeout_s: float = 7200.0  # overall run budget (99 sequential model steps)
     step_timeout_s: float = 300.0  # per-step actor timeout
+    verbose: bool = False  # per-step feedback includes failed/unknown tool attempts
 
     @classmethod
     def load(cls, path: str | None) -> HarnessConfig:
@@ -571,18 +578,21 @@ def _tool_event_name(part: dict[str, Any]) -> str:
         # opencode invokes MCP tools as tools.nextdns["<tool>"](...), while
         # other harnesses use a nextdns_<tool> prefix or a generic
         # tools.mcp.call_tool({name: "<tool>", ...}) wrapper. Try each form.
-        m = re.search(r'nextdns["\']?\s*\[\s*["\']([A-Za-z0-9_]+)', code)
+        # The wrapper is tried FIRST so a progressive-disclosure call
+        # (tools.nextdns.call_tool({name: "manageLists", ...})) resolves to the
+        # proxied tool rather than to the synthetic "call_tool" itself.
+        m = re.search(r'call_tool\(\s*\{[^}]*?name["\']?\s*:\s*["\']([A-Za-z0-9_]+)', code)
+        if not m:
+            m = re.search(r'nextdns["\']?\s*\[\s*["\']([A-Za-z0-9_]+)', code)
         if not m:
             m = re.search(r"nextdns[._]([A-Za-z_][A-Za-z0-9_]*)", code)
         if not m:
             m = re.search(r'["\']nextdns_([A-Za-z][A-Za-z0-9_]*)["\']', code)
-        if not m:
-            m = re.search(r'call_tool\(\s*\{[^}]*?name["\']?\s*:\s*["\']([A-Za-z0-9_]+)', code)
         if m:
             name = m.group(1)
         else:
             name = tool
-    return name.removeprefix("nextdns_")
+    return name.removeprefix("nextdns_").removeprefix("tools.nextdns.")
 
 
 def parse_actor_events(lines: list[str]) -> tuple[list[ToolCall], str]:
@@ -1460,16 +1470,23 @@ def _summarize_calls(run: ActorRun) -> list[dict[str, Any]]:
 
 
 def _feedback_block(step: Step, run: ActorRun, status: str, error: str, reason: str,
-                    rest_v: dict[str, Any]) -> list[str]:
+                    rest_v: dict[str, Any],
+    verbose: bool = False,
+) -> list[str]:
     """Render the command -> actor -> verify -> result chain for one step."""
     out = [f"  COMMAND : {step.description}"]
     mcp_calls = [c for c in run.tool_calls if c.name in ALLOWED_TOOLS]
+    discovery = [c for c in run.tool_calls if c.name in ("search_tools", "call_tool")]
     if mcp_calls:
         for c in mcp_calls[:4]:
             out.append(f"  ACTOR   : called {c.name}({json.dumps(c.args)[:120]})"
                        + ("" if c.ok else f"  -> ERROR: {(c.result_text or '')[:200]}"))
         if len(mcp_calls) > 4:
             out.append(f"  ACTOR   : ... {len(mcp_calls) - 4} more MCP call(s)")
+    elif discovery:
+        for c in discovery[:4]:
+            out.append(f"  ACTOR   : called {c.name}({json.dumps(c.args)[:120]})"
+                       + ("" if c.ok else f"  -> ERROR: {(c.result_text or '')[:200]}"))
     elif run.tool_calls:
         out.append(f"  ACTOR   : no MCP operation observed ({len(run.tool_calls)} built-in/discovery call(s))")
     else:
@@ -1481,6 +1498,21 @@ def _feedback_block(step: Step, run: ActorRun, status: str, error: str, reason: 
                        + (f", stderr: {run.stderr[:200]}" if run.stderr else ""))
         else:
             out.append(f"  ACTOR   : no tool call — replied: {(run.final_text or '')[:200]!r}")
+    if verbose:
+        # Failed calls and attempts at tools outside the advertised catalog
+        # (hallucinated names, first-class MCP calls outside execute, wrong
+        # session ids): invisible to the verdict, but they explain retries.
+        shown = {id(c) for c in (mcp_calls or discovery)[:4]}
+        attempts = [
+            c
+            for c in run.tool_calls
+            if id(c) not in shown and (c.is_error or c.name not in ALLOWED_TOOLS | _BUILTIN_TOOLS)
+        ]
+        for c in attempts[:4]:
+            out.append(f"  ATTEMPT : {c.name}({json.dumps(c.args)[:100]})"
+                       + (f"  -> ERROR: {(c.result_text or '')[:150]}" if not c.ok else "  -> not an advertised tool"))
+        if len(attempts) > 4:
+            out.append(f"  ATTEMPT : ... {len(attempts) - 4} more attempt(s)")
     endpoint = rest_v.get("endpoint", "")
     detail = {k: v for k, v in rest_v.items() if k not in ("endpoint",) and v not in (None, "", {}, [])}
     out.append(f"  VERIFY  : {endpoint or '(no REST endpoint)'}"
@@ -1574,7 +1606,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
 
             # Verdict comes from the task outcome (REST verification), not from
             # how many tool calls the model needed to get there.
-            fb = _feedback_block(step, run, status, error, reason, rest_v)
+            fb = _feedback_block(step, run, status, error, reason, rest_v, verbose=config.verbose)
             for ln in fb:
                 _progress(ln)
 
@@ -1766,6 +1798,7 @@ def main(argv: list[str] | None = None) -> int:
         config.timeout_s = args.budget
     if args.step_timeout:
         config.step_timeout_s = args.step_timeout
+    config.verbose = bool(args.verbose)
 
     report = asyncio.run(run_harness(api_key, config))
     write_report(report, args.report, args.actor_log)
