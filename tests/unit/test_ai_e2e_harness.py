@@ -801,6 +801,14 @@ class TestMcpConfigGeneration:
         text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "bm25"})
         assert "search_tools" in text
         assert "call_tool" in text
+        # Anti-guessing rule targets the small model's dominant failure mode.
+        assert "MUST NOT be guessed" in text
+
+    def test_actor_contract_never_leaks_real_tool_names(self, h):
+        """The contract is a generic affordance, never a task answer."""
+        text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "bm25"})
+        for tool in h.common.MCP_TOOLS:
+            assert tool not in text, f"contract leaked real tool name {tool}"
 
     def test_actor_contract_omits_disclosure_when_off(self, h):
         text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "off"})
