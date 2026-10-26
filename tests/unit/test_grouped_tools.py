@@ -402,6 +402,38 @@ class TestManageLists:
         assert "error" in result
 
     @pytest.mark.asyncio
+    async def test_add_entry_extraneous_keys_dropped(self, mock_api_client):
+        """Nested extra fields are relaxed like top-level ones (AI clients send them)."""
+        mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
+        result = await server.manageLists("allowlist", "add", "abc123", entry={"id": "x.com", "value": "x.com"})
+        mock_api_client.request.assert_called_once_with(
+            "POST", "/profiles/abc123/allowlist", params=None, json={"id": "x.com"}
+        )
+        assert result == {"success": True}
+
+    @pytest.mark.asyncio
+    async def test_replace_string_entries_coerced(self, mock_api_client):
+        """entries=['x.com'] is unambiguous: coerced to [{'id': 'x.com'}]."""
+        mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
+        result = await server.manageLists("allowlist", "replace", "abc123", entries=["x.com", "y.com"])
+        mock_api_client.request.assert_called_once_with(
+            "PUT", "/profiles/abc123/allowlist", params=None, json=[{"id": "x.com"}, {"id": "y.com"}]
+        )
+        assert result == {"success": True}
+
+    @pytest.mark.asyncio
+    async def test_replace_entry_extraneous_keys_dropped(self, mock_api_client):
+        """The exact 11B-model failure: {'id': x, 'value': x} must not reach the API verbatim."""
+        mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
+        result = await server.manageLists(
+            "allowlist", "replace", "abc123", entries=[{"id": "x.com", "value": "x.com", "active": True}]
+        )
+        mock_api_client.request.assert_called_once_with(
+            "PUT", "/profiles/abc123/allowlist", params=None, json=[{"id": "x.com", "active": True}]
+        )
+        assert result == {"success": True}
+
+    @pytest.mark.asyncio
     async def test_add_entry_missing_id(self, mock_api_client):
         """An add entry without the schema-required 'id' is rejected locally (issue #253)."""
         result = await server.manageLists("denylist", "add", "abc123", entry={"active": True})
@@ -467,8 +499,18 @@ class TestManageLists:
         assert "entries[0]" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_replace_entry_not_a_dict(self, mock_api_client):
+    async def test_replace_string_entry_coerced(self, mock_api_client):
+        """Bare strings are accepted and coerced to {'id': ...} (AI-client leniency)."""
+        mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
         result = await server.manageLists("denylist", "replace", "abc123", entries=["bad.com"])
+        mock_api_client.request.assert_called_once_with(
+            "PUT", "/profiles/abc123/denylist", params=None, json=[{"id": "bad.com"}]
+        )
+        assert result == {"success": True}
+
+    @pytest.mark.asyncio
+    async def test_replace_entry_not_a_dict_or_string(self, mock_api_client):
+        result = await server.manageLists("denylist", "replace", "abc123", entries=[7])
         mock_api_client.request.assert_not_called()
         assert result["code"] == "invalid_argument"
         assert "entries[0]" in result["error"]

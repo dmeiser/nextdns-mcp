@@ -51,7 +51,7 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
     if entry is None:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry is required for add operation")
     entry = _coerce_json_arg(entry)
-    body = entry if isinstance(entry, dict) else {"id": entry}
+    body = _relax_list_entry(entry) if isinstance(entry, dict) else {"id": entry}
     entry_error = _validate_list_entry(body, "entry", "add")
     if entry_error:
         return entry_error
@@ -84,6 +84,33 @@ def _validate_list_entry(entry: Any, label: str, operation: str, **extra: Any) -
     return None
 
 
+def _relax_list_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Drop keys the NextDNS entry schema does not define (issue: AI clients).
+
+    ``StripExtraFieldsMiddleware`` relaxes extra *top-level* tool arguments but
+    cannot see inside ``entry``/``entries`` payloads, so an entry like
+    ``{"id": "x.com", "value": "x.com"}`` used to reach the API and come back
+    as an opaque ``400 {"code":"extraneous"}``. The upstream entry schema only
+    defines ``id`` and ``active`` for every list type, so unknown keys are
+    dropped here — the same silent-relaxation contract the middleware applies
+    at the top level, applied one level down.
+    """
+    return {k: v for k, v in entry.items() if k in ("id", "active")}
+
+
+def _coerce_replace_entry(entry: Any) -> Any:
+    """Accept bare strings as list entries: ``"x.com"`` -> ``{"id": "x.com"}``.
+
+    Models frequently pass ``entries=["x.com"]`` even though the schema asks
+    for objects; the intent is unambiguous, so coerce instead of rejecting.
+    """
+    if isinstance(entry, str):
+        return {"id": entry}
+    if isinstance(entry, dict):
+        return _relax_list_entry(entry)
+    return entry
+
+
 def _validate_replace_entries(entries: list[Any]) -> dict[str, Any] | None:
     """Return an error dict if a replace payload has a malformed entry (issue #189)."""
     for index, entry in enumerate(entries):
@@ -100,6 +127,7 @@ async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | No
     entries = _coerce_json_arg(entries)
     if not isinstance(entries, list):
         return error_payload(ErrorCode.INVALID_ARGUMENT, "entries must be a JSON array")
+    entries = [_coerce_replace_entry(entry) for entry in entries]
     entry_error = _validate_replace_entries(entries)
     if entry_error:
         return entry_error

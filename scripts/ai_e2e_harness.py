@@ -1726,6 +1726,12 @@ def main(argv: list[str] | None = None) -> int:
         help="enable FastMCP progressive tool disclosure on the MCP server "
         "(sets NEXTDNS_TOOL_SEARCH; tools/list then exposes only search_tools + call_tool)",
     )
+    parser.add_argument(
+        "--budget", type=float, help="overall run budget in seconds (default 7200; slow models need more)"
+    )
+    parser.add_argument(
+        "--step-timeout", type=float, help="per-step actor timeout in seconds (default 300)"
+    )
     parser.add_argument("--verbose", action="store_true", help="print the actor stderr on failure")
     args = parser.parse_args(argv)
 
@@ -1756,6 +1762,10 @@ def main(argv: list[str] | None = None) -> int:
         config.model = args.model
     if args.profile_name:
         config.profile_name = args.profile_name
+    if args.budget:
+        config.timeout_s = args.budget
+    if args.step_timeout:
+        config.step_timeout_s = args.step_timeout
 
     report = asyncio.run(run_harness(api_key, config))
     write_report(report, args.report, args.actor_log)
