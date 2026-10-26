@@ -774,108 +774,77 @@ class ContainerE2ERunner:
             {"operation": "clear", "profile_id": profile_id},
         )
 
+    async def _get_security_settings(self, session: ClientSession, profile_id: str) -> dict[str, Any] | None:
+        """GET the security settings object; None on failure."""
+        ok, res = await self.execute_call(
+            session,
+            "manageSettings",
+            {"operation": "get", "category": "security", "profile_id": profile_id},
+        )
+        if ok and isinstance(res, dict):
+            return res
+        return None
+
+    async def _patch_security_key(self, session: ClientSession, profile_id: str, key: str, value: Any) -> tuple[bool, str]:
+        """PATCH a single security key; returns (ok, error_detail)."""
+        ok, res = await self.execute_call(
+            session,
+            "manageSettings",
+            {"operation": "update", "category": "security", "profile_id": profile_id, "settings": {key: value}},
+        )
+        if ok:
+            return True, ""
+        error_detail = ""
+        if isinstance(res, dict):
+            status_code = res.get("status_code", "unknown")
+            error_msg = res.get("error", "")
+            error_detail = f"HTTP {status_code}: {error_msg}"
+        return False, error_detail
+
+    async def _verify_one_toggle(self, session: ClientSession, profile_id: str, key: str) -> str:
+        """Round-trip verify a single security toggle; returns the verdict string."""
+        sec_before = await self._get_security_settings(session, profile_id)
+        if sec_before is None:
+            return "ERROR-READ"
+
+        original_value = sec_before.get(key)
+        key_was_present = key in sec_before
+
+        try:
+            ok_patch, error_detail = await self._patch_security_key(session, profile_id, key, True)
+            if not ok_patch:
+                return f"REJECTED ({error_detail})"
+
+            sec_after = await self._get_security_settings(session, profile_id)
+            if sec_after is None:
+                return "ERROR-RE-READ"
+
+            if sec_after.get(key) is True:
+                return "ACCEPTED"
+            absent_or_unchanged = "absent" if key not in sec_after else f"unchanged at {sec_after.get(key)!r}"
+            return f"REJECTED-SILENT (key {absent_or_unchanged} after re-GET)"
+        finally:
+            if key_was_present or original_value is not None:
+                restore_val = original_value if original_value is not None else False
+                await self._patch_security_key(session, profile_id, key, restore_val)
+
     async def _verify_security_toggles(self, session: ClientSession, profile_id: str) -> None:
         """Round-trip verify each early-access security toggle against the live API.
 
-        For each key in SECURITY_TOGGLE_KEYS:
-          1. GET security settings (capture original value).
-          2. PATCH the toggle to True.
-          3. GET security settings again (check persistence).
-          4. Restore original value (always, even on failure).
-
-        Verdicts:
-          ACCEPTED        – key persisted as True after PATCH.
-          REJECTED        – PATCH returned an HTTP error (status + body logged).
-          REJECTED-SILENT – PATCH returned 200 but key absent/unchanged on re-GET.
+        Verdicts: ACCEPTED, REJECTED (HTTP error), REJECTED-SILENT (200 but no persistence).
         """
         log_info("Step 4: Verifying early-access security toggles...")
         toggle_verdicts: dict[str, str] = {}
 
         for key in SECURITY_TOGGLE_KEYS:
             log_info(f"  Testing toggle: {key}")
-            original_value: Any = None
-            key_was_present = False
+            verdict = await self._verify_one_toggle(session, profile_id, key)
+            toggle_verdicts[key] = verdict
+            if verdict == "ACCEPTED":
+                log_success(f"  {key}: ACCEPTED")
+            else:
+                log_error(f"  {key}: {verdict}")
 
-            try:
-                # (a) Capture current security settings.
-                ok, sec_before = await self.execute_call(
-                    session,
-                    "manageSettings",
-                    {"operation": "get", "category": "security", "profile_id": profile_id},
-                )
-                if not ok or not isinstance(sec_before, dict):
-                    log_error(f"  {key}: cannot read security settings; skipping")
-                    toggle_verdicts[key] = "ERROR-READ"
-                    continue
-
-                key_was_present = key in sec_before
-                original_value = sec_before.get(key)
-
-                # (b) PATCH the toggle to True.
-                ok_patch, patch_result = await self.execute_call(
-                    session,
-                    "manageSettings",
-                    {
-                        "operation": "update",
-                        "category": "security",
-                        "profile_id": profile_id,
-                        "settings": {key: True},
-                    },
-                )
-
-                if not ok_patch:
-                    # PATCH failed – extract error details for diagnosis.
-                    error_detail = ""
-                    if isinstance(patch_result, dict):
-                        status_code = patch_result.get("status_code", "unknown")
-                        error_msg = patch_result.get("error", "")
-                        error_detail = f"HTTP {status_code}: {error_msg}"
-                    log_error(f"  {key}: REJECTED ({error_detail})")
-                    toggle_verdicts[key] = f"REJECTED ({error_detail})"
-                    continue
-
-                # (c) GET security settings again and check persistence.
-                ok_after, sec_after = await self.execute_call(
-                    session,
-                    "manageSettings",
-                    {"operation": "get", "category": "security", "profile_id": profile_id},
-                )
-
-                if not ok_after or not isinstance(sec_after, dict):
-                    log_error(f"  {key}: cannot re-read security settings after PATCH")
-                    toggle_verdicts[key] = "ERROR-RE-READ"
-                    continue
-
-                persisted_value = sec_after.get(key)
-                if persisted_value is True:
-                    log_success(f"  {key}: ACCEPTED (persisted as True)")
-                    toggle_verdicts[key] = "ACCEPTED"
-                else:
-                    # 200 but key absent or unchanged – silently ignored.
-                    log_warn(
-                        f"  {key}: REJECTED-SILENT "
-                        f"(PATCH returned 200 but key "
-                        f"{'absent' if key not in sec_after else f'unchanged at {persisted_value!r}'} "
-                        f"after re-GET)"
-                    )
-                    toggle_verdicts[key] = "REJECTED-SILENT"
-
-            finally:
-                # (d) Restore original value (always).
-                if key_was_present or original_value is not None:
-                    restore_val = original_value if original_value is not None else False
-                    await self.execute_call(
-                        session,
-                        "manageSettings",
-                        {
-                            "operation": "update",
-                            "category": "security",
-                            "profile_id": profile_id,
-                            "settings": {key: restore_val},
-                        },
-                    )
-
-        # Log summary of toggle verdicts.
         log_info("")
         log_info("Security Toggle Verdicts:")
         for key, verdict in toggle_verdicts.items():
@@ -884,7 +853,6 @@ class ContainerE2ERunner:
             else:
                 log_error(f"  {key}: {verdict}")
 
-        # Write toggle verdicts to a dedicated artifact for CI consumption.
         verdict_file = self.artifacts_dir / f"security_toggles_{self.variant}.json"
         verdict_file.write_text(json.dumps(toggle_verdicts, indent=2), encoding="utf-8")
         log_info(f"Toggle verdicts written to {verdict_file}")
