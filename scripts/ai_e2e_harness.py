@@ -311,17 +311,58 @@ def render_argv(template: list[str], values: dict[str, str]) -> list[str]:
     return argv
 
 
+def _actor_contract_text(srv_env: dict[str, str]) -> str:
+    """Ambient environment contract for the actor (NOT task hints).
+
+    Tells the model how this harness's environment works — MCP tools are only
+    reachable through opencode's ``execute`` sandbox, and when the server runs
+    with progressive tool disclosure, how to discover the real tools. It never
+    names a tool that answers a specific step; step prompts stay plain tasks.
+    """
+    lines = [
+        "# Environment contract",
+        "",
+        "- You act on NextDNS ONLY through the `nextdns` MCP server. Its tools are",
+        "  NOT first-class tools: call them only inside the `execute` tool's code,",
+        "  as `await tools.nextdns.<name>({...})`.",
+        "- Do not invent tools outside the `tools.nextdns.*` namespace, and do not",
+        "  call `tools.nextdns.<name>` outside `execute` — it will fail.",
+    ]
+    if srv_env.get("NEXTDNS_TOOL_SEARCH", "off") != "off":
+        lines += [
+            "- This server uses progressive tool disclosure: the real NextDNS tools",
+            "  are hidden from the listing. Discover them first, inside `execute`:",
+            '  `await tools.nextdns.search_tools({ query: "..." })` returns the real',
+            "  tool definitions; then run one with",
+            "  `await tools.nextdns.call_tool({ name: \"<tool>\", arguments: {...} })`.",
+        ]
+    lines += [
+        "- You may also read the server's usage guide with",
+        "  `await tools.opencode.read_mcp_resource({ server: \"nextdns\", uri: \"nextdns://usage\" })`.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
     """Write the generated MCP client config (``opencode.json``) into workdir.
 
     The file declares the in-tree MCP server as a *local* stdio server under
     the name ``nextdns``, which is how the default opencode harness (and any
-    harness that reads opencode's config format) mounts it natively. Returns
-    the written path (exposed to templates as ``{config_file}``).
+    harness that reads opencode's config format) mounts it natively. A small
+    ambient-instructions file (the environment contract) is written next to it
+    and referenced via opencode's ``instructions`` key, so the model learns how
+    the sandbox works without any per-step tool hints. Returns the written path
+    (exposed to templates as ``{config_file}``).
     """
     srv = config.server
+    srv_env = {str(k): str(v) for k, v in srv.get("env", {}).items()}
+    contract = Path(dest_dir) / "actor_contract.md"
+    contract.write_text(_actor_contract_text(srv_env), encoding="utf-8")
     doc: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
+        # Ambient instructions: how the sandbox + MCP discovery work. Task
+        # prompts stay plain; this file only describes the environment.
+        "instructions": [str(contract)],
         # Side-channel tools are disabled so the ONLY way the model can act is
         # through the nextdns MCP tools — one tool call per step, as designed.
         "tools": {
@@ -339,7 +380,7 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
                 "type": "local",
                 "command": [srv["command"], *[str(a) for a in srv["args"]]],
                 "cwd": srv.get("cwd"),
-                "environment": {str(k): str(v) for k, v in srv.get("env", {}).items()},
+                "environment": srv_env,
                 "enabled": True,
             }
         },

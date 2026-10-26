@@ -671,6 +671,28 @@ class TestMcpConfigGeneration:
         # The file must parse back cleanly (it is read by opencode at startup).
         assert isinstance(doc["mcp"], dict)
 
+    def test_write_mcp_config_wires_actor_contract_instructions(self, h, tmp_path):
+        """The environment-contract file is written and referenced via `instructions`."""
+        cfg = h.HarnessConfig.load(None)
+        out = h.write_mcp_config(cfg, tmp_path)
+        doc = json.loads(out.read_text(encoding="utf-8"))
+        contract = tmp_path / "actor_contract.md"
+        assert doc["instructions"] == [str(contract)]
+        assert contract.exists()
+        text = contract.read_text(encoding="utf-8")
+        # The contract describes the sandbox, never a per-step answer.
+        assert "tools.nextdns" in text
+        assert "search_tools" not in text  # disclosure flow only appears when enabled
+
+    def test_actor_contract_mentions_disclosure_when_tool_search_on(self, h):
+        text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "bm25"})
+        assert "search_tools" in text
+        assert "call_tool" in text
+
+    def test_actor_contract_omits_disclosure_when_off(self, h):
+        text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "off"})
+        assert "search_tools" not in text
+
 
 # =========================================================================== #
 # task targets + prompt
