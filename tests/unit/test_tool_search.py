@@ -77,3 +77,39 @@ class TestToolSearchServerWiring:
             # even though it is absent from the listing.
             tool = await server.get_tool("manageProfiles")
             assert tool is not None
+
+
+class TestSearchFallback:
+    """Empty-result fallback: guessed-name queries still surface the catalog."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["bm25", "regex"])
+    async def test_unmatchable_query_falls_back_to_full_catalog(self, monkeypatch, mode):
+        """A guessed tool name sharing no tokens with any tool must not return empty.
+
+        This is the small model's dominant failure: it searches for a name it
+        invented (e.g. 'updateProfile'), gets nothing, then calls that invented
+        name and fails. The fallback returns the whole catalog instead.
+        """
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+        server = build_mcp_server()
+        async with Client(server) as client:
+            params = {"query": "updateProfileZzz"} if mode == "bm25" else {"pattern": "updateProfileZzz"}
+            found = await client.call_tool("search_tools", params)
+            names = {t.get("name") for t in found.data}
+            # Fallback surfaces the real grouped tools rather than an empty list.
+            assert "manageSettings" in names
+            assert "manageLists" in names
+
+    def test_build_transform_types(self):
+        from nextdns_mcp.tool_search import (
+            FallbackBM25SearchTransform,
+            FallbackRegexSearchTransform,
+            build_search_transform,
+        )
+
+        assert isinstance(build_search_transform("bm25"), FallbackBM25SearchTransform)
+        assert isinstance(build_search_transform("regex"), FallbackRegexSearchTransform)
+        assert build_search_transform("off") is None

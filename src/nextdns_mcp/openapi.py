@@ -33,13 +33,13 @@ import mcp.types
 from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.server.transforms.search import BM25SearchTransform, RegexSearchTransform
 from fastmcp.tools import ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
+from .tool_search import build_search_transform
 from .tools.doh import close_doh_client
 from .utils import is_float_shaped, is_integer_shaped
 
@@ -271,11 +271,9 @@ def create_mcp_server(client: Any = None) -> FastMCP:
     logger.info("Creating NextDNS MCP server...")
     transforms: list[Any] = []
     tool_search_mode = get_tool_search_mode()
-    if tool_search_mode == "regex":
-        transforms.append(RegexSearchTransform())
-    elif tool_search_mode == "bm25":
-        transforms.append(BM25SearchTransform())
-    if transforms:
+    search_transform = build_search_transform(tool_search_mode)
+    if search_transform is not None:
+        transforms.append(search_transform)
         logger.info(
             "Tool search enabled (%s): tools/list exposes search_tools + call_tool instead of the full catalog",
             tool_search_mode,
