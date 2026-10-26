@@ -145,6 +145,17 @@ LIST_WRITE_CASES = [
 
 SPEC_PATH = PROJECT_ROOT / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
 
+# Early-access security toggles reported from the NextDNS dashboard but not
+# listed in the official API docs. This E2E verifies whether the API actually
+# accepts them via PATCH /profiles/:id/security.
+SECURITY_TOGGLE_KEYS = [
+    "dnsDataExfiltration",
+    "dnsPayloadDelivery",
+    "fastFluxNetworks",
+    "highRiskTlds",
+    "newlyActiveDomains",
+]
+
 
 class ContainerE2ERunner:
     """Orchestrates E2E testing of the NextDNS MCP container over MCP."""
@@ -763,6 +774,121 @@ class ContainerE2ERunner:
             {"operation": "clear", "profile_id": profile_id},
         )
 
+    async def _verify_security_toggles(self, session: ClientSession, profile_id: str) -> None:
+        """Round-trip verify each early-access security toggle against the live API.
+
+        For each key in SECURITY_TOGGLE_KEYS:
+          1. GET security settings (capture original value).
+          2. PATCH the toggle to True.
+          3. GET security settings again (check persistence).
+          4. Restore original value (always, even on failure).
+
+        Verdicts:
+          ACCEPTED        – key persisted as True after PATCH.
+          REJECTED        – PATCH returned an HTTP error (status + body logged).
+          REJECTED-SILENT – PATCH returned 200 but key absent/unchanged on re-GET.
+        """
+        log_info("Step 4: Verifying early-access security toggles...")
+        toggle_verdicts: dict[str, str] = {}
+
+        for key in SECURITY_TOGGLE_KEYS:
+            log_info(f"  Testing toggle: {key}")
+            original_value: Any = None
+            key_was_present = False
+
+            try:
+                # (a) Capture current security settings.
+                ok, sec_before = await self.execute_call(
+                    session,
+                    "manageSettings",
+                    {"operation": "get", "category": "security", "profile_id": profile_id},
+                )
+                if not ok or not isinstance(sec_before, dict):
+                    log_error(f"  {key}: cannot read security settings; skipping")
+                    toggle_verdicts[key] = "ERROR-READ"
+                    continue
+
+                key_was_present = key in sec_before
+                original_value = sec_before.get(key)
+
+                # (b) PATCH the toggle to True.
+                ok_patch, patch_result = await self.execute_call(
+                    session,
+                    "manageSettings",
+                    {
+                        "operation": "update",
+                        "category": "security",
+                        "profile_id": profile_id,
+                        "settings": {key: True},
+                    },
+                )
+
+                if not ok_patch:
+                    # PATCH failed – extract error details for diagnosis.
+                    error_detail = ""
+                    if isinstance(patch_result, dict):
+                        status_code = patch_result.get("status_code", "unknown")
+                        error_msg = patch_result.get("error", "")
+                        error_detail = f"HTTP {status_code}: {error_msg}"
+                    log_error(f"  {key}: REJECTED ({error_detail})")
+                    toggle_verdicts[key] = f"REJECTED ({error_detail})"
+                    continue
+
+                # (c) GET security settings again and check persistence.
+                ok_after, sec_after = await self.execute_call(
+                    session,
+                    "manageSettings",
+                    {"operation": "get", "category": "security", "profile_id": profile_id},
+                )
+
+                if not ok_after or not isinstance(sec_after, dict):
+                    log_error(f"  {key}: cannot re-read security settings after PATCH")
+                    toggle_verdicts[key] = "ERROR-RE-READ"
+                    continue
+
+                persisted_value = sec_after.get(key)
+                if persisted_value is True:
+                    log_success(f"  {key}: ACCEPTED (persisted as True)")
+                    toggle_verdicts[key] = "ACCEPTED"
+                else:
+                    # 200 but key absent or unchanged – silently ignored.
+                    log_warn(
+                        f"  {key}: REJECTED-SILENT "
+                        f"(PATCH returned 200 but key "
+                        f"{'absent' if key not in sec_after else f'unchanged at {persisted_value!r}'} "
+                        f"after re-GET)"
+                    )
+                    toggle_verdicts[key] = "REJECTED-SILENT"
+
+            finally:
+                # (d) Restore original value (always).
+                if key_was_present or original_value is not None:
+                    restore_val = original_value if original_value is not None else False
+                    await self.execute_call(
+                        session,
+                        "manageSettings",
+                        {
+                            "operation": "update",
+                            "category": "security",
+                            "profile_id": profile_id,
+                            "settings": {key: restore_val},
+                        },
+                    )
+
+        # Log summary of toggle verdicts.
+        log_info("")
+        log_info("Security Toggle Verdicts:")
+        for key, verdict in toggle_verdicts.items():
+            if verdict == "ACCEPTED":
+                log_success(f"  {key}: {verdict}")
+            else:
+                log_error(f"  {key}: {verdict}")
+
+        # Write toggle verdicts to a dedicated artifact for CI consumption.
+        verdict_file = self.artifacts_dir / f"security_toggles_{self.variant}.json"
+        verdict_file.write_text(json.dumps(toggle_verdicts, indent=2), encoding="utf-8")
+        log_info(f"Toggle verdicts written to {verdict_file}")
+
     async def _cleanup(self, created_profile_id: str) -> None:
         """Delete the test profile if this run created it."""
         if not created_profile_id:
@@ -845,6 +971,7 @@ class ContainerE2ERunner:
 
                 if self.allow_live_writes:
                     await self._run_write_checks(session, profile_id)
+                    await self._verify_security_toggles(session, profile_id)
                 else:
                     log_info("Skipping write operations (allow_live_writes=False)")
         finally:
