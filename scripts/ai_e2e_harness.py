@@ -352,11 +352,16 @@ def _actor_contract_text(srv_env: dict[str, str]) -> str:
     ]
     if srv_env.get("NEXTDNS_TOOL_SEARCH", "off") != "off":
         lines += [
-            "- This server uses progressive tool disclosure: the real NextDNS tools",
-            "  are hidden from the listing. Discover them first, inside `execute`:",
-            '  `await tools.nextdns.search_tools({ query: "..." })` returns the real',
-            "  tool definitions; then run one with",
-            "  `await tools.nextdns.call_tool({ name: \"<tool>\", arguments: {...} })`.",
+            "- This server uses progressive tool disclosure: the real NextDNS tool",
+            "  names are NOT advertised and MUST NOT be guessed. Any guessed name",
+            "  (a plausible verb_noun) will fail. The only way to learn a real name",
+            "  is to search, inside `execute`, in two steps:",
+            '  1. `await tools.nextdns.search_tools({ query: "<what you need to do>" })`',
+            "     returns the matching tools with their EXACT names and full schemas.",
+            '  2. `await tools.nextdns.call_tool({ name: "<exact name from step 1>",',
+            "     arguments: { ... } })` runs one.",
+            "  Search FIRST, then call. One search per task is enough — reuse its",
+            "  result instead of searching again.",
         ]
     lines += [
         "- You may also read the server's usage guide with",
