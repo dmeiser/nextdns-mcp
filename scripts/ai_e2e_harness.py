@@ -261,7 +261,12 @@ class HarnessConfig:
         cfg.server["env"].setdefault("NEXTDNS_API_BASE", common.API_BASE)
         # The MCP server applies its own read/write ACLs from these; without
         # them every tool call is denied ("no profiles are readable").
-        for var in ("NEXTDNS_READABLE_PROFILES", "NEXTDNS_WRITABLE_PROFILES", "NEXTDNS_DEFAULT_PROFILE"):
+        for var in (
+            "NEXTDNS_READABLE_PROFILES",
+            "NEXTDNS_WRITABLE_PROFILES",
+            "NEXTDNS_DEFAULT_PROFILE",
+            "NEXTDNS_TOOL_SEARCH",
+        ):
             if val := os.environ.get(var):
                 cfg.server["env"].setdefault(var, val)
         return cfg
@@ -1664,8 +1669,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--quiet", action="store_true", help="do not print the text report")
     parser.add_argument("--env-file", help="path to a .env file to load (defaults to ./.env and <repo>/.env)")
     parser.add_argument("--actor-log", help="path for the actor raw event stream (default: <report>.actor.jsonl)")
+    parser.add_argument(
+        "--tool-search",
+        choices=("off", "regex", "bm25"),
+        help="enable FastMCP progressive tool disclosure on the MCP server "
+        "(sets NEXTDNS_TOOL_SEARCH; tools/list then exposes only search_tools + call_tool)",
+    )
     parser.add_argument("--verbose", action="store_true", help="print the actor stderr on failure")
     args = parser.parse_args(argv)
+
+    if args.tool_search:
+        os.environ["NEXTDNS_TOOL_SEARCH"] = args.tool_search
 
     # Load environment from a .env file if present (or the one given explicitly).
     if _load_dotenv is not None:

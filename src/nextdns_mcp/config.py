@@ -176,6 +176,37 @@ def get_writable_profiles() -> set[str] | None:
     return parse_profile_list(profiles)
 
 
+# Tool-search modes accepted by NEXTDNS_TOOL_SEARCH. "off" (the default)
+# advertises the full tool catalog; "regex"/"bm25" replace the listing with
+# FastMCP's synthetic search_tools/call_tool pair (progressive disclosure).
+TOOL_SEARCH_MODES: tuple[str, ...] = ("off", "regex", "bm25")
+
+
+def get_tool_search_mode() -> str:
+    """Get the tool-search (progressive disclosure) mode from the environment.
+
+    Reads ``NEXTDNS_TOOL_SEARCH``: ``"regex"`` or ``"bm25"`` enable FastMCP's
+    search transforms, which hide the real tool catalog behind a
+    ``search_tools`` + ``call_tool`` pair; ``"off"`` (or unset) keeps the
+    normal full listing.
+
+    Returns:
+        str: One of ``"off"``, ``"regex"``, or ``"bm25"`` (default ``"off"``).
+
+    Raises:
+        ConfigurationError: If NEXTDNS_TOOL_SEARCH is not one of the accepted
+            values.
+    """
+    raw = os.getenv("NEXTDNS_TOOL_SEARCH", "").strip().lower()
+    if not raw:
+        return "off"
+    if raw not in TOOL_SEARCH_MODES:
+        raise ConfigurationError(
+            f"Invalid NEXTDNS_TOOL_SEARCH: {raw!r}. Expected one of: {', '.join(TOOL_SEARCH_MODES)}."
+        )
+    return raw
+
+
 def _is_empty_profile_list(profile_str: str) -> bool:
     """Check if profile string is empty or whitespace."""
     return not profile_str or not profile_str.strip()

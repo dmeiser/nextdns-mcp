@@ -117,6 +117,15 @@ The test profile is named `TEST_PROFILE_YYYYMMDD` by default (overridable via
 placeholders). The model can be chosen with `--model`, `NEXTDNS_E2E_MODEL`, or
 left to opencode's own configured default.
 
+To exercise progressive tool disclosure, add `--tool-search regex|bm25` (or set
+`NEXTDNS_TOOL_SEARCH` in the env file). This makes the MCP server hide the real
+tool catalog behind FastMCP's `search_tools` + `call_tool` pair, so the actor
+must discover tools on demand instead of seeing them listed up front.
+
+```bash
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --tool-search bm25
+```
+
 See the module docstrings and `--help` for the full configuration reference.
 
 ### AI Agent E2E Validation
