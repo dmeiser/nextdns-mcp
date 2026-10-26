@@ -64,7 +64,10 @@ async def manageSettings(
     Settings categories:
         - ``general``: Core profile settings (e.g., name, web3 blocking).
         - ``privacy``: Privacy features such as disguised-tracker blocking and affiliate links.
-        - ``security``: Threat intelligence, Google Safe Browsing, typosquatting protection.
+        - ``security``: Threat intelligence, Google Safe Browsing, typosquatting protection, and
+          the early-access toggles ``dnsDataExfiltration``, ``dnsPayloadDelivery``,
+          ``fastFluxNetworks``, ``highRiskTlds``, and ``newlyActiveDomains`` (reported from the
+          NextDNS dashboard; not yet listed in the official NextDNS API docs).
         - ``parental``: Parental control enablement (safe search, YouTube restricted mode).
         - ``performance``: ECS, cache boost, and other performance options.
         - ``logs``: Query-logging enablement and retention.
