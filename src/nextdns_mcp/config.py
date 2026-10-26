@@ -253,6 +253,7 @@ class ProfileAccessControl:
     read_only: bool
     readable: frozenset[str] | None
     writable: frozenset[str] | None
+    protected: frozenset[str] = frozenset()
 
     def can_read(self, profile_id: str) -> bool:
         """Return whether the snapshot allows reading ``profile_id``."""
@@ -265,6 +266,8 @@ class ProfileAccessControl:
     def can_write(self, profile_id: str) -> bool:
         """Return whether the snapshot allows writing ``profile_id``."""
         if self.read_only or self.writable is None:
+            return False
+        if profile_id.lower() in self.protected:
             return False
         if not self.writable:
             return True
@@ -281,12 +284,26 @@ class ProfileAccessControl:
         return not self.read_only and self.writable is not None
 
 
+def get_protected_profiles() -> frozenset[str]:
+    """Get the protected-profile denylist from ``NEXTDNS_PROTECTED_PROFILES``.
+
+    Protected profiles are never writable, even when ``NEXTDNS_WRITABLE_PROFILES``
+    is ``ALL``; reads are unaffected. Intended for data-bearing or production
+    profiles that a test agent must not modify or delete.
+
+    Returns:
+        frozenset[str]: Lowercased profile IDs (empty when unset/empty).
+    """
+    raw = os.getenv("NEXTDNS_PROTECTED_PROFILES", "")
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
 def load_profile_access_control() -> ProfileAccessControl:
     """Read the profile ACL environment exactly once and return a snapshot.
 
-    Each of NEXTDNS_READ_ONLY, NEXTDNS_READABLE_PROFILES and
-    NEXTDNS_WRITABLE_PROFILES is read once, so all decisions derived from the
-    returned snapshot agree with each other.
+    Each of NEXTDNS_READ_ONLY, NEXTDNS_READABLE_PROFILES,
+    NEXTDNS_WRITABLE_PROFILES and NEXTDNS_PROTECTED_PROFILES is read once, so
+    all decisions derived from the returned snapshot agree with each other.
 
     The snapshot is deliberately not cached across requests: it is a
     per-request value, so the next request re-reads the environment and no
@@ -301,6 +318,7 @@ def load_profile_access_control() -> ProfileAccessControl:
         read_only=read_only,
         readable=_combine_readable(readable, writable),
         writable=None if writable is None else frozenset(writable),
+        protected=get_protected_profiles(),
     )
 
 

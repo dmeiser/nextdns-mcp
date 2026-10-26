@@ -266,9 +266,19 @@ class HarnessConfig:
             "NEXTDNS_WRITABLE_PROFILES",
             "NEXTDNS_DEFAULT_PROFILE",
             "NEXTDNS_TOOL_SEARCH",
+            "NEXTDNS_PROTECTED_PROFILES",
         ):
             if val := os.environ.get(var):
                 cfg.server["env"].setdefault(var, val)
+        # The data-bearing profile used for plots/log-download steps is only
+        # ever read by the actor; protect it against hallucinated writes
+        # (e.g. manageProfiles delete with the wrong id) even under ALL.
+        if plot_pid := os.environ.get("NEXTDNS_PLOT_PROFILE"):
+            protected = cfg.server["env"].get("NEXTDNS_PROTECTED_PROFILES", "")
+            ids = [p for p in protected.split(",") if p.strip()]
+            if plot_pid.strip().lower() not in {p.strip().lower() for p in ids}:
+                ids.append(plot_pid.strip())
+            cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"] = ",".join(ids)
         return cfg
 
     def render_argv(self, values: dict[str, str]) -> list[str]:
