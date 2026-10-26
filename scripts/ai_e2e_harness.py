@@ -158,6 +158,11 @@ _BUILTIN_TOOLS = frozenset(
     {"execute", "glob", "read", "write", "edit", "bash", "search", "websearch", "patch", "search_tools", "call_tool"}
 )
 
+# Precomputed union: ALLOWED_TOOLS is a list, so `list | frozenset` would
+# raise TypeError at feedback-render time (caught only when a call succeeds
+# with a non-catalog name, which short-circuit unit tests missed).
+_KNOWN_TOOLS = frozenset(ALLOWED_TOOLS) | _BUILTIN_TOOLS
+
 # Default way to launch the in-tree MCP server (overridden by config/env).
 # Uses the running interpreter (``sys.executable``) plus a PYTHONPATH pointing
 # at the in-tree package, so it works no matter how the harness itself was
@@ -1506,7 +1511,7 @@ def _feedback_block(step: Step, run: ActorRun, status: str, error: str, reason: 
         attempts = [
             c
             for c in run.tool_calls
-            if id(c) not in shown and (c.is_error or c.name not in ALLOWED_TOOLS | _BUILTIN_TOOLS)
+            if id(c) not in shown and (c.is_error or c.name not in _KNOWN_TOOLS)
         ]
         for c in attempts[:4]:
             out.append(f"  ATTEMPT : {c.name}({json.dumps(c.args)[:100]})"

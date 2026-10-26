@@ -728,6 +728,24 @@ class TestFeedbackBlockAttempts:
         out = h._feedback_block(step, self._run(h), "failed", "err", "", {}, verbose=False)
         assert not any(ln.strip().startswith("ATTEMPT") for ln in out)
 
+    def test_successful_non_catalog_call_does_not_crash(self, h):
+        """Regression: a *succeeded* call with a non-catalog name must not raise.
+
+        The live crash was ``list | frozenset`` (TypeError) reached only when
+        ``is_error`` was False, which the other tests short-circuited past.
+        """
+        step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [
+            h.ToolCall(name="session_rename", args={"code": "tools.opencode.session_rename(...)"}),  # ok=True
+            h.ToolCall(name="execute", args={"code": "1+1"}),  # builtin, ok
+        ]
+        out = h._feedback_block(step, run, "passed", "", "", {}, verbose=True)
+        attempts = [ln for ln in out if ln.strip().startswith("ATTEMPT")]
+        assert len(attempts) == 1
+        assert "session_rename" in attempts[0]
+        assert "not an advertised tool" in attempts[0]
+
     def test_discovery_calls_shown_when_no_direct_mcp_calls(self, h):
         step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
         run = h.ActorRun(command=["x"])
