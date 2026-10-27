@@ -397,6 +397,13 @@ def _actor_contract_text(srv_env: dict[str, str]) -> str:
         "  as `await tools.nextdns.<name>({...})`.",
         "- Do not invent tools outside the `tools.nextdns.*` namespace, and do not",
         "  call `tools.nextdns.<name>` outside `execute` — it will fail.",
+        # Generic verification affordance, not a task hint: the verdict is the
+        # server's state read back afterwards. A small model that had just added
+        # a DNS rewrite went on to delete it and reported the task as "added and
+        # then deleted", which reads as a failed step.
+        "- Your task is verified by reading the server's state afterwards, so a",
+        "  change you make must stay in place: do not undo, revert or tidy up",
+        "  something you have already done.",
     ]
     if srv_env.get("NEXTDNS_TOOL_SEARCH", "off") != "off":
         lines += [
@@ -1411,7 +1418,11 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     for rec in rewrite_records:
         steps.append(Step(f"rewrites.add.{rec['name'].split('-')[2]}", "rewrites", "manageRewrites",
             f"add rewrite {rec['name']!r} -> {rec['content']!r}",
-            _step_prompt(f"Add a DNS rewrite record for profile '{{profile_id}}': '{rec['name']}' -> '{rec['content']}'."),
+            # Phrased as a mapping, not "A -> B": the small model read the arrow
+            # as a sequence of two actions and reported having "added and then
+            # deleted" the record — it undid its own successful write.
+            _step_prompt(f"Add a DNS rewrite record for profile '{{profile_id}}' so that the hostname "
+                         f"'{rec['name']}' resolves to '{rec['content']}'."),
             "rewrite_add", {"record": rec}))
     for rec in rewrite_records:
         steps.append(Step(f"rewrites.delete.{rec['name'].split('-')[2]}", "rewrites", "manageRewrites",

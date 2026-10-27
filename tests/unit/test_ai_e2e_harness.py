@@ -1217,6 +1217,27 @@ def all_steps(h):
     return h.build_steps(h.TaskTargets(profile_name="P", tag="t0"))
 
 
+class TestStepPrompts:
+    """Prompts state the task unambiguously, and never say how to do it."""
+
+    def test_prompts_never_name_an_mcp_tool(self, h, all_steps):
+        for step in all_steps:
+            for tool in h.common.MCP_TOOLS:
+                assert tool not in step.prompt, f"{step.id} prompt leaked {tool}"
+
+    def test_rewrite_add_describes_a_mapping_not_an_arrow(self, h, all_steps):
+        """'A -> B' read as a sequence: the model added the record, deleted it,
+        and reported the task as done ('added and then deleted')."""
+        step = next(s for s in all_steps if s.id == "rewrites.add.cname")
+        assert "->" not in step.prompt
+        assert "hostname 'ai-e2e-cname-t0.example.com'" in step.prompt
+        assert "resolves to 'ai-e2e-target-t0.example.com'" in step.prompt
+
+    def test_contract_states_that_changes_must_stay(self, h):
+        text = h._actor_contract_text({})
+        assert "do not undo" in text
+
+
 class TestStepRange:
     def test_no_selection_selects_every_step(self, h, all_steps):
         sel = h.select_steps(all_steps)
