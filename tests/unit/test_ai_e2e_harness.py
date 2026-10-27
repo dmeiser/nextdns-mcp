@@ -1218,46 +1218,68 @@ def all_steps(h):
 
 
 class TestStepRange:
-    def test_no_bounds_select_every_step(self, h, all_steps):
+    def test_no_selection_selects_every_step(self, h, all_steps):
         sel = h.select_steps(all_steps)
         assert [s.id for _, s in sel] == [s.id for s in all_steps]
         assert sel[0][0] == 1 and sel[-1][0] == len(all_steps)
 
-    def test_bounds_are_inclusive_and_named_by_id(self, h, all_steps):
-        sel = h.select_steps(all_steps, "profiles.get", "profiles.update")
+    def test_id_range_is_inclusive(self, h, all_steps):
+        sel = h.select_steps(all_steps, "profiles.get-profiles.update")
         assert [s.id for _, s in sel] == ["profiles.get", "profiles.update"]
 
     def test_positions_are_the_ones_the_catalog_prints(self, h, all_steps):
-        assert [s.id for _, s in h.select_steps(all_steps, "1", "2")] == ["profiles.create", "profiles.list"]
+        assert [s.id for _, s in h.select_steps(all_steps, "1-2")] == ["profiles.create", "profiles.list"]
+
+    def test_a_bare_id_or_position_selects_one_step(self, h, all_steps):
+        assert [s.id for _, s in h.select_steps(all_steps, "lists.allowlist.add")] == ["lists.allowlist.add"]
+        assert [s.id for _, s in h.select_steps(all_steps, "1")] == ["profiles.create"]
 
     def test_positions_keep_full_run_numbering(self, h, all_steps):
         """A targeted report stays comparable with a full one: [89/89], not [1/1]."""
-        assert h.select_steps(all_steps, "profiles.delete", "") == [(len(all_steps), all_steps[-1])]
+        assert h.select_steps(all_steps, "profiles.delete") == [(len(all_steps), all_steps[-1])]
 
-    def test_single_step_range(self, h, all_steps):
-        sel = h.select_steps(all_steps, "lists.allowlist.add", "lists.allowlist.add")
-        assert [s.id for _, s in sel] == ["lists.allowlist.add"]
+    def test_comma_separated_selection_is_a_union_in_checklist_order(self, h, all_steps):
+        sel = h.select_steps(all_steps, "profiles.delete,20-21,lists.privacy_natives.replace-36")
+        assert [s.id for _, s in sel] == [
+            "lists.allowlist.replace",
+            "lists.allowlist.add",
+            "lists.privacy_natives.replace",
+            "lists.privacy_natives.remove",
+            "profiles.delete",
+        ]
 
-    def test_unknown_bound_is_rejected(self, h, all_steps):
+    def test_overlapping_entries_collapse(self, h, all_steps):
+        assert h.select_steps(all_steps, "1-3,2-4,3") == h.select_steps(all_steps, "1-4")
+
+    def test_unknown_entry_is_rejected(self, h, all_steps):
         with pytest.raises(h.StepRangeError, match="not a step id"):
-            h.select_steps(all_steps, "nope", "")
+            h.select_steps(all_steps, "nope")
         with pytest.raises(h.StepRangeError, match="not a position"):
-            h.select_steps(all_steps, str(len(all_steps) + 1), "")
+            h.select_steps(all_steps, str(len(all_steps) + 1))
 
-    def test_inverted_range_is_rejected(self, h, all_steps):
+    def test_reversed_range_is_rejected(self, h, all_steps):
         with pytest.raises(h.StepRangeError, match="comes before"):
-            h.select_steps(all_steps, "profiles.delete", "profiles.create")
+            h.select_steps(all_steps, "profiles.delete-profiles.create")
 
-    def test_harness_owns_lifecycle_only_when_the_range_excludes_it(self, h, all_steps):
+    def test_harness_owns_lifecycle_only_when_the_selection_excludes_it(self, h, all_steps):
         full = h.select_steps(all_steps)
         assert h.needs_harness_setup(full) is False
         assert h.needs_harness_teardown(full) is False
-        middle = h.select_steps(all_steps, "settings.general.read", "logs.get")
+        middle = h.select_steps(all_steps, "settings.general.read-logs.get")
         assert h.needs_harness_setup(middle) is True
         assert h.needs_harness_teardown(middle) is True
-        create_only = h.select_steps(all_steps, "profiles.create", "profiles.list")
+        create_only = h.select_steps(all_steps, "profiles.create-profiles.list")
         assert h.needs_harness_setup(create_only) is False
         assert h.needs_harness_teardown(create_only) is True
+
+    def test_start_end_flags_fold_into_the_same_selection(self, h):
+        cfg = h.HarnessConfig(start_step="logs.get", end_step="logs.clear")
+        assert cfg.step_selection(89) == "logs.get-logs.clear"
+        assert h.HarnessConfig(start_step="logs.get").step_selection(89) == "logs.get-89"
+        assert h.HarnessConfig(end_step="logs.get").step_selection(89) == "1-logs.get"
+        cfg = h.HarnessConfig(steps="20-21,profiles.delete", start_step="32", end_step="32")
+        assert cfg.step_selection(89) == "20-21,profiles.delete,32-32"
+        assert h.HarnessConfig().step_selection(89) == ""
 
     def test_catalog_lists_ids_and_the_positions_they_also_take(self, h, all_steps):
         text = h.render_step_catalog(all_steps)
@@ -1343,7 +1365,7 @@ class TestHarnessProfileLifecycle:
 
 
 class TestStepRangeCli:
-    """--print-steps is how a user finds the range bounds; it needs no API key."""
+    """--print-steps is how a user finds the selection terms; it needs no API key."""
 
     def test_print_steps_works_without_a_key(self, h, monkeypatch, capsys):
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
@@ -1352,20 +1374,33 @@ class TestStepRangeCli:
         assert "Step catalog (" in out
         assert "profiles.delete" in out
 
-    def test_bad_range_prints_the_catalog_and_fails(self, h, monkeypatch, capsys):
+    def test_bad_selection_prints_the_catalog_and_fails(self, h, monkeypatch, capsys):
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
-        assert h.main(["--start-step", "not-a-step"]) == 2
+        assert h.main(["--steps", "20-21,not-a-step"]) == 2
         assert "Step catalog (" in capsys.readouterr().out
 
-    def test_range_flags_reach_the_config(self, h, monkeypatch, tmp_path):
+    def test_selection_flags_reach_the_config(self, h, monkeypatch, tmp_path):
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         seen: dict[str, object] = {}
 
         async def fake_run(api_key, config):
+            seen["steps"] = config.steps
             seen["start"] = config.start_step
             seen["end"] = config.end_step
             return h.Report(started_at=1.0, finished_at=2.0)
 
         monkeypatch.setattr(h, "run_harness", fake_run)
-        h.main(["--start-step", "logs.get", "--end-step", "88", "--quiet", "--report", str(tmp_path / "r.jsonl")])
-        assert seen == {"start": "logs.get", "end": "88"}
+        h.main(
+            [
+                "--steps",
+                "20-21,profiles.delete",
+                "--start-step",
+                "logs.get",
+                "--end-step",
+                "88",
+                "--quiet",
+                "--report",
+                str(tmp_path / "r.jsonl"),
+            ]
+        )
+        assert seen == {"steps": "20-21,profiles.delete", "start": "logs.get", "end": "88"}

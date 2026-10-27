@@ -77,18 +77,19 @@ override, ``-`` for stdout).
 Targeted runs
 -------------
 ``--print-steps`` lists the checklist (ids plus 1-based positions) on stdout;
-``--start-step``/``--end-step`` then run an inclusive range of it, by id or by
-position::
+``--steps`` then runs a comma-separated selection of it — step ids, positions,
+or inclusive ``A-B`` ranges::
 
     uv run python scripts/ai_e2e_harness.py --print-steps
-    uv run python scripts/ai_e2e_harness.py --start-step lists.allowlist.add --end-step rewrites.add.cname
+    uv run python scripts/ai_e2e_harness.py --steps 20-21,lists.privacy_natives.replace-36,profiles.delete
 
-Progress keeps the full-run numbering (``[31/89]``), so a targeted report can be
-compared with a full one step by step. A range that leaves out ``profiles.create``
-or ``profiles.delete`` makes the harness do that part of the profile lifecycle
-itself, through the MCP ``manageProfiles`` tool (so the server's ACLs apply);
-everything else is the caller's responsibility — if the range tests "remove X",
-include the step that adds X.
+``--start-step``/``--end-step`` are the single-range shorthand for the same
+selection. Progress keeps the full-run numbering (``[31/89]``), so a targeted
+report can be compared with a full one step by step. A selection that leaves out
+``profiles.create`` or ``profiles.delete`` makes the harness do that part of the
+profile lifecycle itself, through the MCP ``manageProfiles`` tool (so the
+server's ACLs apply); everything else is the caller's responsibility — if the
+selection tests "remove X", include the step that adds X.
 """
 
 from __future__ import annotations
@@ -237,10 +238,19 @@ class HarnessConfig:
     timeout_s: float = 7200.0  # overall run budget (99 sequential model steps)
     step_timeout_s: float = 300.0  # per-step actor timeout
     verbose: bool = False  # per-step feedback includes failed/unknown tool attempts
-    # Targeted run: an inclusive range of step ids (or 1-based positions).
-    # Empty means "from the first step" / "through the last step".
+    # Targeted run: comma-separated step ids, 1-based positions and inclusive
+    # A-B ranges (see select_steps). start_step/end_step are the single-range
+    # shorthand for the same thing; empty means "the whole checklist".
+    steps: str = ""
     start_step: str = ""
     end_step: str = ""
+
+    def step_selection(self, total: int) -> str:
+        """The selection string for a checklist of ``total`` steps."""
+        parts = [self.steps] if self.steps.strip() else []
+        if self.start_step or self.end_step:
+            parts.append(f"{self.start_step or 1}-{self.end_step or total}")
+        return ",".join(parts)
 
     @classmethod
     def load(cls, path: str | None) -> HarnessConfig:
@@ -266,6 +276,8 @@ class HarnessConfig:
                 cfg.start_step = str(data["start_step"])
             if "end_step" in data:
                 cfg.end_step = str(data["end_step"])
+            if "steps" in data:
+                cfg.steps = str(data["steps"])
             if isinstance(data.get("server"), dict):
                 srv = data["server"]
                 if "command" in srv:
@@ -1471,11 +1483,11 @@ PROFILE_DELETE_STEP = "profiles.delete"
 
 
 class StepRangeError(ValueError):
-    """A --start-step/--end-step value that does not identify a step."""
+    """A --steps/--start-step/--end-step value that does not identify a step."""
 
 
 def _step_position(steps: list[Step], value: str, flag: str) -> int:
-    """Resolve one range bound to a 0-based index: a step id or a 1-based position."""
+    """Resolve one selection bound to a 0-based index: a step id or a 1-based position."""
     raw = value.strip()
     if raw.isdigit():
         pos = int(raw)
@@ -1488,24 +1500,43 @@ def _step_position(steps: list[Step], value: str, flag: str) -> int:
     raise StepRangeError(f"{flag}={value!r} is not a step id or a 1-based position")
 
 
-def select_steps(steps: list[Step], start_step: str = "", end_step: str = "") -> list[tuple[int, Step]]:
-    """The inclusive step range to run, as (1-based position, step) pairs.
+def _entry_bounds(steps: list[Step], entry: str, flag: str) -> tuple[int, int]:
+    """One selection entry as (lo, hi) 0-based indices, inclusive.
 
-    Bounds are step ids (``lists.allowlist.add``) or 1-based positions (``31``);
-    an empty bound means "the first step" / "the last step". The positions are
-    the ones ``--print-steps`` prints, so a targeted run's progress lines keep a
-    full run's numbering and two reports can be compared step by step.
+    An entry is a step id, a 1-based position, or ``A-B`` — both sides resolved
+    the same way. Step ids never contain ``-``, so the separator is unambiguous.
     """
-    if not start_step and not end_step:
+    lo_raw, sep, hi_raw = entry.partition("-")
+    if not sep:
+        pos = _step_position(steps, entry, flag)
+        return pos, pos
+    return _step_position(steps, lo_raw, flag), _step_position(steps, hi_raw, flag)
+
+
+def select_steps(steps: list[Step], selection: str = "") -> list[tuple[int, Step]]:
+    """The selected steps, as (1-based position, step) pairs in checklist order.
+
+    ``selection`` is a comma-separated list of step ids (``lists.allowlist.add``),
+    1-based positions (``21``) and inclusive ranges (``20-21``,
+    ``profiles.get-profiles.update``); overlapping entries collapse and the
+    result is always de-duplicated and in checklist order. Empty means all
+    steps. The positions are the ones ``--print-steps`` prints, so a targeted
+    run's progress lines keep a full run's numbering and two reports can be
+    compared step by step.
+    """
+    entries = [e.strip() for e in selection.split(",") if e.strip()]
+    if not entries:
         return list(enumerate(steps, 1))
-    lo = _step_position(steps, start_step, "--start-step") if start_step else 0
-    hi = _step_position(steps, end_step, "--end-step") if end_step else len(steps) - 1
-    if hi < lo:
-        raise StepRangeError(
-            f"--end-step {steps[hi].id!r} comes before --start-step {steps[lo].id!r}: "
-            "the range is inclusive and runs in checklist order"
-        )
-    return [(i, steps[i - 1]) for i in range(lo + 1, hi + 2)]
+    chosen: set[int] = set()
+    for entry in entries:
+        lo, hi = _entry_bounds(steps, entry, "--steps")
+        if hi < lo:
+            raise StepRangeError(
+                f"--steps {entry!r}: {steps[hi].id!r} comes before {steps[lo].id!r} "
+                "— a range is written low to high"
+            )
+        chosen.update(range(lo + 1, hi + 2))
+    return [(i, steps[i - 1]) for i in sorted(chosen)]
 
 
 def needs_harness_setup(selected: list[tuple[int, Step]]) -> bool:
@@ -1519,13 +1550,14 @@ def needs_harness_teardown(selected: list[tuple[int, Step]]) -> bool:
 
 
 def render_step_catalog(steps: list[Step]) -> str:
-    """The step catalog a --start-step/--end-step range selects from (stdout)."""
+    """The step catalog a --steps range selects from (stdout)."""
     width = max((len(s.id) for s in steps), default=0)
     header = (
-        f"Step catalog ({len(steps)} steps) — --start-step/--end-step take a step id "
-        "or the number below. Both bounds are inclusive; a range that omits "
-        f"{PROFILE_CREATE_STEP} or {PROFILE_DELETE_STEP} makes the harness provision "
-        "and/or delete the test profile itself."
+        f"Step catalog ({len(steps)} steps) — --steps takes a comma-separated list of "
+        "these ids or numbers, and A-B selects an inclusive range "
+        "(e.g. --steps 20-21,lists.privacy_natives.replace-36,profiles.delete). "
+        f"A selection that omits {PROFILE_CREATE_STEP} or {PROFILE_DELETE_STEP} makes "
+        "the harness provision and/or delete the test profile itself."
     )
     lines = [header, ""]
     lines += [f"  {i:>3}  {s.id:<{width}}  [{s.section}] {s.description}" for i, s in enumerate(steps, 1)]
@@ -1814,13 +1846,11 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     report.actor_command = config.command
 
     steps = build_steps(targets)
-    selected = select_steps(steps, config.start_step, config.end_step)
+    selected = select_steps(steps, config.step_selection(len(steps)))
     total = len(steps)
     if len(selected) < total:
-        _progress(
-            f"targeted run: steps {selected[0][0]}-{selected[-1][0]} of {total} "
-            f"({selected[0][1].id} .. {selected[-1][1].id})"
-        )
+        ids = ", ".join(s.id for _, s in selected) if len(selected) <= 12 else f"{selected[0][1].id} .. {selected[-1][1].id}"
+        _progress(f"targeted run: {len(selected)} of {total} steps ({ids})")
     _progress(f"profile name: {targets.profile_name}  ({len(selected)} of {total} steps)")
     workdir = Path(config.workdir) if config.workdir else Path(tempfile.mkdtemp(prefix="nextdns_e2e_"))
     workdir.mkdir(parents=True, exist_ok=True)
@@ -2101,6 +2131,12 @@ def main(argv: list[str] | None = None) -> int:
         "--step-timeout", type=float, help="per-step actor timeout in seconds (default 300)"
     )
     parser.add_argument(
+        "--steps",
+        help="targeted selection: comma-separated step ids, 1-based positions or "
+        "A-B inclusive ranges (see --print-steps), e.g. "
+        "'20-21,lists.privacy_natives.replace-36,profiles.delete'",
+    )
+    parser.add_argument(
         "--start-step",
         help="first step of an inclusive targeted range: a step id "
         "(e.g. lists.allowlist.add) or a 1-based position (see --print-steps)",
@@ -2113,8 +2149,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--print-steps",
         action="store_true",
-        help="print the step catalog (the ids and positions --start-step/--end-step "
-        "take) and exit",
+        help="print the step catalog (the ids and positions --steps takes) and exit",
     )
     parser.add_argument("--verbose", action="store_true", help="print the actor stderr on failure")
     args = parser.parse_args(argv)
@@ -2123,26 +2158,28 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["NEXTDNS_TOOL_SEARCH"] = args.tool_search
 
     # The step catalog needs no API key and runs no model: it is how a user
-    # finds the --start-step/--end-step values, and it states what a range that
-    # leaves out the profile lifecycle implies. A bad range is rejected here,
-    # before an expensive live run, and the catalog is printed as the remedy.
+    # finds the ids and positions a --steps selection takes, and it states what
+    # a selection that leaves out the profile lifecycle implies. A bad selection
+    # is rejected here, before an expensive live run, with the catalog as the
+    # remedy.
     cli_steps = build_steps(
         TaskTargets(profile_name=common._resolve_profile_name(args.profile_name or None), tag=_random_tag())
     )
     if args.print_steps:
         print(render_step_catalog(cli_steps))
         return 0
+    selection = args.steps or ""
     if args.start_step or args.end_step:
+        selection = ",".join([p for p in (selection, f"{args.start_step or 1}-{args.end_step or len(cli_steps)}") if p])
+    if selection:
         try:
-            chosen = select_steps(cli_steps, args.start_step or "", args.end_step or "")
+            chosen = select_steps(cli_steps, selection)
         except StepRangeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             print(render_step_catalog(cli_steps))
             return 2
-        _progress(
-            f"targeted range: steps {chosen[0][0]}-{chosen[-1][0]} of {len(cli_steps)} "
-            f"({chosen[0][1].id} .. {chosen[-1][1].id})"
-        )
+        ids = ", ".join(s.id for _, s in chosen) if len(chosen) <= 12 else f"{chosen[0][1].id} .. {chosen[-1][1].id}"
+        _progress(f"targeted selection: {len(chosen)} of {len(cli_steps)} steps ({ids})")
 
     # Load environment from a .env file if present (or the one given explicitly).
     if _load_dotenv is not None:
@@ -2172,6 +2209,7 @@ def main(argv: list[str] | None = None) -> int:
         config.timeout_s = args.budget
     if args.step_timeout:
         config.step_timeout_s = args.step_timeout
+    config.steps = args.steps or ""
     config.start_step = args.start_step or ""
     config.end_step = args.end_step or ""
     config.verbose = bool(args.verbose)
