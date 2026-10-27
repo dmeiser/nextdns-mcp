@@ -126,21 +126,23 @@ must discover tools on demand instead of seeing them listed up front.
 NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --tool-search bm25
 ```
 
-To run only part of the ~89-step checklist, print the step catalog and pass an
-inclusive range to `--start-step` / `--end-step` (a step id or the position the
-catalog prints):
+To run only part of the ~89-step checklist, print the step catalog and pass a
+`--steps` selection: a comma-separated list of step ids, catalog positions, or
+inclusive `A-B` ranges. `--start-step` / `--end-step` are the single-range
+shorthand for the same thing.
 
 ```bash
 uv run python scripts/ai_e2e_harness.py --print-steps
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --steps 20-21,lists.privacy_natives.replace-36,profiles.delete
 NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --start-step lists.allowlist.add --end-step rewrites.add.cname
 ```
 
 Progress keeps the full-run numbering (`[31/89]`), so a targeted report can be
-compared with a full run step by step. A range that leaves out `profiles.create`
+compared with a full run step by step. A selection that leaves out `profiles.create`
 or `profiles.delete` makes the harness do that part of the profile lifecycle
 itself, by calling the MCP `manageProfiles` tool (so the server's ACLs and error
 contract apply to it too); every other precondition is the caller's job — if the
-range tests "remove X", include the step that adds X.
+selection tests "remove X", include the step that adds X.
 
 See the module docstrings and `--help` for the full configuration reference.
 
