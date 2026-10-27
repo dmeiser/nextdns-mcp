@@ -121,7 +121,7 @@ def _validate_replace_entries(entries: list[Any]) -> dict[str, Any] | None:
     return None
 
 
-async def _lists_replace(base_url: str, entries: str | list[dict[str, Any]] | None) -> dict[str, Any]:
+async def _lists_replace(base_url: str, entries: str | list[Any] | None) -> dict[str, Any]:
     """Replace the entire list with a new set of entries."""
     if entries is None:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entries is required for replace operation")
@@ -149,17 +149,34 @@ async def _lists_update(
             supported_list_types=sorted(_LIST_UPDATEABLE_TYPES),
         )
     if entry_id is None:
-        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for update operation")
+        return error_payload(
+            ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for update operation", hint=_ENTRY_ID_HINT
+        )
     entry = _coerce_json_arg(entry)
     if not isinstance(entry, dict):
         return error_payload(ErrorCode.INVALID_ARGUMENT, "entry must be a dict for update operation")
-    return await _api_request_payload("PATCH", f"{base_url}/{entry_id}", json_body=entry)
+    result = await _api_request_payload("PATCH", f"{base_url}/{entry_id}", json_body=entry)
+    if isinstance(result, dict) and result.get("upstream_code") == "notFound":
+        result = {**result, "hint": _ENTRY_ID_HINT}
+    return result
+
+
+# What an entry_id looks like for each list type: the id IS the entry value,
+# which is not obvious from the parameter name, and a guessed id comes back as
+# an opaque upstream 404.
+_ENTRY_ID_HINT = (
+    "entry_id is the entry's own id as returned by operation='get': the hostname for "
+    "allowlist/denylist, the blocklist name for privacy_blocklists, the TLD for security_tlds, "
+    "and the category/service name for parental_categories/parental_services"
+)
 
 
 async def _lists_remove(base_url: str, entry_id: str | None) -> dict[str, Any]:
     """Remove a single list entry by id."""
     if entry_id is None:
-        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for remove operation")
+        return error_payload(
+            ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for remove operation", hint=_ENTRY_ID_HINT
+        )
     result = await _api_request_payload("DELETE", f"{base_url}/{entry_id}")
     return _idempotent_list_result(result, "remove") or result
 
@@ -208,7 +225,7 @@ async def _manage_lists_impl(
     profile_id: ProfileId,
     entry_id: str | None = None,
     entry: str | dict[str, Any] | None = None,
-    entries: str | list[dict[str, Any]] | None = None,
+    entries: str | list[Any] | None = None,
 ) -> dict[str, Any]:
     """Grouped CRUD implementation for content/privacy/security/parental lists."""
     target_profile, error = resolve_profile_id(profile_id, allow_default=False)
@@ -244,7 +261,7 @@ async def manageLists(
     profile_id: ProfileId,
     entry_id: str | None = None,
     entry: str | dict[str, Any] | None = None,
-    entries: str | list[dict[str, Any]] | None = None,
+    entries: str | list[Any] | None = None,
 ) -> dict[str, Any]:
     """Manage allow/deny/block lists for a NextDNS profile.
 
@@ -261,13 +278,15 @@ async def manageLists(
         - ``add``: Append one entry (pass ``entry`` as ``{"id": "value"}`` or as a plain id string).
           The entry must carry a string ``id``; an entry without one is rejected locally with
           ``invalid_argument`` rather than sent upstream.
-        - ``remove``: Delete one entry by ``entry_id``.
+        - ``remove``: Delete one entry by ``entry_id``. The ``entry_id`` IS the entry's value:
+          the hostname for allowlist/denylist, the TLD for security_tlds, the category or
+          service name for parental lists. Removing an absent entry is idempotent success.
         - ``update``: Toggle an existing entry by ``entry_id`` (pass ``entry={"active": True|False}``).
           Only supported for ``allowlist``, ``denylist``, ``parental_categories``, and
           ``parental_services``.
-        - ``replace``: Replace the entire list with ``entries`` (list of dicts). Each entry must be
-          an object with a string ``id``; a malformed entry is rejected locally with
-          ``invalid_argument`` naming its index, rather than sent upstream.
+        - ``replace``: Replace the entire list with ``entries``. Each entry is an object with a
+          string ``id``, or a bare string, which is read as ``{"id": "..."}``; a malformed entry
+          is rejected locally with ``invalid_argument`` naming its index, rather than sent upstream.
 
     Examples:
         - get: ``manageLists(list_type="denylist", operation="get", profile_id="abc123")``
