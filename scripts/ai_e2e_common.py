@@ -224,6 +224,9 @@ class Report:
     api_key_present: bool = False
     profile_id: str | None = None
     profile_name: str | None = None
+    # Harness-owned lifecycle work for a targeted (step-range) run: how the
+    # test profile was provisioned when the range excluded profiles.create.
+    setup: str = ""
     cleanup: str = ""
     skipped_sections: list[str] = field(default_factory=list)
     results: list[CheckResult] = field(default_factory=list)
@@ -266,6 +269,7 @@ class Report:
             "failed": self.failed,
             "profile_id": self.profile_id,
             "profile_name": self.profile_name,
+            "setup": self.setup,
             "cleanup": self.cleanup,
             "skipped_sections": self.skipped_sections,
             "actor_kind": self.actor_kind,

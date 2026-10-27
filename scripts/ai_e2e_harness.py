@@ -73,6 +73,22 @@ Usage::
 
 The JSONL report defaults to ``artifacts/ai_e2e_report.jsonl`` (``--report`` to
 override, ``-`` for stdout).
+
+Targeted runs
+-------------
+``--print-steps`` lists the checklist (ids plus 1-based positions) on stdout;
+``--start-step``/``--end-step`` then run an inclusive range of it, by id or by
+position::
+
+    uv run python scripts/ai_e2e_harness.py --print-steps
+    uv run python scripts/ai_e2e_harness.py --start-step lists.allowlist.add --end-step rewrites.add.cname
+
+Progress keeps the full-run numbering (``[31/89]``), so a targeted report can be
+compared with a full one step by step. A range that leaves out ``profiles.create``
+or ``profiles.delete`` makes the harness do that part of the profile lifecycle
+itself, through the MCP ``manageProfiles`` tool (so the server's ACLs apply);
+everything else is the caller's responsibility — if the range tests "remove X",
+include the step that adds X.
 """
 
 from __future__ import annotations
@@ -221,6 +237,10 @@ class HarnessConfig:
     timeout_s: float = 7200.0  # overall run budget (99 sequential model steps)
     step_timeout_s: float = 300.0  # per-step actor timeout
     verbose: bool = False  # per-step feedback includes failed/unknown tool attempts
+    # Targeted run: an inclusive range of step ids (or 1-based positions).
+    # Empty means "from the first step" / "through the last step".
+    start_step: str = ""
+    end_step: str = ""
 
     @classmethod
     def load(cls, path: str | None) -> HarnessConfig:
@@ -242,6 +262,10 @@ class HarnessConfig:
                 cfg.timeout_s = float(data["timeout_s"])
             if "step_timeout_s" in data:
                 cfg.step_timeout_s = float(data["step_timeout_s"])
+            if "start_step" in data:
+                cfg.start_step = str(data["start_step"])
+            if "end_step" in data:
+                cfg.end_step = str(data["end_step"])
             if isinstance(data.get("server"), dict):
                 srv = data["server"]
                 if "command" in srv:
@@ -1184,6 +1208,67 @@ async def _self_heal_profile(m: MeasureClient, pid: str, targets: TaskTargets) -
 
 
 # =========================================================================== #
+# Harness-owned profile lifecycle (targeted runs)
+# =========================================================================== #
+
+
+async def _mcp_call(server: dict[str, Any], tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Call one tool on the configured MCP server as an ordinary MCP client.
+
+    Only used for harness-owned lifecycle work: provisioning and tearing down
+    the test profile of a targeted run, which the actor is never asked to do.
+    Going through the MCP tool rather than the REST side-channel keeps the
+    server's own ACLs, argument coercion and error contract in the loop, so the
+    harness creates exactly the profile the actor could create. The server is
+    launched from the same ``server`` spec the actor's ``opencode.json`` gets,
+    so the ACL and tool-search environment is identical.
+    """
+    from fastmcp import Client
+    from fastmcp.client.transports import StdioTransport
+
+    transport = StdioTransport(
+        command=str(server["command"]),
+        args=[str(a) for a in server.get("args", [])],
+        env={str(k): str(v) for k, v in (server.get("env") or {}).items()},
+        cwd=str(server["cwd"]) if server.get("cwd") else None,
+    )
+    async with Client(transport) as client:
+        res = await client.call_tool(tool, arguments)
+    data = getattr(res, "data", None)
+    if data is None:
+        data = getattr(res, "structured_content", None)
+    text = "".join(str(getattr(part, "text", "")) for part in (getattr(res, "content", None) or []))
+    error = ""
+    if getattr(res, "is_error", False):
+        error = text or "tool call failed"
+    if isinstance(data, dict) and data.get("error"):
+        error = str(data["error"])
+    return {"ok": not error, "data": data, "error": error}
+
+
+async def _harness_provision_profile(config: HarnessConfig, targets: TaskTargets) -> tuple[str, str]:
+    """Create the test profile through the MCP tool; returns (profile_id, note).
+
+    A targeted run that starts after ``profiles.create`` still needs a profile
+    for every later step to act on, and the harness owns that profile either
+    way, so it creates it the way the server exposes it.
+    """
+    res = await _mcp_call(config.server, "manageProfiles", {"operation": "create", "name": targets.profile_name})
+    data = res.get("data")
+    body = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+    pid = str(body.get("id", "")) if isinstance(body, dict) else ""
+    if not pid:
+        return "", f"FAILED: manageProfiles(create) returned {res.get('error') or data!r}"
+    return pid, f"test profile {targets.profile_name!r} provisioned by the harness via manageProfiles(create)"
+
+
+async def _harness_delete_profile(config: HarnessConfig, pid: str) -> str:
+    """Delete the test profile through the MCP tool; returns an error string."""
+    res = await _mcp_call(config.server, "manageProfiles", {"operation": "delete", "profile_id": pid})
+    return str(res.get("error") or "")
+
+
+# =========================================================================== #
 # Orchestration
 # =========================================================================== #
 
@@ -1372,6 +1457,79 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         "profile_gone"))
 
     return steps
+
+
+# =========================================================================== #
+# Targeted runs: run one inclusive range of the checklist
+# =========================================================================== #
+
+# The steps that own the test profile's lifecycle. A range that leaves one out
+# means the harness performs that part of the lifecycle itself (the actor is
+# never asked to do it, and the run still starts and ends clean).
+PROFILE_CREATE_STEP = "profiles.create"
+PROFILE_DELETE_STEP = "profiles.delete"
+
+
+class StepRangeError(ValueError):
+    """A --start-step/--end-step value that does not identify a step."""
+
+
+def _step_position(steps: list[Step], value: str, flag: str) -> int:
+    """Resolve one range bound to a 0-based index: a step id or a 1-based position."""
+    raw = value.strip()
+    if raw.isdigit():
+        pos = int(raw)
+        if 1 <= pos <= len(steps):
+            return pos - 1
+        raise StepRangeError(f"{flag}={value!r} is not a position in 1..{len(steps)}")
+    for i, step in enumerate(steps):
+        if step.id == raw:
+            return i
+    raise StepRangeError(f"{flag}={value!r} is not a step id or a 1-based position")
+
+
+def select_steps(steps: list[Step], start_step: str = "", end_step: str = "") -> list[tuple[int, Step]]:
+    """The inclusive step range to run, as (1-based position, step) pairs.
+
+    Bounds are step ids (``lists.allowlist.add``) or 1-based positions (``31``);
+    an empty bound means "the first step" / "the last step". The positions are
+    the ones ``--print-steps`` prints, so a targeted run's progress lines keep a
+    full run's numbering and two reports can be compared step by step.
+    """
+    if not start_step and not end_step:
+        return list(enumerate(steps, 1))
+    lo = _step_position(steps, start_step, "--start-step") if start_step else 0
+    hi = _step_position(steps, end_step, "--end-step") if end_step else len(steps) - 1
+    if hi < lo:
+        raise StepRangeError(
+            f"--end-step {steps[hi].id!r} comes before --start-step {steps[lo].id!r}: "
+            "the range is inclusive and runs in checklist order"
+        )
+    return [(i, steps[i - 1]) for i in range(lo + 1, hi + 2)]
+
+
+def needs_harness_setup(selected: list[tuple[int, Step]]) -> bool:
+    """True unless the range itself asks the actor to create the test profile."""
+    return not any(step.id == PROFILE_CREATE_STEP for _, step in selected)
+
+
+def needs_harness_teardown(selected: list[tuple[int, Step]]) -> bool:
+    """True unless the range itself asks the actor to delete the test profile."""
+    return not any(step.id == PROFILE_DELETE_STEP for _, step in selected)
+
+
+def render_step_catalog(steps: list[Step]) -> str:
+    """The step catalog a --start-step/--end-step range selects from (stdout)."""
+    width = max((len(s.id) for s in steps), default=0)
+    header = (
+        f"Step catalog ({len(steps)} steps) — --start-step/--end-step take a step id "
+        "or the number below. Both bounds are inclusive; a range that omits "
+        f"{PROFILE_CREATE_STEP} or {PROFILE_DELETE_STEP} makes the harness provision "
+        "and/or delete the test profile itself."
+    )
+    lines = [header, ""]
+    lines += [f"  {i:>3}  {s.id:<{width}}  [{s.section}] {s.description}" for i, s in enumerate(steps, 1)]
+    return "\n".join(lines) + "\n"
 
 
 async def _verify_step(
@@ -1656,7 +1814,14 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     report.actor_command = config.command
 
     steps = build_steps(targets)
-    _progress(f"profile name: {targets.profile_name}  ({len(steps)} steps)")
+    selected = select_steps(steps, config.start_step, config.end_step)
+    total = len(steps)
+    if len(selected) < total:
+        _progress(
+            f"targeted run: steps {selected[0][0]}-{selected[-1][0]} of {total} "
+            f"({selected[0][1].id} .. {selected[-1][1].id})"
+        )
+    _progress(f"profile name: {targets.profile_name}  ({len(selected)} of {total} steps)")
     workdir = Path(config.workdir) if config.workdir else Path(tempfile.mkdtemp(prefix="nextdns_e2e_"))
     workdir.mkdir(parents=True, exist_ok=True)
     write_mcp_config(config, workdir)
@@ -1688,7 +1853,17 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
         # creates extras beyond the test profile) can be swept at the end.
         pre_existing = set(await _all_profile_ids(m))
 
-        for i, step in enumerate(steps, 1):
+        # Targeted run: when the range does not include profiles.create the
+        # harness provisions the test profile itself, through the MCP tool so
+        # the server's ACLs apply. Without it every later step has nothing to
+        # act on and the report measures nothing.
+        if needs_harness_setup(selected):
+            pid, note = await _harness_provision_profile(config, targets)
+            report.setup = note
+            report.profile_id = pid
+            _progress(f"targeted setup: {note}")
+
+        for i, step in selected:
             if time.monotonic() - started > budget:
                 rest = CheckResult(step.id, step.section, step.description, "skipped",
                                    mcp_tool=step.tool, reason=f"overall time budget ({budget:.0f}s) exhausted")
@@ -1721,7 +1896,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             attempt = 0
             while True:
                 attempt += 1
-                _progress(f"[{i}/{len(steps)}] {step.id}" + (f" (retry {attempt-1})" if attempt > 1 else ""))
+                _progress(f"[{i}/{total}] {step.id}" + (f" (retry {attempt-1})" if attempt > 1 else ""))
                 run = await run_actor(step_cfg, prompt, workdir, retries=1)
                 total_events += len(run.tool_calls)
                 for t in run.tools_used():
@@ -1778,9 +1953,18 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                     report.profile_id = pid
 
         # Safety net: if the model deleted the profile, verify; if not, the
-        # harness owns cleanup.
+        # harness owns cleanup. For a targeted range that excludes
+        # profiles.delete the teardown is harness-owned from the start, so it
+        # goes through the same MCP tool the actor would have used.
         if pid:
             gone = await _profile_gone(m, pid, targets)
+            if not gone and needs_harness_teardown(selected):
+                err = await _harness_delete_profile(config, pid)
+                gone = await _profile_gone(m, pid, targets)
+                if gone:
+                    _progress("targeted teardown: test profile deleted via manageProfiles(delete)")
+                else:
+                    _progress(f"targeted teardown incomplete via MCP ({err or 'profile still present'})")
             if not gone:
                 _progress("safety cleanup: deleting the test profile via REST")
                 for attempt in range(4):
@@ -1848,6 +2032,8 @@ def render_text_report(report: Report) -> str:
     lines.append(f"VERDICT : {s['verdict']}")
     lines.append(f"total   : {s['total']}  (passed {s['passed']}, skipped {s['skipped']}, failed {s['failed']})")
     lines.append(f"profile : {report.profile_id}  ({report.profile_name})")
+    if report.setup:
+        lines.append(f"setup   : {report.setup}")
     lines.append(
         f"actor   : {report.actor_kind} — {len(report.actor_tools_used)} tool(s) observed, {s['actor_tool_calls']} event(s)"
     )
@@ -1914,11 +2100,49 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--step-timeout", type=float, help="per-step actor timeout in seconds (default 300)"
     )
+    parser.add_argument(
+        "--start-step",
+        help="first step of an inclusive targeted range: a step id "
+        "(e.g. lists.allowlist.add) or a 1-based position (see --print-steps)",
+    )
+    parser.add_argument(
+        "--end-step",
+        help="last step of an inclusive targeted range: a step id or a 1-based "
+        "position (see --print-steps)",
+    )
+    parser.add_argument(
+        "--print-steps",
+        action="store_true",
+        help="print the step catalog (the ids and positions --start-step/--end-step "
+        "take) and exit",
+    )
     parser.add_argument("--verbose", action="store_true", help="print the actor stderr on failure")
     args = parser.parse_args(argv)
 
     if args.tool_search:
         os.environ["NEXTDNS_TOOL_SEARCH"] = args.tool_search
+
+    # The step catalog needs no API key and runs no model: it is how a user
+    # finds the --start-step/--end-step values, and it states what a range that
+    # leaves out the profile lifecycle implies. A bad range is rejected here,
+    # before an expensive live run, and the catalog is printed as the remedy.
+    cli_steps = build_steps(
+        TaskTargets(profile_name=common._resolve_profile_name(args.profile_name or None), tag=_random_tag())
+    )
+    if args.print_steps:
+        print(render_step_catalog(cli_steps))
+        return 0
+    if args.start_step or args.end_step:
+        try:
+            chosen = select_steps(cli_steps, args.start_step or "", args.end_step or "")
+        except StepRangeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            print(render_step_catalog(cli_steps))
+            return 2
+        _progress(
+            f"targeted range: steps {chosen[0][0]}-{chosen[-1][0]} of {len(cli_steps)} "
+            f"({chosen[0][1].id} .. {chosen[-1][1].id})"
+        )
 
     # Load environment from a .env file if present (or the one given explicitly).
     if _load_dotenv is not None:
@@ -1948,6 +2172,8 @@ def main(argv: list[str] | None = None) -> int:
         config.timeout_s = args.budget
     if args.step_timeout:
         config.step_timeout_s = args.step_timeout
+    config.start_step = args.start_step or ""
+    config.end_step = args.end_step or ""
     config.verbose = bool(args.verbose)
 
     report = asyncio.run(run_harness(api_key, config))
