@@ -927,16 +927,24 @@ class TestMeasureActorRun:
 class _FakeClient:
     """A stand-in for MeasureClient that serves canned REST responses."""
 
-    def __init__(self, profiles=None, by_path=None, delete_ok=True):
+    def __init__(self, profiles=None, by_path=None, delete_ok=True, post_result=None):
         self._profiles = profiles or []
         self._by_path = by_path or {}
         self._delete_ok = delete_ok
+        self._post_result = post_result
         self.deleted: list[str] = []
+        self.posted: list[tuple[str, dict]] = []
 
     async def rest_get(self, path, params=None):
         if path in self._by_path:
             return self._by_path[path]
         return {"status": 200, "ok": True, "body": {}}
+
+    async def rest_post(self, path, json_body=None):
+        self.posted.append((path, json_body or {}))
+        if self._post_result is not None:
+            return self._post_result
+        return {"status": 200, "ok": True, "body": {"data": {"id": "pid-new"}}}
 
     async def rest_delete(self, path):
         self.deleted.append(path)
@@ -1067,3 +1075,42 @@ class TestMeasureState:
         # present under the renamed name
         m4 = _FakeClient(profiles=[{"id": "pid1", "name": "P-renamed"}])
         assert asyncio.run(h._profile_gone(m4, "pid1", t)) is False
+
+    def test_self_heal_noop_when_profile_alive(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        import asyncio
+
+        m = _FakeClient(by_path={"/profiles/pid1": {"ok": True, "body": {"data": {"id": "pid1"}}}})
+        assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == "pid1"
+        assert m.posted == []  # alive -> no POST
+
+    def test_self_heal_recreates_deleted_profile(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        import asyncio
+
+        # id 404s (deleted mid-run); POST recreates it and returns a new id.
+        m = _FakeClient(by_path={"/profiles/pid1": {"status": 404, "ok": False, "body": {}}})
+        assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == "pid-new"
+        assert m.posted == [("/profiles", {"name": "P-renamed"})]  # renamed name
+
+    def test_self_heal_falls_back_to_find_profile(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        import asyncio
+
+        # POST ok but body shape unhelpful -> recover the id by name lookup.
+        m = _FakeClient(
+            by_path={"/profiles/pid1": {"status": 404, "ok": False, "body": {}}},
+            profiles=[{"id": "pid-lookup", "name": "P-renamed"}],
+            post_result={"status": 201, "ok": True, "body": {}},
+        )
+        assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == "pid-lookup"
+
+    def test_self_heal_returns_empty_when_recreation_fails(self, h):
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        import asyncio
+
+        m = _FakeClient(
+            by_path={"/profiles/pid1": {"status": 404, "ok": False, "body": {}}},
+            post_result={"status": 500, "ok": False, "body": "boom"},
+        )
+        assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == ""
