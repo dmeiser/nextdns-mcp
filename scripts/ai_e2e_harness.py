@@ -1567,25 +1567,31 @@ def _summarize_calls(run: ActorRun) -> list[dict[str, Any]]:
     ]
 
 
-def _transient_actor_failure(run: ActorRun, blob: str) -> str:
-    """Return why a failed actor attempt is an infrastructure transient, else "".
+def _transient_actor_failure(run: ActorRun, blob: str) -> tuple[str, str]:
+    """Classify a failed actor attempt as ``(kind, reason)``; ``("", "")`` if real.
 
     Retrying these is fair test scheduling, not help for the model: neither
     cause depends on the model's capability, and in the stall case the step
     never reached a single tool call, so its verdict measured nothing but
     latency.
 
-    * lazy MCP tool registration: opencode can answer "Unknown tool" before
-      the server's tools finish registering.
-    * provider stall: the actor hit its timeout without producing a single
-      tool call (observed: ECONNRESET from the model provider after 150s on a
-      trivial prompt, which stalled 28 of 89 steps in one run).
+    * ``unknown-tool``: opencode registers MCP tools lazily, so a first attempt
+      can fail with "Unknown tool" before registration completes.
+    * ``stall``: the actor hit its timeout without producing a single tool call
+      (observed: ECONNRESET from the model provider after 150s on a trivial
+      prompt, which stalled 13 of 89 steps in one run).
     """
     if "unknown tool" in blob:
-        return "unknown tool"
+        return "unknown-tool", "unknown tool"
     if "timed out" in run.error.lower() and not run.tool_calls:
-        return run.error
-    return ""
+        return "stall", run.error
+    return "", ""
+
+
+# How many attempts each transient kind gets. A stall is pure infrastructure
+# and costs the step its entire verdict, so it gets more chances than a lazy
+# registration hiccup; both are capped so one flaky step cannot eat the budget.
+TRANSIENT_ATTEMPTS = {"unknown-tool": 3, "stall": 5}
 
 
 def _feedback_block(step: Step, run: ActorRun, status: str, error: str, reason: str,
@@ -1709,7 +1715,13 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             run: ActorRun | None = None
             status, error, reason = "failed", "", ""
             rest_v: dict[str, Any] = {}
-            for attempt in (1, 2, 3):
+            # Attempt loop: infrastructure transients re-run the step (see
+            # _transient_actor_failure), each kind with its own cap.
+            transients: list[str] = []
+            attempts_by_kind = {kind: 0 for kind in TRANSIENT_ATTEMPTS}
+            attempt = 0
+            while True:
+                attempt += 1
                 _progress(f"[{i}/{len(steps)}] {step.id}" + (f" (retry {attempt-1})" if attempt > 1 else ""))
                 run = await run_actor(step_cfg, prompt, workdir, retries=1)
                 total_events += len(run.tool_calls)
@@ -1721,22 +1733,16 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 all_raw.extend(run.raw_lines)
 
                 status, error, reason, rest_v = await _verify_step(m, targets, pid, step, run)
-                # Transients worth retrying: opencode registers MCP tools
-                # lazily (a first attempt can fail with "Unknown tool" before
-                # registration completes), and the model provider sometimes
-                # stalls the actor to death (observed: ECONNRESET after 150s on
-                # a trivial prompt, so the step produced zero tool calls).
-                # Neither says anything about the model's capability, and a
-                # stalled step never got a chance to act.
-                blob = " ".join(
+                kind, why = _transient_actor_failure(run, " ".join(
                     [error, reason]
                     + [c.result_text or "" for c in run.tool_calls]
                     + ([run.final_text] if run.final_text else [])
-                ).lower()
-                transient = _transient_actor_failure(run, blob)
-                if status != "failed" or not transient:
+                ).lower())
+                if status != "failed" or not kind or attempts_by_kind[kind] >= TRANSIENT_ATTEMPTS[kind]:
                     break
-                _progress(f"  RETRY   : transient actor failure ({transient}); retrying")
+                attempts_by_kind[kind] += 1
+                transients.append(f"{kind}: {why}")
+                _progress(f"  RETRY   : transient actor failure ({why}); retrying")
 
             if run is None:  # pragma: no cover - defensive
                 run = ActorRun(command=list(step_cfg.command))
@@ -1750,12 +1756,16 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             r = CheckResult(
                 id=step.id, section=step.section, description=step.description, status=status,
                 mcp_tool=step.tool,
-                mcp_request={"prompt": prompt[:500], "exit_code": run.exit_code, "tool_events": len(run.tool_calls)},
+                mcp_request={"prompt": prompt[:500], "exit_code": run.exit_code, "tool_events": len(run.tool_calls),
+                             "attempts": attempt},
                 mcp_response={
                     "calls": _summarize_calls(run),
                     "final_text": run.final_text[:1000],
                     "error_events": _extract_error_events(run)[:3],
                     "feedback": fb,
+                    # Recorded, not just printed: a report that cannot say how
+                    # many attempts a step took hides infrastructure noise.
+                    "transients": transients,
                 },
                 rest_verification=rest_v, reason=reason, error=error, duration_ms=run.duration_ms,
             )

@@ -1121,21 +1121,29 @@ class TestTransientActorFailure:
 
     def test_lazy_tool_registration_is_retried(self, h):
         run = h.ActorRun(command=["x"])
-        assert h._transient_actor_failure(run, "failed with unknown tool 'nextdns.foo'") == "unknown tool"
+        assert h._transient_actor_failure(run, "failed with unknown tool 'nextdns.foo'") == (
+            "unknown-tool",
+            "unknown tool",
+        )
 
     def test_provider_stall_is_retried(self, h):
         run = h.ActorRun(command=["x"], error="actor harness timed out after 300s")
-        assert h._transient_actor_failure(run, "") == "actor harness timed out after 300s"
+        assert h._transient_actor_failure(run, "") == ("stall", "actor harness timed out after 300s")
 
     def test_timeout_after_work_is_not_retried(self, h):
         """A step that DID act and still timed out is the model's own doing."""
         run = h.ActorRun(command=["x"], error="actor harness timed out after 300s")
         run.tool_calls = [h.ToolCall(name="manageLists", args={})]
-        assert h._transient_actor_failure(run, "") == ""
+        assert h._transient_actor_failure(run, "") == ("", "")
 
     def test_ordinary_failure_is_not_retried(self, h):
         run = h.ActorRun(command=["x"], error="")
-        assert h._transient_actor_failure(run, "list does not contain entry") == ""
+        assert h._transient_actor_failure(run, "list does not contain entry") == ("", "")
+
+    def test_stalls_get_more_attempts_than_registration_hiccups(self, h):
+        """A stall costs the step its whole verdict, so it deserves more chances."""
+        assert h.TRANSIENT_ATTEMPTS["stall"] > h.TRANSIENT_ATTEMPTS["unknown-tool"]
+        assert all(n >= 2 for n in h.TRANSIENT_ATTEMPTS.values())
 
 
 class TestStraySweep:
