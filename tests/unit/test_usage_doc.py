@@ -5,6 +5,9 @@ SPDX-License-Identifier: MIT
 
 from pathlib import Path
 
+import pytest
+
+from nextdns_mcp.usage import server_instructions
 from scripts.generate_usage_doc import HEADER, generate_usage_doc, main
 
 
@@ -83,3 +86,43 @@ def test_main_uses_sys_argv(monkeypatch):
     """main() with no arguments should fall back to sys.argv."""
     monkeypatch.setattr("sys.argv", ["generate_usage_doc.py", "--check"])
     assert main() == 0
+
+
+# =========================================================================== #
+# MCP initialize instructions (the server's own injection channel)
+# =========================================================================== #
+
+
+class TestServerInstructions:
+    """Instructions the server sends at initialize, not text a harness injects."""
+
+    @pytest.mark.parametrize("mode", ["off", "regex", "bm25"])
+    def test_never_names_a_real_tool(self, mode):
+        """Under disclosure the catalog is hidden; a name here would leak it."""
+        from nextdns_mcp.server import _GROUPED_TOOLS
+
+        text = server_instructions(mode)
+        for tool in _GROUPED_TOOLS:
+            assert tool.__name__ not in text, f"instructions leaked tool name {tool.__name__}"
+
+    @pytest.mark.parametrize("mode", ["off", "regex", "bm25"])
+    def test_says_nothing_about_any_agent_cli(self, mode):
+        text = server_instructions(mode).casefold()
+        for marker in ("opencode", "claude", "code mode", "execute tool", "system prompt"):
+            assert marker not in text, f"instructions mention {marker!r}"
+
+    def test_disclosure_rule_only_when_disclosure_is_on(self):
+        assert "not advertised" not in server_instructions("off").casefold()
+        assert "not advertised" in server_instructions("bm25").casefold()
+
+    def test_states_the_error_and_no_undo_conventions(self):
+        text = server_instructions("off")
+        assert "hint" in text
+        assert "nothing beyond it" in text
+
+    def test_create_mcp_server_publishes_them(self, monkeypatch):
+        from nextdns_mcp.openapi import create_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        assert "# NextDNS MCP server" in create_mcp_server().instructions

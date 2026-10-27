@@ -86,6 +86,41 @@ class _CatalogAwareSearchMixin:
         # the caller's own words are the only signal left about what it wants.
         return _rank_by_name_overlap(results or list(tools)[: self._max_results], query)
 
+    def _make_search_tool(self) -> Tool:
+        """FastMCP's search tool, with this server's discovery contract on it.
+
+        Under disclosure these two synthetic tools are the only entries in
+        ``tools/list``, so their descriptions are the always-visible place to
+        state how the server is meant to be used. FastMCP's own wording is a
+        one-liner that never says the catalog is hidden or that guessing fails.
+        """
+        tool = super()._make_search_tool()  # type: ignore[misc]
+        tool.description = _SEARCH_TOOL_DESCRIPTION
+        return tool
+
+    def _make_call_tool(self) -> Tool:
+        tool = super()._make_call_tool()  # type: ignore[misc]
+        tool.description = _CALL_TOOL_DESCRIPTION
+        return tool
+
+
+# Written for the model that reads them, and client-agnostic: nothing here
+# assumes an agent CLI, a code-mode sandbox, or any particular call syntax.
+_SEARCH_TOOL_DESCRIPTION = """Search this server's tools with the words of the task.
+
+Returns the matching tools with their exact names and full schemas. Tool names
+are NOT advertised by this server, so search first instead of guessing: a name
+that was not returned here does not exist. One search per task is enough —
+reuse its result instead of searching again.
+"""
+
+_CALL_TOOL_DESCRIPTION = """Run one tool by the exact name returned by search_tools.
+
+Pass that name and its arguments. Never guess a name: anything search_tools did
+not return will fail. If the call returns an error with a `hint`, follow the
+hint instead of repeating the call.
+"""
+
 
 class FallbackBM25SearchTransform(_CatalogAwareSearchMixin, BM25SearchTransform):
     """BM25 search with a full-catalog fallback and name-aware ranking."""
