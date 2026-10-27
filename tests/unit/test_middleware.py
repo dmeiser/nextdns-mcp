@@ -52,7 +52,6 @@ class TestStripExtraFieldsMiddleware:
         call_next = AsyncMock(return_value=MagicMock())
 
         await middleware.on_call_tool(mock_context, call_next)
-
         # Verify arguments were filtered
         assert mock_context.message.arguments == {
             "domain": "example.com",
@@ -123,6 +122,39 @@ class TestStripExtraFieldsMiddleware:
         # Arguments should remain unchanged; call_next invoked as pass-through
         assert mock_context.message.arguments == {"domain": "test.com", "extra": "field"}
         call_next.assert_called_once_with(mock_context)
+
+    @pytest.mark.asyncio
+    async def test_reports_ignored_arguments_on_the_result(self, middleware, mock_context):
+        """A stripped argument must be named in the result, not vanish silently.
+
+        The relaxation is deliberate, but silence is what let a model send
+        manageProfiles(update, privacy={...}), get "name is required", and
+        believe its privacy change had been attempted.
+        """
+        from fastmcp.tools import ToolResult
+
+        result = ToolResult(structured_content={"success": True})
+        call_next = AsyncMock(return_value=result)
+
+        out = await middleware.on_call_tool(mock_context, call_next)
+
+        assert out.structured_content["ignored_arguments"] == ["extra_field", "unknown"]
+        assert "not applied" in out.structured_content["hint"]
+
+    @pytest.mark.asyncio
+    async def test_no_annotation_when_nothing_was_stripped(self, middleware, mock_tool):
+        from fastmcp.tools import ToolResult
+
+        context = MagicMock()
+        context.message.name = "testTool"
+        context.message.arguments = {"domain": "example.com", "record_type": "A"}
+        context.fastmcp_context = MagicMock()
+        context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=mock_tool)
+        call_next = AsyncMock(return_value=ToolResult(structured_content={"success": True}))
+
+        out = await middleware.on_call_tool(context, call_next)
+
+        assert out.structured_content == {"success": True}
 
     @pytest.mark.asyncio
     async def test_fails_closed_when_schema_fetch_fails(self, middleware, mock_context, caplog):

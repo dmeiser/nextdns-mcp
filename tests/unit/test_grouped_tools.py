@@ -300,6 +300,36 @@ class TestManageProfiles:
         assert "error" in result
 
     @pytest.mark.asyncio
+    async def test_update_missing_name_states_its_scope(self, mock_api_client):
+        """The error must say update renames the profile and takes nothing else.
+
+        A model that meant 'change privacy settings' otherwise satisfies the
+        error by passing the profile id as the name and silently renames it.
+        """
+        result = await server.manageProfiles("update", profile_id="abc123")
+        assert "settings" in result["hint"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_argument_is_reported_not_dropped_silently(self, mock_api_client):
+        """End to end: a call carrying a foreign parameter says what it ignored."""
+        from fastmcp import Client
+
+        mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
+        async with Client(server.build_mcp_server()) as client:
+            result = await client.call_tool(
+                "manageProfiles",
+                {
+                    "operation": "update",
+                    "profile_id": "abc123",
+                    "name": "Renamed",
+                    "privacy": {"allowAffiliate": False},
+                },
+            )
+        assert result.data["success"] is True
+        assert result.data["ignored_arguments"] == ["privacy"]
+        assert "not applied" in result.data["hint"]
+
+    @pytest.mark.asyncio
     async def test_delete(self, mock_api_client):
         mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
         result = await server.manageProfiles("delete", profile_id="abc123")

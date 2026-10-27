@@ -86,6 +86,25 @@ class HealthFailure(NamedTuple):
 _health_probe_cache: tuple[float, HealthFailure | None] | None = None
 
 
+def _report_ignored_arguments(result: ToolResult, ignored: list[str]) -> None:
+    """Name the arguments the relaxation dropped instead of dropping them silently.
+
+    Dropping unknown top-level arguments is deliberate (AI clients send them),
+    but a *silent* drop is how a model ends up believing a call that carried
+    ``privacy={...}`` actually changed privacy settings: the tool then answers
+    "name is required for update operation" and the model never learns its real
+    intent was discarded. The call still succeeds; the result just says which
+    arguments were not applied.
+    """
+    structured = getattr(result, "structured_content", None)
+    if isinstance(structured, dict):
+        structured["ignored_arguments"] = ignored
+        structured["hint"] = (
+            "these arguments are not parameters of this tool and were not applied; "
+            "check the tool's parameter list before assuming the change happened"
+        )
+
+
 class StripExtraFieldsMiddleware(Middleware):
     """Middleware that strips unknown fields and coerces types in tool arguments.
 
@@ -173,8 +192,11 @@ class StripExtraFieldsMiddleware(Middleware):
         fastmcp_server: FastMCP,
         tool_name: str,
         arguments: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], list[str]]:
         """Fetch the tool schema, strip unknown fields, and coerce argument types.
+
+        Returns the prepared arguments plus the names of any arguments that were
+        dropped, so the caller can report them instead of losing them silently.
 
         Fails closed: if the tool's parameter schema cannot be fetched, the call
         is aborted with a ToolError instead of passing arguments through
@@ -190,7 +212,7 @@ class StripExtraFieldsMiddleware(Middleware):
                 # so there is no unstripped-argument request to make. The
                 # fail-closed branches below guard real failures; this branch
                 # only avoids masking FastMCP's own unknown-tool error.
-                return arguments
+                return arguments, []
 
             parameters = tool.parameters
             known_params = set(parameters.get("properties", {}).keys())
@@ -199,7 +221,9 @@ class StripExtraFieldsMiddleware(Middleware):
             original_keys = set(arguments.keys())
             filtered_args = {k: v for k, v in arguments.items() if k in known_params}
 
-            # Log if any fields were stripped (for debugging)
+            # Log if any fields were stripped (for debugging) and report them to
+            # the caller: silently dropping e.g. a `privacy` payload from a
+            # manageProfiles call leaves the model believing it acted.
             stripped_keys = original_keys - known_params
             if stripped_keys:
                 logger.debug(f"Tool '{tool_name}': Stripped unknown fields: {stripped_keys}")
@@ -210,7 +234,7 @@ class StripExtraFieldsMiddleware(Middleware):
             if coerced_args != filtered_args:
                 logger.debug(f"Tool '{tool_name}': Coerced types in arguments")
 
-            return coerced_args
+            return coerced_args, sorted(stripped_keys)
         except NotFoundError:
             raise
         except Exception as e:
@@ -234,12 +258,16 @@ class StripExtraFieldsMiddleware(Middleware):
         unstripped/un-coerced.
         """
         arguments = context.message.arguments
+        ignored: list[str] = []
         if arguments and context.fastmcp_context:
-            context.message.arguments = await self._prepare_arguments(
+            context.message.arguments, ignored = await self._prepare_arguments(
                 context.fastmcp_context.fastmcp, context.message.name, arguments
             )
 
-        return await call_next(context)
+        result = await call_next(context)
+        if ignored:
+            _report_ignored_arguments(result, ignored)
+        return result
 
 
 @asynccontextmanager
