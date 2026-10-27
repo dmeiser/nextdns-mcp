@@ -105,20 +105,19 @@ class _CatalogAwareSearchMixin:
 
 
 # Written for the model that reads them, and client-agnostic: nothing here
-# assumes an agent CLI, a code-mode sandbox, or any particular call syntax.
+# assumes an agent CLI, a code-mode sandbox, or any particular call syntax, and
+# nothing instructs the model how to behave — it describes what this server does.
 _SEARCH_TOOL_DESCRIPTION = """Search this server's tools with the words of the task.
 
-Returns the matching tools with their exact names and full schemas. Tool names
-are NOT advertised by this server, so search first instead of guessing: a name
-that was not returned here does not exist. One search per task is enough —
-reuse its result instead of searching again.
+Returns the matching tools with their exact names and full schemas. This server
+does not advertise tool names, so a name that was not returned here is not one
+of its tools.
 """
 
-_CALL_TOOL_DESCRIPTION = """Run one tool by the exact name returned by search_tools.
+_CALL_TOOL_DESCRIPTION = """Run one of this server's tools by the exact name returned by search_tools.
 
-Pass that name and its arguments. Never guess a name: anything search_tools did
-not return will fail. If the call returns an error with a `hint`, follow the
-hint instead of repeating the call.
+Anything search_tools did not return is not a tool of this server. A failed call
+returns a JSON payload with an error `code` and, when available, a `hint`.
 """
 
 
