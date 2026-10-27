@@ -1112,6 +1112,41 @@ async def _profile_gone(m: MeasureClient, pid: str, targets: TaskTargets) -> boo
     return await m.find_profile(targets.renamed_name) is None
 
 
+async def _all_profile_ids(m: MeasureClient) -> dict[str, str]:
+    """Map every profile id currently on the account to its name."""
+    resp = await m.rest_get("/profiles")
+    out: dict[str, str] = {}
+    if isinstance(resp, dict) and resp.get("ok"):
+        for p in (resp.get("body") or {}).get("data", []):
+            if isinstance(p, dict) and p.get("id"):
+                out[str(p["id"])] = str(p.get("name", ""))
+    return out
+
+
+def _never_delete_ids() -> set[str]:
+    """Profile ids the stray sweep must never remove (protected + plot)."""
+    ids: set[str] = set()
+    for var in ("NEXTDNS_PROTECTED_PROFILES", "NEXTDNS_PLOT_PROFILE"):
+        ids |= {p.strip() for p in os.environ.get(var, "").split(",") if p.strip()}
+    return ids
+
+
+async def _sweep_stray_profiles(m: MeasureClient, pre_existing: set[str], keep: set[str]) -> None:
+    """Delete profiles the run created beyond the test profile.
+
+    A model asked to create a profile sometimes creates several (a failed
+    run left a stray 'new-profile' behind), and strays accumulate in a real
+    account across runs. Anything that appeared during the run and is
+    neither the test profile nor a protected/plot profile is removed.
+    """
+    protected = _never_delete_ids()
+    for stray, name in (await _all_profile_ids(m)).items():
+        if stray in pre_existing or stray in keep or stray in protected:
+            continue
+        _progress(f"stray sweep: removing profile {stray} ({name!r}) created during the run")
+        await m.rest_delete(f"/profiles/{stray}")
+
+
 async def _self_heal_profile(m: MeasureClient, pid: str, targets: TaskTargets) -> str:
     """Recreate the test profile via REST if the actor deleted it mid-run.
 
@@ -1532,6 +1567,27 @@ def _summarize_calls(run: ActorRun) -> list[dict[str, Any]]:
     ]
 
 
+def _transient_actor_failure(run: ActorRun, blob: str) -> str:
+    """Return why a failed actor attempt is an infrastructure transient, else "".
+
+    Retrying these is fair test scheduling, not help for the model: neither
+    cause depends on the model's capability, and in the stall case the step
+    never reached a single tool call, so its verdict measured nothing but
+    latency.
+
+    * lazy MCP tool registration: opencode can answer "Unknown tool" before
+      the server's tools finish registering.
+    * provider stall: the actor hit its timeout without producing a single
+      tool call (observed: ECONNRESET from the model provider after 150s on a
+      trivial prompt, which stalled 28 of 89 steps in one run).
+    """
+    if "unknown tool" in blob:
+        return "unknown tool"
+    if "timed out" in run.error.lower() and not run.tool_calls:
+        return run.error
+    return ""
+
+
 def _feedback_block(step: Step, run: ActorRun, status: str, error: str, reason: str,
                     rest_v: dict[str, Any],
     verbose: bool = False,
@@ -1623,6 +1679,10 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 _progress(f"removing stale profile {stale.get('id')} ({nm}) from an earlier run")
                 await m.rest_delete(f"/profiles/{stale['id']}")
 
+        # Snapshot the account so profiles the ACTOR creates (it sometimes
+        # creates extras beyond the test profile) can be swept at the end.
+        pre_existing = set(await _all_profile_ids(m))
+
         for i, step in enumerate(steps, 1):
             if time.monotonic() - started > budget:
                 rest = CheckResult(step.id, step.section, step.description, "skipped",
@@ -1661,16 +1721,22 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 all_raw.extend(run.raw_lines)
 
                 status, error, reason, rest_v = await _verify_step(m, targets, pid, step, run)
-                # opencode registers MCP tools lazily: a first attempt can fail
-                # with "Unknown tool" before registration completes. Retry the
-                # whole step on that transient only.
+                # Transients worth retrying: opencode registers MCP tools
+                # lazily (a first attempt can fail with "Unknown tool" before
+                # registration completes), and the model provider sometimes
+                # stalls the actor to death (observed: ECONNRESET after 150s on
+                # a trivial prompt, so the step produced zero tool calls).
+                # Neither says anything about the model's capability, and a
+                # stalled step never got a chance to act.
                 blob = " ".join(
                     [error, reason]
                     + [c.result_text or "" for c in run.tool_calls]
                     + ([run.final_text] if run.final_text else [])
                 ).lower()
-                if status != "failed" or "unknown tool" not in blob:
+                transient = _transient_actor_failure(run, blob)
+                if status != "failed" or not transient:
                     break
+                _progress(f"  RETRY   : transient actor failure ({transient}); retrying")
 
             if run is None:  # pragma: no cover - defensive
                 run = ActorRun(command=list(step_cfg.command))
@@ -1718,6 +1784,10 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             report.profile_id = pid
         else:
             report.cleanup = "skipped (test profile not found on the server)"
+
+        # Remove any extra profiles the actor created during the run so they
+        # do not accumulate in the account between runs.
+        await _sweep_stray_profiles(m, pre_existing, {pid} if pid else set())
 
     report.actor_tool_calls = total_events
     report.actor_tools_used = tools_used
