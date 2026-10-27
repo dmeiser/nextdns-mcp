@@ -55,7 +55,8 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
     entry_error = _validate_list_entry(body, "entry", "add")
     if entry_error:
         return entry_error
-    return await _api_request_payload("POST", base_url, json_body=body)
+    result = await _api_request_payload("POST", base_url, json_body=body)
+    return _idempotent_list_result(result, "add") or result
 
 
 def _validate_list_entry(entry: Any, label: str, operation: str, **extra: Any) -> dict[str, Any] | None:
@@ -159,7 +160,46 @@ async def _lists_remove(base_url: str, entry_id: str | None) -> dict[str, Any]:
     """Remove a single list entry by id."""
     if entry_id is None:
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry_id is required for remove operation")
-    return await _api_request_payload("DELETE", f"{base_url}/{entry_id}")
+    result = await _api_request_payload("DELETE", f"{base_url}/{entry_id}")
+    return _idempotent_list_result(result, "remove") or result
+
+
+# Upstream error codes meaning the list is already in the requested state.
+_IDEMPOTENT_UPSTREAM: dict[str, frozenset[str]] = {
+    "add": frozenset({"duplicate"}),
+    "remove": frozenset({"notFound"}),
+}
+
+_IDEMPOTENT_NOTE: dict[str, str] = {
+    "add": "entry already present; nothing to add",
+    "remove": "entry already absent; nothing to remove",
+}
+
+
+def _idempotent_list_result(result: dict[str, Any], operation: str) -> dict[str, Any] | None:
+    """Report an already-satisfied add/remove as a success, not a failure.
+
+    ``add`` of an entry the list already holds comes back upstream as
+    ``duplicate`` (HTTP 400 for blocklists/TLDs, HTTP 200 with an error
+    document for allow/deny), and ``remove`` of an absent entry comes back as
+    ``notFound``. In every one of those cases the caller's intended end state
+    is already true, so answering with a failure only sends the caller into a
+    retry loop against a list that is already correct. The success payload
+    stays honest about what it absorbed by naming the upstream code.
+
+    Returns None when the result is not an "already in that state" error, so
+    the caller returns the original payload unchanged.
+    """
+    if not isinstance(result, dict):
+        return None
+    codes = result.get("upstream_codes")
+    if not isinstance(codes, list):
+        single = result.get("upstream_code")
+        codes = [single] if isinstance(single, str) else []
+    matched = sorted({str(c) for c in codes} & _IDEMPOTENT_UPSTREAM[operation])
+    if not matched:
+        return None
+    return {"success": True, "note": _IDEMPOTENT_NOTE[operation], "upstream_code": matched[0]}
 
 
 async def _manage_lists_impl(

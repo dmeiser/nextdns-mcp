@@ -122,6 +122,23 @@ def _bound_structured_fields(payload: dict[str, Any]) -> bool:
     return truncated
 
 
+def upstream_error_codes(body: Any) -> list[str]:
+    """Extract the NextDNS upstream error codes from a decoded response body.
+
+    The NextDNS API reports failures as ``{"errors": [{"code": "duplicate",
+    "detail": ...}]}`` — a *plural* ``errors`` document, distinct from this
+    server's own singular ``error`` payload. Callers (tools, and the model
+    reading the tool result) need those upstream codes as values they can
+    branch on, instead of matching free-form message text.
+    """
+    if not isinstance(body, dict):
+        return []
+    items = body.get("errors")
+    if not isinstance(items, list):
+        return []
+    return [str(item["code"]) for item in items if isinstance(item, dict) and isinstance(item.get("code"), str)]
+
+
 def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorCode.HTTP_ERROR) -> dict[str, Any]:
     """Build a typed error payload for a failed HTTP request.
 
@@ -146,6 +163,7 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
     """
     response = getattr(exc, "response", None)
     status_code = getattr(response, "status_code", None) if response is not None else None
+    parsed: Any = None
 
     if response is not None:
         try:
@@ -166,6 +184,13 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
         truncated = len(body) > MAX_RESPONSE_BODY_CHARS
         payload["response_body"] = body[:MAX_RESPONSE_BODY_CHARS] + (TRUNCATION_MARKER if truncated else "")
         payload["response_body_truncated"] = truncated
+    # NextDNS reports failures as {"errors": [{"code": ...}]}: surface those
+    # codes as typed values so callers branch on them instead of parsing the
+    # inlined body string.
+    codes = upstream_error_codes(parsed)
+    if codes:
+        payload["upstream_code"] = codes[0]
+        payload["upstream_codes"] = codes
     return payload
 
 

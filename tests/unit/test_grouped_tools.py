@@ -76,6 +76,24 @@ def _make_response(json_data=None, status_code=200, content=None):
     return response
 
 
+def _upstream_error_response(upstream_body: dict, status_code: int):
+    """Build a mock response carrying a NextDNS ``{"errors":[...]}`` document.
+
+    ``text`` is set explicitly because the error-payload path inlines it, and a
+    bare MagicMock would put a mock object where a body string belongs.
+    """
+    body = json.dumps(upstream_body)
+    response = _make_response(json_data=upstream_body, status_code=status_code, content=body.encode())
+    response.text = body
+    request = httpx.Request("POST", "https://api.nextdns.io/profiles/abc123/allowlist")
+    response.request = request
+    if status_code >= 400:
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            f"Client error '{status_code}'", request=request, response=response
+        )
+    return response
+
+
 class TestCoerceJsonArg:
     """Tests for the _coerce_json_arg helper."""
 
@@ -410,6 +428,60 @@ class TestManageLists:
             "POST", "/profiles/abc123/allowlist", params=None, json={"id": "x.com"}
         )
         assert result == {"success": True}
+
+    @pytest.mark.asyncio
+    async def test_add_duplicate_in_2xx_error_document_is_idempotent(self, mock_api_client):
+        """Allow/deny lists answer 200 with an error document for a duplicate.
+
+        Verified against the live API: POST /allowlist on an existing entry
+        returns 200 {"errors":[{"code":"duplicate"}]} while the same condition
+        on /privacy/blocklists returns 400. Either way the list already holds
+        the entry, so the tool reports the already-satisfied state as success.
+        """
+        mock_api_client.request.return_value = _upstream_error_response({"errors": [{"code": "duplicate"}]}, 200)
+        result = await server.manageLists("allowlist", "add", "abc123", entry="x.com")
+        assert result == {
+            "success": True,
+            "note": "entry already present; nothing to add",
+            "upstream_code": "duplicate",
+        }
+
+    @pytest.mark.asyncio
+    async def test_add_duplicate_as_http_400_is_idempotent(self, mock_api_client):
+        """The blocklist/TLD variant of the same condition (400 duplicate)."""
+        mock_api_client.request.return_value = _upstream_error_response({"errors": [{"code": "duplicate"}]}, 400)
+        result = await server.manageLists("privacy_blocklists", "add", "abc123", entry="nextdns-recommended")
+        assert result["success"] is True
+        assert result["upstream_code"] == "duplicate"
+
+    @pytest.mark.asyncio
+    async def test_remove_absent_entry_is_idempotent(self, mock_api_client):
+        """DELETE of an absent entry returns 404 notFound; the end state holds."""
+        mock_api_client.request.return_value = _upstream_error_response({"errors": [{"code": "notFound"}]}, 404)
+        result = await server.manageLists("denylist", "remove", "abc123", entry_id="gone.com")
+        assert result == {
+            "success": True,
+            "note": "entry already absent; nothing to remove",
+            "upstream_code": "notFound",
+        }
+
+    @pytest.mark.asyncio
+    async def test_update_absent_entry_stays_an_error(self, mock_api_client):
+        """notFound is only idempotent for remove: an update has no satisfied reading."""
+        mock_api_client.request.return_value = _upstream_error_response({"errors": [{"code": "notFound"}]}, 404)
+        result = await server.manageLists("allowlist", "update", "abc123", entry_id="gone.com", entry={"active": False})
+        assert "error" in result
+        assert result.get("upstream_code") == "notFound"
+
+    @pytest.mark.asyncio
+    async def test_add_unrelated_upstream_error_stays_an_error(self, mock_api_client):
+        """Only the already-satisfied codes are absorbed; others keep failing."""
+        mock_api_client.request.return_value = _upstream_error_response(
+            {"errors": [{"code": "format", "detail": '`/id` must match format "domain".'}]}, 400
+        )
+        result = await server.manageLists("allowlist", "add", "abc123", entry="Not A Domain")
+        assert "error" in result
+        assert result.get("upstream_code") == "format"
 
     @pytest.mark.asyncio
     async def test_replace_string_entries_coerced(self, mock_api_client):

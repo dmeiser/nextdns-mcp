@@ -22,6 +22,7 @@ from nextdns_mcp.errors import (
     ErrorCode,
     error_payload,
     http_error_payload,
+    upstream_error_codes,
 )
 from nextdns_mcp.tools.logs import _manage_logs_impl
 from nextdns_mcp.tools.plots import _plot_analytics_series_impl
@@ -438,3 +439,62 @@ class TestPlotAndDohErrorContract:
         result = await server.dohLookup("example.com", "abc123", "A")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.READ_ACCESS_DENIED
+
+
+class TestUpstreamErrorDocument:
+    """The NextDNS plural ``errors`` document is surfaced as typed values.
+
+    Upstream reports failures as ``{"errors": [{"code": ...}]}``, and does so
+    behind either a 4xx or (for some endpoints) a 2xx status. Callers need the
+    upstream code as a value to branch on, and a 2xx error document must not be
+    handed back as if it were a data payload.
+    """
+
+    def test_extracts_codes_in_order(self):
+        assert upstream_error_codes({"errors": [{"code": "duplicate"}]}) == ["duplicate"]
+        assert upstream_error_codes({"errors": [{"code": "format"}, {"code": "extraneous"}]}) == [
+            "format",
+            "extraneous",
+        ]
+
+    def test_ignores_non_error_documents(self):
+        assert upstream_error_codes({"data": []}) == []
+        assert upstream_error_codes({"errors": []}) == []
+        assert upstream_error_codes({"errors": "nope"}) == []
+        assert upstream_error_codes(None) == []
+
+    def test_http_error_payload_surfaces_codes(self):
+        exc = httpx.HTTPError("dup")
+        body = '{"errors":[{"code":"duplicate"}]}'
+        exc.response = MagicMock(status_code=400, text=body)
+        exc.response.json.return_value = {"errors": [{"code": "duplicate"}]}
+        payload = http_error_payload("boom", exc)
+        assert payload["code"] == ErrorCode.HTTP_ERROR
+        assert payload["upstream_code"] == "duplicate"
+        assert payload["upstream_codes"] == ["duplicate"]
+
+    @pytest.mark.asyncio
+    async def test_2xx_error_document_becomes_a_typed_error(self, mock_api_client):
+        """An upstream 2xx carrying an error document must not look like data."""
+        response = MagicMock()
+        response.status_code = 200
+        response.content = b'{"errors":[{"code":"notFound"}]}'
+        response.json.return_value = {"errors": [{"code": "notFound"}]}
+        response.text = '{"errors":[{"code":"notFound"}]}'
+        mock_api_client.request.return_value = response
+        result = await _manage_profiles_impl("get", "abc123")
+        _assert_error_contract(result)
+        assert result["code"] == ErrorCode.HTTP_ERROR
+        assert result["status_code"] == 200
+        assert result["upstream_code"] == "notFound"
+
+    @pytest.mark.asyncio
+    async def test_2xx_data_payload_still_passes_through(self, mock_api_client):
+        """Normalization is limited to error documents: real data is untouched."""
+        response = MagicMock()
+        response.status_code = 200
+        response.content = b'{"data": [{"id": "x.com"}]}'
+        response.json.return_value = {"data": [{"id": "x.com"}]}
+        mock_api_client.request.return_value = response
+        result = await _manage_profiles_impl("list")
+        assert result == {"data": [{"id": "x.com"}]}
