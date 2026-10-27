@@ -484,6 +484,46 @@ class TestManageLists:
         assert result.get("upstream_code") == "format"
 
     @pytest.mark.asyncio
+    async def test_remove_missing_entry_id_explains_the_id(self, mock_api_client):
+        """entry_id is the entry's own value, which the parameter name hides."""
+        result = await server.manageLists("denylist", "remove", "abc123")
+        assert result["code"] == "missing_required_argument"
+        assert "hostname" in result["hint"]
+
+    @pytest.mark.asyncio
+    async def test_update_unknown_entry_id_gets_a_hint(self, mock_api_client):
+        """An upstream 404 on update is opaque without the id explanation."""
+        mock_api_client.request.return_value = _upstream_error_response({"errors": [{"code": "notFound"}]}, 404)
+        result = await server.manageLists(
+            "parental_services", "update", "abc123", entry_id="entry-12345", entry={"active": False}
+        )
+        assert result["code"] == "http_error"
+        assert result["upstream_code"] == "notFound"
+        assert "category/service name" in result["hint"]
+
+    @pytest.mark.asyncio
+    async def test_replace_entries_of_bare_strings_pass_schema_validation(self, mock_api_client):
+        """The PUBLISHED schema must accept entries=['zip'], not reject it first.
+
+        The implementation coerces bare strings, but a ``list[dict]`` annotation
+        made FastMCP reject the call with pydantic validation errors before the
+        coercion could run, so the relaxation was unreachable for exactly the
+        shape small models send.
+        """
+        from fastmcp import Client
+
+        mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
+        async with Client(server.build_mcp_server()) as client:
+            result = await client.call_tool(
+                "manageLists",
+                {"list_type": "security_tlds", "operation": "replace", "profile_id": "abc123", "entries": ["zip"]},
+            )
+        assert not result.is_error
+        mock_api_client.request.assert_called_once_with(
+            "PUT", "/profiles/abc123/security/tlds", params=None, json=[{"id": "zip"}]
+        )
+
+    @pytest.mark.asyncio
     async def test_replace_string_entries_coerced(self, mock_api_client):
         """entries=['x.com'] is unambiguous: coerced to [{'id': 'x.com'}]."""
         mock_api_client.request.return_value = _make_response(status_code=204, content=b"")
@@ -675,6 +715,31 @@ class TestManageRewrites:
     async def test_delete_missing_entry_id(self, mock_api_client):
         result = await server.manageRewrites("delete", "abc123")
         assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_delete_by_name_resolves_the_server_id(self, mock_api_client):
+        """Callers know the hostname they added; the id is the API's to assign."""
+        mock_api_client.request.side_effect = [
+            _make_response({"data": [{"id": "muaw9qqz", "name": "x.com", "content": "1.2.3.4"}]}),
+            _make_response(status_code=204, content=b""),
+        ]
+        result = await server.manageRewrites("delete", "abc123", name="x.com")
+        assert result == {"success": True}
+        last = mock_api_client.request.call_args_list[-1]
+        assert last.args == ("DELETE", "/profiles/abc123/rewrites/muaw9qqz")
+
+    @pytest.mark.asyncio
+    async def test_delete_by_unknown_name_reports_invalid_entry_id(self, mock_api_client):
+        mock_api_client.request.return_value = _make_response({"data": [{"id": "muaw9", "name": "other.com"}]})
+        result = await server.manageRewrites("delete", "abc123", name="missing.com")
+        assert result["code"] == "invalid_entry_id"
+        assert "operation='list'" in result["hint"]
+
+    @pytest.mark.asyncio
+    async def test_delete_missing_entry_id_explains_the_name_alternative(self, mock_api_client):
+        result = await server.manageRewrites("delete", "abc123")
+        assert result["code"] == "missing_required_argument"
+        assert "name" in result["hint"]
 
     @pytest.mark.asyncio
     async def test_unsupported_operation(self):
