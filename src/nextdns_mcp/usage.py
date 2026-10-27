@@ -24,12 +24,16 @@ def server_instructions(tool_search_mode: str) -> str:
 
     This is the spec's own server-to-client channel (clients put it in the model
     context), so the server — not any test harness or agent CLI — is the one
-    describing how it must be used. It stays client-agnostic (no agent-specific
-    wording) and never names a real tool: under progressive tool disclosure the
-    catalog is deliberately not advertised, so a name here would leak it.
+    describing itself. It stays client-agnostic (no agent-specific wording),
+    never names a real tool (under progressive disclosure the catalog is
+    deliberately not advertised, so a name here would leak it), and only
+    describes this server: what it exposes and what its responses look like.
+    It does not instruct the model how to behave — that is not a DNS server's
+    business, and a line like "do not undo your own writes" would be a test
+    harness's failure mode speaking through the product.
 
     ``tool_search_mode`` is the resolved NEXTDNS_TOOL_SEARCH value, so the
-    discovery rule is only stated when discovery is actually required.
+    discovery mechanism is only described when discovery is actually required.
     """
     lines = [
         "# NextDNS MCP server",
@@ -38,20 +42,16 @@ def server_instructions(tool_search_mode: str) -> str:
         "profiles, settings, allow/deny and block lists, DNS rewrites, analytics",
         "(query and plot), query logs, and DNS-over-HTTPS lookups. Each tool takes",
         "an `operation` (get, list, add, replace, update, remove, create, delete)",
-        "plus a `profile_id`; the profile tool's `list` gives you the id.",
+        "plus a `profile_id`; the profile tool's `list` returns the ids.",
         "",
-        "- A failed call returns a JSON payload with an error `code` and usually a",
-        "  `hint` saying what to send instead. Read the hint; do not repeat the",
-        "  call that produced it.",
-        "- Do exactly what was asked, and nothing beyond it. Make the change and",
-        "  leave it in place: do not undo, revert or tidy up a write you have",
-        "  already made unless the request says to.",
+        "- A failed call returns a JSON payload with an error `code`, plus a `hint`",
+        "  whenever the server can say what to send instead.",
     ]
     if tool_search_mode and tool_search_mode != "off":
         lines += [
-            "- Tool names are NOT advertised by this server. Never guess one: search",
-            "  with the words of the task, then run the tool by the EXACT name the",
-            "  search returned. One search per task is enough.",
+            "- This server does not advertise tool names. `search_tools` matches the",
+            "  words of a task to the tools that fit it and returns their exact names",
+            "  and schemas; `call_tool` runs one of those by that exact name.",
         ]
     return "\n".join(lines)
 

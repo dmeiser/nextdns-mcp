@@ -111,14 +111,22 @@ class TestServerInstructions:
         for marker in ("opencode", "claude", "code mode", "execute tool", "system prompt"):
             assert marker not in text, f"instructions mention {marker!r}"
 
-    def test_disclosure_rule_only_when_disclosure_is_on(self):
-        assert "not advertised" not in server_instructions("off").casefold()
-        assert "not advertised" in server_instructions("bm25").casefold()
+    @pytest.mark.parametrize("mode", ["off", "regex", "bm25"])
+    def test_describes_itself_and_never_instructs_behaviour(self, mode):
+        """Facts about this server only — no behaviour coaching.
 
-    def test_states_the_error_and_no_undo_conventions(self):
-        text = server_instructions("off")
+        A line like "do exactly what was asked, and nothing beyond it" was a
+        harness failure mode (one step's model deleted its own write) speaking
+        through the product. It belongs nowhere the server talks.
+        """
+        text = server_instructions(mode)
         assert "hint" in text
-        assert "nothing beyond it" in text
+        for coaching in ("undo", "revert", "tidy up", "nothing beyond it", "stop", "never guess"):
+            assert coaching not in text.casefold(), f"instructions coach behaviour with {coaching!r}"
+
+    def test_disclosure_mechanism_only_when_disclosure_is_on(self):
+        assert "advertise" not in server_instructions("off").casefold()
+        assert "advertise" in server_instructions("bm25").casefold()
 
     def test_create_mcp_server_publishes_them(self, monkeypatch):
         from nextdns_mcp.openapi import create_mcp_server

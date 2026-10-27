@@ -106,25 +106,33 @@ class TestSyntheticToolDescriptions:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("mode", ["bm25", "regex"])
-    async def test_they_state_the_discovery_contract(self, monkeypatch, mode):
+    async def test_they_describe_the_discovery_mechanism(self, monkeypatch, mode):
         from fastmcp import Client
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
         async with Client(build_mcp_server()) as client:
             described = {t.name: (t.description or "") for t in await client.list_tools()}
-        assert "not advertised" in described["search_tools"].casefold()
+        assert "advertise" in described["search_tools"].casefold()
         assert "exact name" in described["call_tool"].casefold()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("mode", ["bm25", "regex"])
-    async def test_they_name_no_client_or_real_tool(self, monkeypatch, mode):
+    async def test_they_instruct_no_behaviour_and_name_no_client_or_real_tool(self, monkeypatch, mode):
         from fastmcp import Client
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
         async with Client(build_mcp_server()) as client:
             described = {t.name: (t.description or "") for t in await client.list_tools()}
         blob = " ".join(described.values()).casefold()
-        for marker in ("opencode", "claude", "code mode", "manageprofiles", "managelists"):
+        for marker in (
+            "opencode",
+            "claude",
+            "code mode",
+            "manageprofiles",
+            "managelists",
+            "never guess",
+            "instead of repeating",
+        ):
             assert marker not in blob, f"synthetic tool description mentions {marker!r}"
 
 
