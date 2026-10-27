@@ -20,6 +20,7 @@ from .errors import (
     NextDNSServerError,
     error_payload,
     http_error_payload,
+    upstream_error_codes,
 )
 
 logger = logging.getLogger(__name__)
@@ -214,6 +215,11 @@ def _handle_api_error(e: NextDNSError) -> dict[str, Any]:
     cause = getattr(e, "__cause__", None)
     if cause is not None and isinstance(cause, httpx.HTTPError):
         return http_error_payload(str(e), cause)
+    if getattr(e, "response", None) is not None:
+        # Typed error built directly around a response (e.g. an upstream 2xx
+        # that carried an error document); keep its structured body instead of
+        # flattening to an internal error.
+        return http_error_payload(str(e), e)
     return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
 
 
@@ -238,13 +244,32 @@ async def _api_request(
         response.raise_for_status()
         if response.status_code == 204 or not response.content:
             return {"success": True}
-        return response.json()
+        data = response.json()
+        if upstream_error_codes(data) and "data" not in data:
+            # Upstream answered 2xx with a structured error document instead of
+            # a payload (observed: POST /allowlist on an existing entry returns
+            # 200 {"errors":[{"code":"duplicate"}]}, while the same condition
+            # on /privacy/blocklists returns 400). Returning that body as if it
+            # were data makes an error look like a success; normalize it into
+            # the same typed failure every other upstream error produces.
+            error = NextDNSError(
+                f"HTTP error in {method} {url}: upstream error in {response.status_code} response",
+                status_code=response.status_code,
+                response_body=response.text,
+            )
+            error.response = response  # type: ignore[attr-defined]
+            raise error
+        return data
     except AccessDeniedError as e:
         # Raised by the ACL layer before any network request. Kept out of the
         # httpx.HTTPError branch: a real upstream 403 (raise_for_status) must
         # keep its existing http_error path.
         logger.warning(f"Access denied in {method} {_redacted(url)}: {_log_safe_error(e)}")
         return access_denied_payload(e)
+    except NextDNSError:
+        # Already typed (including the 2xx-with-error-document case above);
+        # re-raised so the generic branch cannot strip its status/response.
+        raise
     except httpx.HTTPError as e:
         logger.error(f"HTTP error in {method} {_redacted(url)}: {_log_safe_error(e)}")
         message = f"HTTP error in {method} {url}: {e}"
