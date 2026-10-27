@@ -47,7 +47,12 @@ async def _profiles_create(name: str | None) -> dict[str, Any]:
 
 async def _profiles_update(url: str, name: str | None) -> dict[str, Any]:
     if not name:
-        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for update operation")
+        return error_payload(
+            ErrorCode.MISSING_REQUIRED_ARGUMENT,
+            "name is required for update operation",
+            hint="operation='update' renames the profile and takes no other fields; "
+            "settings, lists, rewrites and logs are separate tools",
+        )
     return await _api_request_payload("PATCH", url, json_body={"name": name})
 
 
