@@ -59,7 +59,8 @@ async def manageSettings(
     profile_id: ProfileId,
     settings: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Manage a settings category for a NextDNS profile.
+    """Read or update one settings category of a NextDNS profile: general, privacy,
+    security, parental controls, performance, query logging, and the block page.
 
     Settings categories:
         - ``general``: Core profile settings (e.g., name, web3 blocking).

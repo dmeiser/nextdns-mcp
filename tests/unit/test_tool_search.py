@@ -39,6 +39,68 @@ class TestGetToolSearchMode:
             get_tool_search_mode()
 
 
+class TestNameAwareRanking:
+    """The caller's own words should surface the tool whose NAME says them."""
+
+    def test_words_splits_camel_case_and_singularizes(self):
+        from nextdns_mcp.tool_search import _words
+
+        assert _words("queryTimeSeries") == {"query", "time", "serie"}
+        assert _words("manageProfiles") == {"manage", "profile"}
+        assert _words("delete profile") == {"delete", "profile"}
+
+    def test_rank_prefers_name_overlap_and_keeps_underlying_order_on_ties(self):
+        from fastmcp.tools.base import Tool
+
+        from nextdns_mcp.tool_search import _rank_by_name_overlap
+
+        tools = [
+            Tool.from_function(lambda: None, name="queryAnalytics", description="d"),
+            Tool.from_function(lambda: None, name="manageProfiles", description="d"),
+            Tool.from_function(lambda: None, name="plotAnalytics", description="d"),
+        ]
+        ranked = [t.name for t in _rank_by_name_overlap(tools, "generate analytics plot")]
+        assert ranked == ["plotAnalytics", "queryAnalytics", "manageProfiles"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("mode", "params"),
+        [
+            ("bm25", {"query": "generate analytics plot"}),
+            ("regex", {"pattern": "plot"}),
+        ],
+    )
+    async def test_plot_query_ranks_plot_analytics_first(self, monkeypatch, mode, params):
+        """'generate analytics plot' used to put queryAnalytics ahead of it."""
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", params)
+            names = [t.get("name") for t in found.data]
+            assert names[0] == "plotAnalytics"
+
+    @pytest.mark.asyncio
+    async def test_delete_profile_query_ranks_manage_profiles_first(self, monkeypatch):
+        """Four unrelated tools used to outrank the tool named for the job."""
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": "delete profile"})
+            assert found.data[0].get("name") == "manageProfiles"
+
+    @pytest.mark.asyncio
+    async def test_fallback_results_are_name_ranked_too(self, monkeypatch):
+        """When nothing matched, the caller's words are the only signal left."""
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": "doh"})
+            assert found.data[0].get("name") == "dohLookup"
+
+
 class TestToolSearchServerWiring:
     """Tests for the transform wiring on the built MCP server."""
 

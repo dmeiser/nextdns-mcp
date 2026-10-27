@@ -810,6 +810,15 @@ class TestMcpConfigGeneration:
         for tool in h.common.MCP_TOOLS:
             assert tool not in text, f"contract leaked real tool name {tool}"
 
+    def test_actor_contract_does_not_seed_off_task_search_words(self, h):
+        """Naming the usage-guide affordance derailed the small model's searches.
+
+        It issued search_tools queries like 'read mcp resource' and
+        'update_mcp_resource' — words the contract handed it.
+        """
+        text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "bm25"})
+        assert "mcp_resource" not in text
+
     def test_actor_contract_omits_disclosure_when_off(self, h):
         text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "off"})
         assert "search_tools" not in text

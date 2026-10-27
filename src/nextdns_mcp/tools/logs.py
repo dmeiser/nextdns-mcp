@@ -369,7 +369,9 @@ async def manageLogs(
     device: str | None = None,
     raw: bool | None = None,
 ) -> dict[str, Any]:
-    """Manage query logs for a NextDNS profile.
+    """Get, clear or download a NextDNS profile's DNS query log: the recent resolved
+    domains, the client and device that asked, the answer and reason, over a time
+    range — and the CSV export of those retained log entries.
 
     Operations:
         - ``get``: Return recent query log entries (use ``limit`` to cap results).

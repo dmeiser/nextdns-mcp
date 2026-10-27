@@ -94,8 +94,9 @@ async def manageProfiles(
 ) -> dict[str, Any]:
     """Manage NextDNS profiles.
 
-    NextDNS profiles are named configurations that contain DNS settings, blocklists,
-    analytics, and logs. Most other tools require a ``profile_id`` from this tool.
+    A profile is the account-level object that the other tools act on; this tool
+    manages the profile record itself — list, create, get, rename, delete. Most
+    other tools require a ``profile_id`` from this tool.
 
     Operations:
         - ``list``: Return profiles the API key can access (supports ``cursor`` for pagination).
