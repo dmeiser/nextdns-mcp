@@ -852,6 +852,9 @@ class MeasureClient:
     async def rest_get(self, path: str, params: Any = None) -> Any:
         return await self.rest_request("GET", path, params=params)
 
+    async def rest_post(self, path: str, json_body: Any = None) -> Any:
+        return await self.rest_request("POST", path, json_body=json_body)
+
     async def rest_delete(self, path: str) -> Any:
         return await self.rest_request("DELETE", path)
 
@@ -1107,6 +1110,43 @@ async def _profile_gone(m: MeasureClient, pid: str, targets: TaskTargets) -> boo
     if await m.find_profile(targets.profile_name) is not None:
         return False
     return await m.find_profile(targets.renamed_name) is None
+
+
+async def _self_heal_profile(m: MeasureClient, pid: str, targets: TaskTargets) -> str:
+    """Recreate the test profile via REST if the actor deleted it mid-run.
+
+    A step prompt like "remove this entry from the denylist" can be misread as
+    "delete the profile", and manageProfiles(delete) really does delete it —
+    every later step then fails on 404s and the report measures a cascade, not
+    the model's capability. The harness owns the profile lifecycle (the actor
+    is told cleanup is harness-owned), so recreating it here is test
+    scheduling, not an environment change: the prompts and the MCP server stay
+    exactly as the actor sees them. The profile is recreated under its
+    RENAMED name because every post-rename step verifies against that name.
+
+    Returns the (possibly new) profile id, or "" if recreation failed.
+    """
+    if not pid:
+        return pid
+    resp = await m.rest_get(f"/profiles/{pid}")
+    if isinstance(resp, dict) and resp.get("ok"):
+        return pid
+    created = await m.rest_post("/profiles", {"name": targets.renamed_name})
+    new_id = ""
+    if isinstance(created, dict) and created.get("ok"):
+        body = created.get("body")
+        data = body.get("data") if isinstance(body, dict) else None
+        if isinstance(data, dict) and data.get("id"):
+            new_id = str(data["id"])
+    if not new_id:
+        found = await m.find_profile(targets.renamed_name)
+        if found is not None:
+            new_id = str(found.get("id", ""))
+    if new_id:
+        _progress(f"self-heal: test profile {pid} was deleted mid-run; recreated as {new_id}")
+        return new_id
+    _progress(f"self-heal FAILED: could not recreate test profile {pid} ({created!r})")
+    return ""
 
 
 # =========================================================================== #
@@ -1593,6 +1633,14 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 report.results.append(CheckResult(step.id, step.section, step.description, "skipped",
                                                   mcp_tool=step.tool, reason="test profile was not provisioned"))
                 continue
+            if step.section != "profiles" and pid:
+                # The actor may delete the test profile mid-run (wrong-tool
+                # mistake); recreate it so the report measures each step, not
+                # a 404 cascade. Harness scheduling only — no env change.
+                healed = await _self_heal_profile(m, pid, targets)
+                if healed != pid:
+                    pid = healed
+                    report.profile_id = pid
 
             prompt_pid = pid
             if (step.section == "plots" or step.id == "logs.download") and os.environ.get("NEXTDNS_PLOT_PROFILE"):
