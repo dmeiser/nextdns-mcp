@@ -1204,3 +1204,168 @@ class TestStraySweep:
         asyncio.run(h._sweep_stray_profiles(m, set(), set()))
         assert m.deleted == []
         assert h._never_delete_ids() == {"home12", "plot99"}
+
+
+# =========================================================================== #
+# targeted runs: an inclusive range of the step checklist
+# =========================================================================== #
+
+
+@pytest.fixture(scope="module")
+def all_steps(h):
+    """The full checklist a run would execute."""
+    return h.build_steps(h.TaskTargets(profile_name="P", tag="t0"))
+
+
+class TestStepRange:
+    def test_no_bounds_select_every_step(self, h, all_steps):
+        sel = h.select_steps(all_steps)
+        assert [s.id for _, s in sel] == [s.id for s in all_steps]
+        assert sel[0][0] == 1 and sel[-1][0] == len(all_steps)
+
+    def test_bounds_are_inclusive_and_named_by_id(self, h, all_steps):
+        sel = h.select_steps(all_steps, "profiles.get", "profiles.update")
+        assert [s.id for _, s in sel] == ["profiles.get", "profiles.update"]
+
+    def test_positions_are_the_ones_the_catalog_prints(self, h, all_steps):
+        assert [s.id for _, s in h.select_steps(all_steps, "1", "2")] == ["profiles.create", "profiles.list"]
+
+    def test_positions_keep_full_run_numbering(self, h, all_steps):
+        """A targeted report stays comparable with a full one: [89/89], not [1/1]."""
+        assert h.select_steps(all_steps, "profiles.delete", "") == [(len(all_steps), all_steps[-1])]
+
+    def test_single_step_range(self, h, all_steps):
+        sel = h.select_steps(all_steps, "lists.allowlist.add", "lists.allowlist.add")
+        assert [s.id for _, s in sel] == ["lists.allowlist.add"]
+
+    def test_unknown_bound_is_rejected(self, h, all_steps):
+        with pytest.raises(h.StepRangeError, match="not a step id"):
+            h.select_steps(all_steps, "nope", "")
+        with pytest.raises(h.StepRangeError, match="not a position"):
+            h.select_steps(all_steps, str(len(all_steps) + 1), "")
+
+    def test_inverted_range_is_rejected(self, h, all_steps):
+        with pytest.raises(h.StepRangeError, match="comes before"):
+            h.select_steps(all_steps, "profiles.delete", "profiles.create")
+
+    def test_harness_owns_lifecycle_only_when_the_range_excludes_it(self, h, all_steps):
+        full = h.select_steps(all_steps)
+        assert h.needs_harness_setup(full) is False
+        assert h.needs_harness_teardown(full) is False
+        middle = h.select_steps(all_steps, "settings.general.read", "logs.get")
+        assert h.needs_harness_setup(middle) is True
+        assert h.needs_harness_teardown(middle) is True
+        create_only = h.select_steps(all_steps, "profiles.create", "profiles.list")
+        assert h.needs_harness_setup(create_only) is False
+        assert h.needs_harness_teardown(create_only) is True
+
+    def test_catalog_lists_ids_and_the_positions_they_also_take(self, h, all_steps):
+        text = h.render_step_catalog(all_steps)
+        assert f"Step catalog ({len(all_steps)} steps)" in text
+        entry = next(ln for ln in text.splitlines() if ln.split()[:2] == ["1", "profiles.create"])
+        assert entry.split()[2] == "[profiles]"
+
+    def test_report_records_harness_setup(self, h):
+        r = h.Report(started_at=1.0, finished_at=2.0, setup="provisioned via manageProfiles(create)")
+        assert r.summary()["setup"] == "provisioned via manageProfiles(create)"
+
+
+class TestHarnessProfileLifecycle:
+    """Targeted setup/teardown calls the MCP tool, so the server's ACLs apply."""
+
+    class _Result:
+        def __init__(self, data=None, content=None, is_error=False):
+            self.data = data
+            self.structured_content = data
+            self.content = content or []
+            self.is_error = is_error
+
+    def _fake_client(self, h, monkeypatch, result):
+        """Replace fastmcp's Client so no server is spawned; return the capture."""
+        captured: dict[str, object] = {}
+
+        class FakeClient:
+            def __init__(self, transport):
+                captured["transport"] = transport
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def call_tool(self, tool, arguments):
+                captured["tool"] = tool
+                captured["arguments"] = arguments
+                return result
+
+        monkeypatch.setattr("fastmcp.Client", FakeClient)
+        return captured
+
+    def test_provision_creates_through_the_mcp_tool(self, h, monkeypatch):
+        import asyncio
+
+        captured = self._fake_client(h, monkeypatch, self._Result(data={"data": {"id": "abc123"}}))
+        cfg = h.HarnessConfig()
+        cfg.server["env"] = {"NEXTDNS_API_KEY": "sk-test", "NEXTDNS_WRITABLE_PROFILES": "ALL"}
+        targets = h.TaskTargets(profile_name="P", tag="t0")
+        pid, note = asyncio.run(h._harness_provision_profile(cfg, targets))
+        assert pid == "abc123"
+        assert "manageProfiles(create)" in note
+        assert captured["tool"] == "manageProfiles"
+        assert captured["arguments"] == {"operation": "create", "name": "P"}
+        # the same server spec (and ACL env) the actor's opencode.json gets
+        assert captured["transport"].env["NEXTDNS_WRITABLE_PROFILES"] == "ALL"
+        assert captured["transport"].args == ["-m", "nextdns_mcp.server"]
+
+    def test_provision_failure_is_reported_not_raised(self, h, monkeypatch):
+        import asyncio
+
+        self._fake_client(h, monkeypatch, self._Result(data={"error": "Write access denied"}))
+        pid, note = asyncio.run(
+            h._harness_provision_profile(h.HarnessConfig(), h.TaskTargets(profile_name="P", tag="t0"))
+        )
+        assert pid == ""
+        assert "Write access denied" in note
+
+    def test_teardown_reports_the_tool_error(self, h, monkeypatch):
+        import asyncio
+
+        self._fake_client(h, monkeypatch, self._Result(data={"error": "notFound"}, is_error=True))
+        err = asyncio.run(h._harness_delete_profile(h.HarnessConfig(), "abc123"))
+        assert "notFound" in err
+
+    def test_teardown_success_is_silent(self, h, monkeypatch):
+        import asyncio
+
+        self._fake_client(h, monkeypatch, self._Result(data={"ok": True}))
+        assert asyncio.run(h._harness_delete_profile(h.HarnessConfig(), "abc123")) == ""
+
+
+class TestStepRangeCli:
+    """--print-steps is how a user finds the range bounds; it needs no API key."""
+
+    def test_print_steps_works_without_a_key(self, h, monkeypatch, capsys):
+        monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+        assert h.main(["--print-steps"]) == 0
+        out = capsys.readouterr().out
+        assert "Step catalog (" in out
+        assert "profiles.delete" in out
+
+    def test_bad_range_prints_the_catalog_and_fails(self, h, monkeypatch, capsys):
+        monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+        assert h.main(["--start-step", "not-a-step"]) == 2
+        assert "Step catalog (" in capsys.readouterr().out
+
+    def test_range_flags_reach_the_config(self, h, monkeypatch, tmp_path):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        seen: dict[str, object] = {}
+
+        async def fake_run(api_key, config):
+            seen["start"] = config.start_step
+            seen["end"] = config.end_step
+            return h.Report(started_at=1.0, finished_at=2.0)
+
+        monkeypatch.setattr(h, "run_harness", fake_run)
+        h.main(["--start-step", "logs.get", "--end-step", "88", "--quiet", "--report", str(tmp_path / "r.jsonl")])
+        assert seen == {"start": "logs.get", "end": "88"}
