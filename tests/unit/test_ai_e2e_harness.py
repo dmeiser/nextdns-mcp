@@ -1114,3 +1114,76 @@ class TestMeasureState:
             post_result={"status": 500, "ok": False, "body": "boom"},
         )
         assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == ""
+
+
+class TestTransientActorFailure:
+    """Only infrastructure transients re-run a step; slow-but-working attempts do not."""
+
+    def test_lazy_tool_registration_is_retried(self, h):
+        run = h.ActorRun(command=["x"])
+        assert h._transient_actor_failure(run, "failed with unknown tool 'nextdns.foo'") == "unknown tool"
+
+    def test_provider_stall_is_retried(self, h):
+        run = h.ActorRun(command=["x"], error="actor harness timed out after 300s")
+        assert h._transient_actor_failure(run, "") == "actor harness timed out after 300s"
+
+    def test_timeout_after_work_is_not_retried(self, h):
+        """A step that DID act and still timed out is the model's own doing."""
+        run = h.ActorRun(command=["x"], error="actor harness timed out after 300s")
+        run.tool_calls = [h.ToolCall(name="manageLists", args={})]
+        assert h._transient_actor_failure(run, "") == ""
+
+    def test_ordinary_failure_is_not_retried(self, h):
+        run = h.ActorRun(command=["x"], error="")
+        assert h._transient_actor_failure(run, "list does not contain entry") == ""
+
+
+class TestStraySweep:
+    """Profiles the actor creates beyond the test profile are removed at the end."""
+
+    def test_all_profile_ids_maps_names(self, h):
+        import asyncio
+
+        m = _FakeClient(
+            by_path={"/profiles": {"ok": True, "body": {"data": [{"id": "a1", "name": "One"}, {"id": "b2"}]}}}
+        )
+        assert asyncio.run(h._all_profile_ids(m)) == {"a1": "One", "b2": ""}
+
+    def test_sweep_removes_only_run_created_profiles(self, h, monkeypatch):
+        import asyncio
+
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        monkeypatch.delenv("NEXTDNS_PLOT_PROFILE", raising=False)
+        m = _FakeClient(
+            by_path={
+                "/profiles": {
+                    "ok": True,
+                    "body": {
+                        "data": [
+                            {"id": "real", "name": "Pumpkin Bum"},  # pre-existing
+                            {"id": "test", "name": "P-renamed"},  # the test profile
+                            {"id": "stray", "name": "new-profile"},  # actor-created
+                        ]
+                    },
+                }
+            }
+        )
+        asyncio.run(h._sweep_stray_profiles(m, {"real"}, {"test"}))
+        assert m.deleted == ["/profiles/stray"]
+
+    def test_sweep_never_touches_protected_or_plot_profiles(self, h, monkeypatch):
+        import asyncio
+
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "home12")
+        monkeypatch.setenv("NEXTDNS_PLOT_PROFILE", "plot99")
+        m = _FakeClient(
+            by_path={
+                "/profiles": {
+                    "ok": True,
+                    "body": {"data": [{"id": "home12", "name": "Home"}, {"id": "plot99", "name": "Plot"}]},
+                }
+            }
+        )
+        asyncio.run(h._sweep_stray_profiles(m, set(), set()))
+        assert m.deleted == []
+        assert h._never_delete_ids() == {"home12", "plot99"}
