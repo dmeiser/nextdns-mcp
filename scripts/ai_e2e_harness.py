@@ -369,82 +369,28 @@ def render_argv(template: list[str], values: dict[str, str]) -> list[str]:
     return argv
 
 
-# BOOKMARK(opencode-coupling): the environment contract below is written for
-# the *opencode* harness specifically. It hard-codes opencode's code-mode
-# the `tools.nextdns.<name>` affordance, and the two-step search_tools->call_tool
-# discovery that mirrors opencode's progressive
-# disclosure. The harness advertises other harnesses (Claude Code, any
-# `--harness-cmd`), whose tool surfaces and discovery mechanisms differ, so
-# this contract would mislead them. Deferred on purpose: revisit ONLY after the
-# small model passes reliably on opencode, then generalize the contract per
-# harness (e.g. a contract template selected by harness kind, or move the
-# affordance text into the per-harness config). Do not "fix" it piecemeal while
-# still tuning the small model — the opencode-specific wording is load-bearing
-# for the current experiments.
-def _actor_contract_text(srv_env: dict[str, str]) -> str:
-    """Ambient environment contract for the actor (NOT task hints).
-
-    Tells the model how this harness's environment works — MCP tools are only
-    reachable through opencode's ``execute`` sandbox, and when the server runs
-    with progressive tool disclosure, how to discover the real tools. It never
-    names a tool that answers a specific step; step prompts stay plain tasks.
-    """
-    lines = [
-        "# Environment contract",
-        "",
-        "- You act on NextDNS ONLY through the `nextdns` MCP server. Its tools are",
-        "  NOT first-class tools: call them only inside the `execute` tool's code,",
-        "  as `await tools.nextdns.<name>({...})`.",
-        "- Do not invent tools outside the `tools.nextdns.*` namespace, and do not",
-        "  call `tools.nextdns.<name>` outside `execute` — it will fail.",
-        # Generic verification affordance, not a task hint: the verdict is the
-        # server's state read back afterwards. A small model that had just added
-        # a DNS rewrite went on to delete it and reported the task as "added and
-        # then deleted", which reads as a failed step.
-        "- Your task is verified by reading the server's state afterwards, so a",
-        "  change you make must stay in place: do not undo, revert or tidy up",
-        "  something you have already done.",
-    ]
-    if srv_env.get("NEXTDNS_TOOL_SEARCH", "off") != "off":
-        lines += [
-            "- This server uses progressive tool disclosure: the real NextDNS tool",
-            "  names are NOT advertised and MUST NOT be guessed. Any guessed name",
-            "  (a plausible verb_noun) will fail. The only way to learn a real name",
-            "  is to search, inside `execute`, in two steps:",
-            '  1. `await tools.nextdns.search_tools({ query: "<what you need to do>" })`',
-            "     returns the matching tools with their EXACT names and full schemas.",
-            '  2. `await tools.nextdns.call_tool({ name: "<exact name from step 1>",',
-            "     arguments: { ... } })` runs one.",
-            "  Search FIRST, then call. One search per task is enough — reuse its",
-            "  result instead of searching again.",
-        ]
-    # No usage-guide affordance here on purpose: naming read_mcp_resource in the
-    # contract pushed the small model to search for 'read mcp resource' and
-    # 'update_mcp_resource' instead of the task at hand. The guide is still
-    # advertised by the server itself (prompt + nextdns://usage resource).
-    return "\n".join(lines) + "\n"
-
-
+# No harness-side prompt of any kind. The harness sends the task and nothing
+# else: it does not tell the model how to behave inside a given agent CLI, and
+# it does not describe the MCP server on the server's behalf. That guidance is
+# the server's to publish, through channels any MCP client sees — the MCP
+# ``initialize`` instructions, the tool descriptions, and the usage
+# prompt/resource (see ``nextdns_mcp.usage`` and ``tool_search``).
 def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
     """Write the generated MCP client config (``opencode.json``) into workdir.
 
     The file declares the in-tree MCP server as a *local* stdio server under
     the name ``nextdns``, which is how the default opencode harness (and any
-    harness that reads opencode's config format) mounts it natively. A small
-    ambient-instructions file (the environment contract) is written next to it
-    and referenced via opencode's ``instructions`` key, so the model learns how
-    the sandbox works without any per-step tool hints. Returns the written path
-    (exposed to templates as ``{config_file}``).
+    harness that reads opencode's config format) mounts it natively. It is
+    client plumbing only: nothing in it is model-facing text. The harness
+    injects no instructions of its own — how the server is to be used is the
+    server's business, and it publishes that through the MCP ``initialize``
+    instructions, its tool descriptions, and its usage prompt/resource.
+    Returns the written path (exposed to templates as ``{config_file}``).
     """
     srv = config.server
     srv_env = {str(k): str(v) for k, v in srv.get("env", {}).items()}
-    contract = Path(dest_dir) / "actor_contract.md"
-    contract.write_text(_actor_contract_text(srv_env), encoding="utf-8")
     doc: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
-        # Ambient instructions: how the sandbox + MCP discovery work. Task
-        # prompts stay plain; this file only describes the environment.
-        "instructions": [str(contract)],
         # Side-channel tools are disabled so the ONLY way the model can act is
         # through the nextdns MCP tools — one tool call per step, as designed.
         "tools": {
@@ -1319,20 +1265,14 @@ class Step:
 
 
 def _step_prompt(task: str) -> str:
-    """Wrap a single-step TASK (not a tool call) with the actor contract.
+    """The actor's whole message for one step: the task, nothing else.
 
-    The model chooses which MCP tool and arguments to use; the harness only
-    verifies the resulting state via REST.
+    No role framing, no rules, no description of the agent CLI or the MCP
+    server — the harness asks for an outcome and verifies it over REST. How
+    the server is to be used is the server's own instructions' job
+    (``nextdns_mcp.usage.server_instructions``).
     """
-    return (
-        "You are a validation agent for the NextDNS MCP server.\n\n"
-        "Task: " + task + "\n\n"
-        "Rules:\n"
-        "- Perform this task, then stop.\n"
-        "- If a tool is reported as unknown or not registered, wait a moment and retry the same call once.\n"
-        "- If the call fails, report the error and stop.\n"
-        "- When the call succeeds, stop immediately."
-    )
+    return f"Do the following in NextDNS:\n\n{task}"
 
 
 def build_steps(targets: TaskTargets) -> list[Step]:

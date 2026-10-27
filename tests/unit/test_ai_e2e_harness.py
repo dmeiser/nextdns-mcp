@@ -784,44 +784,20 @@ class TestMcpConfigGeneration:
         # The file must parse back cleanly (it is read by opencode at startup).
         assert isinstance(doc["mcp"], dict)
 
-    def test_write_mcp_config_wires_actor_contract_instructions(self, h, tmp_path):
-        """The environment-contract file is written and referenced via `instructions`."""
+    def test_write_mcp_config_injects_nothing_model_facing(self, h, tmp_path):
+        """The generated config is client plumbing: no prompt text, no instructions file.
+
+        How the server should be used is the server's own business — it publishes
+        that through the MCP ``initialize`` instructions, its tool descriptions
+        and its usage prompt/resource. The harness sends tasks and nothing else,
+        so it cannot tell the model how to behave inside a particular agent CLI.
+        """
         cfg = h.HarnessConfig.load(None)
         out = h.write_mcp_config(cfg, tmp_path)
         doc = json.loads(out.read_text(encoding="utf-8"))
-        contract = tmp_path / "actor_contract.md"
-        assert doc["instructions"] == [str(contract)]
-        assert contract.exists()
-        text = contract.read_text(encoding="utf-8")
-        # The contract describes the sandbox, never a per-step answer.
-        assert "tools.nextdns" in text
-        assert "search_tools" not in text  # disclosure flow only appears when enabled
-
-    def test_actor_contract_mentions_disclosure_when_tool_search_on(self, h):
-        text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "bm25"})
-        assert "search_tools" in text
-        assert "call_tool" in text
-        # Anti-guessing rule targets the small model's dominant failure mode.
-        assert "MUST NOT be guessed" in text
-
-    def test_actor_contract_never_leaks_real_tool_names(self, h):
-        """The contract is a generic affordance, never a task answer."""
-        text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "bm25"})
-        for tool in h.common.MCP_TOOLS:
-            assert tool not in text, f"contract leaked real tool name {tool}"
-
-    def test_actor_contract_does_not_seed_off_task_search_words(self, h):
-        """Naming the usage-guide affordance derailed the small model's searches.
-
-        It issued search_tools queries like 'read mcp resource' and
-        'update_mcp_resource' — words the contract handed it.
-        """
-        text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "bm25"})
-        assert "mcp_resource" not in text
-
-    def test_actor_contract_omits_disclosure_when_off(self, h):
-        text = h._actor_contract_text({"NEXTDNS_TOOL_SEARCH": "off"})
-        assert "search_tools" not in text
+        assert "instructions" not in doc
+        assert not (tmp_path / "actor_contract.md").exists()
+        assert not hasattr(h, "_actor_contract_text")
 
 
 # =========================================================================== #
@@ -1233,9 +1209,31 @@ class TestStepPrompts:
         assert "hostname 'ai-e2e-cname-t0.example.com'" in step.prompt
         assert "resolves to 'ai-e2e-target-t0.example.com'" in step.prompt
 
-    def test_contract_states_that_changes_must_stay(self, h):
-        text = h._actor_contract_text({})
-        assert "do not undo" in text
+    def test_prompt_is_the_task_and_nothing_else(self, h, all_steps):
+        """No role framing, no rules — the harness asks for an outcome."""
+        step = next(s for s in all_steps if s.id == "profiles.delete")
+        assert step.prompt == "Do the following in NextDNS:\n\nDelete the profile '{profile_id}'."
+
+    def test_prompts_never_describe_the_agent_cli(self, h, all_steps):
+        """No client-specific affordances in the task message.
+
+        An earlier rule ("if a tool is reported as unknown, retry it once") was
+        opencode's lazy MCP registration leaking into the prompt. The server's
+        own instructions cover how its tools are found.
+        """
+        markers = (
+            "execute",
+            "tools.nextdns",
+            "unknown tool",
+            "not registered",
+            "opencode",
+            "search_tools",
+            "validation agent",
+            "Rules:",
+        )
+        for step in all_steps:
+            for marker in markers:
+                assert marker not in step.prompt, f"{step.id} prompt mentions {marker!r}"
 
 
 class TestStepRange:

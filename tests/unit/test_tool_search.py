@@ -101,6 +101,33 @@ class TestNameAwareRanking:
             assert found.data[0].get("name") == "dohLookup"
 
 
+class TestSyntheticToolDescriptions:
+    """Under disclosure the two synthetic tools are the only always-visible text."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["bm25", "regex"])
+    async def test_they_state_the_discovery_contract(self, monkeypatch, mode):
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+        async with Client(build_mcp_server()) as client:
+            described = {t.name: (t.description or "") for t in await client.list_tools()}
+        assert "not advertised" in described["search_tools"].casefold()
+        assert "exact name" in described["call_tool"].casefold()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["bm25", "regex"])
+    async def test_they_name_no_client_or_real_tool(self, monkeypatch, mode):
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+        async with Client(build_mcp_server()) as client:
+            described = {t.name: (t.description or "") for t in await client.list_tools()}
+        blob = " ".join(described.values()).casefold()
+        for marker in ("opencode", "claude", "code mode", "manageprofiles", "managelists"):
+            assert marker not in blob, f"synthetic tool description mentions {marker!r}"
+
+
 class TestToolSearchServerWiring:
     """Tests for the transform wiring on the built MCP server."""
 

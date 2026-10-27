@@ -41,6 +41,7 @@ from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
 from .tool_search import build_search_transform
 from .tools.doh import close_doh_client
+from .usage import server_instructions
 from .utils import is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
@@ -306,7 +307,12 @@ def create_mcp_server(client: Any = None) -> FastMCP:
             "Tool search enabled (%s): tools/list exposes search_tools + call_tool instead of the full catalog",
             tool_search_mode,
         )
-    mcp = FastMCP(name="NextDNS MCP Server", lifespan=_server_lifespan, transforms=transforms)
+    mcp = FastMCP(
+        name="NextDNS MCP Server",
+        instructions=server_instructions(tool_search_mode),
+        lifespan=_server_lifespan,
+        transforms=transforms,
+    )
 
     # Add middleware to strip unknown fields from tool arguments
     # This allows AI clients (like OpenAI) that send extra fields to work properly
