@@ -263,7 +263,9 @@ async def manageLists(
     entry: str | dict[str, Any] | None = None,
     entries: str | list[Any] | None = None,
 ) -> dict[str, Any]:
-    """Manage allow/deny/block lists for a NextDNS profile.
+    """Get, add, replace, update or remove entries in a NextDNS profile's lists:
+    allowlist, denylist, privacy blocklists, privacy natives, security TLDs, and
+    parental-control categories and services.
 
     List types:
         - ``allowlist`` / ``denylist``: Always-allow or always-block specific domains.

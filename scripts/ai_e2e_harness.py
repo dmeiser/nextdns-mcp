@@ -335,9 +335,8 @@ def render_argv(template: list[str], values: dict[str, str]) -> list[str]:
 
 # BOOKMARK(opencode-coupling): the environment contract below is written for
 # the *opencode* harness specifically. It hard-codes opencode's code-mode
-# affordances — calling MCP tools only inside `execute` as `tools.nextdns.<name>`,
-# the `tools.opencode.read_mcp_resource` usage-guide path, and the two-step
-# search_tools->call_tool discovery that mirrors opencode's progressive
+# the `tools.nextdns.<name>` affordance, and the two-step search_tools->call_tool
+# discovery that mirrors opencode's progressive
 # disclosure. The harness advertises other harnesses (Claude Code, any
 # `--harness-cmd`), whose tool surfaces and discovery mechanisms differ, so
 # this contract would mislead them. Deferred on purpose: revisit ONLY after the
@@ -376,10 +375,10 @@ def _actor_contract_text(srv_env: dict[str, str]) -> str:
             "  Search FIRST, then call. One search per task is enough — reuse its",
             "  result instead of searching again.",
         ]
-    lines += [
-        "- You may also read the server's usage guide with",
-        "  `await tools.opencode.read_mcp_resource({ server: \"nextdns\", uri: \"nextdns://usage\" })`.",
-    ]
+    # No usage-guide affordance here on purpose: naming read_mcp_resource in the
+    # contract pushed the small model to search for 'read mcp resource' and
+    # 'update_mcp_resource' instead of the task at hand. The guide is still
+    # advertised by the server itself (prompt + nextdns://usage resource).
     return "\n".join(lines) + "\n"
 
 

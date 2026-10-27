@@ -97,7 +97,10 @@ async def queryAnalytics(
     status: str | None = None,
     root: bool | None = None,
 ) -> dict[str, Any]:
-    """Query NextDNS analytics metrics.
+    """Query NextDNS analytics metrics for a profile: resolution status, top domains,
+    query types, block/allow reasons, source IPs, DNSSEC, encryption, IPv4/IPv6
+    versions, protocols, devices, and blocked/allowed destinations — aggregate
+    counts, or a time series when ``series`` is true.
 
     Metrics:
         - ``status``: Query resolution status (default, blocked, allowed, relayed).
