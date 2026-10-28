@@ -1292,6 +1292,32 @@ class TestServerCallEvidence:
         assert not ok
         assert "followed by the write manageRewrites(delete)" in why
 
+    def test_expected_call_ignores_a_failed_write_after_the_match(self, h):
+        """A rejected duplicate changed nothing, so it cannot undo the step.
+
+        Seen live in rewrites.add.a: the add succeeded, then the model added
+        the same record again and upstream rejected the duplicate.
+        """
+        step = h.Step(
+            "rewrites.add.a",
+            "rewrites",
+            "manageRewrites",
+            "d",
+            "p",
+            "rewrite_add",
+            expect=h._expect("manageRewrites", "add", args=("a.example.com",)),
+        )
+        add = {
+            "tool": "manageRewrites",
+            "operation": "add",
+            "ok": True,
+            "write": True,
+            "args": '{"name": "a.example.com", "content": "192.0.2.100"}',
+            "result": '{"data": []}',
+        }
+        duplicate = {**add, "ok": False, "result": '{"error": "already exists"}'}
+        assert h._expected_call_ok([add, duplicate], step.expect, "pid")[0]
+
     def test_expected_call_reason_names_the_failed_condition(self, h):
         step = h.Step(
             "profiles.get",

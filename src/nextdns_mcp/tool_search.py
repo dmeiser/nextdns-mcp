@@ -107,17 +107,23 @@ class _CatalogAwareSearchMixin:
 # Written for the model that reads them, and client-agnostic: nothing here
 # assumes an agent CLI, a code-mode sandbox, or any particular call syntax, and
 # nothing instructs the model how to behave — it describes what this server does.
+# The argument shape is spelled out because it is part of the contract, and
+# getting it wrong is the single most common way a call never reaches a tool:
+# observed live, a model passed a bare string to search_tools and two objects to
+# call_tool, and concluded from the rejections that the server had no tools.
 _SEARCH_TOOL_DESCRIPTION = """Search this server's tools with the words of the task.
 
-Returns the matching tools with their exact names and full schemas. This server
-does not advertise tool names, so a name that was not returned here is not one
-of its tools.
+Takes one argument object, {"query": "<words of the task>"}. Returns the matching
+tools with their exact names and full schemas. This server does not advertise
+tool names, so a name that was not returned here is not one of its tools.
 """
 
 _CALL_TOOL_DESCRIPTION = """Run one of this server's tools by the exact name returned by search_tools.
 
-Anything search_tools did not return is not a tool of this server. A failed call
-returns a JSON payload with an error `code` and, when available, a `hint`.
+Takes exactly one argument object, {"name": "<tool>", "arguments": {<that tool's
+parameters>}}; the name and the arguments are not two separate inputs. Anything
+search_tools did not return is not a tool of this server. A failed call returns a
+JSON payload with an error `code` and, when available, a `hint`.
 """
 
 

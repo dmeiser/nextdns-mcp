@@ -1420,7 +1420,10 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
         if expect.get("data", True) and not _answered(result_text):
             why = f"{label} succeeded but returned no payload"
             continue
-        later = [r for r in records[index + 1 :] if r.get("write")]
+        # Only a write that SUCCEEDED can undo the step. A failed duplicate
+        # (observed: manageRewrites(add) of an existing record, rejected
+        # upstream) changed nothing, so it must not fail the step.
+        later = [r for r in records[index + 1 :] if r.get("write") and r.get("ok")]
         if later:
             undo = later[0]
             return False, (
@@ -1977,10 +1980,13 @@ async def _verify_step(
         )
     if step.verify == "list_add":
         rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
-        ok = common._list_contains(rest, vd["values"] + [vd["added"]])
+        # Only this step's own effect: the entry it asked to add. Checking the
+        # earlier step's entries as well let a failed `replace` cascade into the
+        # `add` verdict and blame the wrong entry.
+        ok = common._list_contains(rest, [vd["added"]])
         return (
             "passed" if ok else "failed",
-            "" if ok else f"list {vd['name']} does not contain added entry {vd['added']!r}",
+            "" if ok else f"list {vd['name']} does not contain the entry this step asked to add: {vd['added']!r}",
             "",
             {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified": ok},
         )
