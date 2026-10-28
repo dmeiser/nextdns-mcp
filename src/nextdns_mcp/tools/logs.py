@@ -9,13 +9,13 @@ import logging
 import os
 import socket
 import tempfile
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 import httpx
 
 from .. import client
 from ..client import AccessDeniedError, _log_safe_error
-from ..coercion import ProfileId
+from ..coercion import ProfileId, before_validator, operation_aliases
 from ..config import get_download_max_bytes
 from ..errors import (
     ErrorCode,
@@ -51,6 +51,11 @@ def _unlink_temp_file(path: str) -> None:
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 LogOperation = Literal["get", "clear", "download"]
+
+# "list the logs" asks for operation="get", and "delete" for "clear".
+LogOperationId = Annotated[
+    LogOperation, before_validator(operation_aliases(get_args(LogOperation), {"list": "get", "delete": "clear"}))
+]
 
 # Server-side cap for the ``limit`` parameter on ``get`` (maximum accepted by
 # the NextDNS API).
@@ -325,7 +330,7 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
 
 
 async def _manage_logs_impl(
-    operation: LogOperation,
+    operation: LogOperationId,
     profile_id: ProfileId,
     from_time: str | int | None = None,
     to_time: str | int | None = None,
@@ -360,7 +365,7 @@ async def _manage_logs_impl(
 
 
 async def manageLogs(
-    operation: LogOperation,
+    operation: LogOperationId,
     profile_id: ProfileId,
     from_time: str | int | None = None,
     to_time: str | int | None = None,

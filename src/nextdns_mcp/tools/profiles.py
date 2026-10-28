@@ -3,9 +3,9 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
-from ..coercion import OptionalProfileId
+from ..coercion import OptionalProfileId, before_validator, operation_aliases
 from ..config import load_profile_access_control
 from ..errors import (
     ErrorCode,
@@ -15,6 +15,19 @@ from ..utils import _api_request_payload, _build_query_params, resolve_profile_i
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 ProfileOperation = Literal["list", "create", "get", "update", "delete"]
+
+# Callers name the intent rather than the enum: live runs show manageProfiles
+# asked for remove, rename, set, replace and add. Each means exactly one thing
+# for this tool, so it is resolved; anything else still gets the schema error.
+ProfileOperationId = Annotated[
+    ProfileOperation,
+    before_validator(
+        operation_aliases(
+            get_args(ProfileOperation),
+            {"remove": "delete", "rename": "update", "set": "update", "replace": "update", "add": "create"},
+        )
+    ),
+]
 
 
 async def _profiles_list(cursor: str | None = None) -> dict[str, Any]:
@@ -57,7 +70,7 @@ async def _profiles_update(url: str, name: str | None) -> dict[str, Any]:
 
 
 async def _manage_profiles_impl(
-    operation: ProfileOperation,
+    operation: ProfileOperationId,
     profile_id: OptionalProfileId = None,
     name: str | None = None,
     cursor: str | None = None,
@@ -87,7 +100,7 @@ async def _manage_profiles_impl(
 
 
 async def manageProfiles(
-    operation: ProfileOperation,
+    operation: ProfileOperationId,
     profile_id: OptionalProfileId = None,
     name: str | None = None,
     cursor: str | None = None,

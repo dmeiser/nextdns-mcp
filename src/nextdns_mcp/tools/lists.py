@@ -3,9 +3,9 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
-from ..coercion import ProfileId, _coerce_json_arg, before_validator
+from ..coercion import ProfileId, _coerce_json_arg, before_validator, operation_aliases
 from ..errors import ErrorCode, error_payload
 from ..utils import _api_request_payload, _optional_entry_id_error, resolve_profile_id
 
@@ -20,6 +20,12 @@ ListType = Literal[
     "parental_services",
 ]
 ListOperation = Literal["get", "add", "replace", "update", "remove"]
+
+# "list the allowlist" is how callers ask for operation="get" (7 calls across
+# three live runs). See coercion.operation_aliases for the rule and its limits.
+ListOperationId = Annotated[
+    ListOperation, before_validator(operation_aliases(get_args(ListOperation), {"list": "get", "delete": "remove"}))
+]
 
 
 def _list_type_alias(value: Any) -> Any:
@@ -241,7 +247,7 @@ def _idempotent_list_result(result: dict[str, Any], operation: str) -> dict[str,
 
 async def _manage_lists_impl(
     list_type: ListTypeId,
-    operation: ListOperation,
+    operation: ListOperationId,
     profile_id: ProfileId,
     entry_id: str | None = None,
     entry: str | dict[str, Any] | None = None,
@@ -289,7 +295,7 @@ async def _manage_lists_impl(
 
 async def manageLists(
     list_type: ListTypeId,
-    operation: ListOperation,
+    operation: ListOperationId,
     profile_id: ProfileId,
     entry_id: str | None = None,
     entry: str | dict[str, Any] | None = None,
