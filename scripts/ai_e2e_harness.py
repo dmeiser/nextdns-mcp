@@ -2396,7 +2396,14 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 # Where the server's call log stands before this attempt; the
                 # lines after it are this attempt's authoritative record.
                 log_offset = call_log.stat().st_size if call_log.exists() else 0
-                run = await run_actor(step_cfg, prompt, workdir, retries=1)
+                # One subprocess per attempt: run_actor's own internal retry is
+                # off here because it would silently double the window this
+                # step's call-log slice covers. Observed: a step whose first
+                # attempt timed out at 300s and whose second produced no parsed
+                # events reported "actor=0, server=56" - the server records
+                # were real, they just came from both attempts. The step loop
+                # below already retries transients, with the bookkeeping.
+                run = await run_actor(step_cfg, prompt, workdir, retries=0)
                 total_events += len(run.tool_calls)
                 for t in run.tools_used():
                     if t not in tools_used:
