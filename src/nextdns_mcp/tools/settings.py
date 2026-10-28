@@ -68,7 +68,8 @@ async def manageSettings(
         - ``security``: Threat intelligence, Google Safe Browsing, typosquatting protection.
         - ``parental``: Parental control enablement (safe search, YouTube restricted mode).
         - ``performance``: ECS, cache boost, and other performance options.
-        - ``logs``: Query-logging enablement and retention.
+        - ``logs``: Query-logging enablement and retention — the setting, not the
+          log entries themselves, which ``manageLogs`` reads.
         - ``blockpage``: Whether to show a custom block page for blocked queries.
 
     Operations:

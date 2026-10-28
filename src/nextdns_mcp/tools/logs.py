@@ -378,6 +378,11 @@ async def manageLogs(
     domains, the client and device that asked, the answer and reason, over a time
     range — and the CSV export of those retained log entries.
 
+    This is the log itself, not the setting that controls it: whether logging is
+    on and how long entries are retained is ``manageSettings`` with
+    ``category="logs"``.
+
+
     Operations:
         - ``get``: Return recent query log entries (use ``limit`` to cap results).
           Set ``raw=true`` to bypass deduplication/noise filtering.

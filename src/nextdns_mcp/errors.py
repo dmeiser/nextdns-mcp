@@ -139,6 +139,32 @@ def upstream_error_codes(body: Any) -> list[str]:
     return [str(item["code"]) for item in items if isinstance(item, dict) and isinstance(item.get("code"), str)]
 
 
+def upstream_error_details(body: Any) -> list[str]:
+    """The upstream diagnosis as short sentences, naming the parameter at fault.
+
+    NextDNS says exactly what it rejected — "`partials` must be equal to one of
+    the allowed values" with ``source.parameter`` set — but that text only
+    reached callers inside ``response_body``, a JSON string, while the ``error``
+    message they read first carried the transport's boilerplate.
+    """
+    if not isinstance(body, dict):
+        return []
+    items = body.get("errors")
+    if not isinstance(items, list):
+        return []
+    details: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        detail = str(item.get("detail") or "").strip()
+        if not detail:
+            continue
+        source = item.get("source")
+        parameter = source.get("parameter") if isinstance(source, dict) else None
+        details.append(f"{detail} (parameter: {parameter})" if parameter else detail)
+    return details
+
+
 def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorCode.HTTP_ERROR) -> dict[str, Any]:
     """Build a typed error payload for a failed HTTP request.
 
@@ -191,6 +217,12 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
     if codes:
         payload["upstream_code"] = codes[0]
         payload["upstream_codes"] = codes
+    # The transport's message names the URL and the status; the upstream
+    # document names the parameter. A caller acts on the second, so it goes in
+    # the message, not only in a side field.
+    details = upstream_error_details(parsed)
+    if details:
+        payload["error"] = f"{payload['error']} | upstream: {'; '.join(details[:3])}"
     return payload
 
 
