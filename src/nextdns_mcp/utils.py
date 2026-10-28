@@ -187,6 +187,72 @@ def _build_series_params(
     )
 
 
+# The spellings of a relative range that the analytics endpoints do NOT accept
+# but callers reach for: `now-1d` (Grafana/Prometheus) and a bare negative
+# number, which upstream reads as an absolute Unix timestamp.
+_NOW_OFFSET_RE = re.compile(r"^now\s*(?:-\s*(\d+\s*[smhdwy]))?$", re.IGNORECASE)
+_BARE_NEGATIVE_RE = re.compile(r"^-\d+$")
+
+
+def normalize_time_value(value: Any) -> Any:
+    """Rewrite a ``from``/``to`` argument into a form the API accepts.
+
+    Two shapes arrive live and both fail silently or obscurely upstream:
+
+    - A bare negative number, ``from_time=-86400``. As an absolute Unix
+      timestamp that is 1969, so the endpoint answers 200 with no rows and the
+      caller has nothing to correct: across three runs the model retried that
+      call ~40 times, varying the interval each time. A negative absolute time
+      is not a thing, so it is read as the offset it means, in the API's own
+      relative-seconds spelling (``-86400s``, verified accepted).
+    - ``now-1d``, the Grafana/Prometheus spelling. Upstream answers "`from` must
+      be number"; the same span in its own spelling (``-1d``) works.
+
+    Anything else - a Unix timestamp, ISO 8601, ``now``, ``-1d`` - is returned
+    unchanged.
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return f"{value}s" if value < 0 else value
+    text = str(value).strip()
+    match = _NOW_OFFSET_RE.match(text)
+    if match:
+        return "now" if match.group(1) is None else f"-{match.group(1).replace(' ', '')}"
+    if _BARE_NEGATIVE_RE.match(text):
+        return f"{text}s"
+    return value
+
+
+# The two values the `;series` endpoints accept for `partials` (probed live:
+# `none` and `all` answer 200, everything else answers 400 enum without naming
+# the allowed set). Callers send a boolean instead.
+PARTIALS_VALUES = ("none", "all")
+_PARTIALS_ALIASES = {
+    "false": "none",
+    "0": "none",
+    "no": "none",
+    "off": "none",
+    "true": "all",
+    "1": "all",
+    "yes": "all",
+    "on": "all",
+}
+
+
+def normalize_partials(value: Any) -> Any:
+    """Map a boolean-ish ``partials`` onto the value the API means by it.
+
+    ``partials=false`` was sent live and answered 400 with an enum error that
+    names no allowed values. "no partials" is ``none`` and "partials" is ``all``;
+    anything else is left as sent so the tool can reject it by name.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return _PARTIALS_ALIASES.get(text, text)
+
+
 def _build_query_params(**kwargs: Any) -> dict[str, Any]:
     """Build a query-param dict, dropping None values and normalizing booleans."""
     params = {k: v for k, v in kwargs.items() if v is not None}

@@ -113,7 +113,14 @@ async def test_schema_typed_scalars_are_still_coerced(mcp_client: Client, record
     """bool/int-typed arguments still arrive typed after the helper move."""
     result = await mcp_client.call_tool(
         "queryAnalytics",
-        {"metric": "status", "profile_id": "315244", "limit": "10", "series": "true", "interval": "3600"},
+        {
+            "metric": "status",
+            "profile_id": "315244",
+            "limit": "10",
+            "series": "true",
+            "interval": "3600",
+            "from_time": "-1d",
+        },
     )
     assert result.data == {"data": []}
 

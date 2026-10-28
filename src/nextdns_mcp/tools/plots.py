@@ -17,10 +17,13 @@ from fastmcp.utilities.types import Image
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
 from ..utils import (
+    PARTIALS_VALUES,
     NextDNSError,
     _api_request,
     _build_series_params,
     _handle_api_error,
+    normalize_partials,
+    normalize_time_value,
     resolve_profile_id,
 )
 from .metrics import PLOT_METRICS, PlotMetric
@@ -396,6 +399,19 @@ async def _plot_analytics_series_impl(
     limit: int = 10,
 ) -> dict[str, Any] | mcp.types.ImageContent:
     """Generate a PNG line chart from a NextDNS analytics time-series endpoint."""
+    # Read the caller's range before bounding it: a bare negative number means
+    # an offset, not 1969 (see utils.normalize_time_value).
+    from_time = normalize_time_value(from_time)
+    to_time = normalize_time_value(to_time)
+    partials = normalize_partials(partials)
+    if partials is not None and partials not in PARTIALS_VALUES:
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"partials must be one of: {', '.join(PARTIALS_VALUES)}; got {partials!r}",
+            allowed=list(PARTIALS_VALUES),
+            partials=partials,
+        )
+
     target_profile, val_error = _validate_plot_params(metric, interval, profile_id, from_time, to_time, limit)
     if val_error:
         return val_error
