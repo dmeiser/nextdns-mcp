@@ -81,10 +81,20 @@ class _CatalogAwareSearchMixin:
     _max_results: int
 
     async def _search(self, tools: Sequence[Tool], query: str) -> Sequence[Tool]:
-        results = await super()._search(tools, query)  # type: ignore[misc]
-        # The fallback still gets the name-aware ordering: when nothing matched,
-        # the caller's own words are the only signal left about what it wants.
-        return _rank_by_name_overlap(results or list(tools)[: self._max_results], query)
+        results = list(await super()._search(tools, query) or [])  # type: ignore[misc]
+        # A tool whose own name carries the caller's word is never left out of
+        # the answer. BM25 ranks prose, so which prose wins changes when a
+        # description gets longer: publishing the full docstrings took `doh`
+        # from dohLookup to queryAnalytics, and the tool named for the request
+        # dropped out of the result set entirely.
+        named = [tool for tool in tools if _words(query) & _words(tool.name)]
+        if not results:
+            # Nothing matched at all: the caller's words are the only signal
+            # left, so answer with the catalog and let the name order sort it.
+            results = list(tools)
+        seen = {tool.name for tool in named}
+        merged = named + [tool for tool in results if tool.name not in seen]
+        return _rank_by_name_overlap(merged[: self._max_results], query)
 
     def _make_search_tool(self) -> Tool:
         """FastMCP's search tool, with this server's discovery contract on it.
