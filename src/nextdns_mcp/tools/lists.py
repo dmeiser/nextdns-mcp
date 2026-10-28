@@ -3,9 +3,9 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from ..coercion import ProfileId, _coerce_json_arg
+from ..coercion import ProfileId, _coerce_json_arg, before_validator
 from ..errors import ErrorCode, error_payload
 from ..utils import _api_request_payload, _optional_entry_id_error, resolve_profile_id
 
@@ -20,6 +20,26 @@ ListType = Literal[
     "parental_services",
 ]
 ListOperation = Literal["get", "add", "replace", "update", "remove"]
+
+
+def _list_type_alias(value: Any) -> Any:
+    """Accept an unambiguous short name for a list type.
+
+    Clients reach for ``"blocklists"`` where the parameter is
+    ``"privacy_blocklists"``: two live runs produced 38 calls with exactly that
+    value, every one rejected by the schema before the tool could answer. A name
+    that is the trailing segment of exactly one list type is accepted. Anything
+    ambiguous is passed through untouched, so the schema error can list the
+    valid values rather than the server guessing wrong.
+    """
+    if not isinstance(value, str) or value in _LIST_PATHS:
+        return value
+    wanted = value.strip().lower().replace("-", "_").replace(" ", "_")
+    matches = [name for name in _LIST_PATHS if wanted == name or wanted == name.split("_")[-1]]
+    return matches[0] if len(matches) == 1 else value
+
+
+ListTypeId = Annotated[ListType, before_validator(_list_type_alias)]
 
 # List types that support per-entry PATCH updates.
 _LIST_UPDATEABLE_TYPES: set[ListType] = {
@@ -137,7 +157,7 @@ async def _lists_replace(base_url: str, entries: str | list[Any] | None) -> dict
 
 async def _lists_update(
     base_url: str,
-    list_type: ListType,
+    list_type: ListTypeId,
     entry_id: str | None,
     entry: str | dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -220,7 +240,7 @@ def _idempotent_list_result(result: dict[str, Any], operation: str) -> dict[str,
 
 
 async def _manage_lists_impl(
-    list_type: ListType,
+    list_type: ListTypeId,
     operation: ListOperation,
     profile_id: ProfileId,
     entry_id: str | None = None,
@@ -237,6 +257,18 @@ async def _manage_lists_impl(
     error = _optional_entry_id_error(entry_id)
     if error:
         return error
+
+    # `entry` is the singular of both `entries` (replace) and, for these list
+    # types, `entry_id` (remove: the id IS the value, see _ENTRY_ID_HINT). Live
+    # runs show callers reaching for the singular in exactly those two
+    # operations, so accept it rather than rejecting a call that names the
+    # right thing. Only the singular: a malformed value under the plural
+    # `entries` stays the shape error it has always been.
+    if operation == "replace" and entries is None and entry is not None:
+        coerced = _coerce_json_arg(entry)
+        entries = [coerced] if isinstance(coerced, (str, dict)) else coerced
+    if operation == "remove" and entry_id is None and isinstance(entry, str):
+        entry_id = entry
 
     path = _LIST_PATHS[list_type]
     base_url = f"/profiles/{target_profile}/{path}"
@@ -256,7 +288,7 @@ async def _manage_lists_impl(
 
 
 async def manageLists(
-    list_type: ListType,
+    list_type: ListTypeId,
     operation: ListOperation,
     profile_id: ProfileId,
     entry_id: str | None = None,

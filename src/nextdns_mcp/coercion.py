@@ -34,6 +34,15 @@ OptionalProfileId = Annotated[str | None, _coerce_to_str]
 ProfileId = Annotated[str, _coerce_to_str]
 
 
+def before_validator(coerce: Any) -> Any:
+    """Wrap an argument coercion for use in an Annotated tool parameter.
+
+    Returns the plain callable when pydantic is unavailable, so a tool module
+    can declare its tolerances without caring how the schema layer is wired.
+    """
+    return BeforeValidator(coerce) if BeforeValidator is not None else coerce
+
+
 def _coerce_json_arg(value: Any) -> Any:
     """Parse a JSON object/array string argument into its Python equivalent.
 
