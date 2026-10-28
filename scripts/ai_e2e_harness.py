@@ -124,6 +124,7 @@ import shutil
 import sys
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
@@ -2616,6 +2617,119 @@ def render_text_report(report: Report) -> str:
     return "\n".join(lines)
 
 
+# What the server said when it refused a call, as reusable patterns: the schema
+# names the parameter it rejected, the tool names the one it needed, and the
+# upstream status code is what a caller can act on.
+_SCHEMA_REJECTION = re.compile(r"validation error for call\[(\w+)\]\s*(\w+)")
+_TOOL_REJECTION = re.compile(r"(\w+) is required for (\w+) operation")
+_UPSTREAM_STATUS = re.compile(r"'(\d{3}) ")
+
+
+def _failure_modes(row: dict[str, Any]) -> list[tuple[str, str]]:
+    """Every failure mode visible in one report row, as (mode, tool).
+
+    A step can fail in several ways at once — the schema rejected the arguments
+    *and* the end state is wrong — so this reports all of them, not the first.
+    Each mode is reported once per step, however many calls inside that step
+    show it: the counts answer "how many steps did this cost", which is the
+    question the tuning loop asks.
+    """
+    modes: list[tuple[str, str]] = []
+    response = row.get("mcp_response") or {}
+    records = response.get("server_calls") or []
+    tool = str(row.get("mcp_tool") or "")
+
+    if not records:
+        modes.append(("no call reached the server", tool))
+
+    for record in records:
+        if record.get("ok"):
+            continue
+        name = str(record.get("tool") or tool)
+        error = str(record.get("error") or "").replace("\n", " ")
+        match = _SCHEMA_REJECTION.search(error)
+        if match:
+            modes.append((f"schema rejected argument '{match.group(2)}'", name))
+            continue
+        match = _TOOL_REJECTION.search(error)
+        if match:
+            modes.append((f"tool rejected call: {match.group(1)} missing", name))
+            continue
+        match = _UPSTREAM_STATUS.search(error)
+        if match:
+            modes.append((f"upstream returned {match.group(1)}", name))
+            continue
+        modes.append(("server error: " + error[:70], name))
+
+    expected = response.get("expected_call") or {}
+    expected_why = str(expected.get("why") or "") if expected.get("ok") is False else ""
+    if expected_why:
+        for marker, label in _EXPECTED_CALL_MODES:
+            if marker in expected_why:
+                modes.append((label, str((expected.get("expect") or {}).get("tool") or tool)))
+                break
+
+    # The REST half of the verdict. When the transcript half already said this
+    # — the step failed because the expected call never happened, and that text
+    # is what lands in `error` — counting it twice would overstate the mode.
+    if row.get("status") == "failed" and row.get("error"):
+        detail = " ".join(str(row["error"]).split())[:70]
+        if detail and detail != expected_why:
+            modes.append(("end state: " + detail, tool))
+    return list(dict.fromkeys(modes))
+
+
+# Ordered: the first marker present in the verdict text decides the label.
+_EXPECTED_CALL_MODES = (
+    ("reached the server but every such call failed", "expected call always failed"),
+    ("was called without", "expected call missing an argument"),
+    ("answered without", "expected call answered without the payload"),
+    ("returned no payload", "expected call returned no payload"),
+    ("followed by the write", "step undone by a later write"),
+    ("no ", "no matching call recorded"),
+)
+
+
+def summarize_reports(paths: list[str]) -> str:
+    """Group a run's failures by what went wrong, most common first.
+
+    The tuning loop this exists for: fix one failure mode, re-run the steps that
+    show it, repeat. So the output names each mode, how many steps it cost, and
+    which steps to re-run.
+    """
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        with open(path, encoding="utf-8") as handle:
+            rows.extend(json.loads(line) for line in handle if line.strip())
+    steps = [row for row in rows if "status" in row]
+    if not steps:
+        return "no step results in " + ", ".join(paths)
+
+    by_mode: dict[tuple[str, str], list[str]] = {}
+    for row in steps:
+        if row["status"] == "passed":
+            continue
+        for mode, tool in _failure_modes(row):
+            by_mode.setdefault((mode, tool), []).append(str(row.get("id") or "?"))
+
+    counts = Counter(row["status"] for row in steps)
+    lines = [
+        "=" * 72,
+        (
+            f"failure modes: {len(paths)} report(s), {len(steps)} step(s) "
+            f"({counts.get('passed', 0)} passed, {counts.get('failed', 0)} failed, {counts.get('skipped', 0)} skipped)"
+        ),
+        "=" * 72,
+    ]
+    if not by_mode:
+        lines.append("  no failures")
+        return "\n".join(lines)
+    for (mode, tool), ids in sorted(by_mode.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        shown = ", ".join(ids[:6]) + (", ..." if len(ids) > 6 else "")
+        lines.append(f"{len(ids):3}  {mode:44} {tool:15} {shown}")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="MCP-native, API-verified E2E harness for the NextDNS MCP server.")
     parser.add_argument(
@@ -2664,8 +2778,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the step catalog (the ids and positions --steps takes) and exit",
     )
+    parser.add_argument(
+        "--summarize",
+        nargs="+",
+        metavar="REPORT",
+        help="group the failures in one or more JSONL reports by what went wrong, and exit: "
+        "which single server-side change fixes the most steps",
+    )
     parser.add_argument("--verbose", action="store_true", help="print the actor stderr on failure")
     args = parser.parse_args(argv)
+
+    # Needs no API key and runs no model: it reads a report that already exists.
+    if args.summarize:
+        print(summarize_reports(list(args.summarize)))
+        return 0
 
     if args.tool_search:
         os.environ["NEXTDNS_TOOL_SEARCH"] = args.tool_search
