@@ -431,11 +431,6 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
             # which is a second actor with its own context and tool access.
             "subagent": False,
             "task": False,
-            # Also observed live: the model wandering into the agent CLI's own
-            # meta-tools (session_move, worktree_list) instead of the server
-            # under test. Those are the client's plumbing, not part of the
-            # surface being measured, and reaching for them wastes the attempt.
-            "opencode*": False,
         },
         "mcp": {
             "nextdns": {

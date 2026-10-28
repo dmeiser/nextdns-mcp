@@ -1417,8 +1417,10 @@ class TestServerCallEvidence:
         doc = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
         assert doc["mcp"]["nextdns"]["environment"]["NEXTDNS_CALL_LOG"] == str(tmp_path / h.CALL_LOG_NAME)
         assert doc["tools"]["subagent"] is False
-        # The agent CLI's own meta-tools are not the surface under test.
-        assert doc["tools"]["opencode*"] is False
+        # The agent CLI's own meta-tools stay available: the point is that the
+        # MCP server works in the client as it is, not that the client is
+        # trimmed until the model cannot go anywhere else.
+        assert "opencode*" not in doc["tools"]
 
     def test_feedback_shows_the_servers_own_record(self, h):
         step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
