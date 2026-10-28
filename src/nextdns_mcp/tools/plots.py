@@ -208,6 +208,19 @@ def _resolve_time_point(value: str | int, now: float) -> float | None:
         return None
 
 
+def _format_resolved(seconds: float | None) -> str:
+    """Render a resolved time point so an error can name the range it computed.
+
+    An error that only reports the span leaves the caller guessing which of its
+    two arguments was wrong: a model that passed from_time=-86400 (a bare
+    number, so an absolute Unix timestamp in seconds, i.e. 1969) retried three
+    different intervals before anything said so.
+    """
+    if seconds is None:
+        return "unresolved"
+    return datetime.fromtimestamp(seconds, tz=UTC).isoformat(timespec="seconds")
+
+
 def _series_span_seconds(from_time: str | int, to_time: str | int, now: float) -> float | None:
     """Return the length in seconds of the requested range, or None if unknown.
 
@@ -242,7 +255,10 @@ def _series_budget_error(
     rejected, because an unbounded request is exactly what the budget exists to
     prevent.
     """
-    span = _series_span_seconds(from_time, to_time, _now() if now is None else now)
+    resolved_now = _now() if now is None else now
+    start = _resolve_time_point(from_time, resolved_now)
+    end = _resolve_time_point(to_time, resolved_now)
+    span = None if start is None or end is None else end - start
     if span is None:
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,
@@ -266,12 +282,17 @@ def _series_budget_error(
     return error_payload(
         ErrorCode.INVALID_ARGUMENT,
         (
-            f"Requested range spans {span:.0f}s, more than the {PLOT_MAX_POINTS}-point series budget "
-            f"allows at interval={interval}s (max {max_span}s); use a larger interval or a shorter range"
+            f"Requested range spans {span:.0f}s "
+            f"({_format_resolved(start)} to {_format_resolved(end)}), more than the {PLOT_MAX_POINTS}-point "
+            f"series budget allows at interval={interval}s (max {max_span}s); use a larger interval or a "
+            "shorter range. A bare number is an absolute Unix timestamp in seconds - a relative range "
+            "needs a unit, such as '-1d'"
         ),
         max_points=PLOT_MAX_POINTS,
         max_span_seconds=max_span,
         interval=interval,
+        resolved_from=_format_resolved(start),
+        resolved_to=_format_resolved(end),
     )
 
 
