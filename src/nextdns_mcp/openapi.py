@@ -37,6 +37,7 @@ from fastmcp.tools import ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from .arg_errors import ArgumentHintMiddleware
 from .call_log import CallLogMiddleware, call_log_path
 from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
@@ -326,6 +327,10 @@ def create_mcp_server(client: Any = None) -> FastMCP:
     if call_log_path():
         mcp.add_middleware(CallLogMiddleware())
         logger.info("Call log enabled: %s", call_log_path())
+
+    # Added last so it sits innermost: it re-raises the enriched failure, and the
+    # call log above records what the caller was actually told.
+    mcp.add_middleware(ArgumentHintMiddleware())
 
     logger.info("MCP server created successfully")
     default_profile = get_default_profile()
