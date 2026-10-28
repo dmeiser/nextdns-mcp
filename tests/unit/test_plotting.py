@@ -384,12 +384,14 @@ class TestPlotAnalyticsSeriesImpl:
         mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
         shared = {
             # Absolute timestamps, so the request is deterministic without a clock patch.
+            # `partials` is `all`, not `both`: the endpoint answers 400 for `both`,
+            # and the tool now rejects that value by name instead of forwarding it.
             "from_time": 1_700_000_000 - 86_400,
             "to_time": 1_700_000_000,
             "interval": 3600,
             "alignment": "start",
             "timezone": "UTC",
-            "partials": "both",
+            "partials": "all",
         }
 
         await plots_module._plot_analytics_series_impl("status", profile_id="abc123", **shared)
@@ -405,7 +407,7 @@ class TestPlotAnalyticsSeriesImpl:
             "interval": 3600,
             "alignment": "start",
             "timezone": "UTC",
-            "partials": "both",
+            "partials": "all",
         }
 
     @pytest.mark.asyncio

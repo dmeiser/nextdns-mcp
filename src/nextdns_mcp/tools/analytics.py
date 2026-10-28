@@ -7,7 +7,16 @@ from typing import Any
 
 from ..coercion import ProfileId
 from ..errors import ErrorCode, error_payload
-from ..utils import _api_request_payload, _build_query_params, _build_series_params, _cap_limit, resolve_profile_id
+from ..utils import (
+    PARTIALS_VALUES,
+    _api_request_payload,
+    _build_query_params,
+    _build_series_params,
+    _cap_limit,
+    normalize_partials,
+    normalize_time_value,
+    resolve_profile_id,
+)
 from .metrics import NON_SERIES_METRICS, AnalyticsMetric
 
 # Server-side cap for the ``limit`` parameter (maximum accepted by the NextDNS API).
@@ -38,11 +47,34 @@ async def _query_analytics_impl(
     if target_profile is None:
         return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
 
+    from_time = normalize_time_value(from_time)
+    to_time = normalize_time_value(to_time)
+    partials = normalize_partials(partials)
+    if partials is not None and partials not in PARTIALS_VALUES:
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"partials must be one of: {', '.join(PARTIALS_VALUES)}; got {partials!r}",
+            allowed=list(PARTIALS_VALUES),
+            partials=partials,
+        )
+
     if series and metric in NON_SERIES_METRICS:
         return error_payload(
             ErrorCode.UNSUPPORTED_PARAMETER,
             f"series=true is not supported for the '{metric}' metric",
             metric=metric,
+            series=series,
+        )
+
+    # The `;series` endpoint requires a start time; upstream answers
+    # {"code":"required","source":{"parameter":"from"}}, which the tool can say
+    # itself without the round trip. Checked after the metric so a request that
+    # cannot work at all is told that first.
+    if series and from_time is None:
+        return error_payload(
+            ErrorCode.MISSING_REQUIRED_ARGUMENT,
+            "from_time is required when series=true",
+            hint='use a relative offset such as "-1d" or a Unix timestamp',
             series=series,
         )
 
