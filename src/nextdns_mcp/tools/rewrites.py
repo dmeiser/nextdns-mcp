@@ -3,14 +3,21 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
-from ..coercion import ProfileId
+from ..coercion import ProfileId, before_validator, operation_aliases
 from ..errors import ErrorCode, error_payload
 from ..utils import _api_request_payload, _optional_entry_id_error, resolve_profile_id
 
 # Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
 RewriteOperation = Literal["list", "add", "delete"]
+
+# "get the rewrites" is how callers ask for operation="list" (seen live), and
+# "remove" for "delete". See coercion.operation_aliases for the rule.
+RewriteOperationId = Annotated[
+    RewriteOperation,
+    before_validator(operation_aliases(get_args(RewriteOperation), {"get": "list", "remove": "delete"})),
+]
 
 
 async def _resolve_rewrite_id(base_url: str, name: str) -> tuple[str | None, dict[str, Any] | None]:
@@ -35,7 +42,7 @@ async def _resolve_rewrite_id(base_url: str, name: str) -> tuple[str | None, dic
 
 
 async def _manage_rewrites_impl(
-    operation: RewriteOperation,
+    operation: RewriteOperationId,
     profile_id: ProfileId,
     name: str | None = None,
     content: str | None = None,
@@ -80,7 +87,7 @@ async def _manage_rewrites_impl(
 
 
 async def manageRewrites(
-    operation: RewriteOperation,
+    operation: RewriteOperationId,
     profile_id: ProfileId,
     name: str | None = None,
     content: str | None = None,

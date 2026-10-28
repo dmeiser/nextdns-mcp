@@ -43,6 +43,29 @@ def before_validator(coerce: Any) -> Any:
     return BeforeValidator(coerce) if BeforeValidator is not None else coerce
 
 
+def operation_aliases(valid: tuple[str, ...], aliases: dict[str, str]) -> Any:
+    """Accept unambiguous synonyms for a tool's ``operation`` parameter.
+
+    Callers reach for the verb that names the intent rather than the one the
+    schema happens to use: across three live runs the model asked
+    ``manageLists`` for ``list`` (7 calls, where the operation is ``get``) and
+    ``manageProfiles`` for ``remove``, ``rename``, ``set`` and ``add``. Each of
+    those has exactly one meaning for the tool in question, so it is resolved.
+
+    Anything else - an unknown verb, or one that is not in the alias table - is
+    returned untouched so the schema error still lists the valid operations.
+    The published enum is never widened.
+    """
+
+    def coerce(value: Any) -> Any:
+        if not isinstance(value, str) or value in valid:
+            return value
+        target = aliases.get(value.strip().lower())
+        return target if target in valid else value
+
+    return coerce
+
+
 def _coerce_json_arg(value: Any) -> Any:
     """Parse a JSON object/array string argument into its Python equivalent.
 
