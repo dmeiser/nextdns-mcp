@@ -20,16 +20,32 @@ and both are client-agnostic (they live in the MCP server, not in a prompt):
 SPDX-License-Identifier: MIT
 """
 
+import json
 import re
 from collections.abc import Sequence
+from typing import Any
 
 from fastmcp.server.transforms.search import BM25SearchTransform, RegexSearchTransform
 from fastmcp.tools.base import Tool
 
-# The NextDNS server exposes a small fixed catalog (the grouped CRUD tools),
-# so a search should be able to surface all of it. The FastMCP default of 5
-# can hide a relevant grouped tool behind five higher-scoring ones.
-CATALOG_MAX_RESULTS = 20
+# The NextDNS server exposes a small fixed catalog (the grouped CRUD tools), so
+# a search should be able to surface all of it - but not at any cost. Each
+# result carries the tool's whole description, and a live run measured the
+# answer at 10-18 KB (about 4k tokens) for a one-line task: the actor then
+# stalled 27 times across 29 steps, and 13 of those steps never reached a tool
+# at all. Four results plus name-matched inclusion keeps the answer near the
+# size it was before the full descriptions went live.
+CATALOG_MAX_RESULTS = 4
+
+# Per-result budget for the description in a search answer. Sized so the parts
+# that decide the call - the list types, the operations, the metrics - fit, and
+# the parts that do not (long prose, worked examples) do not ride along on every
+# discovery.
+SEARCH_DESCRIPTION_CHARS = 1400
+
+# Budget for the whole answer. Four fully-described tools still measured ~10 KB,
+# and the run that carried 10-18 KB per discovery stalled 27 times in 29 steps.
+SEARCH_ANSWER_MAX_BYTES = 8000
 
 # camelCase / snake_case / non-word splitter, used for both tool names and
 # queries so 'queryTimeSeries' and 'query time series' compare equal.
@@ -148,10 +164,47 @@ class FallbackRegexSearchTransform(_CatalogAwareSearchMixin, RegexSearchTransfor
     """Regex search with a full-catalog fallback and name-aware ranking."""
 
 
+def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
+    """FastMCP's search-result shape, with each description cut to a budget.
+
+    A tool's own description is its full contract, and under disclosure the
+    search answer is the only place a caller reads it. But the answer is also
+    the biggest thing the model has to hold per discovery: with the full text
+    and four results it measured 10-18 KB for a one-line task, and the run that
+    did that stalled 27 times across 29 steps. So the search payload carries a
+    bounded excerpt - cut at a line boundary, never mid-sentence - and the
+    input schema, which is the part that decides whether the call is valid, is
+    never cut.
+    """
+    results: list[dict[str, Any]] = []
+    spent = 0
+    for tool in tools:
+        dumped = tool.to_mcp_tool().model_dump(mode="json", by_alias=True, exclude_none=True)
+        description = str(dumped.get("description") or "")
+        if len(description) > SEARCH_DESCRIPTION_CHARS:
+            cut = description.rfind("\n", 0, SEARCH_DESCRIPTION_CHARS)
+            if cut < SEARCH_DESCRIPTION_CHARS // 2:
+                cut = SEARCH_DESCRIPTION_CHARS
+            dumped["description"] = description[:cut].rstrip() + "\n[description truncated]"
+        # The whole answer is bounded too: four fully-described tools is still
+        # ~10 KB, and it is the lower-ranked ones that are least likely to be
+        # the tool the caller wanted. At least one result is always returned.
+        cost = len(json.dumps(dumped, sort_keys=True))
+        if results and spent + cost > SEARCH_ANSWER_MAX_BYTES:
+            break
+        spent += cost
+        results.append(dumped)
+    return results
+
+
 def build_search_transform(mode: str) -> BM25SearchTransform | RegexSearchTransform | None:
     """Return the configured search transform for ``mode`` (``off`` -> None)."""
     if mode == "regex":
-        return FallbackRegexSearchTransform(max_results=CATALOG_MAX_RESULTS)
+        return FallbackRegexSearchTransform(
+            max_results=CATALOG_MAX_RESULTS, search_result_serializer=_compact_search_results
+        )
     if mode == "bm25":
-        return FallbackBM25SearchTransform(max_results=CATALOG_MAX_RESULTS)
+        return FallbackBM25SearchTransform(
+            max_results=CATALOG_MAX_RESULTS, search_result_serializer=_compact_search_results
+        )
     return None
