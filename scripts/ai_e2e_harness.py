@@ -431,6 +431,11 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
             # which is a second actor with its own context and tool access.
             "subagent": False,
             "task": False,
+            # Also observed live: the model wandering into the agent CLI's own
+            # meta-tools (session_move, worktree_list) instead of the server
+            # under test. Those are the client's plumbing, not part of the
+            # surface being measured, and reaching for them wastes the attempt.
+            "opencode*": False,
         },
         "mcp": {
             "nextdns": {
@@ -2176,8 +2181,11 @@ def _transient_actor_failure(run: ActorRun, blob: str) -> tuple[str, str]:
     attempt never put a real call in front of the server, so its verdict
     measured infrastructure rather than behaviour.
 
-    * ``unknown-tool``: opencode registers MCP tools lazily, so a first attempt
-      can fail with "Unknown tool" before registration completes.
+    * ``unknown-tool``: opencode registers MCP tools lazily, so an attempt can
+      fail before registration completes. Its wording varies, and the older
+      detector matched only one of them: "Unknown tool: 'x'" and "No tool named
+      \"tools.nextdns.search_tools\" is currently available." both mean the same
+      thing, and the second was being scored as a model failure.
     * ``stall``: the actor hit its timeout without producing a single tool call
       (observed: ECONNRESET from the model provider after 150s on a trivial
       prompt, which stalled 13 of 89 steps in one run).
@@ -2186,14 +2194,17 @@ def _transient_actor_failure(run: ActorRun, blob: str) -> tuple[str, str]:
       ``state.error`` (observed: "OpenAI Chat stream ended without
       finish_reason", which read as the model calling ``call_tool({})``).
     """
-    if "unknown tool" in blob:
-        return "unknown-tool", "unknown tool"
+    if any(marker in blob for marker in _LAZY_REGISTRATION_MARKERS):
+        return "unknown-tool", "MCP tool not registered yet"
     if "timed out" in run.error.lower() and not run.tool_calls:
         return "stall", run.error
     if any(marker in blob for marker in _PROVIDER_STREAM_MARKERS):
         return "provider-stream", "model provider ended the response mid tool call"
     return "", ""
 
+
+# Signatures of opencode's lazy MCP tool registration, not of a model decision.
+_LAZY_REGISTRATION_MARKERS = ("unknown tool", "no tool named", "is currently available")
 
 # Signatures of a provider/transport drop rather than a model decision.
 _PROVIDER_STREAM_MARKERS = (
