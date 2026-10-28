@@ -37,6 +37,7 @@ from fastmcp.tools import ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from .call_log import CallLogMiddleware, call_log_path
 from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
 from .tool_search import build_search_transform
@@ -317,6 +318,14 @@ def create_mcp_server(client: Any = None) -> FastMCP:
     # Add middleware to strip unknown fields from tool arguments
     # This allows AI clients (like OpenAI) that send extra fields to work properly
     mcp.add_middleware(StripExtraFieldsMiddleware())
+
+    # Record what this server actually executed (see nextdns_mcp.call_log). A
+    # read leaves no trace in the API, so a harness that verifies over REST
+    # cannot tell "the model read it" from "the model did nothing and the state
+    # was already right". The server can say, and it does so here.
+    if call_log_path():
+        mcp.add_middleware(CallLogMiddleware())
+        logger.info("Call log enabled: %s", call_log_path())
 
     logger.info("MCP server created successfully")
     default_profile = get_default_profile()
