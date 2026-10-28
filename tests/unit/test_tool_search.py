@@ -100,6 +100,55 @@ class TestNameAwareRanking:
             found = await client.call_tool("search_tools", {"query": "doh"})
             assert found.data[0].get("name") == "dohLookup"
 
+    @pytest.mark.asyncio
+    async def test_a_tool_named_for_the_query_is_never_crowded_out(self, monkeypatch):
+        """BM25 ranks prose; a longer description must not drop the tool that is
+        literally named for the request (seen when full docstrings went live)."""
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": "doh"})
+        assert "dohLookup" in [tool.get("name") for tool in found.data]
+
+
+class TestPublishedDescriptions:
+    """What a caller sees after search_tools is the tool's `description` field."""
+
+    @pytest.mark.asyncio
+    async def test_the_whole_docstring_is_published_not_just_its_first_section(self, monkeypatch):
+        """FastMCP publishes only the first text section, splitting at the first
+        `Header:` line. Left alone, manageLists published 192 of its 2538
+        docstring characters and queryAnalytics 279 of 2029 - the operations,
+        the accepted values and the worked examples never reached the caller."""
+        import inspect
+
+        from fastmcp import Client
+
+        from nextdns_mcp.tools.lists import manageLists
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
+        async with Client(build_mcp_server()) as client:
+            described = {t.name: (t.description or "") for t in await client.list_tools()}
+        published = " ".join(described["manageLists"].split())
+        docstring = " ".join((inspect.getdoc(manageLists) or "").split())
+        assert published == docstring
+        # Named on purpose: the parts that were being dropped.
+        assert "privacy_blocklists" in published
+        assert "operation=" in published
+
+    @pytest.mark.asyncio
+    async def test_the_same_text_reaches_a_caller_that_discovered_the_tool(self, monkeypatch):
+        """Under disclosure the search result is the only place the contract is
+        written down, so it has to carry the whole thing."""
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": "denylist entry"})
+        described = {tool.get("name"): (tool.get("description") or "") for tool in found.data}
+        assert "operation=" in " ".join(described["manageLists"].split())
+
 
 class TestSyntheticToolDescriptions:
     """Under disclosure the two synthetic tools are the only always-visible text."""

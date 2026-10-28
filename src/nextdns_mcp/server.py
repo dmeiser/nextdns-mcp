@@ -3,6 +3,7 @@
 SPDX-License-Identifier: MIT
 """
 
+import inspect
 import logging
 import os
 import sys
@@ -55,7 +56,15 @@ def build_mcp_server() -> FastMCP:
     logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
     server = create_mcp_server()
     for tool in _GROUPED_TOOLS:
-        server.tool()(tool)
+        # FastMCP publishes only the first text section of a docstring as the
+        # tool description, splitting at the first `Header:` line. Measured on
+        # this server, manageLists published 192 of its 2538 docstring
+        # characters and queryAnalytics 279 of 2029: the operations list, the
+        # accepted values and the worked examples never reached a caller that
+        # discovers tools through search_tools. Passing the docstring
+        # explicitly publishes all of it, and the per-parameter descriptions
+        # are still parsed out of it.
+        server.tool(description=inspect.getdoc(tool) or "")(tool)
     server.prompt(name="nextdns-usage-guide", description="Comprehensive guide for using the NextDNS MCP server tools")(
         nextdns_usage_guide
     )
