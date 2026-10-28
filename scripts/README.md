@@ -144,6 +144,24 @@ itself, by calling the MCP `manageProfiles` tool (so the server's ACLs and error
 contract apply to it too); every other precondition is the caller's job — if the
 selection tests "remove X", include the step that adds X.
 
+### Reading a run: failure modes
+
+A verdict per step is not a plan. `--summarize` groups a report's failures by
+what actually went wrong, counts **steps** per mode (not calls), and names the
+steps so they can be re-run after one fix:
+
+```bash
+uv run python scripts/ai_e2e_harness.py --summarize artifacts/ai_e2e_report.jsonl
+uv run python scripts/ai_e2e_harness.py --summarize run1.jsonl run2.jsonl   # pooled
+```
+
+It needs no API key and runs no model, and it reads the server's own call log
+records inside the report, so the modes it reports are what the server said
+(`schema rejected argument 'category'`, `upstream returned 400`, `no call
+reached the server`) rather than a guess from the step name. The intended loop
+is: pick the largest mode, change the server, re-run exactly the steps listed
+beside it, then re-summarize.
+
 ### How a step is judged
 
 A step passes when three things hold:

@@ -1661,3 +1661,107 @@ class TestStepRangeCli:
             ]
         )
         assert seen == {"steps": "20-21,profiles.delete", "start": "logs.get", "end": "88"}
+
+
+class TestFailureModeSummary:
+    """The tuning loop fixes one failure mode at a time, so a report has to say
+    which modes cost the most steps - not list 89 verdicts and leave the reader
+    to group them."""
+
+    def test_a_step_that_never_reached_the_server_is_its_own_mode(self, h):
+        why = "server recorded no manageLists(get) call in this attempt"
+        row = {
+            "id": "lists.allowlist.read",
+            "status": "failed",
+            "mcp_tool": "manageLists",
+            "error": why,
+            "mcp_response": {
+                "server_calls": [],
+                "expected_call": {"ok": False, "why": why},
+            },
+        }
+        modes = [mode for mode, _ in h._failure_modes(row)]
+        assert modes == ["no call reached the server", "no matching call recorded"]
+        # `error` repeats the transcript verdict here; counting it again would
+        # overstate the mode.
+        assert not [mode for mode in modes if mode.startswith("end state")]
+
+    def test_repeated_rejections_in_one_step_cost_one_step(self, h):
+        record = {
+            "tool": "manageSettings",
+            "ok": False,
+            "error": "ValidationError: 1 validation error for call[manageSettings]\ncategory\n  Missing required argument",
+        }
+        row = {
+            "id": "settings.privacy.update",
+            "status": "failed",
+            "mcp_tool": "manageSettings",
+            "error": "settings/privacy read-back does not match",
+            "mcp_response": {"server_calls": [dict(record) for _ in range(3)], "expected_call": {"ok": True}},
+        }
+        modes = h._failure_modes(row)
+        assert modes.count(("schema rejected argument 'category'", "manageSettings")) == 1
+        assert ("end state: settings/privacy read-back does not match", "manageSettings") in modes
+
+    def test_the_server_says_what_it_refused(self, h):
+        rows = [
+            (
+                {"tool": "manageLists", "ok": False, "error": "entry_id is required for remove operation"},
+                "tool rejected call: entry_id missing",
+            ),
+            (
+                {
+                    "tool": "queryAnalytics",
+                    "ok": False,
+                    "error": "HTTP error in GET /x: Client error '400 Bad Request'",
+                },
+                "upstream returned 400",
+            ),
+        ]
+        for record, expected in rows:
+            row = {
+                "id": "x",
+                "status": "failed",
+                "mcp_tool": record["tool"],
+                "error": "",
+                "mcp_response": {"server_calls": [record], "expected_call": {"ok": True}},
+            }
+            assert expected in [mode for mode, _ in h._failure_modes(row)]
+
+    def test_the_summary_ranks_modes_and_names_the_steps(self, h, tmp_path):
+        report = tmp_path / "r.jsonl"
+        rows = [
+            {
+                "id": f"lists.item{i}.read",
+                "status": "failed",
+                "mcp_tool": "manageLists",
+                "error": "server recorded no manageLists(get) call in this attempt",
+                "mcp_response": {
+                    "server_calls": [],
+                    "expected_call": {"ok": False, "why": "server recorded no manageLists(get) call in this attempt"},
+                },
+            }
+            for i in range(2)
+        ] + [
+            {
+                "id": "settings.privacy.update",
+                "status": "passed",
+                "mcp_tool": "manageSettings",
+                "error": "",
+                "mcp_response": {
+                    "server_calls": [{"tool": "manageSettings", "ok": True}],
+                    "expected_call": {"ok": True},
+                },
+            }
+        ]
+        report.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        summary = h.summarize_reports([str(report)])
+        assert "3 step(s) (1 passed, 2 failed" in summary
+        line = next(ln for ln in summary.splitlines() if "no matching call recorded" in ln)
+        assert line.startswith("  2  ")
+        assert "lists.item0.read" in line and "lists.item1.read" in line
+
+    def test_a_report_with_no_steps_says_so(self, h, tmp_path):
+        report = tmp_path / "empty.jsonl"
+        report.write_text('{"meta": "run"}\n', encoding="utf-8")
+        assert "no step results" in h.summarize_reports([str(report)])
