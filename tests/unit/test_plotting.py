@@ -600,6 +600,20 @@ class TestPlotAnalyticsSeriesImpl:
         assert error["code"] == "invalid_argument"
         assert "must end after it starts" in error["error"]
 
+    def test_series_budget_error_names_the_range_it_resolved(self, now):
+        """A bare number is absolute, and the error has to say so.
+
+        Seen live: the model passed from_time=-86400 meaning "a day ago", the
+        budget check read it as 1969 and rejected a 57-year span, and nothing
+        in the message said which argument was at fault - so it retried three
+        different intervals with the same broken range.
+        """
+        error = plots_module._series_budget_error(-86400, "now", 3600, now=now)
+        assert error is not None
+        assert "1969-12-31" in error["error"]
+        assert "absolute Unix timestamp" in error["error"]
+        assert error["resolved_from"].startswith("1969-12-31")
+
     @pytest.mark.asyncio
     async def test_no_profile_returns_error(self, clean_env):
         result = await plots_module._plot_analytics_series_impl("status")
