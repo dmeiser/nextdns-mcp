@@ -117,6 +117,27 @@ class TestSyntheticToolDescriptions:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("mode", ["bm25", "regex"])
+    async def test_they_state_the_shape_of_the_answer_and_the_name_it_wants(self, monkeypatch, mode):
+        """The most common way a call never reaches a tool is a shape mistake.
+
+        Observed live: `call_tool(name=<the whole search result array>)`. The
+        descriptions have to say what search_tools returns and which part of it
+        `name` takes, because nothing else in the disclosure flow does.
+        """
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+        async with Client(build_mcp_server()) as client:
+            described = {t.name: (t.description or "") for t in await client.list_tools()}
+        # Prose wraps, so compare on collapsed whitespace.
+        search = " ".join(described["search_tools"].split()).casefold()
+        call = " ".join(described["call_tool"].split()).casefold()
+        assert "array" in search
+        assert "single string" in call
+        assert "not the array" in call
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["bm25", "regex"])
     async def test_they_instruct_no_behaviour_and_name_no_client_or_real_tool(self, monkeypatch, mode):
         from fastmcp import Client
 

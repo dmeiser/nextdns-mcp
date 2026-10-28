@@ -113,17 +113,20 @@ class _CatalogAwareSearchMixin:
 # call_tool, and concluded from the rejections that the server had no tools.
 _SEARCH_TOOL_DESCRIPTION = """Search this server's tools with the words of the task.
 
-Takes one argument object, {"query": "<words of the task>"}. Returns the matching
-tools with their exact names and full schemas. This server does not advertise
+Takes one argument object, {"query": "<words of the task>"}. The answer is an
+array of the matching tools in rank order, each an object with its exact `name`,
+its `description`, and its full input schema. This server does not advertise
 tool names, so a name that was not returned here is not one of its tools.
 """
 
 _CALL_TOOL_DESCRIPTION = """Run one of this server's tools by the exact name returned by search_tools.
 
 Takes exactly one argument object, {"name": "<tool>", "arguments": {<that tool's
-parameters>}}; the name and the arguments are not two separate inputs. Anything
-search_tools did not return is not a tool of this server. A failed call returns a
-JSON payload with an error `code` and, when available, a `hint`.
+parameters>}}; the name and the arguments are not two separate inputs. `name` is
+a single string: one search result's `name` field, not the result object and not
+the array of results. Anything search_tools did not return is not a tool of this
+server. A failed call returns a JSON payload with an error `code` and, when
+available, a `hint`.
 """
 
 
