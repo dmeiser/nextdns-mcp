@@ -1121,6 +1121,37 @@ class TestTransientActorFailure:
         run.tool_calls = [h.ToolCall(name="manageLists", args={})]
         assert h._transient_actor_failure(run, "") == ("", "")
 
+    def test_provider_stream_drop_is_retried(self, h):
+        """Observed live: the provider ended mid tool call, and the client
+        recorded call_tool({}) — the model never made that call."""
+        run = h.ActorRun(command=["x"])
+        assert h._transient_actor_failure(run, "openai chat stream ended without finish_reason") == (
+            "provider-stream",
+            "model provider ended the response mid tool call",
+        )
+
+    def test_state_error_text_reaches_the_verdict_inputs(self, h):
+        """opencode puts the reason in state.error, not state.output."""
+        lines = [
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "part": {
+                        "tool": "tools.nextdns.call_tool",
+                        "state": {
+                            "status": "error",
+                            "input": {},
+                            "error": "OpenAI Chat stream ended without finish_reason",
+                        },
+                    },
+                }
+            )
+        ]
+        calls, _ = h.parse_actor_events(lines)
+        assert calls[0].name == "call_tool"
+        assert not calls[0].ok
+        assert "finish_reason" in calls[0].result_text
+
     def test_ordinary_failure_is_not_retried(self, h):
         run = h.ActorRun(command=["x"], error="")
         assert h._transient_actor_failure(run, "list does not contain entry") == ("", "")

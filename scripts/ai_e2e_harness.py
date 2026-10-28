@@ -667,6 +667,13 @@ def parse_actor_events(lines: list[str]) -> tuple[list[ToolCall], str]:
             part = ev.get("part") or {}
             state = part.get("state") or {}
             inp = state.get("input") or {}
+            output = _flatten_text(state.get("output"))
+            if not output and state.get("error"):
+                # opencode reports a failed call's reason in state.error. Without
+                # it, a provider-side drop ("OpenAI Chat stream ended without
+                # finish_reason") is invisible to the verdict, and the step gets
+                # judged as though the model chose to emit an empty call.
+                output = _flatten_text(state["error"])
             calls.append(
                 ToolCall(
                     name=_tool_event_name(part),
@@ -677,7 +684,7 @@ def parse_actor_events(lines: list[str]) -> tuple[list[ToolCall], str]:
                         "success",
                         "succeeded",
                     ),
-                    result_text=_flatten_text(state.get("output")),
+                    result_text=output,
                 )
             )
 
@@ -2164,28 +2171,43 @@ def _summarize_calls(run: ActorRun) -> list[dict[str, Any]]:
 def _transient_actor_failure(run: ActorRun, blob: str) -> tuple[str, str]:
     """Classify a failed actor attempt as ``(kind, reason)``; ``("", "")`` if real.
 
-    Retrying these is fair test scheduling, not help for the model: neither
-    cause depends on the model's capability, and in the stall case the step
-    never reached a single tool call, so its verdict measured nothing but
-    latency.
+    Retrying these is fair test scheduling, not help for the model: none of
+    these causes depends on the model's capability, and in each of them the
+    attempt never put a real call in front of the server, so its verdict
+    measured infrastructure rather than behaviour.
 
     * ``unknown-tool``: opencode registers MCP tools lazily, so a first attempt
       can fail with "Unknown tool" before registration completes.
     * ``stall``: the actor hit its timeout without producing a single tool call
       (observed: ECONNRESET from the model provider after 150s on a trivial
       prompt, which stalled 13 of 89 steps in one run).
+    * ``provider-stream``: the model provider ended the response mid tool call,
+      and the client records the call with empty arguments and the reason in
+      ``state.error`` (observed: "OpenAI Chat stream ended without
+      finish_reason", which read as the model calling ``call_tool({})``).
     """
     if "unknown tool" in blob:
         return "unknown-tool", "unknown tool"
     if "timed out" in run.error.lower() and not run.tool_calls:
         return "stall", run.error
+    if any(marker in blob for marker in _PROVIDER_STREAM_MARKERS):
+        return "provider-stream", "model provider ended the response mid tool call"
     return "", ""
 
 
+# Signatures of a provider/transport drop rather than a model decision.
+_PROVIDER_STREAM_MARKERS = (
+    "stream ended without finish_reason",
+    "econnreset",
+    "connection reset",
+    "socket hang up",
+    "network error",
+)
+
 # How many attempts each transient kind gets. A stall is pure infrastructure
 # and costs the step its entire verdict, so it gets more chances than a lazy
-# registration hiccup; both are capped so one flaky step cannot eat the budget.
-TRANSIENT_ATTEMPTS = {"unknown-tool": 3, "stall": 5}
+# registration hiccup; all are capped so one flaky step cannot eat the budget.
+TRANSIENT_ATTEMPTS = {"unknown-tool": 3, "stall": 5, "provider-stream": 3}
 
 
 def _feedback_block(
