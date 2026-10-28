@@ -1108,7 +1108,16 @@ class TestTransientActorFailure:
         run = h.ActorRun(command=["x"])
         assert h._transient_actor_failure(run, "failed with unknown tool 'nextdns.foo'") == (
             "unknown-tool",
-            "unknown tool",
+            "MCP tool not registered yet",
+        )
+
+    def test_opencodes_other_registration_wording_is_also_a_transient(self, h):
+        """Scored as a model failure until the wording was read from a live run."""
+        run = h.ActorRun(command=["x"])
+        blob = 'No tool named "tools.nextdns.search_tools" is currently available.'
+        assert h._transient_actor_failure(run, blob.lower()) == (
+            "unknown-tool",
+            "MCP tool not registered yet",
         )
 
     def test_provider_stall_is_retried(self, h):
@@ -1408,6 +1417,8 @@ class TestServerCallEvidence:
         doc = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
         assert doc["mcp"]["nextdns"]["environment"]["NEXTDNS_CALL_LOG"] == str(tmp_path / h.CALL_LOG_NAME)
         assert doc["tools"]["subagent"] is False
+        # The agent CLI's own meta-tools are not the surface under test.
+        assert doc["tools"]["opencode*"] is False
 
     def test_feedback_shows_the_servers_own_record(self, h):
         step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
