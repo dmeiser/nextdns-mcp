@@ -1193,6 +1193,174 @@ def all_steps(h):
     return h.build_steps(h.TaskTargets(profile_name="P", tag="t0"))
 
 
+class TestServerCallEvidence:
+    """A REST assertion proves the state, not who produced it."""
+
+    def test_read_new_calls_returns_only_lines_appended_since_offset(self, h, tmp_path):
+        path = tmp_path / h.CALL_LOG_NAME
+        path.write_text('{"tool": "manageProfiles", "ok": true}\n', encoding="utf-8")
+        offset = path.stat().st_size
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write('{"tool": "manageLists", "operation": "add", "ok": false}\n')
+        assert h._read_new_calls(path, offset) == [{"tool": "manageLists", "operation": "add", "ok": False}]
+        assert h._read_new_calls(tmp_path / "absent.jsonl", 0) == []
+
+    def test_expected_call_requires_the_exact_successful_call(self, h):
+        step = h.Step(
+            "lists.denylist.add",
+            "lists",
+            "manageLists",
+            "d",
+            "p",
+            "list_add",
+            expect=h._expect("manageLists", "add", args=("denylist", "ads.example.com")),
+        )
+        right = {
+            "tool": "manageLists",
+            "operation": "add",
+            "ok": True,
+            "write": True,
+            "args": '{"list_type": "denylist", "entry": "ads.example.com"}',
+            "result": '{"data": []}',
+        }
+        assert h._expected_call_ok([right], step.expect, "pid")[0]
+        # wrong operation, wrong entry, and a failed call all miss
+        wrong_op = {**right, "operation": "replace"}
+        wrong_arg = {**right, "args": '{"list_type": "denylist", "entry": "other.com"}'}
+        failed = {**right, "ok": False}
+        for record in (wrong_op, wrong_arg, failed, {"tool": "search_tools", "ok": True}):
+            assert not h._expected_call_ok([record], step.expect, "pid")[0]
+        assert not h._expected_call_ok([], step.expect, "pid")[0]
+
+    def test_expected_call_allows_confirming_reads_after_the_write(self, h):
+        """Models routinely read back what they wrote; that is not a failure."""
+        step = h.Step(
+            "lists.denylist.replace",
+            "lists",
+            "manageLists",
+            "d",
+            "p",
+            "list_replace",
+            expect=h._expect("manageLists", "replace", args=("denylist",)),
+        )
+        write = {
+            "tool": "manageLists",
+            "operation": "replace",
+            "ok": True,
+            "write": True,
+            "args": '{"list_type": "denylist"}',
+            "result": '{"data": []}',
+        }
+        confirm = {
+            "tool": "manageLists",
+            "operation": "get",
+            "ok": True,
+            "write": False,
+            "args": '{"list_type": "denylist"}',
+            "result": '{"data": []}',
+        }
+        assert h._expected_call_ok([write, confirm], step.expect, "pid")[0]
+
+    def test_expected_call_rejects_a_write_that_undoes_the_step(self, h):
+        """The rewrite add-then-delete seen in a live run fails on structure."""
+        step = h.Step(
+            "rewrites.add.a",
+            "rewrites",
+            "manageRewrites",
+            "d",
+            "p",
+            "rewrite_add",
+            expect=h._expect("manageRewrites", "add", args=("a.example.com", "192.0.2.100")),
+        )
+        add = {
+            "tool": "manageRewrites",
+            "operation": "add",
+            "ok": True,
+            "write": True,
+            "args": '{"name": "a.example.com", "content": "192.0.2.100"}',
+            "result": '{"data": []}',
+        }
+        delete = {
+            "tool": "manageRewrites",
+            "operation": "delete",
+            "ok": True,
+            "write": True,
+            "args": '{"name": "a.example.com"}',
+            "result": '{"data": []}',
+        }
+        ok, why = h._expected_call_ok([add, delete], step.expect, "pid")
+        assert not ok
+        assert "followed by the write manageRewrites(delete)" in why
+
+    def test_expected_call_reason_names_the_failed_condition(self, h):
+        step = h.Step(
+            "profiles.get",
+            "profiles",
+            "manageProfiles",
+            "d",
+            "p",
+            "profile_exists",
+            expect=h._expect("manageProfiles", "get", args=("{profile_id}",), result=("{profile_id}",)),
+        )
+        assert "no manageProfiles(get) call" in h._expected_call_ok([], step.expect, "abc")[1]
+        failed = {"tool": "manageProfiles", "operation": "get", "ok": False, "args": "{}", "result": ""}
+        assert "every such call failed" in h._expected_call_ok([failed], step.expect, "abc")[1]
+        wrong_id = {
+            "tool": "manageProfiles",
+            "operation": "get",
+            "ok": True,
+            "write": False,
+            "args": '{"profile_id": "other"}',
+            "result": '{"data": {"id": "other"}}',
+        }
+        assert "without ['abc']" in h._expected_call_ok([wrong_id], step.expect, "abc")[1]
+        empty = {
+            "tool": "manageProfiles",
+            "operation": "get",
+            "ok": True,
+            "write": False,
+            "args": '{"profile_id": "abc"}',
+            "result": '{"error": "notFound"}',
+        }
+        assert "answered without" in h._expected_call_ok([empty], step.expect, "abc")[1]
+
+    def test_answered_accepts_an_empty_list_as_an_answer(self, h):
+        """A fresh profile really does have an empty allowlist."""
+        assert h._answered('{"data": []}')
+        assert h._answered('{"content": ["image"]}')
+        # Every write tool answers this way (verified against the live API).
+        assert h._answered('{"success": true}')
+        assert not h._answered("")
+        assert not h._answered('{"error": "notFound"}')
+        assert not h._answered('{"code": "http_error", "error": "400 Bad Request"}')
+
+    def test_every_step_declares_the_call_it_expects(self, h):
+        """A step without an expectation would fall back to REST-only vacuity."""
+        targets = h.TaskTargets(profile_name="TEST_PROFILE_X", tag="e2ehxyz789")
+        steps = h.build_steps(targets)
+        assert len(steps) >= 89
+        assert [s.id for s in steps if not s.expect] == []
+        for step in steps:
+            assert step.expect["tool"] == step.tool
+
+    def test_config_wires_the_call_log_and_closes_the_subagent_channel(self, h, tmp_path, monkeypatch):
+        """Observed live: the model delegated a step to a subagent."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        cfg = h.HarnessConfig.load(None)
+        h.write_mcp_config(cfg, tmp_path)
+        doc = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
+        assert doc["mcp"]["nextdns"]["environment"]["NEXTDNS_CALL_LOG"] == str(tmp_path / h.CALL_LOG_NAME)
+        assert doc["tools"]["subagent"] is False
+
+    def test_feedback_shows_the_servers_own_record(self, h):
+        step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
+        run = h.ActorRun(command=["x"])
+        calls = [{"tool": "manageLists", "operation": "get", "ok": False, "error": "boom"}]
+        out = h._feedback_block(step, run, "failed", "err", "", {}, server_calls=calls)
+        assert any("SERVER" in ln and "manageLists(get)" in ln for ln in out)
+        assert not any("SERVER" in ln for ln in h._feedback_block(step, run, "failed", "err", "", {}))
+
+
 class TestStepPrompts:
     """Prompts state the task unambiguously, and never say how to do it."""
 

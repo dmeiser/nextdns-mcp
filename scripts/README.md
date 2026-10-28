@@ -144,6 +144,31 @@ itself, by calling the MCP `manageProfiles` tool (so the server's ACLs and error
 contract apply to it too); every other precondition is the caller's job — if the
 selection tests "remove X", include the step that adds X.
 
+### How a step is judged
+
+A step passes when three things hold:
+
+1. **The server recorded the exact expected call.** The MCP server writes every
+   tool call it executes to a JSONL call log (`NEXTDNS_CALL_LOG`, see
+   `nextdns_mcp.call_log`): tool, operation, whether it mutates state, the
+   arguments, whether it succeeded, and the payload it answered with. The step
+   must match that record exactly — tool, operation, and the arguments that
+   identify the call (which list, which metric, which entry) — and the call must
+   have answered with a payload. `--print-steps` shows each step's expectation.
+2. **No state-changing call came after it.** Confirming reads afterwards are
+   normal and allowed; a later write is not, because it can undo the step's own
+   work (observed live: a rewrite added and then deleted in one attempt).
+3. **The REST end state is right.** The harness reads the account back over the
+   raw REST API, the same transport the actor never touches.
+
+Condition 3 alone is not enough, and that was a real bug: a REST assertion
+proves the state, not who produced it. `profiles.get` passed a run whose
+transcript was nothing but errors, because the profile had been created two
+steps earlier. Reads are the sharper case — after
+`manageLists(operation="get")` the API looks identical whether or not the call
+ever happened — so for a read the server's own record, including the payload it
+answered with, is the only evidence there is.
+
 See the module docstrings and `--help` for the full configuration reference.
 
 ### AI Agent E2E Validation
