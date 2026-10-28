@@ -138,16 +138,43 @@ class TestPublishedDescriptions:
         assert "operation=" in published
 
     @pytest.mark.asyncio
-    async def test_the_same_text_reaches_a_caller_that_discovered_the_tool(self, monkeypatch):
-        """Under disclosure the search result is the only place the contract is
-        written down, so it has to carry the whole thing."""
+    async def test_the_discovered_tool_carries_the_contract_that_decides_the_call(self, monkeypatch):
+        """Under disclosure the search answer is where the contract is read, so it
+        has to carry the accepted values and the operations - and the full input
+        schema, which is never cut. Long prose is what gets bounded."""
         from fastmcp import Client
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
             found = await client.call_tool("search_tools", {"query": "denylist entry"})
-        described = {tool.get("name"): (tool.get("description") or "") for tool in found.data}
-        assert "operation=" in " ".join(described["manageLists"].split())
+        result = next(tool for tool in found.data if tool.get("name") == "manageLists")
+        description = " ".join((result.get("description") or "").split())
+        for marker in ("privacy_blocklists", "Operations:", "entry_id"):
+            assert marker in description
+        assert sorted((result.get("inputSchema") or {}).get("properties", {})) == [
+            "entries",
+            "entry",
+            "entry_id",
+            "list_type",
+            "operation",
+            "profile_id",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_search_answer_stays_small_enough_to_be_worth_reading(self, monkeypatch):
+        """Measured live: with the full descriptions and four results the answer
+        was 10-18 KB for a one-line task, and the run stalled 27 times in 29
+        steps. The payload is part of the contract, not an implementation detail."""
+        import json
+
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            for query in ("add entry to allowlist", "analytics top domains", "query logs last hour"):
+                found = await client.call_tool("search_tools", {"query": query})
+                assert len(json.dumps(found.data)) < 8500, query
+                assert len(found.data) <= 4, query
 
 
 class TestSyntheticToolDescriptions:
