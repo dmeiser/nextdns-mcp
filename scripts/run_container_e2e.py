@@ -145,6 +145,17 @@ LIST_WRITE_CASES = [
 
 SPEC_PATH = PROJECT_ROOT / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
 
+# Early-access security toggles reported from the NextDNS dashboard but not
+# listed in the official API docs. This E2E verifies whether the API actually
+# accepts them via PATCH /profiles/:id/security.
+SECURITY_TOGGLE_KEYS = [
+    "dnsDataExfiltration",
+    "dnsPayloadDelivery",
+    "fastFluxNetworks",
+    "highRiskTlds",
+    "newlyActiveDomains",
+]
+
 
 class ContainerE2ERunner:
     """Orchestrates E2E testing of the NextDNS MCP container over MCP."""
@@ -763,6 +774,89 @@ class ContainerE2ERunner:
             {"operation": "clear", "profile_id": profile_id},
         )
 
+    async def _get_security_settings(self, session: ClientSession, profile_id: str) -> dict[str, Any] | None:
+        """GET the security settings object; None on failure."""
+        ok, res = await self.execute_call(
+            session,
+            "manageSettings",
+            {"operation": "get", "category": "security", "profile_id": profile_id},
+        )
+        if ok and isinstance(res, dict):
+            return res
+        return None
+
+    async def _patch_security_key(self, session: ClientSession, profile_id: str, key: str, value: Any) -> tuple[bool, str]:
+        """PATCH a single security key; returns (ok, error_detail)."""
+        ok, res = await self.execute_call(
+            session,
+            "manageSettings",
+            {"operation": "update", "category": "security", "profile_id": profile_id, "settings": {key: value}},
+        )
+        if ok:
+            return True, ""
+        error_detail = ""
+        if isinstance(res, dict):
+            status_code = res.get("status_code", "unknown")
+            error_msg = res.get("error", "")
+            error_detail = f"HTTP {status_code}: {error_msg}"
+        return False, error_detail
+
+    async def _verify_one_toggle(self, session: ClientSession, profile_id: str, key: str) -> str:
+        """Round-trip verify a single security toggle; returns the verdict string."""
+        sec_before = await self._get_security_settings(session, profile_id)
+        if sec_before is None:
+            return "ERROR-READ"
+
+        original_value = sec_before.get(key)
+        key_was_present = key in sec_before
+
+        try:
+            ok_patch, error_detail = await self._patch_security_key(session, profile_id, key, True)
+            if not ok_patch:
+                return f"REJECTED ({error_detail})"
+
+            sec_after = await self._get_security_settings(session, profile_id)
+            if sec_after is None:
+                return "ERROR-RE-READ"
+
+            if sec_after.get(key) is True:
+                return "ACCEPTED"
+            absent_or_unchanged = "absent" if key not in sec_after else f"unchanged at {sec_after.get(key)!r}"
+            return f"REJECTED-SILENT (key {absent_or_unchanged} after re-GET)"
+        finally:
+            if key_was_present or original_value is not None:
+                restore_val = original_value if original_value is not None else False
+                await self._patch_security_key(session, profile_id, key, restore_val)
+
+    async def _verify_security_toggles(self, session: ClientSession, profile_id: str) -> None:
+        """Round-trip verify each early-access security toggle against the live API.
+
+        Verdicts: ACCEPTED, REJECTED (HTTP error), REJECTED-SILENT (200 but no persistence).
+        """
+        log_info("Step 4: Verifying early-access security toggles...")
+        toggle_verdicts: dict[str, str] = {}
+
+        for key in SECURITY_TOGGLE_KEYS:
+            log_info(f"  Testing toggle: {key}")
+            verdict = await self._verify_one_toggle(session, profile_id, key)
+            toggle_verdicts[key] = verdict
+            if verdict == "ACCEPTED":
+                log_success(f"  {key}: ACCEPTED")
+            else:
+                log_error(f"  {key}: {verdict}")
+
+        log_info("")
+        log_info("Security Toggle Verdicts:")
+        for key, verdict in toggle_verdicts.items():
+            if verdict == "ACCEPTED":
+                log_success(f"  {key}: {verdict}")
+            else:
+                log_error(f"  {key}: {verdict}")
+
+        verdict_file = self.artifacts_dir / f"security_toggles_{self.variant}.json"
+        verdict_file.write_text(json.dumps(toggle_verdicts, indent=2), encoding="utf-8")
+        log_info(f"Toggle verdicts written to {verdict_file}")
+
     async def _cleanup(self, created_profile_id: str) -> None:
         """Delete the test profile if this run created it."""
         if not created_profile_id:
@@ -845,6 +939,7 @@ class ContainerE2ERunner:
 
                 if self.allow_live_writes:
                     await self._run_write_checks(session, profile_id)
+                    await self._verify_security_toggles(session, profile_id)
                 else:
                     log_info("Skipping write operations (allow_live_writes=False)")
         finally:
