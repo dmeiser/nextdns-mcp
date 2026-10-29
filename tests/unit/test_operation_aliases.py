@@ -1,10 +1,13 @@
 """Operation synonyms resolve to the verb the tool actually means.
 
 Live runs show callers naming the intent rather than the enum: manageLists asked
-for `list` 7 times, manageProfiles for `remove`, `rename`, `set`, `replace` and
-`add`. Each has exactly one meaning for the tool in question, so the server
-resolves it instead of returning a schema rejection the caller has to decode.
-The published enum is unchanged, and an unknown verb is still rejected.
+for `list` 7 times, manageProfiles for `rename`, `set`, `replace` and `add`.
+Each has exactly one meaning for the tool in question, so the server resolves it
+instead of returning a schema rejection the caller has to decode. The published
+enum is unchanged, and an unknown verb is still rejected.
+
+Not every synonym is safe: `remove` is refused by manageProfiles, because there
+it names an operation of a different tool and resolving it deleted a profile.
 
 SPDX-License-Identifier: MIT
 """
@@ -63,7 +66,6 @@ class TestSynonymsReachTheTool:
         [
             ("manageLists", "list", {"list_type": "allowlist"}, "GET /profiles/"),
             ("manageLists", "delete", {"list_type": "allowlist", "entry_id": "x"}, "DELETE /profiles/"),
-            ("manageProfiles", "remove", {}, "DELETE /profiles/"),
             ("manageProfiles", "rename", {"name": "n"}, "PATCH /profiles/"),
             ("manageProfiles", "add", {"name": "n"}, "POST /profiles"),
             ("manageRewrites", "get", {}, "GET /profiles/"),
@@ -84,6 +86,38 @@ class TestSynonymsReachTheTool:
                 await client.call_tool(
                     "manageLists", {"operation": "frobnicate", "list_type": "allowlist", "profile_id": "23228d"}
                 )
+
+    @pytest.mark.asyncio
+    async def test_remove_is_refused_by_manage_profiles(self):
+        """An ambiguous verb is not a synonym when being wrong is destructive.
+
+        Live: a caller doing "remove X from the denylist" sent
+        manageProfiles(operation="remove", profile_id=…) and, while the alias
+        existed, the server deleted the profile. `remove` names an operation of
+        a different tool, so it is refused here rather than resolved.
+        """
+        async with Client(build_mcp_server()) as client:
+            with pytest.raises(ToolError) as raised:
+                await client.call_tool("manageProfiles", {"operation": "remove", "profile_id": "23228d"})
+        assert "Input should be" in str(raised.value)
+
+    @pytest.mark.asyncio
+    async def test_a_value_that_belongs_to_another_tool_says_so(self):
+        """The wrong-tool mistake is the one the caller cannot see from here."""
+        async with Client(build_mcp_server()) as client:
+            with pytest.raises(ToolError) as raised:
+                await client.call_tool("manageProfiles", {"operation": "remove", "profile_id": "23228d"})
+        message = str(raised.value)
+        assert "'remove' is a valid operation for manageLists, not for manageProfiles." in message
+
+    @pytest.mark.asyncio
+    async def test_a_value_that_belongs_to_no_tool_gets_no_such_note(self):
+        async with Client(build_mcp_server()) as client:
+            with pytest.raises(ToolError) as raised:
+                await client.call_tool(
+                    "manageLists", {"operation": "frobnicate", "list_type": "allowlist", "profile_id": "23228d"}
+                )
+        assert "is a valid operation for" not in str(raised.value)
 
     @pytest.mark.asyncio
     async def test_the_published_enums_are_unchanged(self):

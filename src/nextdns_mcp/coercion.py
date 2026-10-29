@@ -49,8 +49,14 @@ def operation_aliases(valid: tuple[str, ...], aliases: dict[str, str]) -> Any:
     Callers reach for the verb that names the intent rather than the one the
     schema happens to use: across three live runs the model asked
     ``manageLists`` for ``list`` (7 calls, where the operation is ``get``) and
-    ``manageProfiles`` for ``remove``, ``rename``, ``set`` and ``add``. Each of
+    ``manageProfiles`` for ``rename``, ``set``, ``replace`` and ``add``. Each of
     those has exactly one meaning for the tool in question, so it is resolved.
+
+    Only put a verb in the table when it names an operation *of this tool* and
+    being wrong is recoverable. ``remove`` was dropped from ``manageProfiles``
+    after a live run showed a caller doing "remove X from the denylist" sending
+    ``manageProfiles(operation="remove", profile_id=…)``: the alias turned that
+    wrong-tool call into a deleted profile.
 
     Anything else - an unknown verb, or one that is not in the alias table - is
     returned untouched so the schema error still lists the valid operations.

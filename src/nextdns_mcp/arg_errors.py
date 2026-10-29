@@ -85,9 +85,16 @@ async def _hint_for(context: MiddlewareContext, exc: Exception) -> str:
         # there the schema adds only what the message does not say: what the
         # parameter is for. A missing one comes back with neither.
         detail = _describe(schema, include_enum=missing)
-        if not detail:
-            continue
-        lines.append(f"{param} is required for {name}. {detail}" if missing else f"{param}: {detail}")
+        if detail:
+            lines.append(f"{param} is required for {name}. {detail}" if missing else f"{param}: {detail}")
+        if not missing:
+            # The value may be perfectly valid - for a different tool. That is
+            # the wrong-tool mistake this server actually makes: a caller doing
+            # "remove X from the denylist" sends operation="remove" to
+            # manageProfiles, where it is not an operation at all.
+            note = await _other_tool_for(fastmcp_context, name, param, problem.get("input"))
+            if note:
+                lines.append(note)
 
     supplied = set(getattr(getattr(context, "message", None), "arguments", None) or {})
     if any(problem.get("type") == "missing_argument" for problem in problems) and supplied & set(required):
@@ -95,6 +102,29 @@ async def _hint_for(context: MiddlewareContext, exc: Exception) -> str:
 
     # Deduplicated, order kept: the same parameter can fail twice.
     return "\n".join(dict.fromkeys(lines))
+
+
+async def _other_tool_for(fastmcp_context: Any, name: str, param: str, value: Any) -> str:
+    """Say so when the rejected value is a valid ``param`` for another tool.
+
+    Read out of the published schemas, like every other hint here: no guess
+    about what the caller meant, only which tool does accept that value.
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    try:
+        tools = list(await fastmcp_context.fastmcp.list_tools())
+    except Exception:  # pragma: no cover - a hint must never break the error path
+        logger.debug("could not list tools to explain a rejected value for %s.%s", name, param, exc_info=True)
+        return ""
+    for tool in tools:
+        if tool.name == name:
+            continue
+        schema = ((tool.parameters or {}).get("properties") or {}).get(param) or {}
+        enum = schema.get("enum")
+        if isinstance(enum, list) and value in enum:
+            return f"'{value}' is a valid {param} for {tool.name}, not for {name}."
+    return ""
 
 
 def _pydantic_errors(exc: Exception) -> list[dict[str, Any]]:
