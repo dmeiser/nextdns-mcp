@@ -66,17 +66,14 @@ async def _query_analytics_impl(
             series=series,
         )
 
-    # The `;series` endpoint requires a start time; upstream answers
-    # {"code":"required","source":{"parameter":"from"}}, which the tool can say
-    # itself without the round trip. Checked after the metric so a request that
-    # cannot work at all is told that first.
+    # The `;series` endpoint requires a start time, and a caller that asks for
+    # a series usually has the window in mind rather than on the tip of its
+    # schema: live, one such call named `interval` and omitted `from_time`, was
+    # refused, and the caller moved on without retrying. Default the same last
+    # day the aggregate path gets from upstream, and publish that in the
+    # parameter description so the answer is not a surprise.
     if series and from_time is None:
-        return error_payload(
-            ErrorCode.MISSING_REQUIRED_ARGUMENT,
-            "from_time is required when series=true",
-            hint='use a relative offset such as "-1d" or a Unix timestamp',
-            series=series,
-        )
+        from_time = SERIES_DEFAULT_FROM
 
     suffix = ";series" if series else ""
     url = f"/profiles/{target_profile}/analytics/{metric}{suffix}"
@@ -110,6 +107,12 @@ async def _query_analytics_impl(
         params.update(_build_query_params(status=status, root=root))
 
     return await _api_request_payload("GET", url, params=params)
+
+
+# The window a time-series request gets when it does not name one: the same
+# last day the aggregate path gets from upstream, so `series=true` is the only
+# thing a caller has to add to turn an aggregate into a series.
+SERIES_DEFAULT_FROM = "-1d"
 
 
 async def queryAnalytics(
@@ -149,7 +152,9 @@ async def queryAnalytics(
           ``countries`` or ``gafam``.
 
     Set ``series=true`` to fetch time-series data instead of aggregate totals.
-    Time values can be Unix timestamps or relative strings like ``-1d``.
+    Time values can be Unix timestamps or relative strings like ``-1d``; a
+    series that names no ``from_time`` covers the last day (``-1d``), the same
+    window an aggregate request gets when it names none.
     Note: ``series=true`` is not supported when ``metric="domains"``.
 
     ``limit`` is clamped server-side to the range 1-500 (the range accepted by

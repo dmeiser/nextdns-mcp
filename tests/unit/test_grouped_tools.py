@@ -763,7 +763,9 @@ class TestManageRewrites:
         mock_api_client.request.return_value = _make_response({"data": [{"id": "muaw9", "name": "other.com"}]})
         result = await server.manageRewrites("delete", "abc123", name="missing.com")
         assert result["code"] == "invalid_entry_id"
-        assert "operation='list'" in result["hint"]
+        # The hint names the entries instead of sending the caller off to list
+        # them: the list is already fetched while resolving the name.
+        assert "other.com (muaw9)" in result["hint"]
 
     @pytest.mark.asyncio
     async def test_delete_missing_entry_id_explains_the_name_alternative(self, mock_api_client):

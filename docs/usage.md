@@ -82,7 +82,9 @@ Fetch analytics for a profile. Metrics:
   `ipVersions`, `ips`, `protocols`, `queryTypes`, `reasons`, `status`
 
 Set `series=true` for time-series data. The `destinations` metric requires
-`destination_type` (e.g., `countries` or `gafam`).
+`destination_type` (e.g., `countries` or `gafam`). A series that names no
+`from_time` covers the last day (`-1d`), the window an aggregate request gets
+when it names none.
 
 ### plotAnalytics
 Generate a PNG line chart for supported metrics. Use a profile with query

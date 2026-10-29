@@ -69,10 +69,39 @@ class TestTheToolsSaySoThemselves:
         return getattr(result, "structured_content", None) or {}
 
     @pytest.mark.asyncio
-    async def test_series_without_a_start_time_is_refused_before_the_api(self):
-        payload = await self._call("queryAnalytics", {"metric": "devices", "profile_id": "23228d", "series": True})
-        assert "from_time is required when series=true" in str(payload.get("error", ""))
-        assert payload.get("code") == "missing_required_argument"
+    async def test_a_series_without_a_start_time_gets_the_default_window(self, monkeypatch):
+        """Refusing it lost the step: the caller named `interval` and moved on.
+
+        The `;series` endpoint does require a start time, so the tool supplies
+        the same last day an aggregate request gets when it names none.
+        """
+        from nextdns_mcp.tools import analytics
+
+        captured: dict = {}
+
+        async def fake(method, url, params=None, json_body=None):
+            captured["url"] = url
+            captured["params"] = params or {}
+            return {"data": []}
+
+        monkeypatch.setattr(analytics, "_api_request_payload", fake)
+        await analytics.queryAnalytics(metric="encryption", profile_id="23228d", series=True)
+        assert captured["url"].endswith("/analytics/encryption;series")
+        assert captured["params"]["from"] == analytics.SERIES_DEFAULT_FROM
+
+    @pytest.mark.asyncio
+    async def test_a_series_window_the_caller_named_is_left_alone(self, monkeypatch):
+        from nextdns_mcp.tools import analytics
+
+        captured: dict = {}
+
+        async def fake(method, url, params=None, json_body=None):
+            captured["params"] = params or {}
+            return {"data": []}
+
+        monkeypatch.setattr(analytics, "_api_request_payload", fake)
+        await analytics.queryAnalytics(metric="encryption", profile_id="23228d", series=True, from_time="-7d")
+        assert captured["params"]["from"] == "-7d"
 
     @pytest.mark.asyncio
     async def test_a_negative_range_is_not_read_as_1969(self):

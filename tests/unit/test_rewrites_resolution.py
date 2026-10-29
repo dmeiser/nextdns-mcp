@@ -84,3 +84,61 @@ class TestAddNamesWhatItNeeds:
         hint = str(result.get("hint", ""))
         assert "hostname to answer for" in hint
         assert "CNAME" in hint
+
+
+class TestAMissedEntryIdNamesTheOnesThatExist:
+    """ "call operation='list'" asks for a second call the caller does not make.
+
+    Live: manageRewrites(delete, entry_id="entry_id_from_list") - a value
+    invented out of this tool's own hint text - answered 404 and the step ended.
+    The list is already fetched while resolving the name, so the answer carries it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _server_env(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+
+    async def test_the_answer_lists_the_rewrites_the_profile_does_have(self, monkeypatch):
+        async def fake(method, url, params=None, json_body=None):
+            if method == "GET":
+                return {
+                    "data": [
+                        {"id": "j2k3zl", "name": "router.home", "content": "192.168.1.10"},
+                        {"id": "mhxrq76x", "name": "printer.home", "content": "192.168.1.11"},
+                    ]
+                }
+            return {
+                "error": "HTTP error in DELETE: Client error '404 Not Found'",
+                "code": "http_error",
+                "status_code": 404,
+                "upstream_code": "notFound",
+            }
+
+        monkeypatch.setattr(rewrites, "_api_request_payload", fake)
+        result = await rewrites.manageRewrites(operation="delete", profile_id="abc123", entry_id="entry_id_from_list")
+        hint = str(result.get("hint", ""))
+        assert "router.home (j2k3zl)" in hint
+        assert "printer.home (mhxrq76x)" in hint
+
+    async def test_a_profile_with_no_rewrites_says_so(self, monkeypatch):
+        async def fake(method, url, params=None, json_body=None):
+            if method == "GET":
+                return {"data": []}
+            return {
+                "error": "HTTP error in DELETE: Client error '404 Not Found'",
+                "code": "http_error",
+                "status_code": 404,
+                "upstream_code": "notFound",
+            }
+
+        monkeypatch.setattr(rewrites, "_api_request_payload", fake)
+        result = await rewrites.manageRewrites(operation="delete", profile_id="abc123", entry_id="gone.home")
+        assert "no rewrites" in str(result.get("hint", ""))
+
+    async def test_a_long_list_is_named_up_to_a_bound(self):
+        entries = [{"id": f"id{i}", "name": f"host{i}.home"} for i in range(9)]
+        hint = rewrites._available_rewrites(entries)
+        assert "host4.home (id4)" in hint
+        assert "host5.home" not in hint
+        assert "and 4 more" in hint
