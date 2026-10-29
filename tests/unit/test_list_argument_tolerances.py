@@ -134,3 +134,24 @@ class TestSynonymArguments:
         )
         assert "must have a string 'id' field" in error
         assert "entries is the whole replacement list" in str(payload.get("hint", ""))
+
+    @pytest.mark.asyncio
+    async def test_replace_without_entries_names_the_shape_that_works(self):
+        """Live: replace sent entry_id="alexa" instead of entries=["alexa"]."""
+        error, payload = await self._payload(
+            {"operation": "replace", "list_type": "privacy_natives", "profile_id": "23228d", "entry_id": "alexa"}
+        )
+        assert "entries is required for replace operation" in error
+        hint = str(payload.get("hint", ""))
+        assert "entries is the whole replacement list" in hint
+        assert "entry_id names one existing entry" in hint
+
+    @pytest.mark.asyncio
+    async def test_add_without_entry_names_the_shape_that_works(self):
+        error, payload = await self._payload(
+            {"operation": "add", "list_type": "denylist", "profile_id": "23228d", "entry_id": "ads.example.com"}
+        )
+        assert "entry is required for add operation" in error
+        hint = str(payload.get("hint", ""))
+        assert "entry is the value to add" in hint
+        assert "entry_id names an existing entry" in hint

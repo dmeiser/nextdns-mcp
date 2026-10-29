@@ -143,6 +143,36 @@ def upstream_error_codes(body: Any) -> list[str]:
 # httpx's boilerplate on every raise_for_status() message.
 _STATUS_DOC_LINK = re.compile(r"\s*For more information check: \S+")
 
+# Upstream codes NextDNS sends with no `detail` text, in the words that say
+# what the caller can do about them. Only codes seen from this API are listed;
+# an unlisted code is still named, just without a gloss.
+_UPSTREAM_CODE_GLOSS = {
+    "duplicate": "the entry already exists",
+    "notFound": "no such entry on this profile",
+    "insufficientRole": "the API key cannot write to this profile",
+    "authRequired": "no API key was accepted",
+    "required": "a required parameter was not sent",
+    "type": "a parameter was sent in the wrong type",
+    "enum": "a parameter was sent with a value it does not accept",
+}
+
+
+def upstream_error_summary(body: Any) -> str:
+    """One clause naming what upstream rejected: details, or the codes alone.
+
+    Some failures carry a `detail` naming the parameter; others carry only a
+    code (`{"errors":[{"code":"insufficientRole"}]}`). Both belong in the
+    message, because the transport's text names only the URL and the status.
+    """
+    details = upstream_error_details(body)
+    if details:
+        return "upstream: " + "; ".join(details[:3])
+    codes = upstream_error_codes(body)
+    if not codes:
+        return ""
+    named = [f"{code} ({_UPSTREAM_CODE_GLOSS[code]})" if code in _UPSTREAM_CODE_GLOSS else code for code in codes[:3]]
+    return "upstream code: " + ", ".join(named)
+
 
 def upstream_error_details(body: Any) -> list[str]:
     """The upstream diagnosis as short sentences, naming the parameter at fault.
@@ -225,9 +255,9 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
     # The transport's message names the URL and the status; the upstream
     # document names the parameter. A caller acts on the second, so it goes in
     # the message, not only in a side field.
-    details = upstream_error_details(parsed)
-    if details:
-        payload["error"] = f"{payload['error']} | upstream: {'; '.join(details[:3])}"
+    summary = upstream_error_summary(parsed)
+    if summary:
+        payload["error"] = f"{payload['error']} | {summary}"
     # httpx appends a pointer to the MDN page for the status code to every
     # raise_for_status() message. It describes HTTP, not this request, and it
     # eats the room the diagnosis needs - the call log keeps 300 characters of

@@ -319,7 +319,10 @@ async def _api_request(
             # were data makes an error look like a success; normalize it into
             # the same typed failure every other upstream error produces.
             error = NextDNSError(
-                f"HTTP error in {method} {url}: upstream error in {response.status_code} response",
+                # The code is named by http_error_payload from the body, so the
+                # message here only has to say that the status lied.
+                f"HTTP error in {method} {url}: upstream answered {response.status_code} "
+                "with an error document instead of a payload",
                 status_code=response.status_code,
                 response_body=response.text,
             )

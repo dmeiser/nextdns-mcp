@@ -124,3 +124,42 @@ class TestTheMessageFitsWhatIsRecorded:
         assert "developer.mozilla.org" not in payload["error"]
         assert "upstream: Entry not found." in payload["error"]
         assert len(payload["error"]) < 300, "the call log keeps this many characters"
+
+
+class TestUpstreamCodesWithoutDetails:
+    """The code is the whole diagnosis for these, so the message has to carry it."""
+
+    def test_a_code_alone_is_named_in_the_message(self):
+        exc = httpx.HTTPError("boom")
+        exc.response = _response(403, {"errors": [{"code": "insufficientRole"}]})
+        payload = http_error_payload("HTTP error in POST /profiles/abc/rewrites: Client error '403 Forbidden'", exc)
+        assert "upstream code: insufficientRole" in payload["error"]
+        assert "the API key cannot write to this profile" in payload["error"]
+
+    def test_a_detail_is_still_preferred_over_the_code(self):
+        exc = httpx.HTTPError("boom")
+        exc.response = _response(
+            400,
+            {"errors": [{"code": "enum", "source": {"parameter": "partials"}, "detail": "`partials` must be one."}]},
+        )
+        payload = http_error_payload("HTTP error in GET /x", exc)
+        assert "upstream: `partials` must be one." in payload["error"]
+        assert "upstream code" not in payload["error"]
+
+    def test_an_unknown_code_is_still_named(self):
+        exc = httpx.HTTPError("boom")
+        exc.response = _response(422, {"errors": [{"code": "somethingNew"}]})
+        payload = http_error_payload("HTTP error in PUT /x", exc)
+        assert "upstream code: somethingNew" in payload["error"]
+
+    def test_a_2xx_that_carries_an_error_document_names_the_code_it_hidden(self):
+        """POST /allowlist on an existing entry answers 200 {"errors":[{"code":"duplicate"}]}."""
+        exc = httpx.HTTPError("boom")
+        exc.response = _response(200, {"errors": [{"code": "duplicate"}]})
+        payload = http_error_payload(
+            "HTTP error in POST /profiles/abc/allowlist: upstream answered 200 "
+            "with an error document instead of a payload",
+            exc,
+        )
+        assert "upstream code: duplicate (the entry already exists)" in payload["error"]
+        assert len(payload["error"]) < 300, "the call log keeps this many characters"
