@@ -7,6 +7,8 @@ transforms in: with a mode enabled, ``tools/list`` exposes only the synthetic
 callable through the ``call_tool`` proxy.
 """
 
+import json
+
 import pytest
 
 from nextdns_mcp.config import ConfigurationError, get_tool_search_mode
@@ -198,7 +200,10 @@ class TestSyntheticToolDescriptions:
 
         Observed live: `call_tool(name=<the whole search result array>)`. The
         descriptions have to say what search_tools returns and which part of it
-        `name` takes, because nothing else in the disclosure flow does.
+        `name` takes, because nothing else in the disclosure flow does. The
+        array is also resolved now (see TestSearchAnswerAsName), so the
+        description states that as what the server does rather than warning
+        against a mistake callers kept making anyway.
         """
         from fastmcp import Client
 
@@ -209,8 +214,8 @@ class TestSyntheticToolDescriptions:
         search = " ".join(described["search_tools"].split()).casefold()
         call = " ".join(described["call_tool"].split()).casefold()
         assert "array" in search
-        assert "single string" in call
-        assert "not the array" in call
+        assert "one search result's `name` field" in call
+        assert "highest-ranked tool in it" in call
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("mode", ["bm25", "regex"])
@@ -307,3 +312,55 @@ class TestSearchFallback:
         assert isinstance(build_search_transform("bm25"), FallbackBM25SearchTransform)
         assert isinstance(build_search_transform("regex"), FallbackRegexSearchTransform)
         assert build_search_transform("off") is None
+
+
+class TestSearchAnswerAsName:
+    """`name: result.result` is what the disclosure flow actually produces.
+
+    Live runs, repeatedly: the caller pipes the search answer straight into
+    call_tool's `name`. FastMCP refuses it against that parameter's own
+    `name: str`, so the step ends with no tool call anywhere - the single most
+    common way a call never reaches a tool.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _server_env(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+
+    async def test_the_whole_answer_resolves_to_its_top_ranked_tool(self):
+        from fastmcp import Client
+
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": "list profiles"})
+            assert found.data[0]["name"] == "manageProfiles"
+            result = await client.call_tool("call_tool", {"name": found.data, "arguments": {"operation": "list"}})
+        assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
+
+    async def test_one_result_object_resolves_to_its_name(self):
+        from fastmcp import Client
+
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": "list profiles"})
+            result = await client.call_tool("call_tool", {"name": found.data[0], "arguments": {"operation": "list"}})
+        assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
+
+    async def test_a_name_that_says_nothing_still_fails_the_schema(self):
+        """Tolerance has a limit: nothing to read means the original rejection."""
+        from fastmcp import Client
+
+        from nextdns_mcp.tool_search import _name_from_search_answer
+
+        assert _name_from_search_answer(42) == ""
+        assert _name_from_search_answer([{"id": 1}]) == ""
+        async with Client(build_mcp_server()) as client:
+            with pytest.raises(Exception, match="Input should be"):
+                await client.call_tool("call_tool", {"name": 42, "arguments": {}})
+
+    async def test_a_plain_name_is_left_exactly_as_sent(self):
+        from fastmcp import Client
+
+        async with Client(build_mcp_server()) as client:
+            result = await client.call_tool("call_tool", {"name": "manageProfiles", "arguments": {"operation": "list"}})
+        assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
