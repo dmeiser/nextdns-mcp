@@ -40,14 +40,28 @@ async def _resolve_rewrite_id(base_url: str, name: str) -> tuple[str | None, dic
     listed = await _api_request_payload("GET", base_url)
     if listed.get("error"):
         return None, listed
-    for entry in listed.get("data") or []:
-        if isinstance(entry, dict) and entry.get("name") == name and entry.get("id"):
+    entries = [entry for entry in listed.get("data") or [] if isinstance(entry, dict) and entry.get("id")]
+    for entry in entries:
+        if entry.get("name") == name:
             return str(entry["id"]), None
+    # Telling the caller to go list the rewrites asks it to make a second call,
+    # and live it does not: one step sent entry_id="entry_id_from_list", a value
+    # invented out of this tool's own hint text, and stopped at the 404. The
+    # list is already in hand here, so the answer carries it.
     return None, error_payload(
         ErrorCode.INVALID_ENTRY_ID,
         f"no rewrite named {name!r} on this profile",
-        hint="call operation='list' to see each rewrite's name and id",
+        hint=_available_rewrites(entries),
     )
+
+
+def _available_rewrites(entries: list[dict[str, Any]], limit: int = 5) -> str:
+    """The rewrites this profile does have, as the `entry_id` the tool wants."""
+    if not entries:
+        return "this profile has no rewrites; operation='add' creates one, and its id is returned"
+    named = [f"{entry.get('name')} ({entry['id']})" for entry in entries[:limit]]
+    more = f", and {len(entries) - limit} more" if len(entries) > limit else ""
+    return "this profile's rewrites, as name (entry_id): " + ", ".join(named) + more
 
 
 async def _manage_rewrites_impl(
@@ -102,10 +116,14 @@ async def _manage_rewrites_impl(
         # inference about intent.
         if isinstance(result, dict) and result.get("upstream_code") == "notFound":
             resolved, resolve_error = await _resolve_rewrite_id(base_url, entry_id)
-            if not resolve_error:
-                result = await _api_request_payload("DELETE", f"{base_url}/{resolved}")
-                if isinstance(result, dict) and not result.get("error"):
-                    result = {**result, "resolved_from_name": entry_id}
+            if resolve_error:
+                # The 404 says the id missed; the lookup says which ids there
+                # are. Only the hint is carried over: the call log bounds the
+                # message, and the entries belong where the caller reads them.
+                return {**result, "hint": resolve_error.get("hint")}
+            result = await _api_request_payload("DELETE", f"{base_url}/{resolved}")
+            if isinstance(result, dict) and not result.get("error"):
+                result = {**result, "resolved_from_name": entry_id}
         return result
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
