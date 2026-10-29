@@ -1788,3 +1788,46 @@ class TestFailureModeSummary:
         report = tmp_path / "empty.jsonl"
         report.write_text('{"meta": "run"}\n', encoding="utf-8")
         assert "no step results" in h.summarize_reports([str(report)])
+
+
+class TestActorStreamCollection:
+    """A timed-out attempt used to lose every event the actor had produced."""
+
+    def _config(self, h, script: str, timeout_s: float):
+        cfg = h.HarnessConfig()
+        cfg.command = ["python3", "-c", script]
+        cfg.timeout_s = timeout_s
+        cfg.model = "test/model"
+        return cfg
+
+    async def test_events_before_a_timeout_are_kept(self, h, tmp_path):
+        script = (
+            "import json,sys,time;"
+            "print(json.dumps({'type':'tool_use','part':{'tool':'search_tools',"
+            "'state':{'status':'completed','input':{'query':'denylist'},'output':'[]'}}}));"
+            "sys.stdout.flush(); time.sleep(30)"
+        )
+        cfg = self._config(h, script, timeout_s=2)
+        run = await h.run_actor(cfg, "do the thing", tmp_path, retries=0)
+        assert "timed out" in run.error
+        assert len(run.raw_lines) == 1, run.raw_lines
+        assert [call.name for call in run.tool_calls] == ["search_tools"]
+
+    async def test_a_clean_run_is_still_parsed_normally(self, h, tmp_path):
+        script = (
+            "import json,sys;"
+            "print(json.dumps({'type':'tool_use','part':{'tool':'call_tool',"
+            "'state':{'status':'completed','input':{},'output':'{}'}}}));"
+            "print(json.dumps({'type':'text','part':{'text':'done'}}))"
+        )
+        cfg = self._config(h, script, timeout_s=30)
+        run = await h.run_actor(cfg, "do the thing", tmp_path, retries=0)
+        assert run.ok, run.error
+        assert [call.name for call in run.tool_calls] == ["call_tool"]
+        assert run.final_text == "done"
+
+    async def test_a_stalled_actor_is_still_a_stall(self, h, tmp_path):
+        cfg = self._config(h, "import time; time.sleep(30)", timeout_s=2)
+        run = await h.run_actor(cfg, "do the thing", tmp_path, retries=0)
+        assert "timed out" in run.error
+        assert run.tool_calls == []
