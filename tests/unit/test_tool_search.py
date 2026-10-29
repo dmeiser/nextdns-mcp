@@ -542,3 +542,63 @@ class TestRankingOnTheWordsTheCatalogOwns:
         async with Client(build_mcp_server()) as client:
             found = await client.call_tool("search_tools", {"query": query})
         assert next(tool["name"] for tool in found.data) == first
+
+
+class TestATypedNameSaysWhichNamesThereAre:
+    """A caller that types a name has already decided it knows the tool.
+
+    Full run 6, verbatim, one step: `call_tool({name: "plot"})`, then
+    "generate", "analytics", "profile", "profile 23228d", "generate analytics
+    plot for profile 23228d for metric protocols over the last day". 23 such
+    names in the run, every one a dead end, because the answer pointed back at
+    search_tools and the caller had already passed the point of searching.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _server_env(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.delenv("NEXTDNS_TOOL_SEARCH", raising=False)
+
+    def _catalog(self) -> list:
+        """The real tools, which is what the shape middleware compares against."""
+        import asyncio
+
+        from nextdns_mcp.server import build_mcp_server
+
+        async def listed():
+            return list(await build_mcp_server().list_tools())
+
+        return asyncio.run(listed())
+
+    def test_a_name_from_another_api_ranks_on_this_catalogs_words(self):
+        """`denylists.updateDenylistEntry` is not a tool; its words are manageLists'."""
+        closest = [tool.name for tool in ts._closest_tools("denylists.updateDenylistEntry", self._catalog())]
+        assert closest[0] == "manageLists"
+
+    def test_a_name_that_carries_no_catalog_word_matches_nothing(self):
+        assert ts._closest_tools("zzzqqq", self._catalog()) == []
+
+    def test_the_required_arguments_come_from_the_tools_own_schema(self):
+        by_name = {tool.name: tool for tool in self._catalog()}
+        assert ts._required_arguments(by_name["manageLists"]).startswith("list_type")
+
+    async def test_a_typed_name_is_answered_with_the_names_and_arguments_to_use(self, monkeypatch):
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            with pytest.raises(Exception, match="Its words match") as raised:
+                await client.call_tool("call_tool", {"name": "generate analytics plot", "arguments": {}})
+        message = str(raised.value)
+        assert "plotAnalytics takes" in message, message
+        assert "search_tools" not in message, message
+
+    async def test_a_name_with_nothing_in_common_still_points_at_search(self, monkeypatch):
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            with pytest.raises(Exception, match="is not a tool of this server") as raised:
+                await client.call_tool("call_tool", {"name": "zzzqqqTool", "arguments": {}})
+        assert "search_tools(query)" in str(raised.value)

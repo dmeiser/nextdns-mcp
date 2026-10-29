@@ -324,6 +324,60 @@ def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
     return results
 
 
+def _closest_tools(name: str, tools: Sequence[Tool], limit: int = 3) -> list[Tool]:
+    """The tools a typed name's words come closest to, ranked as search_tools ranks them.
+
+    A caller that types ``denylists.updateDenylistEntry`` or "generate analytics
+    plot" has described a task in this catalog's vocabulary without naming a
+    tool. Ranking those words with the rule search_tools already uses turns a
+    dead end into a correction the caller can act on.
+    """
+    if not tools:
+        return []
+    names = _name_words(tools)
+    vocabulary = _vocabulary_words(tools)
+    vocab_shared = _shared_words(vocabulary)
+    unique_to_one_name = {word for word, count in _word_counts(names).items() if count == 1}
+    name_shared = _shared_words(names) | (vocab_shared - unique_to_one_name)
+    query_words = _words(name)
+    scored = [
+        (
+            _overlap(query_words, names.get(tool.name), name_shared) * 2
+            + _overlap(query_words, vocabulary.get(tool.name), vocab_shared),
+            tool,
+        )
+        for tool in tools
+    ]
+    scored.sort(key=lambda pair: -pair[0])
+    return [tool for score, tool in scored[:limit] if score > 0]
+
+
+def _required_arguments(tool: Tool) -> str:
+    """The arguments a tool cannot be called without, read from its own schema."""
+    required = [str(item) for item in ((tool.parameters or {}).get("required") or [])]
+    return ", ".join(required) if required else "no arguments"
+
+
+def _unknown_tool_message(name: str, tools: Sequence[Tool]) -> str:
+    """Say what the caller can call instead of a name that is not a tool.
+
+    FastMCP's own answer is ``Unknown tool: '<x>'``. Under disclosure the caller
+    cannot see the names that do exist, so the only way out is to search again -
+    and a caller that typed a name has already decided it knows the tool. Live,
+    it guesses again instead, shorter each time.
+    """
+    closest = _closest_tools(name, tools)
+    if not closest:
+        return (
+            f"{name!r} is not a tool of this server. search_tools(query) returns "
+            "the tools there are, with the exact name each one takes."
+        )
+    listed = "; ".join(f"{tool.name} takes {_required_arguments(tool)}" for tool in closest)
+    return (
+        f"{name!r} is not a tool of this server. Its words match: {listed}. call_tool takes one of those names exactly."
+    )
+
+
 def _match_tool_name(name: str, names: Sequence[str]) -> str:
     """The catalog entry a mistyped name unambiguously means, or ''.
 
@@ -420,13 +474,7 @@ class CallToolShapeMiddleware(Middleware):
                 logger.info("call_tool name %r is not a tool; it matches %r once normalised", resolved, matched)
                 resolved = matched
             else:
-                # FastMCP's own answer is `Unknown tool: '<x>'`, which tells a
-                # caller nothing it can act on: under disclosure it cannot even
-                # see the names that do exist.
-                raise ToolError(
-                    f"{resolved!r} is not a tool of this server. search_tools(query) returns "
-                    "the tools there are, with the exact name each one takes."
-                )
+                raise ToolError(_unknown_tool_message(resolved, tools))
         if resolved:
             shaped["name"] = resolved
 
