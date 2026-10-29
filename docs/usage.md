@@ -33,7 +33,9 @@ Get or update one of the seven settings categories:
 
 - `general` — core profile options (e.g., web3 blocking)
 - `privacy` — disguised trackers, affiliate links
-- `security` — threat intelligence, Google Safe Browsing
+- `security` — threat intelligence, Google Safe Browsing, and the early-access toggles
+  `dnsDataExfiltration`, `dnsPayloadDelivery`, `fastFluxNetworks`, `highRiskTlds`,
+  `newlyActiveDomains` (reported from the NextDNS dashboard, not yet in the official API docs)
 - `parental` — safe search, YouTube restricted mode
 - `performance` — ECS, cache boost
 - `logs` — logging enablement and retention

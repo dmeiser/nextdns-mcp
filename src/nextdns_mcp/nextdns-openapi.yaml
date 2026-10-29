@@ -2051,6 +2051,21 @@ paths:
                     type: boolean
                   csam:
                     type: boolean
+                  dnsDataExfiltration:
+                    type: boolean
+                    description: DNS data exfiltration protection (early-access key reported from the NextDNS dashboard, not yet listed in the official NextDNS API docs)
+                  dnsPayloadDelivery:
+                    type: boolean
+                    description: DNS payload delivery defenses (early-access key reported from the NextDNS dashboard, not yet listed in the official NextDNS API docs)
+                  fastFluxNetworks:
+                    type: boolean
+                    description: Fast flux networks detection (early-access key reported from the NextDNS dashboard, not yet listed in the official NextDNS API docs)
+                  highRiskTlds:
+                    type: boolean
+                    description: High-risk TLD auto-blocking (early-access key reported from the NextDNS dashboard, not yet listed in the official NextDNS API docs)
+                  newlyActiveDomains:
+                    type: boolean
+                    description: Newly active domains protection (early-access key reported from the NextDNS dashboard, not yet listed in the official NextDNS API docs)
 
     patch:
       summary: Update security settings
@@ -2090,6 +2105,21 @@ paths:
                   type: boolean
                 csam:
                   type: boolean
+                dnsDataExfiltration:
+                  type: boolean
+                  description: DNS data exfiltration protection (early-access key reported from the NextDNS dashboard, not yet listed in the official NextDNS API docs)
+                dnsPayloadDelivery:
+                  type: boolean
+                  description: DNS payload delivery defenses (early-access key reported from the NextDNS dashboard, not yet listed in the official NextDNS API docs)
+                fastFluxNetworks:
+                  type: boolean
+                  description: Fast flux networks detection (early-access key reported from the NextDNS dashboard, not yet listed in the official NextDNS API docs)
+                highRiskTlds:
+                  type: boolean
+                  description: High-risk TLD auto-blocking (early-access key reported from the NextDNS dashboard, not yet listed in the official NextDNS API docs)
+                newlyActiveDomains:
+                  type: boolean
+                  description: Newly active domains protection (early-access key reported from the NextDNS dashboard, not yet listed in the official NextDNS API docs)
       responses:
         '204':
           description: Security settings updated
