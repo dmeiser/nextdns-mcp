@@ -1686,6 +1686,29 @@ class TestFailureModeSummary:
         # overstate the mode.
         assert not [mode for mode in modes if mode.startswith("end state")]
 
+    def test_a_stalled_step_is_not_counted_as_a_contract_miss(self, h):
+        """`no call reached the server` reads like the server refused the call.
+
+        When the harness knows the actor stalled - it retried and timed out -
+        that is infrastructure noise, and grouping it with real misses sends the
+        tuning loop to change the server for nothing.
+        """
+        why = "server recorded no manageLists(get) call in this attempt"
+        row = {
+            "id": "lists.denylist.update",
+            "status": "failed",
+            "mcp_tool": "manageLists",
+            "error": why,
+            "mcp_response": {
+                "server_calls": [],
+                "transients": ["stall: actor harness timed out after 300s"] * 2,
+                "expected_call": {"ok": False, "why": why},
+            },
+        }
+        modes = [mode for mode, _ in h._failure_modes(row)]
+        assert "actor stalled without calling" in modes
+        assert "no call reached the server" not in modes
+
     def test_repeated_rejections_in_one_step_cost_one_step(self, h):
         record = {
             "tool": "manageSettings",
