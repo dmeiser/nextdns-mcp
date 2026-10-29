@@ -727,6 +727,45 @@ def parse_actor_events(lines: list[str]) -> tuple[list[ToolCall], str]:
 # =========================================================================== #
 
 
+async def _collect_streams(proc: asyncio.subprocess.Process, timeout_s: float) -> tuple[list[bytes], list[bytes], bool]:
+    """Drain the actor's stdout and stderr while it runs, up to ``timeout_s``.
+
+    Returns (stdout lines, stderr chunks, timed_out). On a timeout whatever the
+    actor had already written is returned with it: the event stream is what
+    shows whether the model stalled before its first tool call or in the middle
+    of a chain, and discarding it made a timed-out step un diagnosable.
+    """
+    out: list[bytes] = []
+    err: list[bytes] = []
+
+    async def _drain(stream: asyncio.StreamReader | None, sink: list[bytes]) -> None:
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.readline()
+            if not chunk:
+                return
+            sink.append(chunk)
+
+    drains = [
+        asyncio.create_task(_drain(proc.stdout, out)),
+        asyncio.create_task(_drain(proc.stderr, err)),
+    ]
+    timed_out = False
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+    except TimeoutError:
+        timed_out = True
+        with _suppress():
+            proc.kill()
+    # The pipes close when the process does, so the drains finish on their own;
+    # bounded so a child that leaves a grandchild holding a pipe cannot hang the
+    # harness here.
+    with _suppress():
+        await asyncio.wait_for(asyncio.gather(*drains, return_exceptions=True), timeout=10)
+    return out, err, timed_out
+
+
 async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: int = 1) -> ActorRun:
     """Launch the actor harness in ``workdir`` and capture its event stream.
 
@@ -783,34 +822,34 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
                 continue
             return run
 
-        try:
-            stdout, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=config.timeout_s)
-        except TimeoutError:
-            with _suppress():
-                proc.kill()
-            run.error = f"actor harness timed out after {config.timeout_s:.0f}s"
-            run.stderr = ""
-            run.duration_ms = int((time.monotonic() - started) * 1000)
-            last_run = run
-            if attempt < retries and _is_transient(run.error):
-                await asyncio.sleep(2)
-                continue
-            return run
+        # Read the event stream as it arrives rather than buffering to the end.
+        # A timed-out attempt used to discard every event the actor had already
+        # produced, so the one question that matters most on a timeout - where
+        # did the model stop? - was the one the report could not answer.
+        out_lines, err_chunks, timed_out = await _collect_streams(proc, config.timeout_s)
 
-        err_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+        err_text = b"".join(err_chunks).decode("utf-8", errors="replace").strip()
         run.stderr = err_text
-        raw = stdout.decode("utf-8", errors="replace").splitlines()
+        raw = [line.decode("utf-8", errors="replace").rstrip("\r\n") for line in out_lines]
         lines = raw
         run.raw_lines = raw
         calls, final_text = parse_actor_events(lines)
         run.tool_calls = calls
         run.final_text = final_text
+        run.duration_ms = int((time.monotonic() - started) * 1000)
+        last_run = run
+
+        if timed_out:
+            run.error = f"actor harness timed out after {config.timeout_s:.0f}s"
+            if attempt < retries and _is_transient(run.error):
+                await asyncio.sleep(2)
+                continue
+            return run
+
         run.exit_code = proc.returncode
         run.ok = proc.returncode == 0
         if not run.ok and not run.error:
             run.error = err_text[-1500:] if err_text else f"actor harness exited with code {proc.returncode}"
-        run.duration_ms = int((time.monotonic() - started) * 1000)
-        last_run = run
 
         if run.ok:
             return run
