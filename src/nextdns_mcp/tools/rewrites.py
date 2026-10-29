@@ -20,6 +20,15 @@ RewriteOperationId = Annotated[
 ]
 
 
+# What an add needs, in the caller's terms: the published schema says only that
+# these are strings, and a caller that sends neither gets a message naming two
+# words it already knows.
+_ADD_REWRITE_HINT = (
+    'name is the hostname to answer for ("router.home"); content is the answer - an IPv4 or '
+    "IPv6 address for an A/AAAA rewrite, or another hostname for a CNAME"
+)
+
+
 async def _resolve_rewrite_id(base_url: str, name: str) -> tuple[str | None, dict[str, Any] | None]:
     """Find a rewrite's server-assigned id from its name (the natural key).
 
@@ -66,7 +75,11 @@ async def _manage_rewrites_impl(
 
     if operation == "add":
         if not name or not content:
-            return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name and content are required for add operation")
+            return error_payload(
+                ErrorCode.MISSING_REQUIRED_ARGUMENT,
+                "name and content are required for add operation",
+                hint=_ADD_REWRITE_HINT,
+            )
         return await _api_request_payload("POST", base_url, json_body={"name": name, "content": content})
 
     if operation == "delete":
@@ -81,7 +94,19 @@ async def _manage_rewrites_impl(
                 "entry_id is required for delete operation",
                 hint="pass entry_id from operation='list', or pass the rewrite's name and it will be resolved",
             )
-        return await _api_request_payload("DELETE", f"{base_url}/{entry_id}")
+        result = await _api_request_payload("DELETE", f"{base_url}/{entry_id}")
+        # A caller that puts the hostname in entry_id is not guessing: the name
+        # is the only rewrite identifier it can see in its own task. The 404 is
+        # the endpoint saying "that is not an id", so look the value up as a
+        # name and delete what it matches. An exact name match is not an
+        # inference about intent.
+        if isinstance(result, dict) and result.get("upstream_code") == "notFound":
+            resolved, resolve_error = await _resolve_rewrite_id(base_url, entry_id)
+            if not resolve_error:
+                result = await _api_request_payload("DELETE", f"{base_url}/{resolved}")
+                if isinstance(result, dict) and not result.get("error"):
+                    result = {**result, "resolved_from_name": entry_id}
+        return result
 
     return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
 
