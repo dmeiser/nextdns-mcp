@@ -69,10 +69,13 @@ class TestSynonymArguments:
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
     async def _call(self, arguments: dict) -> str:
+        return str((await self._payload(arguments))[0])
+
+    async def _payload(self, arguments: dict) -> tuple[str, dict]:
         async with Client(build_mcp_server()) as client:
             result = await client.call_tool("manageLists", arguments)
         payload = getattr(result, "structured_content", None) or {}
-        return str(payload.get("error", ""))
+        return str(payload.get("error", "")), payload
 
     @pytest.mark.asyncio
     async def test_short_list_type_reaches_the_api_instead_of_the_schema(self):
@@ -107,3 +110,27 @@ class TestSynonymArguments:
     async def test_replace_still_rejects_when_nothing_names_the_entries(self):
         error = await self._call({"operation": "replace", "list_type": "denylist", "profile_id": "23228d"})
         assert "entries is required" in error
+
+    @pytest.mark.asyncio
+    async def test_add_names_the_entry_shapes_when_the_call_used_the_wrong_operation(self):
+        """Live: add sent entry={"active": true} with the value in entry_id."""
+        error, payload = await self._payload(
+            {
+                "operation": "add",
+                "list_type": "denylist",
+                "profile_id": "23228d",
+                "entry": {"active": True},
+                "entry_id": "ads.example.com",
+            }
+        )
+        assert "must have a string 'id' field" in error
+        assert "entry is the value to add" in str(payload.get("hint", ""))
+        assert "entry_id names an existing entry" in str(payload.get("hint", ""))
+
+    @pytest.mark.asyncio
+    async def test_replace_names_the_entries_shape(self):
+        error, payload = await self._payload(
+            {"operation": "replace", "list_type": "security_tlds", "profile_id": "23228d", "entries": [{"nope": 1}]}
+        )
+        assert "must have a string 'id' field" in error
+        assert "entries is the whole replacement list" in str(payload.get("hint", ""))
