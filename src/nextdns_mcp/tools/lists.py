@@ -75,7 +75,9 @@ async def _lists_get(base_url: str) -> dict[str, Any]:
 async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[str, Any]:
     """Add a single entry to a list."""
     if entry is None:
-        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry is required for add operation")
+        return error_payload(
+            ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry is required for add operation", hint=_ADD_ENTRY_HINT
+        )
     entry = _coerce_json_arg(entry)
     body = _relax_list_entry(entry) if isinstance(entry, dict) else {"id": entry}
     entry_error = _validate_list_entry(body, "entry", "add", hint=_ADD_ENTRY_HINT)
@@ -150,7 +152,11 @@ def _validate_replace_entries(entries: list[Any]) -> dict[str, Any] | None:
 async def _lists_replace(base_url: str, entries: str | list[Any] | None) -> dict[str, Any]:
     """Replace the entire list with a new set of entries."""
     if entries is None:
-        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entries is required for replace operation")
+        # Seen live: replace sent entry_id="alexa" - a parameter that exists on
+        # this tool but belongs to the other operations.
+        return error_payload(
+            ErrorCode.MISSING_REQUIRED_ARGUMENT, "entries is required for replace operation", hint=_REPLACE_ENTRIES_HINT
+        )
     entries = _coerce_json_arg(entries)
     if not isinstance(entries, list):
         return error_payload(ErrorCode.INVALID_ARGUMENT, "entries must be a JSON array")
