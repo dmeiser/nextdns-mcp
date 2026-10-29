@@ -41,7 +41,7 @@ from .arg_errors import ArgumentHintMiddleware
 from .call_log import CallLogMiddleware, call_log_path
 from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
-from .tool_search import build_search_transform
+from .tool_search import SearchAnswerNameMiddleware, build_search_transform
 from .tools.doh import close_doh_client
 from .usage import server_instructions
 from .utils import is_float_shaped, is_integer_shaped
@@ -319,6 +319,15 @@ def create_mcp_server(client: Any = None) -> FastMCP:
     # Add middleware to strip unknown fields from tool arguments
     # This allows AI clients (like OpenAI) that send extra fields to work properly
     mcp.add_middleware(StripExtraFieldsMiddleware())
+
+    # Under disclosure the caller reaches tools only through call_tool, and live
+    # runs show it passing the whole search answer where a name belongs
+    # (`name: result.result`). FastMCP refuses that against call_tool's own
+    # `name: str`, so nothing runs and the step produces no call at all. This
+    # resolves the answer to the tool it ranks first. Added before the call log
+    # so the log records the call that actually happened.
+    if search_transform is not None:
+        mcp.add_middleware(SearchAnswerNameMiddleware())
 
     # Record what this server actually executed (see nextdns_mcp.call_log). A
     # read leaves no trace in the API, so a harness that verifies over REST

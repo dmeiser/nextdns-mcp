@@ -21,12 +21,16 @@ SPDX-License-Identifier: MIT
 """
 
 import json
+import logging
 import re
 from collections.abc import Sequence
 from typing import Any
 
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms.search import BM25SearchTransform, RegexSearchTransform
 from fastmcp.tools.base import Tool
+
+logger = logging.getLogger(__name__)
 
 # The NextDNS server exposes a small fixed catalog (the grouped CRUD tools), so
 # a search should be able to surface all of it - but not at any cost. Each
@@ -148,11 +152,12 @@ tool names, so a name that was not returned here is not one of its tools.
 _CALL_TOOL_DESCRIPTION = """Run one of this server's tools by the exact name returned by search_tools.
 
 Takes exactly one argument object, {"name": "<tool>", "arguments": {<that tool's
-parameters>}}; the name and the arguments are not two separate inputs. `name` is
-a single string: one search result's `name` field, not the result object and not
-the array of results. Anything search_tools did not return is not a tool of this
-server. A failed call returns a JSON payload with an error `code` and, when
-available, a `hint`.
+parameters>}}; the name and the arguments are not two separate inputs. `name`
+selects one tool: one search result's `name` field. If the search answer itself
+is passed instead - the array of results, or one result object - it resolves to
+the highest-ranked tool in it, because the answer is in rank order. Anything
+search_tools did not return is not a tool of this server. A failed call returns
+a JSON payload with an error `code` and, when available, a `hint`.
 """
 
 
@@ -195,6 +200,60 @@ def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
         spent += cost
         results.append(dumped)
     return results
+
+
+def _name_from_search_answer(value: Any) -> str:
+    """The tool name a caller meant, when it sent the search answer instead.
+
+    The single most common way a call never reaches a tool, seen repeatedly
+    across live runs, is this expression::
+
+        search_tools({query}).then(result => call_tool({ name: result.result, … }))
+
+    `result.result` is the answer - an array of tool objects - and FastMCP
+    rejects it against call_tool's own `name: str`, so nothing runs. The answer
+    is in rank order and the caller passed all of it, so the top-ranked entry is
+    the only defensible reading; taking it is not a guess about intent.
+
+    Returns '' when the value cannot be read as a name, leaving the schema
+    error to fire unchanged.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        name = value.get("name")
+        return name.strip() if isinstance(name, str) else ""
+    if isinstance(value, list):
+        for entry in value:
+            name = _name_from_search_answer(entry)
+            if name:
+                return name
+    return ""
+
+
+class SearchAnswerNameMiddleware(Middleware):
+    """Resolve a `call_tool` name that arrived as the search answer.
+
+    Runs before argument validation (like the other argument-shaping
+    middleware here), so the call reaches the tool instead of being refused by
+    the synthetic tool's own schema.
+    """
+
+    def __init__(self, call_tool_name: str = "call_tool") -> None:
+        self._call_tool_name = call_tool_name
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> Any:
+        message = getattr(context, "message", None)
+        arguments = getattr(message, "arguments", None)
+        if getattr(message, "name", "") == self._call_tool_name and isinstance(arguments, dict):
+            supplied = arguments.get("name")
+            resolved = _name_from_search_answer(supplied)
+            if resolved and resolved != supplied:
+                logger.info(
+                    "call_tool name given as %s; resolved to the top-ranked %r", type(supplied).__name__, resolved
+                )
+                context.message.arguments = {**arguments, "name": resolved}
+        return await call_next(context)
 
 
 def build_search_transform(mode: str) -> BM25SearchTransform | RegexSearchTransform | None:
