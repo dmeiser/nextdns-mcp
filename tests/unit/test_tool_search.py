@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from nextdns_mcp import tool_search as ts
 from nextdns_mcp.config import ConfigurationError, get_tool_search_mode
 from nextdns_mcp.server import build_mcp_server
 
@@ -364,3 +365,180 @@ class TestSearchAnswerAsName:
         async with Client(build_mcp_server()) as client:
             result = await client.call_tool("call_tool", {"name": "manageProfiles", "arguments": {"operation": "list"}})
         assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
+
+
+class TestMistypedToolName:
+    """A name typed from memory, not copied from a search result.
+
+    Live, from one plots step: `call_tool(name: 'analytics/plot')`, then
+    `Unknown tool: 'analytics/plot'` - and under disclosure the caller cannot
+    see the names that do exist, so the dead end is total.
+    """
+
+    def test_separators_and_case_are_not_part_of_a_name(self):
+        names = ["manageProfiles", "manageLists", "plotAnalytics"]
+        assert ts._match_tool_name("manage_profiles", names) == "manageProfiles"
+        assert ts._match_tool_name("manageprofiles", names) == "manageProfiles"
+
+    def test_the_same_words_in_another_order_are_the_same_tool(self):
+        names = ["manageProfiles", "queryAnalytics", "plotAnalytics"]
+        assert ts._match_tool_name("analytics/plot", names) == "plotAnalytics"
+
+    def test_an_ambiguous_or_unmatched_name_is_left_alone(self):
+        assert ts._match_tool_name("manage", ["manageLists", "manageProfiles"]) == ""
+        assert ts._match_tool_name("totallyDifferent", ["manageLists"]) == ""
+        assert ts._match_tool_name("manageLists", ["manageLists"]) == ""
+
+    @pytest.fixture(autouse=True)
+    def _server_env(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+
+    async def test_a_normalised_name_reaches_the_tool(self):
+        from fastmcp import Client
+
+        async with Client(build_mcp_server()) as client:
+            result = await client.call_tool(
+                "call_tool", {"name": "manage_profiles", "arguments": {"operation": "list"}}
+            )
+        assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
+
+    async def test_a_name_that_means_nothing_says_where_names_come_from(self):
+        from fastmcp import Client
+
+        async with Client(build_mcp_server()) as client:
+            with pytest.raises(Exception, match="is not a tool of this server") as raised:
+                await client.call_tool("call_tool", {"name": "analytics", "arguments": {}})
+        assert "search_tools" in str(raised.value)
+
+
+class TestParametersSentBesideTheName:
+    """`call_tool({name, operation, profile_id})` - the wrapper, not a parameter.
+
+    Live, 16 times in one run, all on the profile delete step: the caller named
+    the tool and gave its parameters beside `name` instead of inside
+    `arguments`. The filter that drops unknown fields dropped them, and the
+    server answered "operation is required" to a call that had just supplied it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _server_env(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+
+    async def test_the_parameters_reach_the_tool_they_belong_to(self):
+        from fastmcp import Client
+
+        async with Client(build_mcp_server()) as client:
+            result = await client.call_tool("call_tool", {"name": "manageProfiles", "operation": "list"})
+        content = json.dumps(getattr(result, "structured_content", None) or {})
+        assert "GET /profiles" in content, content
+
+    async def test_what_is_inside_arguments_stays_wins(self):
+        """Lifting fills a gap; it never overwrites what was sent correctly."""
+        from fastmcp import Client
+
+        async with Client(build_mcp_server()) as client:
+            result = await client.call_tool(
+                "call_tool",
+                {"name": "manageProfiles", "operation": "delete", "arguments": {"operation": "list"}},
+            )
+        content = json.dumps(getattr(result, "structured_content", None) or {})
+        assert "GET /profiles" in content, content
+        assert "DELETE" not in content, content
+
+    async def test_a_key_the_named_tool_does_not_declare_is_still_reported_as_ignored(self):
+        from fastmcp import Client
+
+        async with Client(build_mcp_server()) as client:
+            result = await client.call_tool(
+                "call_tool", {"name": "manageProfiles", "operation": "list", "totally_made_up": 1}
+            )
+        assert "totally_made_up" in json.dumps(getattr(result, "structured_content", None) or {})
+
+
+class TestRankingOnTheWordsTheCatalogOwns:
+    """With `name: result.result` resolving to the top-ranked tool, ranking chooses the tool.
+
+    Measured on 31 queries in the shape the actor writes and on all 89 step
+    prompts: before this rule 17/31 and 24/89 answered with the right tool
+    first; 14 of the misses named manageProfiles, because every task states the
+    profile it acts on and `profile` is half of manageProfiles' name. Two steps
+    in that run deleted the test profile while doing list work.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _server_env(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+
+    @pytest.mark.parametrize(
+        ("query", "kept"),
+        [
+            ("remove zip from security_tlds for profile 87c444", "remove zip from security_tlds for"),
+            ("Update the general settings for profile '87c444' to web3", "Update the general settings for to web3"),
+            ("delete profile", "delete profile"),
+            ("delete profile TEST_PROFILE_20261029", "delete profile TEST_PROFILE_20261029"),
+            ("plot 23228d", "plot 23228d"),
+        ],
+    )
+    def test_a_scope_reference_comes_out_and_a_subject_stays(self, query, kept):
+        """`profile 87c444` names which account, not which tool."""
+        stripped = ts._strip_scope_mentions(query, {"profile"})
+        assert " ".join(stripped.split()) == " ".join(kept.split())
+
+    def test_the_scope_words_are_read_from_the_catalog(self):
+        """profile_id is on every tool; metric belongs to two of them."""
+        from fastmcp.tools.base import Tool
+
+        tools = [
+            Tool.from_function(lambda profile_id, list_type: None, name="manageLists"),
+            Tool.from_function(lambda profile_id, entry_id: None, name="manageRewrites"),
+            Tool.from_function(lambda profile_id, metric: None, name="queryAnalytics"),
+            Tool.from_function(lambda profile_id, name: None, name="manageProfiles"),
+        ]
+        assert "profile" in ts._scope_words(tools)
+        assert "metric" not in ts._scope_words(tools)
+
+    def test_a_word_unique_to_one_tool_name_is_not_cancelled_by_the_vocabulary(self):
+        """`get` is an accepted value of four tools; `settings` belongs to one name."""
+        from typing import Literal
+
+        from fastmcp.tools.base import Tool
+
+        def make(name: str) -> Tool:
+            def run(operation: Literal["get", "update"] = "get") -> dict:
+                return {}
+
+            return Tool.from_function(run, name=name)
+
+        tools = [make("manageSettings"), make("manageLists"), make("manageLogs"), make("manageProfiles")]
+        ranked = [tool.name for tool in ts._rank_by_name_overlap(tools, "read the current settings")]
+        assert ranked[0] == "manageSettings"
+
+    @pytest.mark.parametrize(
+        ("query", "first"),
+        [
+            ("remove zip from security_tlds for profile 87c444", "manageLists"),
+            ("replace privacy_natives with alexa profile 87c444", "manageLists"),
+            ("add entry to denylist profile 87c444", "manageLists"),
+            ("clear query logs for profile 81b222", "manageLogs"),
+            ("update performance settings for profile 51c8a4", "manageSettings"),
+            ("add a rewrite for router.home in profile 87c444", "manageRewrites"),
+            ("delete profile TEST_PROFILE_20261029", "manageProfiles"),
+            ("list profiles", "manageProfiles"),
+            ("doh example.com for profile 87c444", "dohLookup"),
+            ("analytics plot profile 23228d ipVersions", "plotAnalytics"),
+            ("time series destinations profile 81b222", "queryAnalytics"),
+        ],
+    )
+    async def test_a_query_in_the_shape_the_actor_writes_answers_the_right_tool(self, monkeypatch, query, first):
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        from fastmcp import Client
+
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": query})
+        assert next(tool["name"] for tool in found.data) == first
