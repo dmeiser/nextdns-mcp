@@ -163,9 +163,9 @@ async def queryAnalytics(
         - ``root``: For the ``domains`` metric, group results by root domain (boolean).
 
     Examples:
-        - totals: ``queryAnalytics(metric="status", profile_id="abc123", from_time="-1d")``
-        - time series: ``queryAnalytics(metric="status", profile_id="abc123", from_time="-1d", series=true)``
-        - destinations: ``queryAnalytics(metric="destinations", profile_id="abc123", from_time="-1d", destination_type="countries")``
+        - totals: ``queryAnalytics(metric="status", profile_id="<profile id>", from_time="-1d")``
+        - time series: ``queryAnalytics(metric="status", profile_id="<profile id>", from_time="-1d", series=true)``
+        - destinations: ``queryAnalytics(metric="destinations", profile_id="<profile id>", from_time="-1d", destination_type="countries")``
     """
     return await _query_analytics_impl(
         metric=metric,
