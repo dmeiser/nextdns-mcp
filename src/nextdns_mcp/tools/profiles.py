@@ -17,14 +17,23 @@ from ..utils import _api_request_payload, _build_query_params, resolve_profile_i
 ProfileOperation = Literal["list", "create", "get", "update", "delete"]
 
 # Callers name the intent rather than the enum: live runs show manageProfiles
-# asked for remove, rename, set, replace and add. Each means exactly one thing
-# for this tool, so it is resolved; anything else still gets the schema error.
+# asked for rename, set, replace and add. Each means exactly one thing for this
+# tool, so it is resolved; anything else still gets the schema error.
+#
+# `remove` is deliberately NOT an alias for `delete` here, even though a live
+# run showed it. On this tool the verb is ambiguous - a caller doing "remove X
+# from the denylist" reaches for manageProfiles(operation="remove", profile_id=…)
+# and the alias would turn that wrong-tool call into a deleted profile. An
+# alias is only safe when the operation it selects is what the caller most
+# likely meant *and* being wrong is recoverable; deleting a profile is neither.
+# `delete` is in the published enum, so a caller that means it says it, and the
+# schema error lists it for one that does not.
 ProfileOperationId = Annotated[
     ProfileOperation,
     before_validator(
         operation_aliases(
             get_args(ProfileOperation),
-            {"remove": "delete", "rename": "update", "set": "update", "replace": "update", "add": "create"},
+            {"rename": "update", "set": "update", "replace": "update", "add": "create"},
         )
     ),
 ]
@@ -108,15 +117,18 @@ async def manageProfiles(
     """Manage NextDNS profiles.
 
     A profile is the account-level object that the other tools act on; this tool
-    manages the profile record itself — list, create, get, rename, delete. Most
-    other tools require a ``profile_id`` from this tool.
+    manages the profile record itself — list, create, get, update, delete. Most
+    other tools require a ``profile_id`` from this tool. Taking an entry out of
+    something *inside* a profile is that tool's job, not this one: a list entry
+    is ``manageLists``, a DNS rewrite is ``manageRewrites``.
 
     Operations:
         - ``list``: Return profiles the API key can access (supports ``cursor`` for pagination).
         - ``create``: Create a new profile (requires ``name``).
         - ``get``: Retrieve a single profile (requires ``profile_id``).
         - ``update``: Rename a profile (requires ``profile_id`` and ``name``).
-        - ``delete``: Remove a profile (requires ``profile_id``).
+        - ``delete``: Delete a profile permanently (requires ``profile_id``). This
+          deletes the profile and everything configured in it; there is no undo.
 
     Examples:
         - list:        ``manageProfiles(operation="list")``
