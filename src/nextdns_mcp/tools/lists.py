@@ -349,12 +349,12 @@ async def manageLists(
           is rejected locally with ``invalid_argument`` naming its index, rather than sent upstream.
 
     Examples:
-        - get: ``manageLists(list_type="denylist", operation="get", profile_id="abc123")``
-        - add: ``manageLists(list_type="denylist", operation="add", profile_id="abc123", entry={"id": "example.com"})``
-        - remove: ``manageLists(list_type="denylist", operation="remove", profile_id="abc123", entry_id="example.com")``
-        - replace: ``manageLists(list_type="privacy_blocklists", operation="replace", profile_id="abc123", entries=[{"id": "nextdns-recommended"}])``
-        - add parental category: ``manageLists(list_type="parental_categories", operation="add", profile_id="abc123", entry={"id": "gambling"})``
-        - update parental service: ``manageLists(list_type="parental_services", operation="update", profile_id="abc123", entry_id="tiktok", entry={"active": False})``
+        - get: ``manageLists(list_type="denylist", operation="get", profile_id="<profile id>")``
+        - add: ``manageLists(list_type="denylist", operation="add", profile_id="<profile id>", entry={"id": "example.com"})``
+        - remove: ``manageLists(list_type="denylist", operation="remove", profile_id="<profile id>", entry_id="example.com")``
+        - replace: ``manageLists(list_type="privacy_blocklists", operation="replace", profile_id="<profile id>", entries=[{"id": "nextdns-recommended"}])``
+        - add parental category: ``manageLists(list_type="parental_categories", operation="add", profile_id="<profile id>", entry={"id": "gambling"})``
+        - update parental service: ``manageLists(list_type="parental_services", operation="update", profile_id="<profile id>", entry_id="tiktok", entry={"active": False})``
     """
     return await _manage_lists_impl(
         list_type=list_type,

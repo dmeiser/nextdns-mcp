@@ -493,9 +493,9 @@ async def plotAnalytics(
       larger ``interval``.
 
     Examples:
-        - ``plotAnalytics(metric="status", profile_id="abc123", from_time="-1d")``
-        - ``plotAnalytics(metric="devices", profile_id="abc123", from_time="-7d", interval=86400)``
-        - a year of data: ``plotAnalytics(metric="status", profile_id="abc123", from_time="-1y", interval=43200)``
+        - ``plotAnalytics(metric="status", profile_id="<profile id>", from_time="-1d")``
+        - ``plotAnalytics(metric="devices", profile_id="<profile id>", from_time="-7d", interval=86400)``
+        - a year of data: ``plotAnalytics(metric="status", profile_id="<profile id>", from_time="-1y", interval=43200)``
 
     Returns:
         An MCP ImageContent PNG chart, or an error dict if data is unavailable.

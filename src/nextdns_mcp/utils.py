@@ -374,4 +374,34 @@ async def _api_request_payload(
     try:
         return await _api_request(method, url, params=params, json_body=json_body)
     except NextDNSError as e:
-        return _handle_api_error(e)
+        return _note_404_on_a_profile_path(_handle_api_error(e), url)
+
+
+# The first path segment every profile-scoped endpoint shares.
+_PROFILE_PATH_RE = re.compile(r"^/profiles/([^/?#]+)")
+
+
+def _note_404_on_a_profile_path(payload: dict[str, Any], url: str) -> dict[str, Any]:
+    """Say which id a 404 under ``/profiles/<id>`` could be blaming.
+
+    A 404 on that path has two possible causes and the upstream answer does not
+    say which: the profile id is wrong, or the entry within the profile is.
+    Live runs show the first happening because the tool description shows a
+    ``profile_id="abc123"`` example and the caller sends exactly that - a
+    six-character hex string, which is the shape of a real NextDNS profile id,
+    so nothing about it reads as a placeholder.
+
+    The hint names both possibilities rather than guessing one, and where to
+    get a real profile id.
+    """
+    if not isinstance(payload, dict) or payload.get("upstream_code") != "notFound":
+        return payload
+    if not _PROFILE_PATH_RE.match(url):
+        return payload
+    return {
+        **payload,
+        "hint": (
+            "a 404 here means the profile id or the entry id in this request does not exist. "
+            'manageProfiles(operation="list") returns the profile ids this API key can access'
+        ),
+    }

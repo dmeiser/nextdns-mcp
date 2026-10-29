@@ -81,8 +81,8 @@ async def manageSettings(
     to change.
 
     Examples:
-        - get: ``manageSettings(operation="get", category="privacy", profile_id="abc123")``
-        - update: ``manageSettings(operation="update", category="privacy", profile_id="abc123", settings={"disguisedTrackers": True})``
+        - get: ``manageSettings(operation="get", category="privacy", profile_id="<profile id>")``
+        - update: ``manageSettings(operation="update", category="privacy", profile_id="<profile id>", settings={"disguisedTrackers": True})``
     """
     return await _manage_settings_impl(
         operation=operation,

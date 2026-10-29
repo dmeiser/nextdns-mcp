@@ -83,9 +83,9 @@ List, create, get, update, or delete profiles. Use this first to discover the
 - `operation="list"` (paginated: if the response includes a `cursor`, pass
   it as `cursor="..."` to fetch the next page)
 - `operation="create" name="My Profile"`
-- `operation="get" profile_id="abc123"`
-- `operation="update" profile_id="abc123" name="New Name"`
-- `operation="delete" profile_id="abc123"`
+- `operation="get" profile_id="<profile id>"`
+- `operation="update" profile_id="<profile id>" name="New Name"`
+- `operation="delete" profile_id="<profile id>"`
 
 ### manageSettings
 Get or update one of the seven settings categories:
@@ -157,32 +157,32 @@ consume no `limit`, so it is validated but never sent.
 ### dohLookup
 Perform a DNS-over-HTTPS lookup through NextDNS:
 
-- `dohLookup(domain="example.com", profile_id="abc123", record_type="A")`
+- `dohLookup(domain="example.com", profile_id="<profile id>", record_type="A")`
 
 ## Common workflows
 
 ### Block a domain
-1. `manageLists(list_type="denylist", operation="add", profile_id="abc123", entry={"id": "bad.example.com"})`
+1. `manageLists(list_type="denylist", operation="add", profile_id="<profile id>", entry={"id": "bad.example.com"})`
 
 ### Allow a domain
-1. `manageLists(list_type="allowlist", operation="add", profile_id="abc123", entry={"id": "safe.example.com"})`
+1. `manageLists(list_type="allowlist", operation="add", profile_id="<profile id>", entry={"id": "safe.example.com"})`
 
 ### Block a parental control category
-1. `manageLists(list_type="parental_categories", operation="add", profile_id="abc123", entry={"id": "gambling"})`
+1. `manageLists(list_type="parental_categories", operation="add", profile_id="<profile id>", entry={"id": "gambling"})`
 
 ### Block or toggle a service in parental control
-1. `manageLists(list_type="parental_services", operation="add", profile_id="abc123", entry={"id": "tiktok"})`
-2. `manageLists(list_type="parental_services", operation="update", profile_id="abc123", entry_id="tiktok", entry={"active": False})`
+1. `manageLists(list_type="parental_services", operation="add", profile_id="<profile id>", entry={"id": "tiktok"})`
+2. `manageLists(list_type="parental_services", operation="update", profile_id="<profile id>", entry_id="tiktok", entry={"active": False})`
 
 ### View blocked query trends
-1. `queryAnalytics(metric="status", profile_id="abc123", from_time="-1d", series=true)`
-2. `plotAnalytics(metric="status", profile_id="abc123", from_time="-1d")`
+1. `queryAnalytics(metric="status", profile_id="<profile id>", from_time="-1d", series=true)`
+2. `plotAnalytics(metric="status", profile_id="<profile id>", from_time="-1d")`
 
 ### Add a DNS rewrite
-1. `manageRewrites(operation="add", profile_id="abc123", name="router.home", content="192.168.1.1")`
+1. `manageRewrites(operation="add", profile_id="<profile id>", name="router.home", content="192.168.1.1")`
 
 ### Delete a DNS rewrite
-1. `manageRewrites(operation="list", profile_id="abc123")` — find the entry's opaque `id`
-2. `manageRewrites(operation="delete", profile_id="abc123", entry_id="<id-from-list>")`
+1. `manageRewrites(operation="list", profile_id="<profile id>")` — find the entry's opaque `id`
+2. `manageRewrites(operation="delete", profile_id="<profile id>", entry_id="<id-from-list>")`
 """
     )

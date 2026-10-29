@@ -148,7 +148,7 @@ _STATUS_DOC_LINK = re.compile(r"\s*For more information check: \S+")
 # an unlisted code is still named, just without a gloss.
 _UPSTREAM_CODE_GLOSS = {
     "duplicate": "the entry already exists",
-    "notFound": "no such entry on this profile",
+    "notFound": "nothing matches that id",
     "insufficientRole": "the API key cannot write to this profile",
     "authRequired": "no API key was accepted",
     "required": "a required parameter was not sent",

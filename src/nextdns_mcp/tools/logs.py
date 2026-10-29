@@ -409,10 +409,10 @@ async def manageLogs(
     most 1000.
 
     Examples:
-        - get recent: ``manageLogs(operation="get", profile_id="abc123", limit=10)``
-        - get raw logs: ``manageLogs(operation="get", profile_id="abc123", raw=true)``
-        - download: ``manageLogs(operation="download", profile_id="abc123", from_time="-1d")``
-        - clear: ``manageLogs(operation="clear", profile_id="abc123")``
+        - get recent: ``manageLogs(operation="get", profile_id="<profile id>", limit=10)``
+        - get raw logs: ``manageLogs(operation="get", profile_id="<profile id>", raw=true)``
+        - download: ``manageLogs(operation="download", profile_id="<profile id>", from_time="-1d")``
+        - clear: ``manageLogs(operation="clear", profile_id="<profile id>")``
     """
     return await _manage_logs_impl(
         operation=operation,

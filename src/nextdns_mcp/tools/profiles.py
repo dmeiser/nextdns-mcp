@@ -63,7 +63,15 @@ async def _profiles_create(name: str | None) -> dict[str, Any]:
     if not access.any_writable:
         return error_payload(ErrorCode.WRITE_ACCESS_DENIED, "Write access denied: no profiles are writable")
     if not name:
-        return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "name is required for create operation")
+        # The caller has a profile_id in hand from an earlier call and reaches
+        # for it; `name` is the new profile's own display name, which no
+        # earlier call returned.
+        return error_payload(
+            ErrorCode.MISSING_REQUIRED_ARGUMENT,
+            "name is required for create operation",
+            hint="name is the new profile's own display label - any label you choose, "
+            "not a profile_id and not a name taken from an example",
+        )
     return await _api_request_payload("POST", "/profiles", json_body={"name": name})
 
 
@@ -134,7 +142,7 @@ async def manageProfiles(
         - list:        ``manageProfiles(operation="list")``
         - list (page): ``manageProfiles(operation="list", cursor="j2k3zl3b4v")``
         - create:      ``manageProfiles(operation="create", name="Home Network")``
-        - get:         ``manageProfiles(operation="get", profile_id="abc123")``
+        - get:         ``manageProfiles(operation="get", profile_id="<profile id>")``
     """
     return await _manage_profiles_impl(
         operation=operation,
