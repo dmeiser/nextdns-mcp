@@ -2640,7 +2640,14 @@ def _failure_modes(row: dict[str, Any]) -> list[tuple[str, str]]:
     tool = str(row.get("mcp_tool") or "")
 
     if not records:
-        modes.append(("no call reached the server", tool))
+        # A step whose actor never got as far as a call is usually the model
+        # stalling, not the server refusing: the harness already says which.
+        # Separating the two is what keeps a run's infrastructure noise from
+        # looking like a contract problem.
+        if any(str(t).startswith("stall") for t in response.get("transients") or []):
+            modes.append(("actor stalled without calling", tool))
+        else:
+            modes.append(("no call reached the server", tool))
 
     for record in records:
         if record.get("ok"):
