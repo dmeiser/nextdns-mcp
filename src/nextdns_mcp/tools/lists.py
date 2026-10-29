@@ -78,7 +78,7 @@ async def _lists_add(base_url: str, entry: str | dict[str, Any] | None) -> dict[
         return error_payload(ErrorCode.MISSING_REQUIRED_ARGUMENT, "entry is required for add operation")
     entry = _coerce_json_arg(entry)
     body = _relax_list_entry(entry) if isinstance(entry, dict) else {"id": entry}
-    entry_error = _validate_list_entry(body, "entry", "add")
+    entry_error = _validate_list_entry(body, "entry", "add", hint=_ADD_ENTRY_HINT)
     if entry_error:
         return entry_error
     result = await _api_request_payload("POST", base_url, json_body=body)
@@ -141,7 +141,7 @@ def _coerce_replace_entry(entry: Any) -> Any:
 def _validate_replace_entries(entries: list[Any]) -> dict[str, Any] | None:
     """Return an error dict if a replace payload has a malformed entry (issue #189)."""
     for index, entry in enumerate(entries):
-        error = _validate_list_entry(entry, f"entries[{index}]", "replace", index=index)
+        error = _validate_list_entry(entry, f"entries[{index}]", "replace", index=index, hint=_REPLACE_ENTRIES_HINT)
         if error:
             return error
     return None
@@ -194,6 +194,20 @@ _ENTRY_ID_HINT = (
     "entry_id is the entry's own id as returned by operation='get': the hostname for "
     "allowlist/denylist, the blocklist name for privacy_blocklists, the TLD for security_tlds, "
     "and the category/service name for parental_categories/parental_services"
+)
+
+# Seen live: an add sent entry={"active": true} with the value in entry_id, and a
+# replace sent entry_id="alexa". Both names exist on the tool, so the caller had
+# no way to tell they belong to the other operations.
+_ADD_ENTRY_HINT = (
+    'entry is the value to add: a plain string ("ads.example.com") or an object with a '
+    'string id ({"id": "ads.example.com"}). entry_id names an existing entry and is '
+    "not how a new one is added"
+)
+
+_REPLACE_ENTRIES_HINT = (
+    'entries is the whole replacement list: ["zip"] or [{"id": "zip"}]. '
+    "entry_id names one existing entry and is not used by replace"
 )
 
 

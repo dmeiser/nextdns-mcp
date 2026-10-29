@@ -106,3 +106,21 @@ class TestTheTwoLogToolsPointAtEachOther:
             described = {tool.name: (tool.description or "") for tool in await client.list_tools()}
         settings = " ".join(described["manageSettings"].split())
         assert "manageLogs" in settings
+
+
+class TestTheMessageFitsWhatIsRecorded:
+    """The call log keeps 300 characters of the error. httpx's pointer to the MDN
+    status page was what survived them; the diagnosis was what got cut."""
+
+    def test_the_transport_boilerplate_is_gone(self):
+        exc = httpx.HTTPError("boom")
+        exc.response = _response(404, {"errors": [{"code": "notFound", "detail": "Entry not found."}]})
+        payload = http_error_payload(
+            "HTTP error in PATCH /profiles/abc/allowlist/x.example.com: "
+            "Client error '404 Not Found' for url 'https://api.nextdns.io/profiles/abc/allowlist/x.example.com' "
+            "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+            exc,
+        )
+        assert "developer.mozilla.org" not in payload["error"]
+        assert "upstream: Entry not found." in payload["error"]
+        assert len(payload["error"]) < 300, "the call log keeps this many characters"

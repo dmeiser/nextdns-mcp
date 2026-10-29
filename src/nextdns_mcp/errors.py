@@ -8,6 +8,7 @@ branch on the typed ``code`` instead of parsing opaque exception text.
 SPDX-License-Identifier: MIT
 """
 
+import re
 from typing import Any
 
 # Server-side cap on the number of characters of an unparseable upstream
@@ -139,6 +140,10 @@ def upstream_error_codes(body: Any) -> list[str]:
     return [str(item["code"]) for item in items if isinstance(item, dict) and isinstance(item.get("code"), str)]
 
 
+# httpx's boilerplate on every raise_for_status() message.
+_STATUS_DOC_LINK = re.compile(r"\s*For more information check: \S+")
+
+
 def upstream_error_details(body: Any) -> list[str]:
     """The upstream diagnosis as short sentences, naming the parameter at fault.
 
@@ -223,6 +228,11 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
     details = upstream_error_details(parsed)
     if details:
         payload["error"] = f"{payload['error']} | upstream: {'; '.join(details[:3])}"
+    # httpx appends a pointer to the MDN page for the status code to every
+    # raise_for_status() message. It describes HTTP, not this request, and it
+    # eats the room the diagnosis needs - the call log keeps 300 characters of
+    # the message, and the link was what survived.
+    payload["error"] = _STATUS_DOC_LINK.sub("", str(payload["error"]))
     return payload
 
 
