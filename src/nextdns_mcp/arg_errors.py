@@ -35,6 +35,18 @@ _MAX_HINT_VALUES = 14
 class ArgumentHintMiddleware(Middleware):
     """Append the schema's own explanation to an argument-validation failure."""
 
+    def __init__(self, catalog: Any = None) -> None:
+        """`catalog` supplies the real tools when ``tools/list`` does not.
+
+        Under progressive disclosure ``list_tools()`` returns only the
+        synthetic search pair, so a hint that compares other tools' schemas
+        would silently do nothing in exactly the mode where callers discover
+        tools by searching and guess their arguments wrong most often. The
+        search transform's catalog is the same list its call_tool proxy
+        dispatches against.
+        """
+        self._catalog = catalog
+
     async def on_call_tool(
         self,
         context: MiddlewareContext,
@@ -43,7 +55,7 @@ class ArgumentHintMiddleware(Middleware):
         try:
             return await call_next(context)
         except FastMCPValidationError as exc:
-            hint = await _hint_for(context, exc)
+            hint = await _hint_for(context, exc, self._catalog)
             if not hint:
                 raise
             # The hint goes first: the call log bounds the recorded error, and a
@@ -51,7 +63,7 @@ class ArgumentHintMiddleware(Middleware):
             raise type(exc)(f"{hint}\n\n{exc}") from exc
 
 
-async def _hint_for(context: MiddlewareContext, exc: Exception) -> str:
+async def _hint_for(context: MiddlewareContext, exc: Exception, catalog: Any = None) -> str:
     """Build the hint for a validation failure, or '' when it cannot be done."""
     problems = _pydantic_errors(exc)
     if not problems:
@@ -92,7 +104,7 @@ async def _hint_for(context: MiddlewareContext, exc: Exception) -> str:
             # the wrong-tool mistake this server actually makes: a caller doing
             # "remove X from the denylist" sends operation="remove" to
             # manageProfiles, where it is not an operation at all.
-            note = await _other_tool_for(fastmcp_context, name, param, problem.get("input"))
+            note = await _other_tool_for(fastmcp_context, name, param, problem.get("input"), catalog)
             if note:
                 lines.append(note)
 
@@ -104,7 +116,7 @@ async def _hint_for(context: MiddlewareContext, exc: Exception) -> str:
     return "\n".join(dict.fromkeys(lines))
 
 
-async def _other_tool_for(fastmcp_context: Any, name: str, param: str, value: Any) -> str:
+async def _other_tool_for(fastmcp_context: Any, name: str, param: str, value: Any, catalog: Any = None) -> str:
     """Say so when the rejected value is a valid ``param`` for another tool.
 
     Read out of the published schemas, like every other hint here: no guess
@@ -113,7 +125,10 @@ async def _other_tool_for(fastmcp_context: Any, name: str, param: str, value: An
     if not isinstance(value, str) or not value:
         return ""
     try:
-        tools = list(await fastmcp_context.fastmcp.list_tools())
+        if catalog is not None:
+            tools = list(await catalog(fastmcp_context))
+        else:
+            tools = list(await fastmcp_context.fastmcp.list_tools())
     except Exception:  # pragma: no cover - a hint must never break the error path
         logger.debug("could not list tools to explain a rejected value for %s.%s", name, param, exc_info=True)
         return ""

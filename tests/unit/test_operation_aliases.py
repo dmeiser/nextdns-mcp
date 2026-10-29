@@ -139,3 +139,23 @@ class TestSynonymsReachTheTool:
         ]
         assert tools["manageRewrites"].input_schema["properties"]["operation"]["enum"] == ["list", "add", "delete"]
         assert tools["manageLogs"].input_schema["properties"]["operation"]["enum"] == ["get", "clear", "download"]
+
+
+class TestTheCrossToolNoteUnderDisclosure:
+    """The note has to work in the mode where callers guess names most.
+
+    Progressive disclosure hides the real tools from tools/list, so a hint
+    built from list_tools() silently does nothing there - which is the mode
+    where the wrong-tool mistake is made.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disclosure_env(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+
+    @pytest.mark.asyncio
+    async def test_a_value_that_belongs_to_another_tool_says_so_when_tools_are_hidden(self):
+        async with Client(build_mcp_server()) as client:
+            with pytest.raises(ToolError) as raised:
+                await client.call_tool("call_tool", {"name": "manageProfiles", "arguments": {"operation": "remove"}})
+        assert "'remove' is a valid operation for manageLists, not for manageProfiles." in str(raised.value)

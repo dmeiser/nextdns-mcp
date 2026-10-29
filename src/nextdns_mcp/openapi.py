@@ -41,7 +41,7 @@ from .arg_errors import ArgumentHintMiddleware
 from .call_log import CallLogMiddleware, call_log_path
 from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
-from .tool_search import SearchAnswerNameMiddleware, build_search_transform
+from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import close_doh_client
 from .usage import server_instructions
 from .utils import is_float_shaped, is_integer_shaped
@@ -316,18 +316,20 @@ def create_mcp_server(client: Any = None) -> FastMCP:
         transforms=transforms,
     )
 
+    # Under disclosure the caller reaches tools only through call_tool, and
+    # live runs show three ways it gets that wrapper wrong: the whole search
+    # answer where a name belongs (`name: result.result`), a name typed from
+    # memory, and the tool's parameters sent beside `name` instead of inside
+    # `arguments`. Each is refused by call_tool's own schema or stripped by the
+    # filter below, so the step ends with no call at all. Added first, so it
+    # runs before that filter (which would drop the misplaced parameters) and
+    # before the call log (which then records the call that actually happened).
+    if search_transform is not None:
+        mcp.add_middleware(CallToolShapeMiddleware(transform=search_transform))
+
     # Add middleware to strip unknown fields from tool arguments
     # This allows AI clients (like OpenAI) that send extra fields to work properly
     mcp.add_middleware(StripExtraFieldsMiddleware())
-
-    # Under disclosure the caller reaches tools only through call_tool, and live
-    # runs show it passing the whole search answer where a name belongs
-    # (`name: result.result`). FastMCP refuses that against call_tool's own
-    # `name: str`, so nothing runs and the step produces no call at all. This
-    # resolves the answer to the tool it ranks first. Added before the call log
-    # so the log records the call that actually happened.
-    if search_transform is not None:
-        mcp.add_middleware(SearchAnswerNameMiddleware())
 
     # Record what this server actually executed (see nextdns_mcp.call_log). A
     # read leaves no trace in the API, so a harness that verifies over REST
@@ -338,8 +340,12 @@ def create_mcp_server(client: Any = None) -> FastMCP:
         logger.info("Call log enabled: %s", call_log_path())
 
     # Added last so it sits innermost: it re-raises the enriched failure, and the
-    # call log above records what the caller was actually told.
-    mcp.add_middleware(ArgumentHintMiddleware())
+    # call log above records what the caller was actually told. Under disclosure
+    # it is also told where the transform's catalog is, because tools/list no
+    # longer shows the tools whose schemas explain the failure.
+    mcp.add_middleware(
+        ArgumentHintMiddleware(catalog=None if search_transform is None else search_transform.get_tool_catalog)
+    )
 
     logger.info("MCP server created successfully")
     default_profile = get_default_profile()
