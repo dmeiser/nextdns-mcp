@@ -229,6 +229,10 @@ class Report:
     setup: str = ""
     cleanup: str = ""
     skipped_sections: list[str] = field(default_factory=list)
+    # Events that say the run did not measure what it claims to: a test profile
+    # deleted by something outside the run, a provider outage that ended it.
+    # Printed by --summarize so a contaminated number cannot be read as a score.
+    notes: list[str] = field(default_factory=list)
     results: list[CheckResult] = field(default_factory=list)
     # LLM-actor metadata (the "who acted" half of the report).
     actor_kind: str = ""
@@ -272,6 +276,7 @@ class Report:
             "setup": self.setup,
             "cleanup": self.cleanup,
             "skipped_sections": self.skipped_sections,
+            "notes": self.notes,
             "actor_kind": self.actor_kind,
             "actor_tool_calls": self.actor_tool_calls,
             "actor_tools_used": self.actor_tools_used,

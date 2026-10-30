@@ -1112,13 +1112,172 @@ class TestTransientActorFailure:
         )
 
     def test_opencodes_other_registration_wording_is_also_a_transient(self, h):
-        """Scored as a model failure until the wording was read from a live run."""
+        """Scored as a model failure until the wording was read from a live run.
+
+        The name in the message is the one opencode registers for a direct MCP
+        tool, `<server>_<tool>`: that call was aimed correctly and met a server
+        that had not finished registering.
+        """
         run = h.ActorRun(command=["x"])
-        blob = 'No tool named "tools.nextdns.search_tools" is currently available.'
+        blob = 'No tool named "nextdns_search_tools" is currently available.'
         assert h._transient_actor_failure(run, blob.lower()) == (
             "unknown-tool",
             "MCP tool not registered yet",
         )
+
+    def test_the_code_mode_name_called_directly_is_its_own_kind(self, h):
+        """`tools.nextdns.search_tools` is a code-mode path, not a registered tool.
+
+        25 attempts across two runs used it directly and none ever reached the
+        server, so retrying it three times as a registration hiccup measured the
+        same thing each time and labelled the loss as infrastructure.
+        """
+        run = h.ActorRun(command=["x"])
+        blob = 'No tool named "tools.nextdns.search_tools" is currently available.'
+        assert h._transient_actor_failure(run, blob.lower()) == (
+            "wrong-tool-path",
+            "actor called the code-mode tool name directly",
+        )
+
+    def test_that_loss_is_named_in_the_summary(self, h):
+        """A step lost to it is not reported as an unexplained no-call."""
+        row = {
+            "mcp_tool": "manageLists",
+            "mcp_response": {
+                "server_calls": [],
+                "transients": ["wrong-tool-path: actor called the code-mode tool name directly"],
+            },
+        }
+        modes = [mode for mode, _tool in h._failure_modes(row)]
+        assert "actor called a tool path this client does not expose" in modes
+        assert "no call reached the server" not in modes
+
+    def test_a_provider_that_refuses_the_model_is_a_transient(self, h):
+        """Reproduced with a bare `opencode run`: the provider, not the server.
+
+        "Function id '...' version 'null': Specified function in account '...'
+        is not found" - the attempt produced no tool call, so the step measured
+        nothing and must not be scored as a model failure.
+        """
+        run = h.ActorRun(command=["x"])
+        run.error = (
+            "Function id '9fa6fd04-ba2c-4bb3-90b7-ede407a9290f' version 'null': "
+            "Specified function in account 'X1UCRn4VumVsuKcJJB603mP5Yx09bRnJ67Idchb50ys' is not found"
+        )
+        blob = " ".join([run.error, run.final_text or ""]).lower()
+        assert h._transient_actor_failure(run, blob) == (
+            "provider-unavailable",
+            "model provider is not serving this model",
+        )
+        assert h._provider_outage(run) is True
+
+    def test_the_outage_reaches_the_harness_as_an_event_stream_error(self, h):
+        """The message is an {"type":"error"} line on stdout, not stderr.
+
+        The first version of the detector read only `error`/`stderr` and missed
+        every step of a live outage run.
+        """
+        run = h.ActorRun(command=["x"], exit_code=1)
+        run.raw_lines = [
+            json.dumps(
+                {
+                    "type": "error",
+                    "error": {
+                        "message": "Function id '9fa6fd04': Specified function in account 'X1UCRn4V' is not found"
+                    },
+                }
+            )
+        ]
+        run.error = "actor harness exited with code 1"
+        blob = " ".join(h._extract_error_events(run)).lower()
+        assert h._transient_actor_failure(run, blob) == (
+            "provider-unavailable",
+            "model provider is not serving this model",
+        )
+        assert h._provider_outage(run) is True
+
+    def test_a_model_answer_is_never_read_as_an_outage(self, h):
+        """The same words inside a tool result mean the server answered."""
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [h.ToolCall(name="execute", result_text="profile is not found")]
+        assert h._provider_outage(run) is False
+        assert h._transient_actor_failure(run, "profile is not found")[0] == ""
+
+    def test_an_outage_step_is_named_in_the_summary(self, h):
+        row = {
+            "mcp_tool": "manageLists",
+            "mcp_response": {
+                "server_calls": [],
+                "transients": ["provider-unavailable: model provider is not serving this model"],
+            },
+        }
+        modes = [mode for mode, _tool in h._failure_modes(row)]
+        assert modes == ["model provider was not serving the model"]
+
+
+class TestRunValidityNotes:
+    """A number that did not measure the model has to say so on the report."""
+
+    def test_notes_reach_the_summary_row(self, h):
+        report = h.Report()
+        report.notes.append("self-heal: test profile was deleted mid-run")
+        assert report.summary()["notes"] == ["self-heal: test profile was deleted mid-run"]
+
+    def test_summarize_warns_before_the_modes(self, h, tmp_path):
+        report = tmp_path / "r.jsonl"
+        rows = [
+            {
+                "id": "profiles.get",
+                "status": "failed",
+                "mcp_tool": "manageProfiles",
+                "error": "profile not found via REST",
+                "mcp_response": {"server_calls": [], "expected_call": {"ok": False, "why": "no call"}},
+            },
+            {"summary": {"notes": ["self-heal: test profile was deleted mid-run; recreated as 2c2b8f"]}},
+        ]
+        report.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        summary = h.summarize_reports([str(report)])
+        assert "RUN NOT A CLEAN MEASUREMENT" in summary
+        assert "recreated as 2c2b8f" in summary
+
+    def test_a_clean_run_carries_no_warning(self, h, tmp_path):
+        report = tmp_path / "clean.jsonl"
+        rows = [
+            {
+                "id": "profiles.list",
+                "status": "passed",
+                "mcp_tool": "manageProfiles",
+                "error": "",
+                "mcp_response": {
+                    "server_calls": [{"tool": "manageProfiles", "ok": True}],
+                    "expected_call": {"ok": True},
+                },
+            },
+            {"summary": {"notes": []}},
+        ]
+        report.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        assert "RUN NOT A CLEAN MEASUREMENT" not in h.summarize_reports([str(report)])
+
+    def test_steps_skipped_by_an_abort_are_not_counted_as_failures(self, h, tmp_path):
+        """Aborting leaves dozens of skipped rows; grouping them as failure
+        modes would bury the one mode that mattered."""
+        report = tmp_path / "abort.jsonl"
+        rows = [
+            {
+                "id": f"profiles.step{i}",
+                "status": "skipped",
+                "mcp_tool": "manageProfiles",
+                "reason": "model provider is not serving this model (run aborted)",
+                "mcp_response": {},
+            }
+            for i in range(4)
+        ] + [{"summary": {"notes": ["provider outage after 3 step(s): Specified function in account"]}}]
+        report.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        summary = h.summarize_reports([str(report)])
+        assert "no failures" in summary
+        assert "4 skipped" in summary
+        assert "model provider is not serving this model (run aborted)" in summary
+        assert "no call reached the server" not in summary
 
     def test_provider_stall_is_retried(self, h):
         run = h.ActorRun(command=["x"], error="actor harness timed out after 300s")
