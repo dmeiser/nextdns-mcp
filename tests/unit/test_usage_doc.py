@@ -96,14 +96,52 @@ def test_main_uses_sys_argv(monkeypatch):
 class TestServerInstructions:
     """Instructions the server sends at initialize, not text a harness injects."""
 
+    @pytest.mark.parametrize("mode", ["regex", "bm25"])
+    def test_a_small_catalog_is_described_by_name(self, mode):
+        """Eight tools cost less to name than every caller costs to search for them.
+
+        Full run 6: 19 of 36 failures died between searching and calling - the
+        caller's own chained expression threw before `call_tool` ran. Naming the
+        catalog removes the hop, and the names are the server's own contract.
+        """
+        from nextdns_mcp.server import _GROUPED_TOOLS
+        from nextdns_mcp.usage import ADVERTISE_CATALOG_MAX_TOOLS
+
+        names = [tool.__name__ for tool in _GROUPED_TOOLS]
+        assert len(names) <= ADVERTISE_CATALOG_MAX_TOOLS, "this server's own catalog must fit the rule"
+        text = server_instructions(mode, names)
+        for name in names:
+            assert f"`{name}`" in text, f"instructions do not name {name}"
+        assert "call_tool" in text
+
+    @pytest.mark.parametrize("mode", ["regex", "bm25"])
+    def test_a_large_catalog_is_pointed_at_search_instead(self, mode):
+        """The rule is size, not secrecy: a big catalog still hides its names."""
+        from nextdns_mcp.usage import ADVERTISE_CATALOG_MAX_TOOLS
+
+        many = [f"tool{index}" for index in range(ADVERTISE_CATALOG_MAX_TOOLS + 1)]
+        text = server_instructions(mode, many)
+        assert "does not advertise tool names" in text
+        assert "tool0" not in text
+
     @pytest.mark.parametrize("mode", ["off", "regex", "bm25"])
-    def test_never_names_a_real_tool(self, mode):
-        """Under disclosure the catalog is hidden; a name here would leak it."""
+    def test_nothing_is_named_when_the_caller_gives_no_names(self, mode):
+        """The default stays silent, so nothing depends on the caller passing them."""
         from nextdns_mcp.server import _GROUPED_TOOLS
 
         text = server_instructions(mode)
         for tool in _GROUPED_TOOLS:
             assert tool.__name__ not in text, f"instructions leaked tool name {tool.__name__}"
+
+    def test_the_built_server_publishes_its_own_names(self, monkeypatch):
+        """The names come from the registered tools, not a second list to drift."""
+        from nextdns_mcp.server import _GROUPED_TOOLS, build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        text = build_mcp_server().instructions
+        for tool in _GROUPED_TOOLS:
+            assert f"`{tool.__name__}`" in text, f"{tool.__name__} missing from the published instructions"
 
     @pytest.mark.parametrize("mode", ["off", "regex", "bm25"])
     def test_says_nothing_about_any_agent_cli(self, mode):

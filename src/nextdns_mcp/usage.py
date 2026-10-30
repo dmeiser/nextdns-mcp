@@ -4,8 +4,13 @@ SPDX-License-Identifier: MIT
 """
 
 import textwrap
+from collections.abc import Sequence
 
 from .tools.metrics import ANALYTICS_METRICS
+
+# Below this many tools, the instructions describe the catalog instead of
+# pointing at search: the hop costs a caller more than the context it saves.
+ADVERTISE_CATALOG_MAX_TOOLS = 12
 
 
 def _analytics_metric_bullets() -> str:
@@ -19,15 +24,21 @@ def _analytics_metric_bullets() -> str:
     return textwrap.fill(listed, width=72, initial_indent="- ", subsequent_indent="  ")
 
 
-def server_instructions(tool_search_mode: str) -> str:
+def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = ()) -> str:
     """Short instructions sent in the MCP ``initialize`` handshake.
 
     This is the spec's own server-to-client channel (clients put it in the model
     context), so the server — not any test harness or agent CLI — is the one
-    describing itself. It stays client-agnostic (no agent-specific wording),
-    never names a real tool (under progressive disclosure the catalog is
-    deliberately not advertised, so a name here would leak it), and only
-    describes this server: what it exposes and what its responses look like.
+    describing itself. It stays client-agnostic (no agent-specific wording) and
+    only describes this server: what it exposes and what its responses look like.
+
+    Whether it names its tools is a size question, not a secret. Progressive
+    disclosure exists so a large catalog does not eat context; with a catalog of
+    ``ADVERTISE_CATALOG_MAX_TOOLS`` or fewer, the names are cheaper to state
+    than the search every caller has to make to find them, so they are stated.
+    Above that, the instructions point at ``search_tools`` and ``tools/list``
+    stays the only place the names appear. Either way this is the server
+    choosing what it advertises about itself.
     It does not instruct the model how to behave — that is not a DNS server's
     business, and a line like "do not undo your own writes" would be a test
     harness's failure mode speaking through the product.
@@ -48,11 +59,25 @@ def server_instructions(tool_search_mode: str) -> str:
         "  whenever the server can say what to send instead.",
     ]
     if tool_search_mode and tool_search_mode != "off":
-        lines += [
-            "- This server does not advertise tool names. `search_tools` matches the",
-            "  words of a task to the tools that fit it and returns their exact names",
-            "  and schemas; `call_tool` runs one of those by that exact name.",
-        ]
+        if tool_names and len(tool_names) <= ADVERTISE_CATALOG_MAX_TOOLS:
+            listed = textwrap.fill(
+                ", ".join(f"`{name}`" for name in tool_names),
+                width=72,
+                initial_indent="  ",
+                subsequent_indent="  ",
+            )
+            lines += [
+                "- Its tools, each by the exact name `call_tool` takes it:",
+                listed,
+                "- `search_tools` matches the words of a task to the tools that fit",
+                "  it and returns each one with its full schema.",
+            ]
+        else:
+            lines += [
+                "- This server does not advertise tool names. `search_tools` matches the",
+                "  words of a task to the tools that fit it and returns their exact names",
+                "  and schemas; `call_tool` runs one of those by that exact name.",
+            ]
     return "\n".join(lines)
 
 

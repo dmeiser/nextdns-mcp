@@ -267,8 +267,9 @@ _SEARCH_TOOL_DESCRIPTION = """Search this server's tools with the words of the t
 
 Takes one argument object, {"query": "<words of the task>"}. The answer is an
 array of the matching tools in rank order, each an object with its exact `name`,
-its `description`, and its full input schema. This server does not advertise
-tool names, so a name that was not returned here is not one of its tools.
+its `description`, and its full input schema. A name that search_tools did not
+return, and that the server's instructions do not list, is not a tool of this
+server.
 """
 
 _CALL_TOOL_DESCRIPTION = """Run one of this server's tools by the exact name returned by search_tools.
