@@ -16,7 +16,9 @@ RewriteOperation = Literal["list", "add", "delete"]
 # "remove" for "delete". See coercion.operation_aliases for the rule.
 RewriteOperationId = Annotated[
     RewriteOperation,
-    before_validator(operation_aliases(get_args(RewriteOperation), {"get": "list", "remove": "delete"})),
+    before_validator(
+        operation_aliases(get_args(RewriteOperation), {"get": "list", "remove": "delete"}, tool="manageRewrites")
+    ),
 ]
 
 

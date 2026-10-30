@@ -20,6 +20,7 @@ from nextdns_mcp.call_log import (
     call_log_path,
     get_call_log,
     is_write,
+    resolve_operation,
     result_error,
 )
 from nextdns_mcp.server import build_mcp_server
@@ -57,6 +58,65 @@ class TestResultError:
 
     def test_success_has_no_error(self):
         assert result_error(self._R(structured={"data": []})) == ""
+
+
+class TestResolvedOperation:
+    """The log is what a read is judged on, so it must name the operation that ran.
+
+    A live run scored two successful reads as failures: the caller sent
+    `operation="list"`, the alias validator ran the `get` path, and the log
+    recorded `list`, so the checklist's `get` never matched.
+    """
+
+    def test_a_synonym_resolves_to_the_operation_that_runs(self):
+        assert resolve_operation("manageLists", "list") == "get"
+        assert resolve_operation("manageLogs", "list") == "get"
+        assert resolve_operation("manageRewrites", "remove") == "delete"
+        assert resolve_operation("manageProfiles", "rename") == "update"
+
+    def test_a_verb_that_is_not_an_alias_is_left_as_sent(self):
+        """An unknown verb never ran, so the log must not invent a resolution."""
+        assert resolve_operation("manageLists", "get") == "get"
+        assert resolve_operation("manageLists", "bogus") == "bogus"
+        assert resolve_operation("manageLists", "") == ""
+        assert resolve_operation("someOtherTool", "list") == "list"
+
+    def test_a_refused_synonym_is_not_resolved(self):
+        """manageProfiles refuses `remove` on purpose; the log keeps saying so."""
+        assert resolve_operation("manageProfiles", "remove") == "remove"
+
+    @pytest.mark.asyncio
+    async def test_the_log_records_the_resolved_operation_and_keeps_the_verb(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        path = tmp_path / "calls.jsonl"
+        monkeypatch.setenv(CALL_LOG_ENV, str(path))
+
+        async with Client(build_mcp_server()) as client:
+            with contextlib.suppress(Exception):  # denied upstream; still recorded
+                await client.call_tool(
+                    "manageLists", {"operation": "list", "list_type": "allowlist", "profile_id": "x"}
+                )
+
+        rows = _rows(path)
+        assert rows[0]["operation"] == "get"
+        assert rows[0]["operation_as_sent"] == "list"
+        assert rows[0]["write"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_canonical_call_carries_no_alias_field(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        path = tmp_path / "calls.jsonl"
+        monkeypatch.setenv(CALL_LOG_ENV, str(path))
+
+        async with Client(build_mcp_server()) as client:
+            with contextlib.suppress(Exception):
+                await client.call_tool("manageLists", {"operation": "get", "list_type": "allowlist", "profile_id": "x"})
+
+        rows = _rows(path)
+        assert rows[0]["operation"] == "get"
+        assert "operation_as_sent" not in rows[0]
 
 
 class TestCallLogMiddleware:

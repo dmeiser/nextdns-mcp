@@ -54,7 +54,8 @@ LogOperation = Literal["get", "clear", "download"]
 
 # "list the logs" asks for operation="get", and "delete" for "clear".
 LogOperationId = Annotated[
-    LogOperation, before_validator(operation_aliases(get_args(LogOperation), {"list": "get", "delete": "clear"}))
+    LogOperation,
+    before_validator(operation_aliases(get_args(LogOperation), {"list": "get", "delete": "clear"}, tool="manageLogs")),
 ]
 
 # Server-side cap for the ``limit`` parameter on ``get`` (maximum accepted by

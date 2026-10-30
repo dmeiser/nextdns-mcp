@@ -28,6 +28,8 @@ from typing import Any
 
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 
+from .coercion import resolve_operation
+
 logger = logging.getLogger(__name__)
 
 CALL_LOG_ENV = "NEXTDNS_CALL_LOG"
@@ -122,7 +124,12 @@ class CallLogMiddleware(Middleware):
         if not self._path:
             return
         arguments = args if isinstance(args, dict) else {}
-        operation = str(arguments.get("operation", ""))
+        sent = str(arguments.get("operation", ""))
+        # The alias validator rewrites synonyms before the tool body runs, so
+        # the operation that executed is not always the verb that was sent.
+        # This record is what a read is judged on, so it names the operation
+        # that ran; the caller's own word is kept beside it.
+        operation = resolve_operation(tool, sent)
         row = {
             "ts": time.time(),
             "tool": tool,
@@ -140,6 +147,8 @@ class CallLogMiddleware(Middleware):
             # read answered with data.
             "result": _result_text(result),
         }
+        if operation != sent:
+            row["operation_as_sent"] = sent
         try:
             with _write_lock, open(self._path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
