@@ -54,7 +54,7 @@ def build_mcp_server() -> FastMCP:
         FastMCP: Configured MCP server instance with all tools registered
     """
     logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
-    server = create_mcp_server()
+    server = create_mcp_server(tool_names=[tool.__name__ for tool in _GROUPED_TOOLS])
     for tool in _GROUPED_TOOLS:
         # FastMCP publishes only the first text section of a docstring as the
         # tool description, splitting at the first `Header:` line. Measured on

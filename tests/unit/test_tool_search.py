@@ -191,7 +191,9 @@ class TestSyntheticToolDescriptions:
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
         async with Client(build_mcp_server()) as client:
             described = {t.name: (t.description or "") for t in await client.list_tools()}
-        assert "advertise" in described["search_tools"].casefold()
+        # Prose wraps, so compare on collapsed whitespace.
+        search = " ".join(described["search_tools"].split()).casefold()
+        assert "did not return" in search
         assert "exact name" in described["call_tool"].casefold()
 
     @pytest.mark.asyncio

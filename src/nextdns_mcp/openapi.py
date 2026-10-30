@@ -24,7 +24,7 @@ SPDX-License-Identifier: MIT
 
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, NamedTuple
 
@@ -285,7 +285,7 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             await close_doh_client()
 
 
-def create_mcp_server(client: Any = None) -> FastMCP:
+def create_mcp_server(client: Any = None, tool_names: Sequence[str] = ()) -> FastMCP:
     """Create and configure the NextDNS MCP server.
 
     The server exposes only the grouped CRUD tools registered by
@@ -293,8 +293,10 @@ def create_mcp_server(client: Any = None) -> FastMCP:
     generated from the OpenAPI spec anymore (see module docstring and issue
     #141/#146 for the rationale).
 
-    Args:
+        Args:
         client: Retained for backward compatibility.
+        tool_names: The names of the tools registered after this call, so the
+            initialize instructions can describe a small catalog directly.
 
     Returns:
         FastMCP: Configured MCP server instance
@@ -311,7 +313,7 @@ def create_mcp_server(client: Any = None) -> FastMCP:
         )
     mcp = FastMCP(
         name="NextDNS MCP Server",
-        instructions=server_instructions(tool_search_mode),
+        instructions=server_instructions(tool_search_mode, tool_names),
         lifespan=_server_lifespan,
         transforms=transforms,
     )
