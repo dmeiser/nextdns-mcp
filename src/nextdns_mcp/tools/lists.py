@@ -24,7 +24,10 @@ ListOperation = Literal["get", "add", "replace", "update", "remove"]
 # "list the allowlist" is how callers ask for operation="get" (7 calls across
 # three live runs). See coercion.operation_aliases for the rule and its limits.
 ListOperationId = Annotated[
-    ListOperation, before_validator(operation_aliases(get_args(ListOperation), {"list": "get", "delete": "remove"}))
+    ListOperation,
+    before_validator(
+        operation_aliases(get_args(ListOperation), {"list": "get", "delete": "remove"}, tool="manageLists")
+    ),
 ]
 
 

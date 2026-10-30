@@ -34,6 +34,7 @@ ProfileOperationId = Annotated[
         operation_aliases(
             get_args(ProfileOperation),
             {"rename": "update", "set": "update", "replace": "update", "add": "create"},
+            tool="manageProfiles",
         )
     ),
 ]
