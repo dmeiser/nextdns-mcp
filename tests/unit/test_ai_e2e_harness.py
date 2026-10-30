@@ -777,6 +777,36 @@ class TestMcpConfigGeneration:
         assert srv["environment"]["NEXTDNS_API_BASE"] == h.API_BASE
         assert srv["enabled"] is True
 
+    def test_codemode_off_registers_the_tools_natively(self, h, tmp_path):
+        """`codemode: false` is opencode's per-server opt-out of Code Mode.
+
+        With it the server's tools are native `nextdns_<tool>` tools rather than
+        JavaScript bindings inside `execute`. Under progressive disclosure that
+        is `nextdns_search_tools` and `nextdns_call_tool`, so the disclosure
+        contract stays what is measured - only the client-side JS evaluation in
+        front of it goes away.
+        """
+        cfg = h.HarnessConfig.load(None)
+        assert cfg.codemode is True  # opencode's default: baselines stay comparable
+        doc = json.loads(h.write_mcp_config(cfg, tmp_path).read_text(encoding="utf-8"))
+        assert doc["mcp"]["nextdns"]["codemode"] is True
+
+        cfg.codemode = False
+        doc = json.loads(h.write_mcp_config(cfg, tmp_path).read_text(encoding="utf-8"))
+        assert doc["mcp"]["nextdns"]["codemode"] is False
+
+    def test_the_codemode_flag_reaches_the_config(self, h, monkeypatch, tmp_path):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        seen: dict[str, object] = {}
+
+        async def fake_run(api_key, config):
+            seen["codemode"] = config.codemode
+            return h.Report(started_at=1.0, finished_at=2.0)
+
+        monkeypatch.setattr(h, "run_harness", fake_run)
+        h.main(["--codemode", "off", "--quiet", "--report", str(tmp_path / "r.jsonl")])
+        assert seen == {"codemode": False}
+
     def test_write_mcp_config_is_valid_json_schema_shaped(self, h, tmp_path):
         cfg = h.HarnessConfig.load(None)
         out = h.write_mcp_config(cfg, tmp_path)
@@ -1324,6 +1354,19 @@ class TestInstrumentVisibility:
         run = h.ActorRun(command=["x"])
         run.tool_calls = [h.ToolCall(name="read", args={"path": "/tmp/whatever/mcp_calls.jsonl"})]
         assert h._actor_read_the_instrument(run, "") is False
+
+    def test_the_run_passes_a_path_object_not_a_string(self, h):
+        """`run_harness` holds the log as a Path; the guard must accept both.
+
+        The first live run after this guard landed died with
+        `'PosixPath' object has no attribute 'lower'` on step 1.
+        """
+        import pathlib
+
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [h.ToolCall(name="read", args={"path": self.LOG})]
+        assert h._actor_read_the_instrument(run, pathlib.Path(self.LOG)) is True
+        assert h._actor_read_the_instrument(run, pathlib.Path(self.LOG).parent / "other.jsonl") is False
 
     def test_the_step_is_named_as_a_measurement_problem_not_a_model_failure(self, h):
         row = {

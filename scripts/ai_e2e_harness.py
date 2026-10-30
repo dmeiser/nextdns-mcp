@@ -260,6 +260,10 @@ class HarnessConfig:
     timeout_s: float = 7200.0  # overall run budget (99 sequential model steps)
     step_timeout_s: float = 300.0  # per-step actor timeout
     verbose: bool = False  # per-step feedback includes failed/unknown tool attempts
+    # opencode mounts MCP servers through Code Mode unless told otherwise: the
+    # model's only native tool is `execute`, and this server's tools are JS
+    # bindings inside it. False registers them natively as `nextdns_<tool>`.
+    codemode: bool = True
     # Targeted run: comma-separated step ids, 1-based positions and inclusive
     # A-B ranges (see select_steps). start_step/end_step are the single-range
     # shorthand for the same thing; empty means "the whole checklist".
@@ -440,6 +444,10 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
                 "cwd": srv.get("cwd"),
                 "environment": srv_env,
                 "enabled": True,
+                # Client plumbing, not model-facing text: Code Mode is opencode's
+                # default and puts a JS evaluation between the model and the
+                # server's contract. Turning it off registers the tools natively.
+                "codemode": config.codemode,
             }
         },
     }
@@ -2255,15 +2263,16 @@ def _extract_error_events(run: ActorRun) -> list[str]:
     return errs
 
 
-def _actor_read_the_instrument(run: ActorRun, call_log: str) -> bool:
+def _actor_read_the_instrument(run: ActorRun, call_log: str | os.PathLike[str]) -> bool:
     # True when the actor opened the harness's own call log. The path is in the
     # MCP config the actor can read, so the subject can see the instrument the
     # verdict is made from. Detection is by path or file name in any call's
     # arguments, whichever tool it used to get there.
-    if not call_log:
+    path = str(call_log or "")
+    if not path:
         return False
-    sent = call_log.lower()
-    name = os.path.basename(call_log).lower()
+    sent = path.lower()
+    name = os.path.basename(path).lower()
     for call in run.tool_calls:
         try:
             blob = json.dumps(call.args, default=str).lower()
@@ -3031,6 +3040,16 @@ def main(argv: list[str] | None = None) -> int:
         "which single server-side change fixes the most steps",
     )
     parser.add_argument("--verbose", action="store_true", help="print the actor stderr on failure")
+    parser.add_argument(
+        "--codemode",
+        choices=("on", "off"),
+        default="on",
+        help=(
+            "opencode Code Mode (default: on, its documented default). 'off' registers this server's "
+            "tools natively as nextdns_<tool> instead of exposing them only as JavaScript bindings "
+            "inside execute, so no client-side JS evaluation sits between the model and the contract."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # Needs no API key and runs no model: it reads a report that already exists.
@@ -3097,6 +3116,7 @@ def main(argv: list[str] | None = None) -> int:
     config.start_step = args.start_step or ""
     config.end_step = args.end_step or ""
     config.verbose = bool(args.verbose)
+    config.codemode = args.codemode == "on"
 
     report = asyncio.run(run_harness(api_key, config))
     write_report(report, args.report, args.actor_log)
