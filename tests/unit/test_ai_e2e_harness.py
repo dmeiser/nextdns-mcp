@@ -13,6 +13,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -1213,6 +1214,83 @@ class TestTransientActorFailure:
         }
         modes = [mode for mode, _tool in h._failure_modes(row)]
         assert modes == ["model provider was not serving the model"]
+
+
+class TestExpectedCallAcceptsServerIssuedIds:
+    """Deleting a record by the id the server gave it names that record.
+
+    The live run listed the rewrites, deleted `c41a6xwk`, and the REST read-back
+    confirmed `ai-e2e-a-…example.com` was gone — yet the step failed because the
+    delete call did not repeat the hostname. The server's own list answer is
+    what tells a caller the id, and its 404 hint says "pass the rewrite's name
+    and it will be resolved", so both spellings identify the same record.
+    """
+
+    HOST = "ai-e2e-a-e2eh5l1kdb.example.com"
+    LIST_RESULT = (
+        '{"data": [{"content": "192.0.2.100", "id": "c41a6xwk", "name": '
+        '"ai-e2e-a-e2eh5l1kdb.example.com", "type": "A"}, '
+        '{"content": "2001:db8::dead", "id": "y2fpqzs9", "name": '
+        '"ai-e2e-aaaa-e2eh5l1kdb.example.com", "type": "AAAA"}]}'
+    )
+    EXPECT: ClassVar[dict] = {
+        "tool": "manageRewrites",
+        "operation": "delete",
+        "args": [HOST],
+        "result": [],
+        "data": True,
+    }
+
+    def _records(self, entry_id: str) -> list[dict]:
+        return [
+            {
+                "tool": "manageRewrites",
+                "operation": "list",
+                "ok": True,
+                "write": False,
+                "args": '{"profile_id": "4a6326"}',
+                "result": self.LIST_RESULT,
+            },
+            {
+                "tool": "manageRewrites",
+                "operation": "delete",
+                "ok": True,
+                "write": True,
+                "args": f'{{"entry_id": "{entry_id}", "profile_id": "4a6326"}}',
+                "result": '{"success": true}',
+            },
+        ]
+
+    def test_the_id_the_server_returned_for_the_name_satisfies_the_expected_argument(self, h):
+        ok, why = h._expected_call_ok(self._records("c41a6xwk"), self.EXPECT, "4a6326")
+        assert ok is True, why
+
+    def test_the_hostname_still_satisfies_it(self, h):
+        records = self._records("c41a6xwk")
+        records[1]["args"] = f'{{"name": "{self.HOST}", "profile_id": "4a6326"}}'
+        ok, why = h._expected_call_ok(records, self.EXPECT, "4a6326")
+        assert ok is True, why
+
+    def test_deleting_a_different_record_still_fails(self, h):
+        """The equivalence is per name: y2fpqzs9 is the AAAA record, not this one."""
+        ok, why = h._expected_call_ok(self._records("y2fpqzs9"), self.EXPECT, "4a6326")
+        assert ok is False
+        assert "was called without" in why
+
+    def test_an_id_the_server_never_returned_for_that_name_does_not_count(self, h):
+        records = self._records("c41a6xwk")
+        records.pop(0)  # no list call in the attempt: nothing established the id
+        ok, why = h._expected_call_ok(records, self.EXPECT, "4a6326")
+        assert ok is False, why
+
+    def test_labels_are_not_treated_as_names(self, h):
+        """`type: "A"` must not tie every entry in the list to the word "A"."""
+        assert h._identifiers_from_answers([self._records("c41a6xwk")[0]]) == {
+            "192.0.2.100": ["c41a6xwk"],
+            self.HOST: ["c41a6xwk"],
+            "2001:db8::dead": ["y2fpqzs9"],
+            "ai-e2e-aaaa-e2eh5l1kdb.example.com": ["y2fpqzs9"],
+        }
 
 
 class TestInstrumentVisibility:

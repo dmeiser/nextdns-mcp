@@ -1421,6 +1421,50 @@ def _answered(result_text: str) -> bool:
     return bool(payload)
 
 
+def _identifiers_from_answers(records: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Map each name a tool answer carried to the id that answer gave it.
+
+    Built only from this attempt's successful answers, so the equivalence is the
+    server's own statement, not the harness guessing which record a call meant.
+    Short values (`type: "A"`) are skipped: they are labels, not identifiers, and
+    matching on them would tie every entry in the list to the same word.
+    """
+    out: dict[str, list[str]] = {}
+    for record in records:
+        if not record.get("ok"):
+            continue
+        try:
+            payload = json.loads(str(record.get("result") or ""))
+        except (ValueError, TypeError):
+            continue
+        for identifier, names in _walk_identifiers(payload):
+            for name in names:
+                if identifier not in out.setdefault(name, []):
+                    out[name].append(identifier)
+    return out
+
+
+def _walk_identifiers(node: Any) -> list[tuple[str, list[str]]]:
+    """(id, names) for every object in a payload that carries an `id` string."""
+    found: list[tuple[str, list[str]]] = []
+    if isinstance(node, dict):
+        identifier = node.get("id")
+        if isinstance(identifier, str) and len(identifier) >= 4:
+            names = [
+                value
+                for key, value in node.items()
+                if key != "id" and isinstance(value, str) and len(value) >= 6 and value != identifier
+            ]
+            if names:
+                found.append((identifier, names))
+        for value in node.values():
+            found.extend(_walk_identifiers(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_walk_identifiers(value))
+    return found
+
+
 def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid: str) -> tuple[bool, str]:
     """The two transcript conditions of the pass rule.
 
@@ -1440,6 +1484,12 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
     operation = str(expect.get("operation", ""))
     want_args = [s.replace("{profile_id}", pid) for s in expect.get("args", [])]
     want_result = [s.replace("{profile_id}", pid) for s in expect.get("result", [])]
+    # An identifier the server handed back in this same attempt names the thing
+    # it names. The checklist asks for the record called
+    # `ai-e2e-a-…example.com`; the server's own list answer is what tells a
+    # caller that its id is `c41a6xwk`, and deleting by that id is the workflow
+    # the server documents and hints at. Both spellings identify the record.
+    ids_by_name = _identifiers_from_answers(records)
     label = f"{tool}({operation or '-'})"
 
     # Why the closest candidate was rejected, so a failure names the condition
@@ -1455,7 +1505,9 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
         if operation and str(record.get("operation", "")) != operation:
             continue
         args_text = str(record.get("args", ""))
-        missing_args = [s for s in want_args if s not in args_text]
+        missing_args = [
+            s for s in want_args if s not in args_text and not any(i in args_text for i in ids_by_name.get(s, ()))
+        ]
         if missing_args:
             why = f"{label} was called without {missing_args}"
             continue
