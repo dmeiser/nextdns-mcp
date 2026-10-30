@@ -2219,8 +2219,15 @@ def _transient_actor_failure(run: ActorRun, blob: str) -> tuple[str, str]:
     * ``unknown-tool``: opencode registers MCP tools lazily, so an attempt can
       fail before registration completes. Its wording varies, and the older
       detector matched only one of them: "Unknown tool: 'x'" and "No tool named
-      \"tools.nextdns.search_tools\" is currently available." both mean the same
-      thing, and the second was being scored as a model failure.
+      \"nextdns_search_tools\" is currently available." both mean the same thing,
+      and the second was being scored as a model failure.
+    * ``wrong-tool-path``: the attempt called the code-mode name
+      (``tools.nextdns.search_tools``) as a direct tool. opencode exposes MCP
+      servers through Code Mode by default, and the direct name it registers is
+      ``<server>_<tool>``, so that call cannot resolve in any attempt. 25 such
+      attempts across two runs, none of them ever reaching the server: retrying
+      three times measures the same thing each time, so it gets its own kind and
+      a smaller budget rather than the registration label.
     * ``stall``: the actor hit its timeout without producing a single tool call
       (observed: ECONNRESET from the model provider after 150s on a trivial
       prompt, which stalled 13 of 89 steps in one run).
@@ -2229,17 +2236,51 @@ def _transient_actor_failure(run: ActorRun, blob: str) -> tuple[str, str]:
       ``state.error`` (observed: "OpenAI Chat stream ended without
       finish_reason", which read as the model calling ``call_tool({})``).
     """
+    if any(marker in blob for marker in _CODE_MODE_TOOL_PATH_MARKERS):
+        return "wrong-tool-path", "actor called the code-mode tool name directly"
     if any(marker in blob for marker in _LAZY_REGISTRATION_MARKERS):
         return "unknown-tool", "MCP tool not registered yet"
     if "timed out" in run.error.lower() and not run.tool_calls:
         return "stall", run.error
     if any(marker in blob for marker in _PROVIDER_STREAM_MARKERS):
         return "provider-stream", "model provider ended the response mid tool call"
+    if not run.tool_calls and any(marker in blob for marker in _PROVIDER_OUTAGE_MARKERS):
+        return "provider-unavailable", "model provider is not serving this model"
     return "", ""
 
 
 # Signatures of opencode's lazy MCP tool registration, not of a model decision.
 _LAZY_REGISTRATION_MARKERS = ("unknown tool", "no tool named", "is currently available")
+
+# The provider refusing to serve the model at all. Observed verbatim:
+# "Function id '9fa6fd04-...' version 'null': Specified function in account
+# 'X1UCRn4VumVsuKcJJB603mP5Yx09bRnJ67Idchb50ys' is not found" - a bare
+# `opencode run` with the same model reproduces it, so no MCP code is involved.
+_PROVIDER_OUTAGE_MARKERS = (
+    "specified function in account",
+    "provider_model_doesnt_exist",
+    "the model you selected does not exist",
+)
+
+# Three steps in a row of the same outage is the signal; the run is measuring
+# nothing and would otherwise spend its whole budget doing it.
+PROVIDER_OUTAGE_STEPS = 3
+
+
+# The code-mode name used as a direct tool name. opencode registers a direct MCP
+# tool as `<server>_<tool>`, so `tools.<server>.<tool>` is not a name it has.
+_CODE_MODE_TOOL_PATH_MARKERS = ('no tool named "tools.', "no tool named 'tools.")
+
+
+def _provider_outage(run: ActorRun) -> bool:
+    # Distinct from a bad answer: the attempt produced no tool call at all, so
+    # the step measured the provider rather than the model. The message arrives
+    # as an {"type":"error"} event in the actor's event stream, not in stderr.
+    if run.tool_calls:
+        return False
+    blob = " ".join(_extract_error_events(run) + [run.stderr or "", run.final_text or ""]).lower()
+    return any(marker in blob for marker in _PROVIDER_OUTAGE_MARKERS)
+
 
 # Signatures of a provider/transport drop rather than a model decision.
 _PROVIDER_STREAM_MARKERS = (
@@ -2253,7 +2294,13 @@ _PROVIDER_STREAM_MARKERS = (
 # How many attempts each transient kind gets. A stall is pure infrastructure
 # and costs the step its entire verdict, so it gets more chances than a lazy
 # registration hiccup; all are capped so one flaky step cannot eat the budget.
-TRANSIENT_ATTEMPTS = {"unknown-tool": 3, "stall": 5, "provider-stream": 3}
+TRANSIENT_ATTEMPTS = {
+    "unknown-tool": 3,
+    "stall": 5,
+    "provider-stream": 3,
+    "wrong-tool-path": 2,
+    "provider-unavailable": 2,
+}
 
 
 def _feedback_block(
@@ -2384,7 +2431,21 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             report.profile_id = pid
             _progress(f"targeted setup: {note}")
 
+        aborted_reason = ""
+        outage_streak = 0
         for i, step in selected:
+            if aborted_reason:
+                report.results.append(
+                    CheckResult(
+                        step.id,
+                        step.section,
+                        step.description,
+                        "skipped",
+                        mcp_tool=step.tool,
+                        reason=aborted_reason,
+                    )
+                )
+                continue
             if time.monotonic() - started > budget:
                 rest = CheckResult(
                     step.id,
@@ -2416,6 +2477,14 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 if healed != pid:
                     pid = healed
                     report.profile_id = pid
+                    # The profile vanished between steps. This harness deleted
+                    # it zero times in the run this happened in, so something
+                    # else is using the account and every step around it is
+                    # measuring a 404, not the model.
+                    report.notes.append(
+                        f"self-heal: test profile was deleted mid-run and recreated as {pid}; "
+                        "another process is using this NextDNS account"
+                    )
 
             prompt_pid = pid
             if (step.section == "plots" or step.id == "logs.download") and os.environ.get("NEXTDNS_PLOT_PROFILE"):
@@ -2466,6 +2535,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                     run,
                     " ".join(
                         [error, reason]
+                        + _extract_error_events(run)
                         + [c.result_text or "" for c in run.tool_calls]
                         + [str(r.get("error") or "") for r in server_calls]
                         + ([run.final_text] if run.final_text else [])
@@ -2479,6 +2549,19 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
 
             if run is None:  # pragma: no cover - defensive
                 run = ActorRun(command=list(step_cfg.command))
+
+            if _provider_outage(run):
+                outage_streak += 1
+                if outage_streak >= PROVIDER_OUTAGE_STEPS:
+                    aborted_reason = "model provider is not serving this model (run aborted)"
+                    events = _extract_error_events(run)
+                    report.notes.append(
+                        f"provider outage after {len(report.results) + 1} step(s): "
+                        f"{(events[0] if events else run.error)[:200]}"
+                    )
+                    _progress(f"  ABORT   : {aborted_reason}; every remaining step is skipped")
+            else:
+                outage_streak = 0
 
             # Verdict comes from the task outcome (REST verification), not from
             # how many tool calls the model needed to get there.
@@ -2685,6 +2768,10 @@ def _failure_modes(row: dict[str, Any]) -> list[tuple[str, str]]:
         # looking like a contract problem.
         if any(str(t).startswith("stall") for t in response.get("transients") or []):
             modes.append(("actor stalled without calling", tool))
+        elif any(str(t).startswith("wrong-tool-path") for t in response.get("transients") or []):
+            modes.append(("actor called a tool path this client does not expose", tool))
+        elif any(str(t).startswith("provider-unavailable") for t in response.get("transients") or []):
+            modes.append(("model provider was not serving the model", tool))
         else:
             modes.append(("no call reached the server", tool))
 
@@ -2744,16 +2831,30 @@ def summarize_reports(paths: list[str]) -> str:
     which steps to re-run.
     """
     rows: list[dict[str, Any]] = []
+    notes: list[str] = []
     for path in paths:
         with open(path, encoding="utf-8") as handle:
-            rows.extend(json.loads(line) for line in handle if line.strip())
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                rows.append(row)
+                if "summary" in row:
+                    notes.extend(str(n) for n in (row["summary"].get("notes") or []))
     steps = [row for row in rows if "status" in row]
     if not steps:
         return "no step results in " + ", ".join(paths)
 
     by_mode: dict[tuple[str, str], list[str]] = {}
+    skip_reasons: Counter = Counter()
     for row in steps:
         if row["status"] == "passed":
+            continue
+        # A skipped step was never attempted - a budget that ran out, or a run
+        # aborted on an outage. Grouping it as a failure mode buries the modes
+        # that were actually measured.
+        if row["status"] == "skipped":
+            skip_reasons[str(row.get("reason") or "skipped")] += 1
             continue
         for mode, tool in _failure_modes(row):
             by_mode.setdefault((mode, tool), []).append(str(row.get("id") or "?"))
@@ -2767,12 +2868,21 @@ def summarize_reports(paths: list[str]) -> str:
         ),
         "=" * 72,
     ]
+    if notes:
+        lines.append("  RUN NOT A CLEAN MEASUREMENT - what happened outside the model:")
+        for note in notes:
+            lines.append(f"    ! {note}")
+        lines.append("")
     if not by_mode:
         lines.append("  no failures")
-        return "\n".join(lines)
-    for (mode, tool), ids in sorted(by_mode.items(), key=lambda kv: (-len(kv[1]), kv[0])):
-        shown = ", ".join(ids[:6]) + (", ..." if len(ids) > 6 else "")
-        lines.append(f"{len(ids):3}  {mode:44} {tool:15} {shown}")
+    else:
+        for (mode, tool), ids in sorted(by_mode.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            shown = ", ".join(ids[:6]) + (", ..." if len(ids) > 6 else "")
+            lines.append(f"{len(ids):3}  {mode:44} {tool:15} {shown}")
+    if skip_reasons:
+        lines.append("  skipped, never attempted:")
+        for reason, count in skip_reasons.most_common():
+            lines.append(f"{count:3}  {reason}")
     return "\n".join(lines)
 
 
