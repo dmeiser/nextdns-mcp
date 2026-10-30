@@ -2203,6 +2203,25 @@ def _extract_error_events(run: ActorRun) -> list[str]:
     return errs
 
 
+def _actor_read_the_instrument(run: ActorRun, call_log: str) -> bool:
+    # True when the actor opened the harness's own call log. The path is in the
+    # MCP config the actor can read, so the subject can see the instrument the
+    # verdict is made from. Detection is by path or file name in any call's
+    # arguments, whichever tool it used to get there.
+    if not call_log:
+        return False
+    sent = call_log.lower()
+    name = os.path.basename(call_log).lower()
+    for call in run.tool_calls:
+        try:
+            blob = json.dumps(call.args, default=str).lower()
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            blob = str(call.args).lower()
+        if sent in blob or (name and name in blob):
+            return True
+    return False
+
+
 def _summarize_calls(run: ActorRun) -> list[dict[str, Any]]:
     """Compact record of each tool call the actor made."""
     return [{"tool": c.name, "args": c.args, "ok": c.ok, "result": (c.result_text or "")[:300]} for c in run.tool_calls]
@@ -2433,6 +2452,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
 
         aborted_reason = ""
         outage_streak = 0
+        instrument_read = False
         for i, step in selected:
             if aborted_reason:
                 report.results.append(
@@ -2563,6 +2583,14 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             else:
                 outage_streak = 0
 
+            if not instrument_read and _actor_read_the_instrument(run, call_log):
+                instrument_read = True
+                report.notes.append(
+                    f"actor read the harness call log ({call_log}): the record this verdict is made "
+                    "from was visible to the subject"
+                )
+                _progress("  NOTE    : actor read the harness call log; this run's ground truth was visible")
+
             # Verdict comes from the task outcome (REST verification), not from
             # how many tool calls the model needed to get there.
             fb = _feedback_block(
@@ -2597,6 +2625,9 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                     # How the transcript half of the verdict was decided, so a
                     # failure says which condition it failed.
                     "expected_call": {"ok": call_ok, "why": call_why, "expect": step.expect},
+                    # Set on the step where the actor opened the call log; the
+                    # run-level note says when, this says which step.
+                    "instrument_read": instrument_read and _actor_read_the_instrument(run, call_log),
                 },
                 rest_verification=rest_v,
                 reason=reason,
@@ -2760,6 +2791,12 @@ def _failure_modes(row: dict[str, Any]) -> list[tuple[str, str]]:
     response = row.get("mcp_response") or {}
     records = response.get("server_calls") or []
     tool = str(row.get("mcp_tool") or "")
+
+    if response.get("instrument_read"):
+        # Not a capability failure and not infrastructure: the subject read the
+        # record the verdict is made from, which makes this step's number mean
+        # something else.
+        modes.append(("actor read the harness call log", tool))
 
     if not records:
         # A step whose actor never got as far as a call is usually the model

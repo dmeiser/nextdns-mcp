@@ -1215,6 +1215,50 @@ class TestTransientActorFailure:
         assert modes == ["model provider was not serving the model"]
 
 
+class TestInstrumentVisibility:
+    """The verdict is made from the server's call log; the actor must not read it."""
+
+    LOG = "/tmp/nextdns_e2e_fr8u250p/mcp_calls.jsonl"
+
+    def test_reading_the_log_by_path_is_detected(self, h):
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [h.ToolCall(name="read", args={"path": self.LOG})]
+        assert h._actor_read_the_instrument(run, self.LOG) is True
+
+    def test_reaching_it_through_code_mode_is_detected(self, h):
+        """The actor in the live run got there with `fs.promises.readFile`."""
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [
+            h.ToolCall(
+                name="execute", args={"code": "await fs.promises.readFile('/tmp/nextdns_e2e_fr8u250p/mcp_calls.jsonl')"}
+            )
+        ]
+        assert h._actor_read_the_instrument(run, self.LOG) is True
+
+    def test_reading_its_own_mcp_config_is_not_flagged(self, h):
+        """The config sits in the same directory and names the log; reading the
+        config is the actor inspecting its own environment, not the record."""
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [h.ToolCall(name="read", args={"path": "/tmp/nextdns_e2e_fr8u250p/opencode.json"})]
+        assert h._actor_read_the_instrument(run, self.LOG) is False
+
+    def test_no_log_path_means_nothing_to_read(self, h):
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [h.ToolCall(name="read", args={"path": "/tmp/whatever/mcp_calls.jsonl"})]
+        assert h._actor_read_the_instrument(run, "") is False
+
+    def test_the_step_is_named_as_a_measurement_problem_not_a_model_failure(self, h):
+        row = {
+            "id": "lists.allowlist.remove_added",
+            "status": "failed",
+            "mcp_tool": "manageLists",
+            "error": "list allowlist still contains added entry",
+            "mcp_response": {"server_calls": [], "instrument_read": True},
+        }
+        modes = [mode for mode, _tool in h._failure_modes(row)]
+        assert "actor read the harness call log" in modes
+
+
 class TestRunValidityNotes:
     """A number that did not measure the model has to say so on the report."""
 
