@@ -42,11 +42,11 @@ class TestCheckFromCall:
             "c1",
             "lists",
             "desc",
-            mcp_tool="manageLists",
+            mcp_tool="getDenylist",
             mcp_response={"structured": {"data": []}, "is_error": False},
         )
         assert r.status == "passed"
-        assert r.id == "c1" and r.section == "lists" and r.mcp_tool == "manageLists"
+        assert r.id == "c1" and r.section == "lists" and r.mcp_tool == "getDenylist"
 
     def test_failed_on_tool_exception(self, h):
         r = h.check_from_call(
@@ -108,7 +108,7 @@ class TestCheckFromCall:
             "c1",
             "lists",
             "d",
-            mcp_tool="manageLists",
+            mcp_tool="getDenylist",
             mcp_request=req,
             mcp_response=resp,
             rest_verification={"verified": True},
@@ -261,7 +261,6 @@ class TestRestHelpers:
         assert tag.startswith("e2eh") and len(tag) == 9  # "e2eh" + 5
         name = h.make_profile_name()
         assert name.startswith("TEST_PROFILE_")
-        import re
 
         assert re.fullmatch(r"TEST_PROFILE_\d{8}", name) is not None
         # date-based name is deterministic within a day
@@ -413,7 +412,7 @@ class TestParseActorEvents:
                 {
                     "type": "tool_use",
                     "part": {
-                        "tool": "nextdns_manageProfiles",
+                        "tool": "nextdns_getProfile",
                         "state": {"status": "completed", "input": {"operation": "list"}, "output": "ok"},
                     },
                 }
@@ -425,7 +424,7 @@ class TestParseActorEvents:
                         "tool": "execute",
                         "state": {
                             "status": "completed",
-                            "input": {"code": 'await tools.nextdns["queryAnalytics"]({ metric: "status" })'},
+                            "input": {"code": 'await tools.nextdns["getAnalyticsStatus"]({ metric: "status" })'},
                             "output": "{}",
                         },
                     },
@@ -436,10 +435,10 @@ class TestParseActorEvents:
         calls, final = h.parse_actor_events(lines)
         assert len(calls) == 2
         # opencode names MCP tools nextdns_<tool>; the prefix is normalised.
-        assert calls[0].name == "manageProfiles" and calls[0].ok
+        assert calls[0].name == "getProfile" and calls[0].ok
         assert calls[0].args == {"operation": "list"}
         # an execute wrapper is attributed to the underlying MCP tool from its code.
-        assert calls[1].name == "queryAnalytics"
+        assert calls[1].name == "getAnalyticsStatus"
         assert final == "All done."
 
     def test_execute_wrapper_dot_form(self, h):
@@ -451,7 +450,7 @@ class TestParseActorEvents:
                         "tool": "execute",
                         "state": {
                             "status": "completed",
-                            "input": {"code": "const r = await tools.nextdns.manageProfiles({ operation: 'create' });"},
+                            "input": {"code": "const r = await tools.nextdns.getProfile({ operation: 'create' });"},
                             "output": "{}",
                         },
                     },
@@ -460,7 +459,7 @@ class TestParseActorEvents:
         ]
         calls, _ = h.parse_actor_events(lines)
         # the dot form tools.nextdns.<tool> is also attributed to the MCP tool
-        assert calls[0].name == "manageProfiles"
+        assert calls[0].name == "getProfile"
 
     def test_execute_wrapper_without_mcp_reference(self, h):
         lines = [
@@ -504,7 +503,7 @@ class TestParseActorEvents:
                             {"type": "text", "text": "Working on it."},
                             {
                                 "type": "tool_use",
-                                "name": "mcp__nextdns__manageProfiles",
+                                "name": "mcp__nextdns__getProfile",
                                 "input": {"operation": "create", "name": "P"},
                             },
                         ],
@@ -514,7 +513,7 @@ class TestParseActorEvents:
             json.dumps({"type": "result", "result": "Done creating the profile."}),
         ]
         calls, final = h.parse_actor_events(lines)
-        assert len(calls) == 1 and calls[0].name == "mcp__nextdns__manageProfiles"
+        assert len(calls) == 1 and calls[0].name == "mcp__nextdns__getProfile"
         assert calls[0].args == {"operation": "create", "name": "P"}
         assert final == "Done creating the profile."
 
@@ -673,18 +672,18 @@ class TestToolEventNameResolution:
     def test_direct_execute_call_resolves_tool(self, h):
         part = {
             "tool": "execute",
-            "state": {"input": {"code": "await tools.nextdns.manageProfiles({operation: 'list'})"}},
+            "state": {"input": {"code": "await tools.nextdns.getProfile({operation: 'list'})"}},
         }
-        assert h._tool_event_name(part) == "manageProfiles"
+        assert h._tool_event_name(part) == "getProfile"
 
     def test_call_tool_proxy_resolves_proxied_name(self, h):
         part = {
             "tool": "execute",
             "state": {
-                "input": {"code": "await tools.nextdns.call_tool({name: 'manageLists', arguments: {operation: 'get'}})"}
+                "input": {"code": "await tools.nextdns.call_tool({name: 'getDenylist', arguments: {operation: 'get'}})"}
             },
         }
-        assert h._tool_event_name(part) == "manageLists"
+        assert h._tool_event_name(part) == "getDenylist"
 
     def test_search_tools_stays_discovery(self, h):
         part = {"tool": "execute", "state": {"input": {"code": "await tools.nextdns.search_tools({query: 'x'})"}}}
@@ -717,7 +716,7 @@ class TestFeedbackBlockAttempts:
         return run
 
     def test_verbose_shows_attempts(self, h):
-        step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
+        step = h.Step("x", "profiles", "getProfile", "d", "p", "profile_exists")
         out = h._feedback_block(step, self._run(h), "failed", "err", "", {}, verbose=True)
         attempts = [ln for ln in out if ln.strip().startswith("ATTEMPT")]
         assert len(attempts) == 2
@@ -725,7 +724,7 @@ class TestFeedbackBlockAttempts:
         assert any("session_rename" in ln for ln in attempts)
 
     def test_quiet_omits_attempts(self, h):
-        step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
+        step = h.Step("x", "profiles", "getProfile", "d", "p", "profile_exists")
         out = h._feedback_block(step, self._run(h), "failed", "err", "", {}, verbose=False)
         assert not any(ln.strip().startswith("ATTEMPT") for ln in out)
 
@@ -735,7 +734,7 @@ class TestFeedbackBlockAttempts:
         The live crash was ``list | frozenset`` (TypeError) reached only when
         ``is_error`` was False, which the other tests short-circuited past.
         """
-        step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
+        step = h.Step("x", "profiles", "getProfile", "d", "p", "profile_exists")
         run = h.ActorRun(command=["x"])
         run.tool_calls = [
             h.ToolCall(name="session_rename", args={"code": "tools.opencode.session_rename(...)"}),  # ok=True
@@ -748,7 +747,7 @@ class TestFeedbackBlockAttempts:
         assert "not an advertised tool" in attempts[0]
 
     def test_discovery_calls_shown_when_no_direct_mcp_calls(self, h):
-        step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
+        step = h.Step("x", "profiles", "getProfile", "d", "p", "profile_exists")
         run = h.ActorRun(command=["x"])
         run.tool_calls = [h.ToolCall(name="search_tools", args={"code": "search_tools({query:'profile'})"})]
         out = h._feedback_block(step, run, "passed", "", "", {})
@@ -864,79 +863,6 @@ class TestTaskTargets:
         assert t.rewrite_name == "ai-e2e-a-abc.example.com"
         assert t.rewrite_content == "192.0.2.100"
 
-    def test_build_task_prompt_embeds_all_targets(self, h):
-        t = h.TaskTargets(profile_name="AI E2E Test Profile 123", tag="abc")
-        p = h.build_task_prompt(t)
-        assert "AI E2E Test Profile 123" in p
-        assert "AI E2E Test Profile 123-renamed" in p
-        assert "manageProfiles" in p and "dohLookup" in p
-        for cat in h.SETTINGS_CATEGORIES:
-            assert cat in p
-        # Anchored (not bare-substring) matches: the hostnames must appear as
-        # whole tokens, which also keeps CodeQL's incomplete-url-substring-
-        # sanitization rule quiet.
-        for host in ("ai-e2e-allow-abc.example.com", "ai-e2e-a-abc.example.com"):
-            assert re.search(rf"(?<![A-Za-z0-9.-]){re.escape(host)}(?![A-Za-z0-9.-])", p)
-        assert "nextdns-recommended" in p
-        # The harness owns cleanup; the actor must not delete the profile.
-        assert "Do NOT delete the test profile" in p
-
-
-# =========================================================================== #
-# coverage + measurement checks (pure; no network)
-# =========================================================================== #
-
-
-def _run_with(*calls):
-    import ai_e2e_harness as hh
-
-    r = hh.ActorRun(ok=True, exit_code=0, tool_calls=list(calls))
-    return r
-
-
-class TestCoverage:
-    def test_coverage_passed_when_observed(self, h):
-        run = _run_with(h.ToolCall(name="dohLookup", args={}))
-        r = h._coverage_check(run, "dohLookup")
-        assert r.status == "passed"
-
-    def test_coverage_skipped_when_unobserved(self, h):
-        run = _run_with()
-        r = h._coverage_check(run, "plotAnalytics")
-        assert r.status == "skipped"
-
-    def test_coverage_counts_calls(self, h):
-        run = _run_with(h.ToolCall(name="dohLookup"), h.ToolCall(name="dohLookup"))
-        r = h._coverage_check(run, "dohLookup")
-        assert r.status == "passed" and r.mcp_request == {"calls": 2}
-
-
-class TestReadOnlyCoverage:
-    def test_skipped_when_unobserved(self, h):
-        run = _run_with()
-        r = h._readonly_coverage(run, "queryAnalytics", "analytics", "analytics.query", "desc")
-        assert r.status == "skipped" and r.section == "analytics" and r.id == "analytics.query"
-
-    def test_passed_when_observed(self, h):
-        run = _run_with(h.ToolCall(name="queryAnalytics", args={"metric": "status"}))
-        r = h._readonly_coverage(run, "queryAnalytics", "analytics", "analytics.query", "desc")
-        assert r.status == "passed" and r.mcp_request == {"calls": 1}
-
-
-class TestMeasureActorRun:
-    def test_passed_on_clean_exit(self, h):
-        run = h.ActorRun(ok=True, exit_code=0, tool_calls=[h.ToolCall(name="x")])
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        h._measure_actor_run(run, rep)
-        assert rep.results[0].status == "passed"
-
-    def test_failed_on_nonzero_exit(self, h):
-        run = h.ActorRun(ok=False, exit_code=1, tool_calls=[], error="boom")
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        h._measure_actor_run(run, rep)
-        assert rep.results[0].status == "failed"
-        assert "boom" in rep.results[0].error
-
 
 # =========================================================================== #
 # REST-verifying measurements (fake client, no network)
@@ -979,105 +905,6 @@ class _FakeClient:
 
 
 class TestMeasureState:
-    def test_profile_provision_and_rename(self, h):
-        t = h.TaskTargets(profile_name="P", tag="abc")
-        m = _FakeClient(profiles=[{"id": "pid1", "name": "P-renamed"}])
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        import asyncio
-
-        prof = asyncio.run(h._measure_profile(m, t, rep))
-        assert prof is not None and rep.profile_id == "pid1"
-        statuses = {r.id: r.status for r in rep.results}
-        assert statuses["profiles.provision"] == "passed"
-        assert statuses["profiles.rename"] == "passed"
-
-    def test_profile_provision_fails_when_absent(self, h):
-        t = h.TaskTargets(profile_name="P", tag="abc")
-        m = _FakeClient(profiles=[])
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        import asyncio
-
-        prof = asyncio.run(h._measure_profile(m, t, rep))
-        assert prof is None
-        assert rep.results[0].id == "profiles.provision" and rep.results[0].status == "failed"
-
-    def test_settings_verifies_target_values(self, h):
-        m = _FakeClient(by_path={"/profiles/pid1/settings": {"ok": True, "body": {"web3": True}}})
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        import asyncio
-
-        asyncio.run(h._measure_settings(m, "pid1", rep))
-        general = next(r for r in rep.results if r.id == "settings.general")
-        assert general.status == "passed"
-        # a category whose read-back lacks the target value fails
-        privacy = next(r for r in rep.results if r.id == "settings.privacy")
-        assert privacy.status == "failed"
-
-    def test_lists_verify_target_entries(self, h):
-        t = h.TaskTargets(profile_name="P", tag="abc")
-        entries = t.list_entries
-        by_path = {}
-        for spec in h._LIST_SPECS:
-            by_path[f"/profiles/pid1{spec['path']}"] = {
-                "ok": True,
-                "body": {"data": [{"id": entries[spec["name"]]}]},
-            }
-        m = _FakeClient(by_path=by_path)
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        import asyncio
-
-        asyncio.run(h._measure_lists(m, "pid1", t, rep))
-        assert all(r.status == "passed" for r in rep.results)
-
-    def test_lists_fail_when_entry_missing(self, h):
-        t = h.TaskTargets(profile_name="P", tag="abc")
-        m = _FakeClient(by_path={"/profiles/pid1/allowlist": {"ok": True, "body": {"data": []}}})
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        import asyncio
-
-        asyncio.run(h._measure_lists(m, "pid1", t, rep))
-        allow = next(r for r in rep.results if r.id == "lists.allowlist")
-        assert allow.status == "failed"
-
-    def test_rewrites_verify_target_record(self, h):
-        t = h.TaskTargets(profile_name="P", tag="abc")
-        m = _FakeClient(by_path={"/profiles/pid1/rewrites": {"ok": True, "body": {"data": [{"name": t.rewrite_name}]}}})
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        import asyncio
-
-        asyncio.run(h._measure_rewrites(m, "pid1", t, rep))
-        assert rep.results[0].status == "passed"
-
-    def test_rewrites_fail_when_record_missing(self, h):
-        t = h.TaskTargets(profile_name="P", tag="abc")
-        m = _FakeClient(by_path={"/profiles/pid1/rewrites": {"ok": True, "body": {"data": []}}})
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        import asyncio
-
-        asyncio.run(h._measure_rewrites(m, "pid1", t, rep))
-        assert rep.results[0].status == "failed"
-
-    def test_cleanup_deletes_and_verifies_gone(self, h):
-        t = h.TaskTargets(profile_name="P", tag="abc")
-        m = _FakeClient(profiles=[])  # gone: neither name resolves
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        import asyncio
-
-        asyncio.run(h._cleanup(m, "pid1", t, rep))
-        assert m.deleted == ["/profiles/pid1"]
-        r = next(x for x in rep.results if x.id == "profiles.cleanup")
-        assert r.status == "passed" and rep.cleanup == "passed"
-
-    def test_cleanup_failed_when_delete_errors(self, h):
-        t = h.TaskTargets(profile_name="P", tag="abc")
-        m = _FakeClient(profiles=[], delete_ok=False)
-        rep = h.Report(started_at=0.0, api_key_present=True)
-        import asyncio
-
-        asyncio.run(h._cleanup(m, "pid1", t, rep))
-        r = next(x for x in rep.results if x.id == "profiles.cleanup")
-        assert r.status == "failed" and "FAILED" in rep.cleanup
-
     def test_profile_gone_logic(self, h):
         t = h.TaskTargets(profile_name="P", tag="abc")
         import asyncio
@@ -1188,53 +1015,109 @@ class TestClientTransientsAreNotModelProse:
         )
 
 
-class TestAtomicSurfaceExpectations:
-    """On ``--tool-surface atomic`` a step's expected call is the endpoint it performed.
+class TestStepEndpointExpectations:
+    """Each step's expectation is the endpoint of the tool that performs it.
 
-    The steps are written once, against the grouped surface; this is how the
-    same checklist measures a server whose tools are API operations.
+    Steps are authored by tool name; the endpoint string is resolved from the
+    shipped OpenAPI document, so the checklist breaks at build time when the
+    document renames or drops an operation instead of silently matching no
+    call in a live run.
     """
 
     def _steps(self, h) -> dict:
         return {step.id: step for step in h.build_steps(h.TaskTargets(profile_name="PN", tag="tg"))}
 
-    def test_every_comparable_step_expects_a_real_operation(self, h):
-        """Each derived endpoint must be an operation the server can generate."""
+    def _operations(self, h) -> dict:
         from nextdns_mcp import spec_tools
 
-        operations = {f"{route.method} {route.path}" for route in spec_tools.spec_routes(spec_tools.load_spec())}
-        expected = [e["endpoints"][0] for step in self._steps(h).values() if (e := h._atomic_expectation(step))]
-        assert len(expected) == 79, "the other steps have no endpoint to match"
+        return {
+            route.operation_id: f"{route.method} {route.path}"
+            for route in spec_tools.spec_routes(spec_tools.load_spec())
+            if route.operation_id
+        }
+
+    def test_every_endpoint_step_expects_a_real_operation(self, h):
+        operations = set(self._operations(h).values())
+        expected = [e["endpoints"][0] for step in self._steps(h).values() if (e := step.expect).get("endpoints")]
+        assert len(expected) == 79, "the doh and plot steps expect local records, not endpoints"
         assert not [ep for ep in expected if ep not in operations]
 
-    def test_the_composite_steps_have_no_endpoint(self, h):
-        """Plotting and DoH resolution are server-side composites, not endpoints.
+    def test_the_step_tool_and_its_expected_endpoint_agree(self, h):
+        """The step's label tool is exactly the one bound to the endpoint it expects."""
+        operations = self._operations(h)
+        for step in self._steps(h).values():
+            expect = step.expect
+            if expect.get("endpoints"):
+                assert operations.get(step.tool) in expect["endpoints"], step.id
+            else:
+                assert expect["tool"] == step.tool, step.id
 
-        Reporting them as skipped rather than failed is what keeps a comparison
-        of the two surfaces a comparison over the steps both can perform.
+    def test_the_local_operation_steps_expect_their_own_record(self, h):
+        """Chart making and the DoH lookup are what the server does itself.
+
+        They have no endpoint to match, so their pass rule is the server's own
+        tool record plus the payload it answered with - which is what makes
+        them measured steps rather than skipped ones.
         """
         steps = self._steps(h)
-        assert h._atomic_expectation(steps["doh.lookup"]) is None
-        assert h._atomic_expectation(steps["plots.status"]) is None
+        doh = steps["doh.lookup"].expect
+        assert "endpoints" not in doh and doh["tool"] == "dohLookup"
+        assert doh["result"] == ["example.com"]
+        plot = steps["plots.status"].expect
+        assert "endpoints" not in plot and plot["tool"] == "plotAnalytics"
+        assert plot["result"] == ["image"]
 
-    def test_the_category_word_moves_from_the_arguments_into_the_endpoint(self, h):
-        expect = h._atomic_expectation(self._steps(h)["lists.denylist.add"])
+    def test_an_operation_renamed_in_the_document_breaks_the_checklist_at_build_time(self, h, monkeypatch):
+        """The alternative is a live run where one step silently matches nothing."""
+        renamed = {**h._LIST_TOOLS["denylist"], "add": "insertDenylistEntry"}
+        monkeypatch.setitem(h._LIST_TOOLS, "denylist", renamed)
+        with pytest.raises(KeyError, match="insertDenylistEntry"):
+            h.build_steps(h.TaskTargets(profile_name="PN", tag="tg"))
+
+    def test_the_category_word_is_carried_by_the_endpoint_not_the_arguments(self, h):
+        expect = self._steps(h)["lists.denylist.add"].expect
         assert expect["endpoints"] == ["POST /profiles/{profile_id}/denylist"]
         assert expect["args"] == ["ai-e2e-denylist-add-tg.example.com"]
 
     def test_a_parental_entry_is_addressed_by_its_id_parameter(self, h):
         """The spec spells that path parameter `id`, not `entry_id`."""
-        expect = h._atomic_expectation(self._steps(h)["lists.parental_services.remove"])
-        assert expect["endpoints"] == ["DELETE /profiles/{profile_id}/parentalControl/services/{id}"]
+        steps = self._steps(h)
+        assert steps["lists.parental_services.remove"].expect["endpoints"] == [
+            "DELETE /profiles/{profile_id}/parentalControl/services/{id}"
+        ]
+        assert steps["lists.allowlist.remove"].expect["endpoints"] == [
+            "DELETE /profiles/{profile_id}/allowlist/{entry_id}"
+        ]
 
     def test_a_series_step_expects_the_series_endpoint(self, h):
         steps = self._steps(h)
-        assert h._atomic_expectation(steps["analytics.series.devices"])["endpoints"] == [
+        assert steps["analytics.series.devices"].expect["endpoints"] == [
             "GET /profiles/{profile_id}/analytics/devices;series"
         ]
-        assert h._atomic_expectation(steps["analytics.aggregate.devices"])["endpoints"] == [
+        assert steps["analytics.aggregate.devices"].expect["endpoints"] == [
             "GET /profiles/{profile_id}/analytics/devices"
         ]
+
+    def test_the_settings_categories_are_seven_distinct_endpoint_pairs(self, h):
+        """Each category is its own endpoint pair; `logs` is not the logs endpoint.
+
+        Re-home check for the surface switch: the web3 toggle lives on
+        /settings itself, so the general update step is the updateSettings
+        endpoint with web3 pinned in the arguments.
+        """
+        steps = self._steps(h)
+        reads = {steps[f"settings.{cat}.read"].expect["endpoints"][0] for cat in h.SETTINGS_CATEGORIES}
+        writes = {steps[f"settings.{cat}.update"].expect["endpoints"][0] for cat in h.SETTINGS_CATEGORIES}
+        assert len(reads) == 7 and len(writes) == 7
+        assert "GET /profiles/{profile_id}/settings/logs" in reads, "settings.logs, not the logs endpoint"
+        general = steps["settings.general.update"].expect
+        assert general["endpoints"] == ["PATCH /profiles/{profile_id}/settings"]
+        assert general["args"] == ["web3"]
+
+    def test_download_expects_the_download_endpoint(self, h):
+        expect = self._steps(h)["logs.download"].expect
+        assert expect["endpoints"] == ["GET /profiles/{profile_id}/logs/download"]
+        assert expect["result"] == ["file_path"]
 
     def test_a_step_with_no_expectation_still_passes(self, h):
         assert h._expected_call_ok([], {}, "abc123") == (True, "")
@@ -1302,33 +1185,21 @@ class TestAtomicSurfaceExpectations:
 
     def test_the_server_record_is_read_by_endpoint_when_it_has_one(self, h):
         assert h._call_label({"endpoint": "POST /profiles"}) == "POST /profiles"
-        assert h._call_label({"tool": "manageLists", "operation": "add"}) == "manageLists(add)"
+        # A local operation has no endpoint; its tool name is the whole label.
+        assert h._call_label({"tool": "plotAnalytics"}) == "plotAnalytics"
 
-    def test_the_harness_profile_lifecycle_names_a_tool_the_surface_has(self, h):
-        """Otherwise a targeted atomic run cannot provision or clean up its profile.
+    def test_the_harness_profile_lifecycle_names_real_tools(self, h):
+        """Otherwise a targeted run cannot provision or clean up its own profile.
 
-        Observed on the first atomic run: the grouped-only cleanup call died with
-        `Unknown tool: 'manageProfiles'` after the steps had all passed.
+        Observed on the first spec-surface run: the grouped-only cleanup call
+        died with `Unknown tool: 'manageProfiles'` after the steps had all
+        passed.
         """
-        assert h._profile_lifecycle_call("grouped", "create", name="PN") == (
-            "manageProfiles",
-            {"operation": "create", "name": "PN"},
-            "manageProfiles(create)",
-        )
-        assert h._profile_lifecycle_call("atomic", "create", name="PN") == (
-            "createProfile",
-            {"name": "PN"},
-            "createProfile",
-        )
-        assert h._profile_lifecycle_call("atomic", "delete", pid="abc123") == (
+        assert h._profile_lifecycle_call("create", name="PN") == ("createProfile", {"name": "PN"}, "createProfile")
+        assert h._profile_lifecycle_call("delete", pid="abc123") == (
             "deleteProfile",
             {"profile_id": "abc123"},
             "deleteProfile",
-        )
-        assert h._profile_lifecycle_call("grouped", "delete", pid="abc123") == (
-            "manageProfiles",
-            {"operation": "delete", "profile_id": "abc123"},
-            "manageProfiles(delete)",
         )
 
 
@@ -1380,7 +1251,7 @@ class TestTransientActorFailure:
     def test_that_loss_is_named_in_the_summary(self, h):
         """A step lost to it is not reported as an unexplained no-call."""
         row = {
-            "mcp_tool": "manageLists",
+            "mcp_tool": "getDenylist",
             "mcp_response": {
                 "server_calls": [],
                 "transients": ["wrong-tool-path: actor called the code-mode tool name directly"],
@@ -1443,7 +1314,7 @@ class TestTransientActorFailure:
 
     def test_an_outage_step_is_named_in_the_summary(self, h):
         row = {
-            "mcp_tool": "manageLists",
+            "mcp_tool": "getDenylist",
             "mcp_response": {
                 "server_calls": [],
                 "transients": ["provider-unavailable: model provider is not serving this model"],
@@ -1471,8 +1342,7 @@ class TestExpectedCallAcceptsServerIssuedIds:
         '"ai-e2e-aaaa-e2eh5l1kdb.example.com", "type": "AAAA"}]}'
     )
     EXPECT: ClassVar[dict] = {
-        "tool": "manageRewrites",
-        "operation": "delete",
+        "endpoints": ["DELETE /profiles/{profile_id}/rewrites/{entry_id}"],
         "args": [HOST],
         "result": [],
         "data": True,
@@ -1481,16 +1351,16 @@ class TestExpectedCallAcceptsServerIssuedIds:
     def _records(self, entry_id: str) -> list[dict]:
         return [
             {
-                "tool": "manageRewrites",
-                "operation": "list",
+                "tool": "listRewrites",
+                "endpoint": "GET /profiles/{profile_id}/rewrites",
                 "ok": True,
                 "write": False,
                 "args": '{"profile_id": "cc33cc"}',
                 "result": self.LIST_RESULT,
             },
             {
-                "tool": "manageRewrites",
-                "operation": "delete",
+                "tool": "deleteRewrite",
+                "endpoint": "DELETE /profiles/{profile_id}/rewrites/{entry_id}",
                 "ok": True,
                 "write": True,
                 "args": f'{{"entry_id": "{entry_id}", "profile_id": "cc33cc"}}',
@@ -1579,7 +1449,7 @@ class TestInstrumentVisibility:
         row = {
             "id": "lists.allowlist.remove_added",
             "status": "failed",
-            "mcp_tool": "manageLists",
+            "mcp_tool": "getDenylist",
             "error": "list allowlist still contains added entry",
             "mcp_response": {"server_calls": [], "instrument_read": True},
         }
@@ -1601,7 +1471,7 @@ class TestRunValidityNotes:
             {
                 "id": "profiles.get",
                 "status": "failed",
-                "mcp_tool": "manageProfiles",
+                "mcp_tool": "getProfile",
                 "error": "profile not found via REST",
                 "mcp_response": {"server_calls": [], "expected_call": {"ok": False, "why": "no call"}},
             },
@@ -1618,10 +1488,10 @@ class TestRunValidityNotes:
             {
                 "id": "profiles.list",
                 "status": "passed",
-                "mcp_tool": "manageProfiles",
+                "mcp_tool": "getProfile",
                 "error": "",
                 "mcp_response": {
-                    "server_calls": [{"tool": "manageProfiles", "ok": True}],
+                    "server_calls": [{"tool": "getProfile", "ok": True}],
                     "expected_call": {"ok": True},
                 },
             },
@@ -1638,7 +1508,7 @@ class TestRunValidityNotes:
             {
                 "id": f"profiles.step{i}",
                 "status": "skipped",
-                "mcp_tool": "manageProfiles",
+                "mcp_tool": "getProfile",
                 "reason": "model provider is not serving this model (run aborted)",
                 "mcp_response": {},
             }
@@ -1658,7 +1528,7 @@ class TestRunValidityNotes:
     def test_timeout_after_work_is_not_retried(self, h):
         """A step that DID act and still timed out is the model's own doing."""
         run = h.ActorRun(command=["x"], error="actor harness timed out after 300s")
-        run.tool_calls = [h.ToolCall(name="manageLists", args={})]
+        run.tool_calls = [h.ToolCall(name="getDenylist", args={})]
         assert h._transient_actor_failure(run, "") == ("", "")
 
     def test_provider_stream_drop_is_retried(self, h):
@@ -1769,37 +1639,39 @@ class TestServerCallEvidence:
 
     def test_read_new_calls_returns_only_lines_appended_since_offset(self, h, tmp_path):
         path = tmp_path / h.CALL_LOG_NAME
-        path.write_text('{"tool": "manageProfiles", "ok": true}\n', encoding="utf-8")
+        path.write_text('{"tool": "createProfile", "ok": true}\n', encoding="utf-8")
         offset = path.stat().st_size
         with path.open("a", encoding="utf-8") as fh:
-            fh.write('{"tool": "manageLists", "operation": "add", "ok": false}\n')
-        assert h._read_new_calls(path, offset) == [{"tool": "manageLists", "operation": "add", "ok": False}]
+            fh.write('{"tool": "addToDenylist", "endpoint": "POST /profiles/{profile_id}/denylist", "ok": false}\n')
+        assert h._read_new_calls(path, offset) == [
+            {"tool": "addToDenylist", "endpoint": "POST /profiles/{profile_id}/denylist", "ok": False}
+        ]
         assert h._read_new_calls(tmp_path / "absent.jsonl", 0) == []
 
     def test_expected_call_requires_the_exact_successful_call(self, h):
         step = h.Step(
             "lists.denylist.add",
             "lists",
-            "manageLists",
+            "addToDenylist",
             "d",
             "p",
             "list_add",
-            expect=h._expect("manageLists", "add", args=("denylist", "ads.example.com")),
+            expect=h._expect("POST /profiles/{profile_id}/denylist", args=("ads.example.com",)),
         )
         right = {
-            "tool": "manageLists",
-            "operation": "add",
+            "tool": "addToDenylist",
+            "endpoint": "POST /profiles/{profile_id}/denylist",
             "ok": True,
             "write": True,
-            "args": '{"list_type": "denylist", "entry": "ads.example.com"}',
+            "args": '{"entry_id": "ads.example.com"}',
             "result": '{"data": []}',
         }
         assert h._expected_call_ok([right], step.expect, "pid")[0]
-        # wrong operation, wrong entry, and a failed call all miss
-        wrong_op = {**right, "operation": "replace"}
-        wrong_arg = {**right, "args": '{"list_type": "denylist", "entry": "other.com"}'}
+        # a different endpoint, the entry missing, and a failed call all miss
+        wrong_ep = {**right, "endpoint": "PUT /profiles/{profile_id}/denylist"}
+        wrong_arg = {**right, "args": '{"entry_id": "other.example.com"}'}
         failed = {**right, "ok": False}
-        for record in (wrong_op, wrong_arg, failed, {"tool": "search_tools", "ok": True}):
+        for record in (wrong_ep, wrong_arg, failed, {"tool": "search_tools", "ok": True}):
             assert not h._expected_call_ok([record], step.expect, "pid")[0]
         assert not h._expected_call_ok([], step.expect, "pid")[0]
 
@@ -1808,26 +1680,26 @@ class TestServerCallEvidence:
         step = h.Step(
             "lists.denylist.replace",
             "lists",
-            "manageLists",
+            "replaceDenylist",
             "d",
             "p",
             "list_replace",
-            expect=h._expect("manageLists", "replace", args=("denylist",)),
+            expect=h._expect("PUT /profiles/{profile_id}/denylist"),
         )
         write = {
-            "tool": "manageLists",
-            "operation": "replace",
+            "tool": "replaceDenylist",
+            "endpoint": "PUT /profiles/{profile_id}/denylist",
             "ok": True,
             "write": True,
-            "args": '{"list_type": "denylist"}',
+            "args": '{"entry_ids": ["x"]}',
             "result": '{"data": []}',
         }
         confirm = {
-            "tool": "manageLists",
-            "operation": "get",
+            "tool": "getDenylist",
+            "endpoint": "GET /profiles/{profile_id}/denylist",
             "ok": True,
             "write": False,
-            "args": '{"list_type": "denylist"}',
+            "args": "{}",
             "result": '{"data": []}',
         }
         assert h._expected_call_ok([write, confirm], step.expect, "pid")[0]
@@ -1837,31 +1709,31 @@ class TestServerCallEvidence:
         step = h.Step(
             "rewrites.add.a",
             "rewrites",
-            "manageRewrites",
+            "addRewrite",
             "d",
             "p",
             "rewrite_add",
-            expect=h._expect("manageRewrites", "add", args=("a.example.com", "192.0.2.100")),
+            expect=h._expect("POST /profiles/{profile_id}/rewrites", args=("a.example.com", "192.0.2.100")),
         )
         add = {
-            "tool": "manageRewrites",
-            "operation": "add",
+            "tool": "addRewrite",
+            "endpoint": "POST /profiles/{profile_id}/rewrites",
             "ok": True,
             "write": True,
             "args": '{"name": "a.example.com", "content": "192.0.2.100"}',
             "result": '{"data": []}',
         }
         delete = {
-            "tool": "manageRewrites",
-            "operation": "delete",
+            "tool": "deleteRewrite",
+            "endpoint": "DELETE /profiles/{profile_id}/rewrites/{entry_id}",
             "ok": True,
             "write": True,
-            "args": '{"name": "a.example.com"}',
-            "result": '{"data": []}',
+            "args": '{"entry_id": "c41a6xwk"}',
+            "result": '{"success": true}',
         }
         ok, why = h._expected_call_ok([add, delete], step.expect, "pid")
         assert not ok
-        assert "followed by the write manageRewrites(delete)" in why
+        assert "followed by the write DELETE /profiles/{profile_id}/rewrites/{entry_id}" in why
 
     def test_expected_call_ignores_a_failed_write_after_the_match(self, h):
         """A rejected duplicate changed nothing, so it cannot undo the step.
@@ -1872,15 +1744,15 @@ class TestServerCallEvidence:
         step = h.Step(
             "rewrites.add.a",
             "rewrites",
-            "manageRewrites",
+            "addRewrite",
             "d",
             "p",
             "rewrite_add",
-            expect=h._expect("manageRewrites", "add", args=("a.example.com",)),
+            expect=h._expect("POST /profiles/{profile_id}/rewrites", args=("a.example.com",)),
         )
         add = {
-            "tool": "manageRewrites",
-            "operation": "add",
+            "tool": "addRewrite",
+            "endpoint": "POST /profiles/{profile_id}/rewrites",
             "ok": True,
             "write": True,
             "args": '{"name": "a.example.com", "content": "192.0.2.100"}',
@@ -1893,18 +1765,24 @@ class TestServerCallEvidence:
         step = h.Step(
             "profiles.get",
             "profiles",
-            "manageProfiles",
+            "getProfile",
             "d",
             "p",
             "profile_exists",
-            expect=h._expect("manageProfiles", "get", args=("{profile_id}",), result=("{profile_id}",)),
+            expect=h._expect("GET /profiles/{profile_id}", args=("{profile_id}",), result=("{profile_id}",)),
         )
-        assert "no manageProfiles(get) call" in h._expected_call_ok([], step.expect, "abc")[1]
-        failed = {"tool": "manageProfiles", "operation": "get", "ok": False, "args": "{}", "result": ""}
+        assert "no GET /profiles/{profile_id} call" in h._expected_call_ok([], step.expect, "abc")[1]
+        failed = {
+            "tool": "getProfile",
+            "endpoint": "GET /profiles/{profile_id}",
+            "ok": False,
+            "args": "{}",
+            "result": "",
+        }
         assert "every such call failed" in h._expected_call_ok([failed], step.expect, "abc")[1]
         wrong_id = {
-            "tool": "manageProfiles",
-            "operation": "get",
+            "tool": "getProfile",
+            "endpoint": "GET /profiles/{profile_id}",
             "ok": True,
             "write": False,
             "args": '{"profile_id": "other"}',
@@ -1912,8 +1790,8 @@ class TestServerCallEvidence:
         }
         assert "without ['abc']" in h._expected_call_ok([wrong_id], step.expect, "abc")[1]
         empty = {
-            "tool": "manageProfiles",
-            "operation": "get",
+            "tool": "getProfile",
+            "endpoint": "GET /profiles/{profile_id}",
             "ok": True,
             "write": False,
             "args": '{"profile_id": "abc"}',
@@ -1925,11 +1803,14 @@ class TestServerCallEvidence:
         """A fresh profile really does have an empty allowlist."""
         assert h._answered('{"data": []}')
         assert h._answered('{"content": ["image"]}')
+        # Each published tool answers with its own document shape; the ok flag
+        # on the record already excluded the calls that answered with an error.
+        assert h._answered('{"name": "example.com", "addresses": ["93.184.216.34"]}')
         # Every write tool answers this way (verified against the live API).
         assert h._answered('{"success": true}')
         assert not h._answered("")
-        assert not h._answered('{"error": "notFound"}')
-        assert not h._answered('{"code": "http_error", "error": "400 Bad Request"}')
+        assert not h._answered("{}")
+        assert not h._answered("null")
 
     def test_every_step_declares_the_call_it_expects(self, h):
         """A step without an expectation would fall back to REST-only vacuity."""
@@ -1938,7 +1819,10 @@ class TestServerCallEvidence:
         assert len(steps) >= 89
         assert [s.id for s in steps if not s.expect] == []
         for step in steps:
-            assert step.expect["tool"] == step.tool
+            if step.expect.get("endpoints"):
+                assert step.expect["endpoints"] == [s for s in step.expect["endpoints"] if s]
+            else:
+                assert step.expect["tool"] == step.tool
 
     def test_config_wires_the_call_log_and_closes_the_subagent_channel(self, h, tmp_path, monkeypatch):
         """Observed live: the model delegated a step to a subagent."""
@@ -1954,11 +1838,18 @@ class TestServerCallEvidence:
         assert "opencode*" not in doc["tools"]
 
     def test_feedback_shows_the_servers_own_record(self, h):
-        step = h.Step("x", "profiles", "manageProfiles", "d", "p", "profile_exists")
+        step = h.Step("x", "profiles", "getProfile", "d", "p", "profile_exists")
         run = h.ActorRun(command=["x"])
-        calls = [{"tool": "manageLists", "operation": "get", "ok": False, "error": "boom"}]
+        calls = [
+            {
+                "tool": "getDenylist",
+                "endpoint": "GET /profiles/{profile_id}/denylist",
+                "ok": False,
+                "error": "boom",
+            }
+        ]
         out = h._feedback_block(step, run, "failed", "err", "", {}, server_calls=calls)
-        assert any("SERVER" in ln and "manageLists(get)" in ln for ln in out)
+        assert any("SERVER" in ln and "GET /profiles/{profile_id}/denylist" in ln for ln in out)
         assert not any("SERVER" in ln for ln in h._feedback_block(step, run, "failed", "err", "", {}))
 
 
@@ -1967,7 +1858,7 @@ class TestStepPrompts:
 
     def test_prompts_never_name_an_mcp_tool(self, h, all_steps):
         for step in all_steps:
-            for tool in h.common.MCP_TOOLS:
+            for tool in h.allowed_tools():
                 assert tool not in step.prompt, f"{step.id} prompt leaked {tool}"
 
     def test_rewrite_add_describes_a_mapping_not_an_arrow(self, h, all_steps):
@@ -2076,8 +1967,8 @@ class TestStepRange:
         assert entry.split()[2] == "[profiles]"
 
     def test_report_records_harness_setup(self, h):
-        r = h.Report(started_at=1.0, finished_at=2.0, setup="provisioned via manageProfiles(create)")
-        assert r.summary()["setup"] == "provisioned via manageProfiles(create)"
+        r = h.Report(started_at=1.0, finished_at=2.0, setup="provisioned via createProfile")
+        assert r.summary()["setup"] == "provisioned via createProfile"
 
 
 class TestHarnessProfileLifecycle:
@@ -2121,9 +2012,9 @@ class TestHarnessProfileLifecycle:
         targets = h.TaskTargets(profile_name="P", tag="t0")
         pid, note = asyncio.run(h._harness_provision_profile(cfg, targets))
         assert pid == "abc123"
-        assert "manageProfiles(create)" in note
-        assert captured["tool"] == "manageProfiles"
-        assert captured["arguments"] == {"operation": "create", "name": "P"}
+        assert "createProfile" in note
+        assert captured["tool"] == "createProfile"
+        assert captured["arguments"] == {"name": "P"}
         # the same server spec (and ACL env) the actor's opencode.json gets
         assert captured["transport"].env["NEXTDNS_WRITABLE_PROFILES"] == "ALL"
         assert captured["transport"].args == ["-m", "nextdns_mcp.server"]
@@ -2200,11 +2091,11 @@ class TestFailureModeSummary:
     to group them."""
 
     def test_a_step_that_never_reached_the_server_is_its_own_mode(self, h):
-        why = "server recorded no manageLists(get) call in this attempt"
+        why = "server recorded no GET /profiles/{profile_id}/denylist call in this attempt"
         row = {
-            "id": "lists.allowlist.read",
+            "id": "lists.denylist.read",
             "status": "failed",
-            "mcp_tool": "manageLists",
+            "mcp_tool": "getDenylist",
             "error": why,
             "mcp_response": {
                 "server_calls": [],
@@ -2224,11 +2115,11 @@ class TestFailureModeSummary:
         that is infrastructure noise, and grouping it with real misses sends the
         tuning loop to change the server for nothing.
         """
-        why = "server recorded no manageLists(get) call in this attempt"
+        why = "server recorded no PATCH /profiles/{profile_id}/denylist/{entry_id} call in this attempt"
         row = {
             "id": "lists.denylist.update",
             "status": "failed",
-            "mcp_tool": "manageLists",
+            "mcp_tool": "updateDenylistEntry",
             "error": why,
             "mcp_response": {
                 "server_calls": [],
@@ -2242,30 +2133,40 @@ class TestFailureModeSummary:
 
     def test_repeated_rejections_in_one_step_cost_one_step(self, h):
         record = {
-            "tool": "manageSettings",
+            "tool": "updatePrivacySettings",
             "ok": False,
-            "error": "ValidationError: 1 validation error for call[manageSettings]\ncategory\n  Missing required argument",
+            "error": (
+                "ValidationError: 1 validation error for call[updatePrivacySettings]\n"
+                "privacySettings\n  Missing required argument"
+            ),
         }
         row = {
             "id": "settings.privacy.update",
             "status": "failed",
-            "mcp_tool": "manageSettings",
+            "mcp_tool": "updatePrivacySettings",
             "error": "settings/privacy read-back does not match",
             "mcp_response": {"server_calls": [dict(record) for _ in range(3)], "expected_call": {"ok": True}},
         }
         modes = h._failure_modes(row)
-        assert modes.count(("schema rejected argument 'category'", "manageSettings")) == 1
-        assert ("end state: settings/privacy read-back does not match", "manageSettings") in modes
+        assert modes.count(("schema rejected argument 'privacySettings'", "updatePrivacySettings")) == 1
+        assert ("end state: settings/privacy read-back does not match", "updatePrivacySettings") in modes
 
     def test_the_server_says_what_it_refused(self, h):
         rows = [
             (
-                {"tool": "manageLists", "ok": False, "error": "entry_id is required for remove operation"},
-                "tool rejected call: entry_id missing",
+                {
+                    "tool": "removeFromDenylist",
+                    "ok": False,
+                    "error": (
+                        "ValidationError: 1 validation error for call[removeFromDenylist]\n"
+                        "entry_id\n  Missing required argument"
+                    ),
+                },
+                "schema rejected argument 'entry_id'",
             ),
             (
                 {
-                    "tool": "queryAnalytics",
+                    "tool": "getAnalyticsStatus",
                     "ok": False,
                     "error": "HTTP error in GET /x: Client error '400 Bad Request'",
                 },
@@ -2288,11 +2189,14 @@ class TestFailureModeSummary:
             {
                 "id": f"lists.item{i}.read",
                 "status": "failed",
-                "mcp_tool": "manageLists",
-                "error": "server recorded no manageLists(get) call in this attempt",
+                "mcp_tool": "getDenylist",
+                "error": "server recorded no GET /profiles/{profile_id}/denylist call in this attempt",
                 "mcp_response": {
                     "server_calls": [],
-                    "expected_call": {"ok": False, "why": "server recorded no manageLists(get) call in this attempt"},
+                    "expected_call": {
+                        "ok": False,
+                        "why": "server recorded no GET /profiles/{profile_id}/denylist call in this attempt",
+                    },
                 },
             }
             for i in range(2)
@@ -2300,10 +2204,10 @@ class TestFailureModeSummary:
             {
                 "id": "settings.privacy.update",
                 "status": "passed",
-                "mcp_tool": "manageSettings",
+                "mcp_tool": "updatePrivacySettings",
                 "error": "",
                 "mcp_response": {
-                    "server_calls": [{"tool": "manageSettings", "ok": True}],
+                    "server_calls": [{"tool": "updatePrivacySettings", "ok": True}],
                     "expected_call": {"ok": True},
                 },
             }

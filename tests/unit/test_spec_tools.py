@@ -304,7 +304,6 @@ class TestRegistration:
 
     async def test_the_surface_publishes_one_tool_per_operation(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_API_KEY", "k")
-        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "atomic")
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
@@ -320,7 +319,6 @@ class TestRegistration:
         caller of this surface has no way to find out the server can do either.
         """
         monkeypatch.setenv("NEXTDNS_API_KEY", "k")
-        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "atomic")
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
@@ -333,7 +331,6 @@ class TestRegistration:
     async def test_a_composite_is_found_by_search(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_API_KEY", "k")
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
-        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "atomic")
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
@@ -351,7 +348,6 @@ class TestRegistration:
         has to be proven through a real call rather than against the tool alone.
         """
         monkeypatch.setenv("NEXTDNS_API_KEY", "k")
-        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "atomic")
 
         calls: list[dict[str, Any]] = []
         monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
@@ -364,7 +360,6 @@ class TestRegistration:
     async def test_disclosure_and_call_tool_work_on_generated_tools(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_API_KEY", "k")
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
-        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "atomic")
 
         async def fake_payload(method, url, params=None, json_body=None):
             return {"data": [{"id": "zip"}]}

@@ -9,7 +9,7 @@ deliberate two-halves shape:
 * **The actor is an MCP-native LLM harness.** The script sends a task prompt
   into an AI coding harness that connects to the NextDNS MCP server *natively
   over stdio* (the repo's own ``nextdns_mcp.server``) and does the tool calling
-  itself: it decides which grouped tool to call, with which arguments, and in
+  itself: it decides which tool to call, with which arguments, and in
   which order. The default harness is ``opencode`` (proven, built-in MCP
   support); the harness is a **configurable command template**, so any harness
   that can mount the MCP server may substitute it. The script does **not**
@@ -19,10 +19,9 @@ deliberate two-halves shape:
   *actually happened* by talking to the NextDNS REST API directly with the API
   key — independently of the MCP path. It checks the resulting server state
   (profile provisioned + renamed, settings values, list entries, rewrite
-  record) against the fixed targets embedded in the task, measures tool
-  coverage (which of the 8 grouped tools the actor observed exercising), then
-  owns the cleanup: it deletes the test profile via REST and verifies the
-  deletion (404 read-back). The verdict is a PASS/FAIL/SKIP report in JSONL.
+  record) against the fixed targets embedded in the task, then owns the
+  cleanup: it deletes the test profile via REST and verifies the deletion
+  (404 read-back). The verdict is a PASS/FAIL/SKIP report in JSONL.
 
 How the actor gets the tools
 -----------------------------
@@ -86,24 +85,21 @@ the tools register natively as ``nextdns_<tool>``; under progressive disclosure
 that is ``nextdns_search_tools`` and ``nextdns_call_tool``, so the same contract
 is measured without that layer.
 
-Tool surface
-------------
-``--tool-surface grouped|atomic`` (default ``grouped``) chooses which tools the
-server publishes behind ``search_tools``/``call_tool``. ``grouped`` is the eight
-area tools; ``atomic`` generates one tool per operation of the shipped OpenAPI
-spec (``addToDenylist``, ``getAnalyticsDevicesSeries``, …), 78 of them, each
-taking that endpoint's own arguments. Progressive disclosure is unchanged either
-way — ``tools/list`` still exposes two tools — only the searchable catalog
-changes size.
+The tool contract
+-----------------
+The server publishes one tool per operation of the shipped OpenAPI document
+(``addToDenylist``, ``getAnalyticsDevicesSeries``, …), each taking that
+endpoint's own arguments, plus the two operations it performs itself —
+``plotAnalytics`` and ``dohLookup`` — which no endpoint describes. Progressive
+disclosure is what the run configures with ``--tool-search``: with it on,
+``tools/list`` exposes only ``search_tools`` and ``call_tool``, and the catalog
+behind them is the full operation set.
 
-The two surfaces give the server different things to record, so condition 1
-below is matched two ways: tool + operation on ``grouped``, and the API endpoint
-the call executed on ``atomic`` (``POST /profiles/{profile_id}/rewrites``). The
-endpoint a step is about is derived from the expectation that step was written
-with, so the same step measures the same API call on either surface. Two groups
-of steps have no endpoint: ``plotAnalytics`` and ``dohLookup`` are server-side
-composites, not operations in the API. On ``atomic`` they are reported as
-skipped, not failed, because the surface has no tool to run.
+Condition 1 below is therefore matched on the API endpoint the call executed
+(``POST /profiles/{profile_id}/denylist``): each published tool is bound to
+one, and the server's call log records it. ``plotAnalytics`` and ``dohLookup``
+have no endpoint; their pass rule is their own record instead — the call ran,
+answered, and (for the chart) came back as image content.
 
 Targeted runs
 -------------
@@ -118,31 +114,33 @@ or inclusive ``A-B`` ranges::
 selection. Progress keeps the full-run numbering (``[31/89]``), so a targeted
 report can be compared with a full one step by step. A selection that leaves out
 ``profiles.create`` or ``profiles.delete`` makes the harness do that part of the
-profile lifecycle itself, through the MCP ``manageProfiles`` tool (so the
-server's ACLs apply); everything else is the caller's responsibility — if the
-selection tests "remove X", include the step that adds X.
+profile lifecycle itself, through the MCP ``createProfile``/``deleteProfile``
+tools (so the server's ACLs apply); everything else is the caller's
+responsibility — if the selection tests "remove X", include the step that adds
+X.
 
 How each step is judged
 -----------------------
 Three conditions, all of which must hold:
 
-1. The MCP server recorded the step's **exact** expected call — tool, operation
-   and identifying arguments on the grouped surface, the API endpoint it
-   executed on the atomic one — and that call succeeded and answered with a
-   payload. The server writes what it executed to a JSONL call log
-   (``NEXTDNS_CALL_LOG``, see ``nextdns_mcp.call_log``); the harness reads back
-   the lines its own attempt appended. ``--print-steps`` prints each step's
-   expectation.
+1. The MCP server recorded a call to the **endpoint this step verifies** — and
+   that call succeeded and answered with a payload. Each published tool is
+   bound to one endpoint, so this names the API call the step is about no
+   matter which tool the actor found; the two local operations are named by
+   their own record (see ``_expect``). The server writes what it executed to a
+   JSONL call log (``NEXTDNS_CALL_LOG``, see ``nextdns_mcp.call_log``); the
+   harness reads back the lines its own attempt appended. ``--print-steps``
+   prints each step's expectation.
 2. **No state-changing call followed it** in the same attempt. A confirming
    read afterwards is normal; a later write can undo the step's own work.
 3. The **REST end state** is correct, read back over the raw API.
 
 REST alone cannot decide a step. It proves the state, not who produced it: a
-step asking for ``manageProfiles(operation="get")`` passed a run whose transcript
-was nothing but errors, because an earlier step had created the profile. For a
-read there is nothing to read back at all — the account looks the same whether
-or not the read happened — so the server's own record, including the payload it
-answered with, is the only evidence there is.
+step asking for ``getProfile`` passed a run whose transcript was nothing but
+errors, because an earlier step had created the profile. For a read there is
+nothing to read back at all — the account looks the same whether or not the
+read happened — so the server's own record, including the payload it answered
+with, is the only evidence there is.
 """
 
 from __future__ import annotations
@@ -158,6 +156,7 @@ import tempfile
 import time
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Self
 
@@ -187,7 +186,6 @@ SETTINGS_CATEGORIES = common.SETTINGS_CATEGORIES
 AGGREGATE_METRICS = common.AGGREGATE_METRICS
 SERIES_METRICS = common.SERIES_METRICS
 PLOT_METRICS = common.PLOT_METRICS
-MCP_TOOLS = common.MCP_TOOLS
 _LIST_SPECS = common._LIST_SPECS
 CheckResult = common.CheckResult
 Report = common.Report
@@ -220,19 +218,30 @@ make_profile_name = common.make_profile_name
 # Harness (actor) configuration
 # =========================================================================== #
 
-# The 8 grouped tools the actor is expected to exercise (its target surface).
-ALLOWED_TOOLS = list(common.MCP_TOOLS)
+
+# The tool catalog the actor is measured against: one tool per operation of the
+# shipped OpenAPI document, plus the two operations the server performs itself.
+# Read from the server rather than typed out here - the document is the
+# contract, and a list kept beside it would drift the moment an operation is
+# added to it.
+@lru_cache(maxsize=1)
+def allowed_tools() -> frozenset[str]:
+    from nextdns_mcp.server import published_tool_names
+
+    return frozenset(published_tool_names())
+
 
 # Harness-side tools the actor may legitimately use (discovery, sandbox);
-# attempts outside these and ALLOWED_TOOLS are flagged in verbose feedback.
+# attempts outside these and the catalog are flagged in verbose feedback.
 _BUILTIN_TOOLS = frozenset(
     {"execute", "glob", "read", "write", "edit", "bash", "search", "websearch", "patch", "search_tools", "call_tool"}
 )
 
-# Precomputed union: ALLOWED_TOOLS is a list, so `list | frozenset` would
-# raise TypeError at feedback-render time (caught only when a call succeeds
-# with a non-catalog name, which short-circuit unit tests missed).
-_KNOWN_TOOLS = frozenset(ALLOWED_TOOLS) | _BUILTIN_TOOLS
+
+def _known_tools() -> frozenset[str]:
+    """Catalog plus the harness-side tool names."""
+    return allowed_tools() | _BUILTIN_TOOLS
+
 
 # Default way to launch the in-tree MCP server (overridden by config/env).
 # Uses the running interpreter (``sys.executable``) plus a PYTHONPATH pointing
@@ -301,10 +310,6 @@ class HarnessConfig:
     # registration removes that layer while leaving progressive disclosure
     # (nextdns_search_tools / nextdns_call_tool) exactly what is measured.
     codemode: bool = False
-    # Which tool surface the MCP server publishes for this run: "grouped" (the
-    # eight area tools) or "atomic" (one tool per NextDNS API operation). The
-    # expected-call rule is written differently for each, so the run records it.
-    tool_surface: str = "grouped"
     # Targeted run: comma-separated step ids, 1-based positions and inclusive
     # A-B ranges (see select_steps). start_step/end_step are the single-range
     # shorthand for the same thing; empty means "the whole checklist".
@@ -381,16 +386,13 @@ class HarnessConfig:
             "NEXTDNS_WRITABLE_PROFILES",
             "NEXTDNS_DEFAULT_PROFILE",
             "NEXTDNS_TOOL_SEARCH",
-            "NEXTDNS_TOOL_SURFACE",
             "NEXTDNS_PROTECTED_PROFILES",
         ):
             if val := os.environ.get(var):
                 cfg.server["env"].setdefault(var, val)
-        if surface := os.environ.get("NEXTDNS_TOOL_SURFACE"):
-            cfg.tool_surface = surface.strip().lower() or "grouped"
         # The data-bearing profile used for plots/log-download steps is only
         # ever read by the actor; protect it against hallucinated writes
-        # (e.g. manageProfiles delete with the wrong id) even under ALL.
+        # (e.g. deleteProfile with the wrong id) even under ALL.
         if plot_pid := os.environ.get("NEXTDNS_PLOT_PROFILE"):
             protected = cfg.server["env"].get("NEXTDNS_PROTECTED_PROFILES", "")
             ids = [p for p in protected.split(",") if p.strip()]
@@ -542,62 +544,6 @@ class TaskTargets:
         return "192.0.2.100"
 
 
-def build_task_prompt(targets: TaskTargets) -> str:
-    """The task handed to the actor.
-
-    The prompt fixes every target (profile names, settings values, list
-    entries, the rewrite) so the measuring half can verify the *resulting
-    state* after the run without any out-of-band channel.
-    """
-    entries = targets.list_entries
-    settings_lines = "\n".join(
-        f"   - {cat}: set {json.dumps(spec['set'])}" for cat, spec in SETTINGS_CATEGORIES.items()
-    )
-    return f"""You are an autonomous validation agent for the NextDNS MCP server.
-You have exactly these NextDNS MCP tools available: {", ".join(ALLOWED_TOOLS)}.
-Use them to complete the task below. Do your own tool calling — decide the
-arguments and ordering yourself from the tool descriptions.
-
-## Task
-Exercise the full NextDNS MCP tool surface against a dedicated test profile and
-carry out each step below. These exact values are checked afterwards, so use
-them verbatim.
-
-1. Create a new profile named exactly: {targets.profile_name!r}
-2. Get the new profile (you will need its profile_id for the remaining steps).
-3. Update the new profile's name to exactly: {targets.renamed_name!r}
-4. For EACH settings category, first read it, then update it to exactly these
-   values (leave every other field unchanged):
-{settings_lines}
-5. For EACH list type, read it, then make sure EXACTLY this entry is present
-   (add it if missing; do not remove any other entries):
-   - allowlist: {entries["allowlist"]!r}
-   - denylist: {entries["denylist"]!r}
-   - privacy_blocklists: {entries["privacy_blocklists"]!r}
-   - privacy_natives: {entries["privacy_natives"]!r}
-   - security_tlds: {entries["security_tlds"]!r}
-   - parental_categories: {entries["parental_categories"]!r}
-   - parental_services: {entries["parental_services"]!r}
-6. Add an A-record rewrite named exactly {targets.rewrite_name!r} with content
-   exactly {targets.rewrite_content!r}.
-7. Query analytics for the new profile for at least the 'status' and
-   'queryTypes' metrics (aggregate, from_time=-1d).
-8. Run a DoH lookup (dohLookup) for example.com through the new profile.
-9. Get, then download, then clear the query logs for the new profile.
-10. Generate at least one plot (plotAnalytics, metric=status) for the new
-    profile.
-
-## Rules
-- Perform all writes against the test profile only. Never touch other profiles.
-- If a call fails, note the error and continue with the remaining steps.
-- Do NOT delete the test profile: the harness owns cleanup and deletes it after
-  you finish.
-- Do not modify any code or configuration.
-- When you are done, reply with a short summary of what you did and the test
-  profile id.
-"""
-
-
 # =========================================================================== #
 # Actor result model + harness event parsing (pure helpers, unit-tested)
 # =========================================================================== #
@@ -672,7 +618,7 @@ def _tool_event_name(part: dict[str, Any]) -> str:
         # other harnesses use a nextdns_<tool> prefix or a generic
         # tools.mcp.call_tool({name: "<tool>", ...}) wrapper. Try each form.
         # The wrapper is tried FIRST so a progressive-disclosure call
-        # (tools.nextdns.call_tool({name: "manageLists", ...})) resolves to the
+        # (tools.nextdns.call_tool({name: "addToDenylist", ...})) resolves to the
         # proxied tool rather than to the synthetic "call_tool" itself.
         m = re.search(r'call_tool\(\s*\{[^}]*?name["\']?\s*:\s*["\']([A-Za-z0-9_]+)', code)
         if not m:
@@ -990,239 +936,6 @@ class MeasureClient:
 # =========================================================================== #
 
 
-def _coverage_check(run: ActorRun, tool: str) -> CheckResult:
-    """Observational: did the actor's event stream show this tool being used?
-
-    This is a best-effort signal — a harness that routes MCP calls through a
-    wrapper tool (e.g. opencode's ``execute``) can defeat name attribution —
-    and it is reported as ``skipped`` (never ``failed``) so it can never fail
-    the verdict on its own.
-    """
-    calls = [c for c in run.tool_calls if c.name == tool]
-    if not calls:
-        return CheckResult(
-            id=f"coverage.{tool}",
-            section="coverage",
-            description=f"actor exercised the '{tool}' tool",
-            status="skipped",
-            mcp_tool=tool,
-            reason="tool not observed in the harness event stream (best-effort signal)",
-        )
-    return CheckResult(
-        id=f"coverage.{tool}",
-        section="coverage",
-        description=f"actor exercised the '{tool}' tool ({len(calls)} observed call(s))",
-        status="passed",
-        mcp_tool=tool,
-        mcp_request={"calls": len(calls)},
-    )
-
-
-async def _measure_profile(m: MeasureClient, targets: TaskTargets, report: Report) -> dict[str, Any] | None:
-    """State check: the test profile exists and was renamed as the task required.
-
-    The actor renames the profile during the run, so by the time we measure it
-    lives under the *renamed* name, not the original. We therefore provision
-    (exists) if it is found under either name, and judge the rename check on
-    whether it is specifically found under the renamed name.
-    """
-    orig = await m.find_profile(targets.profile_name)
-    renamed = await m.find_profile(targets.renamed_name)
-    if orig is not None:
-        prof = orig
-    elif renamed is not None:
-        prof = renamed
-    else:
-        report.results.append(
-            CheckResult(
-                id="profiles.provision",
-                section="profiles",
-                description=f"test profile {targets.profile_name!r} exists on the server",
-                status="failed",
-                mcp_tool="manageProfiles",
-                rest_verification={"endpoint": "GET /profiles", "verified_present": False},
-                error="profile was not found via REST — the actor did not provision it",
-            )
-        )
-        return None
-    pid = str(prof.get("id"))
-    report.profile_id = pid
-    report.results.append(
-        CheckResult(
-            id="profiles.provision",
-            section="profiles",
-            description=f"test profile {targets.profile_name!r} exists on the server",
-            status="passed",
-            mcp_tool="manageProfiles",
-            rest_verification={"endpoint": "GET /profiles", "verified_present": True, "profile_id": prof.get("id")},
-        )
-    )
-    renamed_ok = isinstance(renamed, dict) and str(renamed.get("id")) == pid
-    r = CheckResult(
-        id="profiles.rename",
-        section="profiles",
-        description=f"test profile was renamed to {targets.renamed_name!r}",
-        status="passed" if renamed_ok else "failed",
-        mcp_tool="manageProfiles",
-        mcp_request={"operation": "update", "name": targets.renamed_name},
-        rest_verification={"endpoint": "GET /profiles", "verified_renamed": renamed_ok},
-    )
-    if not renamed_ok:
-        r.error = f"profile {pid} was not found under its renamed name via REST"
-    report.results.append(r)
-    return prof
-
-
-async def _measure_settings(m: MeasureClient, pid: str, report: Report) -> None:
-    for cat, spec in SETTINGS_CATEGORIES.items():
-        rest = await m.rest_get(f"/profiles/{pid}{spec['path']}")
-        ok = _verify_settings_assert(rest, spec["assert"])
-        r = CheckResult(
-            id=f"settings.{cat}",
-            section="settings",
-            description=f"settings/{cat} read-back shows the task's target values {json.dumps(spec['assert'])}",
-            status="passed" if ok else "failed",
-            mcp_tool="manageSettings",
-            mcp_request={"operation": "update", "category": cat, "settings": spec["set"]},
-            rest_verification={
-                "endpoint": f"GET /profiles/{pid}{spec['path']}",
-                "rest_status": common._resp_status(rest),
-            },
-        )
-        if not ok:
-            r.error = f"REST read-back for settings/{cat} does not match the target values"
-        report.results.append(r)
-
-
-async def _measure_lists(m: MeasureClient, pid: str, targets: TaskTargets, report: Report) -> None:
-    entries = targets.list_entries
-    for spec in common._LIST_SPECS:
-        name = spec["name"]
-        base = f"/profiles/{pid}{spec['path']}"
-        rest = await m.rest_get(base)
-        present = _list_contains(rest, [entries[name]])
-        r = CheckResult(
-            id=f"lists.{name}",
-            section="lists",
-            description=f"list {name} read-back contains the target entry {entries[name]!r}",
-            status="passed" if present else "failed",
-            mcp_tool="manageLists",
-            mcp_request={"list_type": name, "operation": "add", "entry": entries[name]},
-            rest_verification={"endpoint": f"GET {base}", "rest_status": common._resp_status(rest)},
-        )
-        if not present:
-            r.error = f"REST read-back for list {name} does not contain the target entry"
-        report.results.append(r)
-
-
-async def _measure_rewrites(m: MeasureClient, pid: str, targets: TaskTargets, report: Report) -> None:
-    base = f"/profiles/{pid}/rewrites"
-    rest = await m.rest_get(base)
-    present = _rewrites_contains(rest, [targets.rewrite_name])
-    r = CheckResult(
-        id="rewrites.add",
-        section="rewrites",
-        description=f"rewrites read-back contains the target record {targets.rewrite_name!r}",
-        status="passed" if present else "failed",
-        mcp_tool="manageRewrites",
-        mcp_request={"operation": "add", "name": targets.rewrite_name, "content": targets.rewrite_content},
-        rest_verification={"endpoint": f"GET {base}", "rest_status": common._resp_status(rest)},
-    )
-    if not present:
-        r.error = "REST read-back for rewrites does not contain the target record"
-    report.results.append(r)
-
-
-def _readonly_coverage(run: ActorRun, tool: str, section: str, cid: str, description: str) -> CheckResult:
-    """Coverage check for read-only surface (analytics / doh / plots / logs).
-
-    No REST state change is observable, so the event stream is the only signal.
-    Reported as skipped (not failed) when unobserved.
-    """
-    calls = [c for c in run.tool_calls if c.name == tool]
-    if not calls:
-        return CheckResult(
-            id=cid,
-            section=section,
-            description=description,
-            status="skipped",
-            mcp_tool=tool,
-            reason="tool not observed in the harness event stream (best-effort signal)",
-        )
-    return CheckResult(
-        id=cid,
-        section=section,
-        description=f"{description} ({len(calls)} observed call(s))",
-        status="passed",
-        mcp_tool=tool,
-        mcp_request={"calls": len(calls)},
-    )
-
-
-def _measure_actor_run(run: ActorRun, report: Report) -> None:
-    """Gate: did the actor harness run at all?"""
-    report.results.append(
-        CheckResult(
-            id="actor.run",
-            section="actor",
-            description=f"actor harness exited cleanly (exit={run.exit_code}, {len(run.tool_calls)} tool event(s) observed)",
-            status="passed" if run.ok else "failed",
-            mcp_tool=None,
-            mcp_response={"exit_code": run.exit_code, "tool_events": len(run.tool_calls)},
-            error=(
-                (run.error + chr(10) + "--- stderr (tail) ---" + chr(10) + run.stderr[-800:])
-                if (run.error and run.stderr)
-                else run.error
-            )
-            if not run.ok
-            else "",
-        )
-    )
-
-
-def _measure_coverage(run: ActorRun, report: Report) -> None:
-    for tool in ALLOWED_TOOLS:
-        report.results.append(_coverage_check(run, tool))
-
-
-async def _cleanup(m: MeasureClient, pid: str, targets: TaskTargets, report: Report) -> None:
-    """Harness-owned cleanup: delete the test profile, then verify via REST.
-
-    The actor was explicitly told not to delete the profile, so the deletion
-    and its verification belong to the measuring half.
-    """
-    resp = await m.rest_delete(f"/profiles/{pid}")
-    if not (isinstance(resp, dict) and resp.get("ok")):
-        report.cleanup = f"FAILED (REST DELETE /profiles/{pid} status={common._resp_status(resp)})"
-        report.results.append(
-            CheckResult(
-                id="profiles.cleanup",
-                section="profiles",
-                description="test profile deleted by the harness and verified gone",
-                status="failed",
-                mcp_tool=None,
-                mcp_request={"operation": "delete", "profile_id": pid},
-                rest_verification={"endpoint": f"DELETE /profiles/{pid}", "rest_status": common._resp_status(resp)},
-                error=f"REST DELETE was not ok (status={common._resp_status(resp)})",
-            )
-        )
-        return
-    gone = await _profile_gone(m, pid, targets)
-    report.cleanup = "passed" if gone else "FAILED (profile still present after DELETE)"
-    r = CheckResult(
-        id="profiles.cleanup",
-        section="profiles",
-        description="test profile deleted by the harness and verified gone",
-        status="passed" if gone else "failed",
-        mcp_tool=None,
-        mcp_request={"operation": "delete", "profile_id": pid},
-        rest_verification={"endpoint": f"GET /profiles/{pid}", "verified_gone": gone},
-    )
-    if not gone:
-        r.error = f"profile {pid} is still present after the harness deleted it"
-    report.results.append(r)
-
-
 async def _profile_gone(m: MeasureClient, pid: str, targets: TaskTargets) -> bool:
     """The profile is gone when neither name (original or renamed) resolves."""
     by_id = await m.rest_get(f"/profiles/{pid}")
@@ -1275,7 +988,7 @@ async def _self_heal_profile(m: MeasureClient, pid: str, targets: TaskTargets) -
     """Recreate the test profile via REST if the actor deleted it mid-run.
 
     A step prompt like "remove this entry from the denylist" can be misread as
-    "delete the profile", and manageProfiles(delete) really does delete it —
+    "delete the profile", and deleteProfile really does delete it —
     every later step then fails on 404s and the report measures a cascade, not
     the model's capability. The harness owns the profile lifecycle (the actor
     is told cleanup is harness-owned), so recreating it here is test
@@ -1347,24 +1060,17 @@ async def _mcp_call(server: dict[str, Any], tool: str, arguments: dict[str, Any]
     return {"ok": not error, "data": data, "error": error}
 
 
-def _profile_lifecycle_call(
-    surface: str, action: str, pid: str = "", name: str = ""
-) -> tuple[str, dict[str, Any], str]:
+def _profile_lifecycle_call(action: str, pid: str = "", name: str = "") -> tuple[str, dict[str, Any], str]:
     """The call the harness makes for a profile action it owns.
 
     Creating and deleting the test profile goes through the MCP server, not
     straight to the API, so the server's read/write ACLs apply to the harness's
-    own bookkeeping too. That means naming a tool the published surface
-    actually has: the grouped surface's ``manageProfiles``, or this operation's
-    endpoint tool on the atomic surface. Returns (tool, arguments, label).
+    own bookkeeping too. The action names the endpoint tool that performs it:
+    ``createProfile`` and ``deleteProfile``. Returns (tool, arguments, label).
     """
-    if surface == "atomic":
-        if action == "create":
-            return "createProfile", {"name": name}, "createProfile"
-        return "deleteProfile", {"profile_id": pid}, "deleteProfile"
     if action == "create":
-        return "manageProfiles", {"operation": "create", "name": name}, "manageProfiles(create)"
-    return "manageProfiles", {"operation": "delete", "profile_id": pid}, "manageProfiles(delete)"
+        return "createProfile", {"name": name}, "createProfile"
+    return "deleteProfile", {"profile_id": pid}, "deleteProfile"
 
 
 async def _harness_provision_profile(config: HarnessConfig, targets: TaskTargets) -> tuple[str, str]:
@@ -1374,7 +1080,7 @@ async def _harness_provision_profile(config: HarnessConfig, targets: TaskTargets
     for every later step to act on, and the harness owns that profile either
     way, so it creates it the way the server exposes it.
     """
-    tool, arguments, label = _profile_lifecycle_call(config.tool_surface, "create", name=targets.profile_name)
+    tool, arguments, label = _profile_lifecycle_call("create", name=targets.profile_name)
     res = await _mcp_call(config.server, tool, arguments)
     data = res.get("data")
     body = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
@@ -1386,7 +1092,7 @@ async def _harness_provision_profile(config: HarnessConfig, targets: TaskTargets
 
 async def _harness_delete_profile(config: HarnessConfig, pid: str) -> str:
     """Delete the test profile through the MCP tool; returns an error string."""
-    tool, arguments, _label = _profile_lifecycle_call(config.tool_surface, "delete", pid=pid)
+    tool, arguments, _label = _profile_lifecycle_call("delete", pid=pid)
     res = await _mcp_call(config.server, tool, arguments)
     return str(res.get("error") or "")
 
@@ -1416,152 +1122,159 @@ class Step:
 
     id: str
     section: str
-    tool: str  # the MCP tool the model is instructed to use
+    tool: str  # the published tool this step is about (a report label; the actor finds it itself)
     description: str
     prompt: str  # instruction to the actor ("{profile_id}" rendered at run time)
     verify: str  # verifier key in _verify_step
     vdata: dict[str, Any] = field(default_factory=dict)
-    # The exact call this step must produce, matched against the server's own
-    # call log (nextdns_mcp.call_log): {"tool", "operation", "args": [needed
-    # substrings], "result": [needed substrings], "data": bool}. "{profile_id}"
-    # inside a substring is rendered at run time.
+    # The call this step must produce, matched against the server's own call
+    # log (nextdns_mcp.call_log): either {"endpoints": ["METHOD /path/template"]}
+    # for a proxied operation, or {"tool": name} for one the server performs
+    # itself - plus "args" and "result" (substrings that must appear) and
+    # "data" (the call answered with a payload). "{profile_id}" inside a
+    # substring is rendered at run time.
     expect: dict[str, Any] = field(default_factory=dict)
 
 
 def _expect(
-    tool: str,
-    operation: str = "",
+    endpoint: str,
     args: tuple[str, ...] = (),
     result: tuple[str, ...] = (),
     data: bool = True,
 ) -> dict[str, Any]:
-    """Compact builder for a step's expected call (see Step.expect)."""
-    return {
-        "tool": tool,
-        "operation": operation,
-        "args": list(args),
-        "result": list(result),
-        "data": data,
-    }
+    """The endpoint call this step must produce (see Step.expect).
 
-
-# ---------------------------------------------------------------------------
-# The atomic surface: what a step's expected call means when the tools are
-# API endpoints rather than area tools.
-# ---------------------------------------------------------------------------
-
-# category -> (endpoint path, name of the entry's path parameter). Taken from
-# the spec the atomic surface generates its tools from
-# (src/nextdns_mcp/nextdns-openapi.yaml): a list step is about one collection
-# endpoint, and the category word that named it in a grouped call is carried by
-# the path instead. Parental control is the one family whose entry parameter is
-# spelled `id` rather than `entry_id`.
-_LIST_ENDPOINTS: dict[str, tuple[str, str]] = {
-    "denylist": ("/profiles/{profile_id}/denylist", "entry_id"),
-    "allowlist": ("/profiles/{profile_id}/allowlist", "entry_id"),
-    "parental_categories": ("/profiles/{profile_id}/parentalControl/categories", "id"),
-    "parental_services": ("/profiles/{profile_id}/parentalControl/services", "id"),
-    "privacy_blocklists": ("/profiles/{profile_id}/privacy/blocklists", "entry_id"),
-    "privacy_natives": ("/profiles/{profile_id}/privacy/natives", "entry_id"),
-    "security_tlds": ("/profiles/{profile_id}/security/tlds", "entry_id"),
-}
-
-# category -> settings endpoint. The seven categories of the grouped tool are
-# seven different endpoints here.
-_SETTINGS_ENDPOINTS: dict[str, str] = {
-    "general": "/profiles/{profile_id}/settings",
-    "logs": "/profiles/{profile_id}/settings/logs",
-    "blockpage": "/profiles/{profile_id}/settings/blockPage",
-    "performance": "/profiles/{profile_id}/settings/performance",
-    "security": "/profiles/{profile_id}/security",
-    "privacy": "/profiles/{profile_id}/privacy",
-    "parental": "/profiles/{profile_id}/parentalControl",
-}
-
-# The HTTP verb each grouped operation performs.
-_OPERATION_VERBS: dict[str, str] = {
-    "create": "POST",
-    "list": "GET",
-    "get": "GET",
-    "download": "GET",
-    "update": "PATCH",
-    "replace": "PUT",
-    "add": "POST",
-    "remove": "DELETE",
-    "delete": "DELETE",
-    "clear": "DELETE",
-}
-
-# Steps whose grouped tool is a server-side composite with no endpoint behind
-# it: chart generation and the DNS-over-HTTPS lookup. Neither exists in the API
-# spec, so no atomic catalog contains them.
-_NO_ENDPOINT_TOOLS = frozenset({"plotAnalytics", "dohLookup"})
-
-
-def _atomic_expectation(step: Step) -> dict[str, Any] | None:
-    """The endpoint form of a step's expected call, or None if it has none.
-
-    The endpoint is what the step is about, so a step authored for the grouped
-    surface is judged on the same API call on this one: a successful call that
-    hit that endpoint, no successful write after it, and the REST end state the
-    step already checks.
-
-    ``None`` means the step is not comparable on this surface rather than that
-    the model failed it — see ``_NO_ENDPOINT_TOOLS``.
-
-    Arguments are kept only where they still identify the call once the path
-    carries the category: the profile name, the entry being written, the
-    settings field being changed. The category word itself ("denylist",
-    "parental_services") is dropped because it is now in the endpoint, and the
-    analytics metric is dropped for the same reason.
+    Every published tool is bound to one endpoint, so naming the endpoint names
+    the API call the step is about no matter which tool the actor found to make
+    it. ``{profile_id}`` stays literal: the log records the spec's own path
+    template, so a step pointed at a different profile (the plot profile, the
+    log-download profile) still matches its endpoint.
     """
-    expect = step.expect or {}
-    tool = str(expect.get("tool", ""))
-    operation = str(expect.get("operation", ""))
-    args = [str(item) for item in expect.get("args", [])]
-    if tool in _NO_ENDPOINT_TOOLS:
-        return None
+    return {"endpoints": [endpoint], "args": list(args), "result": list(result), "data": data}
 
-    endpoints: list[str] = []
-    keep: list[str] = []
-    if tool == "manageProfiles":
-        path = "/profiles" if operation in ("create", "list") else "/profiles/{profile_id}"
-        endpoints = [f"{_OPERATION_VERBS[operation]} {path}"]
-        keep = args
-    elif tool == "manageSettings":
-        endpoints = [f"{_OPERATION_VERBS[operation]} {_SETTINGS_ENDPOINTS[args[0]]}"]
-        keep = args[1:]
-    elif tool == "manageLists":
-        path, entry_param = _LIST_ENDPOINTS[args[0]]
-        verb = _OPERATION_VERBS[operation]
-        suffix = f"/{{{entry_param}}}" if operation in ("update", "remove") else ""
-        endpoints = [f"{verb} {path}{suffix}"]
-        keep = args[1:]
-    elif tool == "manageRewrites":
-        verb = _OPERATION_VERBS[operation]
-        suffix = "/{entry_id}" if operation == "delete" else ""
-        endpoints = [f"{verb} /profiles/{{profile_id}}/rewrites{suffix}"]
-        keep = args
-    elif tool == "manageLogs":
-        if operation == "download":
-            endpoints = ["GET /profiles/{profile_id}/logs/download"]
-        elif operation == "get":
-            endpoints = ["GET /profiles/{profile_id}/logs"]
-        else:
-            endpoints = ["DELETE /profiles/{profile_id}/logs"]
-    elif tool == "queryAnalytics":
-        metric = args[0]
-        suffix = ";series" if "series" in args else ""
-        endpoints = [f"GET /profiles/{{profile_id}}/analytics/{metric}{suffix}"]
-    else:
-        raise ValueError(f"step {step.id}: no endpoint mapping for the {tool!r} tool")
 
-    return {
-        "endpoints": endpoints,
-        "args": keep,
-        "result": list(expect.get("result", [])),
-        "data": bool(expect.get("data", True)),
-    }
+def _expect_local(
+    tool: str,
+    args: tuple[str, ...] = (),
+    result: tuple[str, ...] = (),
+    data: bool = True,
+) -> dict[str, Any]:
+    """A call to an operation the server performs itself: no endpoint, its own record.
+
+    ``plotAnalytics`` and ``dohLookup`` answer with what no endpoint returns - a
+    chart image, a DNS answer - so they are recorded by tool name, and the
+    payload they answered with is the proof the operation ran.
+    """
+    return {"tool": tool, "args": list(args), "result": list(result), "data": data}
+
+
+# ---------------------------------------------------------------------------
+# The checklist's API surface: the tools and endpoints each family of steps
+# drives, taken from the shipped OpenAPI document
+# (src/nextdns_mcp/nextdns-openapi.yaml).
+# ---------------------------------------------------------------------------
+
+# category -> the (read, write) tools for that settings endpoint. The seven
+# settings categories are seven separate endpoints, each with its own getter and
+# writer; "general" is /settings itself, which is where the web3 toggle lives.
+_SETTINGS_OPS: dict[str, tuple[str, str]] = {
+    "general": ("getSettings", "updateSettings"),
+    "logs": ("getLogsSettings", "updateLogsSettings"),
+    "blockpage": ("getBlockPageSettings", "updateBlockPageSettings"),
+    "performance": ("getPerformanceSettings", "updatePerformanceSettings"),
+    "security": ("getSecuritySettings", "updateSecuritySettings"),
+    "privacy": ("getPrivacySettings", "updatePrivacySettings"),
+    "parental": ("getParentalControlSettings", "updateParentalControlSettings"),
+}
+
+# list type -> the tool that performs each operation on that collection. A
+# missing key means the checklist does not perform that operation there (only
+# the free-form domain lists accept a synthetic "added" entry). The endpoint
+# each tool executes is resolved from the document, so the entry parameter's
+# spelling - `id` for parental control, `entry_id` elsewhere - is never
+# re-typed here.
+_LIST_TOOLS: dict[str, dict[str, str]] = {
+    "allowlist": {
+        "get": "getAllowlist",
+        "replace": "replaceAllowlist",
+        "add": "addToAllowlist",
+        "update": "updateAllowlistEntry",
+        "remove": "removeFromAllowlist",
+    },
+    "denylist": {
+        "get": "getDenylist",
+        "replace": "replaceDenylist",
+        "add": "addToDenylist",
+        "update": "updateDenylistEntry",
+        "remove": "removeFromDenylist",
+    },
+    "privacy_blocklists": {
+        "get": "getPrivacyBlocklists",
+        "replace": "replacePrivacyBlocklists",
+        "remove": "removePrivacyBlocklist",
+    },
+    "privacy_natives": {
+        "get": "getPrivacyNatives",
+        "replace": "replacePrivacyNatives",
+        "remove": "removePrivacyNative",
+    },
+    "security_tlds": {
+        "get": "getSecurityTLDs",
+        "replace": "replaceSecurityTLDs",
+        "remove": "removeSecurityTLD",
+    },
+    "parental_categories": {
+        "get": "getParentalControlCategories",
+        "replace": "replaceParentalControlCategories",
+        "update": "updateParentalControlCategoryEntry",
+        "remove": "removeFromParentalControlCategories",
+    },
+    "parental_services": {
+        "get": "getParentalControlServices",
+        "replace": "replaceParentalControlServices",
+        "update": "updateParentalControlServiceEntry",
+        "remove": "removeFromParentalControlServices",
+    },
+}
+
+# metric -> the tool answering that aggregate. The series tool is the same name
+# with a "Series" suffix (there is no series endpoint for domains, and the
+# checklist does not ask for one).
+_ANALYTICS_TOOLS: dict[str, str] = {
+    "status": "getAnalyticsStatus",
+    "domains": "getAnalyticsDomains",
+    "queryTypes": "getAnalyticsQueryTypes",
+    "reasons": "getAnalyticsReasons",
+    "ips": "getAnalyticsIPs",
+    "dnssec": "getAnalyticsDNSSEC",
+    "encryption": "getAnalyticsEncryption",
+    "ipVersions": "getAnalyticsIPVersions",
+    "protocols": "getAnalyticsProtocols",
+    "devices": "getAnalyticsDevices",
+    "destinations": "getAnalyticsDestinations",
+}
+
+
+@lru_cache(maxsize=1)
+def _spec_endpoints() -> dict[str, str]:
+    """operationId -> ``"METHOD /path template"``, read from the shipped document.
+
+    This is how a step's expectation is written: the step names the tool that
+    performs it, and this resolves the endpoint the server will record for that
+    call. An operation the document renames or drops fails at build time with a
+    KeyError naming it, rather than quietly matching no call in a live run.
+    """
+    from nextdns_mcp.spec_tools import spec_routes
+
+    return {r.operation_id: f"{r.method} {r.path}" for r in spec_routes() if r.operation_id}
+
+
+def _endpoint(tool: str) -> str:
+    """The endpoint a published tool executes, as the server's call log records it."""
+    endpoints = _spec_endpoints()
+    if tool not in endpoints:
+        raise KeyError(f"the checklist names {tool!r}, which is not an operation of the shipped OpenAPI document")
+    return endpoints[tool]
 
 
 # Written by the MCP server (nextdns_mcp.call_log) into the run's workdir; the
@@ -1595,8 +1308,10 @@ def _answered(result_text: str) -> bool:
 
     Effectiveness, not emptiness: a fresh test profile really does have an empty
     allowlist, so ``{"data": []}`` is a correct answer to "read the allowlist",
-    and the write tools answer ``{"success": true}`` rather than an object. What
-    is not correct is a call that returned no payload at all.
+    and the write tools answer ``{"success": true}`` rather than an object. Each
+    published tool answers with its own document - a chart's content blocks, a
+    DNS answer, a settings object - so any non-empty payload counts; the ok flag
+    on the record has already excluded the ones that answered with an error.
     """
     if not result_text:
         return False
@@ -1609,8 +1324,9 @@ def _answered(result_text: str) -> bool:
             return True
         if "data" in payload:
             return payload["data"] is not None
-        # Tools without a data envelope (plots return content blocks).
-        return bool(payload.get("content"))
+        # Anything else the tool answered with - a chart's content blocks, a
+        # DNS answer, a status document - is the payload for that tool.
+        return bool(payload)
     return bool(payload)
 
 
@@ -1661,19 +1377,13 @@ def _walk_identifiers(node: Any) -> list[tuple[str, list[str]]]:
 def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid: str) -> tuple[bool, str]:
     """The two transcript conditions of the pass rule.
 
-    1. the server recorded a SUCCESSFUL call matching this step's expected call
-       exactly, and, for a read, the call answered with a payload, since the API
-       cannot show that a read happened. The expectation is written one of two
-       ways, because the two tool surfaces give the server different things to
-       record:
-       - grouped: the tool name, its `operation`, and the arguments that
-         identify it (which list, which metric, which entry);
-       - atomic: the API endpoint the call executed
-         (``POST /profiles/{profile_id}/rewrites``), which the server knows
-         because each generated tool is bound to one. A step's endpoint
-         expectation is derived from the grouped expectation it was written with
-         (see ``_atomic_expectation``), so "the call this step is about" means
-         the same thing on both surfaces.
+    1. the server recorded a SUCCESSFUL call matching this step's expected call,
+       and the call answered with a payload — the API cannot show that a read
+       happened. The expectation names the API endpoint the call executed
+       (``POST /profiles/{profile_id}/denylist``), which the server knows
+       because every generated tool is bound to one; the two operations the
+       server performs itself are named by their tool instead (see
+       ``_expect_local``).
     2. no state-changing call came AFTER it in the same attempt. Confirming
        reads afterwards are normal and allowed; undoing the step's own write is
        not.
@@ -1683,7 +1393,6 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
     if not expect:
         return True, ""
     tool = str(expect.get("tool", ""))
-    operation = str(expect.get("operation", ""))
     # Endpoint expectations are matched against the spec's path templates, so
     # `{profile_id}` stays literal and a step whose call targets another
     # profile (plots, log download) still matches.
@@ -1696,12 +1405,12 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
     # caller that its id is `c41a6xwk`, and deleting by that id is the workflow
     # the server documents and hints at. Both spellings identify the record.
     ids_by_name = _identifiers_from_answers(records)
-    label = " or ".join(endpoints) if endpoints else f"{tool}({operation or '-'})"
+    label = " or ".join(endpoints) if endpoints else tool
 
     def matches(record: dict[str, Any]) -> bool:
         if endpoints:
             return str(record.get("endpoint", "")) in endpoints
-        return record.get("tool") == tool and (not operation or str(record.get("operation", "")) == operation)
+        return record.get("tool") == tool
 
     # Why the closest candidate was rejected, so a failure names the condition
     # it failed instead of guessing from the tool name alone.
@@ -1729,8 +1438,8 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
             why = f"{label} succeeded but returned no payload"
             continue
         # Only a write that SUCCEEDED can undo the step. A failed duplicate
-        # (observed: manageRewrites(add) of an existing record, rejected
-        # upstream) changed nothing, so it must not fail the step.
+        # (observed: addRewrite of an existing record, rejected upstream)
+        # changed nothing, so it must not fail the step.
         later = [r for r in records[index + 1 :] if r.get("write") and r.get("ok")]
         if later:
             undo = later[0]
@@ -1743,13 +1452,13 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
 def _call_label(record: dict[str, Any]) -> str:
     """How the server's own record of a call is named.
 
-    The atomic surface records the endpoint it executed, which is what says what
-    happened there; the grouped surface's tool and operation is what says it.
+    The endpoint says what happened upstream; a call with no endpoint is one of
+    the two operations the server performs itself, so its tool name says it.
     """
     endpoint = str(record.get("endpoint") or "")
     if endpoint:
         return endpoint
-    return f"{record.get('tool')}({record.get('operation') or '-'})"
+    return str(record.get("tool") or "?")
 
 
 def _server_calls_text(records: list[dict[str, Any]]) -> str:
@@ -1773,7 +1482,15 @@ def _step_prompt(task: str) -> str:
 
 
 def build_steps(targets: TaskTargets) -> list[Step]:
-    """Build the full per-step checklist (~89 steps) for this run."""
+    """Build the full per-step checklist (~89 steps) for this run.
+
+    Each step names the published tool that performs it and is judged on that
+    tool's endpoint, resolved from the shipped OpenAPI document (see
+    ``_endpoint``); the two operations the server performs itself name
+    themselves through ``_expect_local``. The actor decides for itself which
+    tool to find and call - the step states the outcome it must produce, not
+    the call to make.
+    """
     pn = targets.profile_name
     rn = targets.renamed_name
     tag = targets.tag
@@ -1785,104 +1502,106 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         Step(
             "profiles.create",
             "profiles",
-            "manageProfiles",
+            "createProfile",
             f"create the test profile {pn!r}",
             _step_prompt(f"Create a new NextDNS profile named exactly '{pn}'."),
             "profile_exists",
-            expect=_expect("manageProfiles", "create", args=(pn,)),
+            expect=_expect(_endpoint("createProfile"), args=(pn,)),
         )
     )
     steps.append(
         Step(
             "profiles.list",
             "profiles",
-            "manageProfiles",
+            "listProfiles",
             "list all profiles and find the new one",
             _step_prompt(f"List all profiles and confirm '{pn}' is present."),
             "profile_exists",
             # The answer has to name the profile: a list call that never mentions it
             # did not find it.
-            expect=_expect("manageProfiles", "list", result=(pn,)),
+            expect=_expect(_endpoint("listProfiles"), result=(pn,)),
         )
     )
     steps.append(
         Step(
             "profiles.get",
             "profiles",
-            "manageProfiles",
+            "getProfile",
             "get the test profile by id",
             _step_prompt("Get the profile '{profile_id}' and report its details."),
             "profile_exists",
-            expect=_expect("manageProfiles", "get", args=("{profile_id}",), result=("{profile_id}",)),
+            expect=_expect(_endpoint("getProfile"), args=("{profile_id}",), result=("{profile_id}",)),
         )
     )
     steps.append(
         Step(
             "profiles.update",
             "profiles",
-            "manageProfiles",
+            "updateProfile",
             f"rename the test profile to {rn!r}",
             _step_prompt(f"Rename the profile '{{profile_id}}' to exactly '{rn}'."),
             "profile_renamed",
-            expect=_expect("manageProfiles", "update", args=(rn,)),
+            expect=_expect(_endpoint("updateProfile"), args=(rn,)),
         )
     )
 
     # ---- settings: read + update per category ---------------------------
     for cat, spec in SETTINGS_CATEGORIES.items():
+        read_tool, write_tool = _SETTINGS_OPS[cat]
         steps.append(
             Step(
                 f"settings.{cat}.read",
                 "settings",
-                "manageSettings",
+                read_tool,
                 f"{cat}: read current settings",
                 _step_prompt(f"Read the current {cat} settings for profile '{{profile_id}}' and report them."),
                 "settings_read",
                 {"cat": cat, "spec": spec},
-                expect=_expect("manageSettings", "get", args=(cat,)),
+                expect=_expect(_endpoint(read_tool)),
             )
         )
         steps.append(
             Step(
                 f"settings.{cat}.update",
                 "settings",
-                "manageSettings",
+                write_tool,
                 f"{cat}: update to {json.dumps(spec['set'])}",
                 _step_prompt(f"Update the {cat} settings for profile '{{profile_id}}' to {json.dumps(spec['set'])}."),
                 "settings_update",
                 {"cat": cat, "spec": spec},
-                # Pin the payload, not just the tool: the step is about these fields.
-                expect=_expect("manageSettings", "update", args=(cat, *spec["set"].keys())),
+                # Pin the payload, not just the endpoint: the step is about these fields.
+                expect=_expect(_endpoint(write_tool), args=tuple(spec["set"].keys())),
             )
         )
 
     # ---- lists: read/replace/add/update/remove per type -----------------
     for lt in _LIST_SPECS:
         name = lt["name"]
+        tools = _LIST_TOOLS[name]
         values = [entries[name]]
         added = common._list_added(name, tag)
         steps.append(
             Step(
                 f"lists.{name}.read",
                 "lists",
-                "manageLists",
+                tools["get"],
                 f"{name}: read current list",
                 _step_prompt(f"Read the current {name} for profile '{{profile_id}}'."),
                 "list_read",
                 {"name": name, "spec": lt},
-                expect=_expect("manageLists", "get", args=(name,)),
+                expect=_expect(_endpoint(tools["get"])),
             )
         )
         steps.append(
             Step(
                 f"lists.{name}.replace",
                 "lists",
-                "manageLists",
+                tools["replace"],
                 f"{name}: replace with {values}",
                 _step_prompt(f"Replace the {name} for profile '{{profile_id}}' with exactly {json.dumps(values)}."),
                 "list_replace",
                 {"name": name, "spec": lt, "values": values},
-                expect=_expect("manageLists", "replace", args=(name, values[0])),
+                expect=_expect(_endpoint(tools["replace"]), args=(values[0],)),
             )
         )
         if added is not None:
@@ -1890,12 +1609,12 @@ def build_steps(targets: TaskTargets) -> list[Step]:
                 Step(
                     f"lists.{name}.add",
                     "lists",
-                    "manageLists",
+                    tools["add"],
                     f"{name}: add {added!r}",
                     _step_prompt(f"Add '{added}' to the {name} for profile '{{profile_id}}'."),
                     "list_add",
                     {"name": name, "spec": lt, "values": values, "added": added},
-                    expect=_expect("manageLists", "add", args=(name, added)),
+                    expect=_expect(_endpoint(tools["add"]), args=(added,)),
                 )
             )
         if lt["updatable"]:
@@ -1903,28 +1622,29 @@ def build_steps(targets: TaskTargets) -> list[Step]:
                 Step(
                     f"lists.{name}.update",
                     "lists",
-                    "manageLists",
+                    tools["update"],
                     f"{name}: update {values[0]!r} (active=false)",
                     _step_prompt(
-                        f"Update the entry '{values[0]}' in the {name} for profile '{{profile_id}}' with {json.dumps({'active': False})}."
+                        f"Update the entry '{values[0]}' in the {name} for profile '{{profile_id}}' "
+                        f"with {json.dumps({'active': False})}."
                     ),
                     "list_update",
                     {"name": name, "spec": lt, "values": values},
-                    # entry_id is only knowable from a prior read, so pin the list
-                    # and the field the step asks to change.
-                    expect=_expect("manageLists", "update", args=(name, "active")),
+                    # entry_id is only knowable from a prior read, so pin the
+                    # field the step asks to change.
+                    expect=_expect(_endpoint(tools["update"]), args=("active",)),
                 )
             )
         steps.append(
             Step(
                 f"lists.{name}.remove",
                 "lists",
-                "manageLists",
+                tools["remove"],
                 f"{name}: remove {values[0]!r}",
                 _step_prompt(f"Remove '{values[0]}' from the {name} for profile '{{profile_id}}'."),
                 "list_remove",
                 {"name": name, "spec": lt, "values": values},
-                expect=_expect("manageLists", "remove", args=(name,)),
+                expect=_expect(_endpoint(tools["remove"])),
             )
         )
         if added is not None:
@@ -1932,12 +1652,12 @@ def build_steps(targets: TaskTargets) -> list[Step]:
                 Step(
                     f"lists.{name}.remove_added",
                     "lists",
-                    "manageLists",
+                    tools["remove"],
                     f"{name}: remove the added entry {added!r}",
                     _step_prompt(f"Remove '{added}' from the {name} for profile '{{profile_id}}'."),
                     "list_remove_added",
                     {"name": name, "spec": lt, "values": values, "added": added},
-                    expect=_expect("manageLists", "remove", args=(name,)),
+                    expect=_expect(_endpoint(tools["remove"])),
                 )
             )
 
@@ -1946,11 +1666,11 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         Step(
             "rewrites.list",
             "rewrites",
-            "manageRewrites",
+            "listRewrites",
             "list existing rewrites",
             _step_prompt("List the DNS rewrite records for profile '{profile_id}'."),
             "rewrite_list",
-            expect=_expect("manageRewrites", "list"),
+            expect=_expect(_endpoint("listRewrites")),
         )
     )
     rewrite_records = [
@@ -1963,18 +1683,18 @@ def build_steps(targets: TaskTargets) -> list[Step]:
             Step(
                 f"rewrites.add.{rec['name'].split('-')[2]}",
                 "rewrites",
-                "manageRewrites",
+                "addRewrite",
                 f"add rewrite {rec['name']!r} -> {rec['content']!r}",
                 # Phrased as a mapping, not "A -> B": the small model read the arrow
                 # as a sequence of two actions and reported having "added and then
-                # deleted" the record — it undid its own successful write.
+                # deleted" the record - it undid its own successful write.
                 _step_prompt(
                     f"Add a DNS rewrite record for profile '{{profile_id}}' so that the hostname "
                     f"'{rec['name']}' resolves to '{rec['content']}'."
                 ),
                 "rewrite_add",
                 {"record": rec},
-                expect=_expect("manageRewrites", "add", args=(rec["name"], rec["content"])),
+                expect=_expect(_endpoint("addRewrite"), args=(rec["name"], rec["content"])),
             )
         )
     for rec in rewrite_records:
@@ -1982,12 +1702,15 @@ def build_steps(targets: TaskTargets) -> list[Step]:
             Step(
                 f"rewrites.delete.{rec['name'].split('-')[2]}",
                 "rewrites",
-                "manageRewrites",
+                "deleteRewrite",
                 f"delete rewrite {rec['name']!r}",
                 _step_prompt(f"Delete the DNS rewrite record '{rec['name']}' from profile '{{profile_id}}'."),
                 "rewrite_delete",
                 {"record": rec},
-                expect=_expect("manageRewrites", "delete", args=(rec["name"],)),
+                # The entry id is only knowable from a prior list, so the step
+                # pins the record by name; the id the server answered with for
+                # that name counts as the same identifier (_identifiers_from_answers).
+                expect=_expect(_endpoint("deleteRewrite"), args=(rec["name"],)),
             )
         )
 
@@ -1995,39 +1718,43 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     for m in AGGREGATE_METRICS:
         vdata = {"metric": m}
         instr = f"Query aggregate analytics for profile '{{profile_id}}' for metric '{m}' over the last day"
-        args = (m,)
+        args: tuple[str, ...] = ()
         if m == "destinations":
             instr += ", with destination_type 'countries'"
-            args += ("countries",)
+            args = ("countries",)
         steps.append(
             Step(
                 f"analytics.aggregate.{m}",
                 "analytics",
-                "queryAnalytics",
-                f"queryAnalytics aggregate {m}",
+                _ANALYTICS_TOOLS[m],
+                f"aggregate analytics for metric {m!r}",
                 _step_prompt(instr + "."),
                 "analytics",
                 vdata,
-                expect=_expect("queryAnalytics", args=args),
+                expect=_expect(_endpoint(_ANALYTICS_TOOLS[m]), args=args),
             )
         )
     for m in SERIES_METRICS:
+        series_tool = _ANALYTICS_TOOLS[m] + "Series"
         vdata_s: dict[str, Any] = {"metric": m, "series": True}
-        instr = f"Query the time series for profile '{{profile_id}}' for metric '{m}' over the last day (series=true, interval 3600)"
-        args_s = (m, "series")
+        instr = (
+            f"Query the time series for profile '{{profile_id}}' for metric '{m}' "
+            "over the last day (series=true, interval 3600)"
+        )
+        args_s: tuple[str, ...] = ()
         if m == "destinations":
             instr += ", with destination_type 'countries'"
-            args_s += ("countries",)
+            args_s = ("countries",)
         steps.append(
             Step(
                 f"analytics.series.{m}",
                 "analytics",
-                "queryAnalytics",
-                f"queryAnalytics series {m}",
+                series_tool,
+                f"time-series analytics for metric {m!r}",
                 _step_prompt(instr + "."),
                 "analytics",
                 vdata_s,
-                expect=_expect("queryAnalytics", args=args_s),
+                expect=_expect(_endpoint(series_tool), args=args_s),
             )
         )
 
@@ -2040,7 +1767,9 @@ def build_steps(targets: TaskTargets) -> list[Step]:
             "dohLookup example.com through the test profile",
             _step_prompt("Perform a DNS-over-HTTPS lookup for example.com (A record) through profile '{profile_id}'."),
             "tool_ok",
-            expect=_expect("dohLookup", args=("example.com",), result=("example.com",)),
+            # No account state to read back; the server's own record that the
+            # lookup ran and answered with example.com is the whole verdict.
+            expect=_expect_local("dohLookup", args=("example.com",), result=("example.com",)),
         )
     )
 
@@ -2057,7 +1786,9 @@ def build_steps(targets: TaskTargets) -> list[Step]:
                 ),
                 "plots",
                 {"metric": m},
-                expect=_expect("plotAnalytics", args=(m,)),
+                # The chart is the payload: the record has to say it answered
+                # with image content, not just that the tool ran.
+                expect=_expect_local("plotAnalytics", args=(m,), result=("image",)),
             )
         )
 
@@ -2066,33 +1797,35 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         Step(
             "logs.get",
             "logs",
-            "manageLogs",
+            "getLogs",
             "get recent query logs",
             _step_prompt("Retrieve the 10 most recent query logs for profile '{profile_id}'."),
             "logs_get",
-            expect=_expect("manageLogs", "get"),
+            expect=_expect(_endpoint("getLogs")),
         )
     )
     steps.append(
         Step(
             "logs.download",
             "logs",
-            "manageLogs",
+            "downloadLogs",
             "download retained logs (CSV)",
             _step_prompt("Download the retained query logs for profile '{profile_id}' as CSV."),
             "logs_download",
-            expect=_expect("manageLogs", "download"),
+            # The tool saves the CSV and answers with its local path; naming
+            # that key proves the download itself ran, not just the redirect.
+            expect=_expect(_endpoint("downloadLogs"), result=("file_path",)),
         )
     )
     steps.append(
         Step(
             "logs.clear",
             "logs",
-            "manageLogs",
+            "clearLogs",
             "clear query logs",
             _step_prompt("Clear the query logs for profile '{profile_id}'."),
             "logs_clear",
-            expect=_expect("manageLogs", "clear"),
+            expect=_expect(_endpoint("clearLogs")),
         )
     )
 
@@ -2101,11 +1834,11 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         Step(
             "profiles.delete",
             "profiles",
-            "manageProfiles",
+            "deleteProfile",
             f"delete the test profile {pn!r}",
             _step_prompt("Delete the profile '{profile_id}'."),
             "profile_gone",
-            expect=_expect("manageProfiles", "delete", args=("{profile_id}",)),
+            expect=_expect(_endpoint("deleteProfile"), args=("{profile_id}",)),
         )
     )
 
@@ -2211,9 +1944,7 @@ def _expect_label(step: Step) -> str:
     exp = step.expect
     if not exp:
         return "(no call expectation)"
-    label = str(exp.get("tool", ""))
-    if exp.get("operation"):
-        label += f"({exp['operation']})"
+    label = " or ".join(str(e) for e in exp.get("endpoints", [])) or str(exp.get("tool", ""))
     bits = [f"args~{exp['args']}"] if exp.get("args") else []
     bits += [f"result~{exp['result']}"] if exp.get("result") else []
     return f"{label} {' '.join(bits)}".strip()
@@ -2626,7 +2357,7 @@ def _feedback_block(
 ) -> list[str]:
     """Render the command -> actor -> verify -> result chain for one step."""
     out = [f"  COMMAND : {step.description}"]
-    mcp_calls = [c for c in run.tool_calls if c.name in ALLOWED_TOOLS]
+    mcp_calls = [c for c in run.tool_calls if c.name in allowed_tools()]
     discovery = [c for c in run.tool_calls if c.name in ("search_tools", "call_tool")]
     if mcp_calls:
         for c in mcp_calls[:4]:
@@ -2660,7 +2391,7 @@ def _feedback_block(
         # (hallucinated names, first-class MCP calls outside execute, wrong
         # session ids): invisible to the verdict, but they explain retries.
         shown = {id(c) for c in (mcp_calls or discovery)[:4]}
-        attempts = [c for c in run.tool_calls if id(c) not in shown and (c.is_error or c.name not in _KNOWN_TOOLS)]
+        attempts = [c for c in run.tool_calls if id(c) not in shown and (c.is_error or c.name not in _known_tools())]
         for c in attempts[:4]:
             out.append(
                 f"  ATTEMPT : {c.name}({json.dumps(c.args)[:100]})"
@@ -2688,9 +2419,6 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     report = Report(started_at=time.time(), api_key_present=True, profile_name=targets.profile_name)
     report.actor_kind = "mcp-native-harness (per-step)"
     report.actor_command = config.command
-    report.tool_surface = config.tool_surface
-    if config.tool_surface != "grouped":
-        _progress(f"tool surface: {config.tool_surface}; expected calls are matched by API endpoint")
 
     steps = build_steps(targets)
     selected = select_steps(steps, config.step_selection(len(steps)))
@@ -2784,27 +2512,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                     )
                 )
                 continue
-            expect = _atomic_expectation(step) if config.tool_surface == "atomic" else step.expect
-            if expect is None:
-                # Not a model failure: the surface has no tool to run. Chart
-                # making and the DoH lookup are server-side composites with no
-                # operation in the API spec, so an atomic catalog cannot offer
-                # them; scoring them as failures would compare the surfaces over
-                # a set they do not share.
-                report.results.append(
-                    CheckResult(
-                        step.id,
-                        step.section,
-                        step.description,
-                        "skipped",
-                        mcp_tool=step.tool,
-                        reason=(
-                            f"the {config.tool_surface} catalog has no tool for this step: "
-                            f"{step.tool} is a server-side composite, not an API endpoint"
-                        ),
-                    )
-                )
-                continue
+            expect = step.expect
             if step.section != "profiles" and pid:
                 # The actor may delete the test profile mid-run (wrong-tool
                 # mistake); recreate it so the report measures each step, not
@@ -2972,7 +2680,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 err = await _harness_delete_profile(config, pid)
                 gone = await _profile_gone(m, pid, targets)
                 if gone:
-                    _progress("targeted teardown: test profile deleted via manageProfiles(delete)")
+                    _progress("targeted teardown: test profile deleted via deleteProfile")
                 else:
                     _progress(f"targeted teardown incomplete via MCP ({err or 'profile still present'})")
             if not gone:
@@ -3087,10 +2795,9 @@ def render_text_report(report: Report) -> str:
 
 
 # What the server said when it refused a call, as reusable patterns: the schema
-# names the parameter it rejected, the tool names the one it needed, and the
-# upstream status code is what a caller can act on.
+# names the parameter it rejected, and the upstream status code is what a caller
+# can act on.
 _SCHEMA_REJECTION = re.compile(r"validation error for call\[(\w+)\]\s*(\w+)")
-_TOOL_REJECTION = re.compile(r"(\w+) is required for (\w+) operation")
 _UPSTREAM_STATUS = re.compile(r"'(\d{3}) ")
 
 
@@ -3137,10 +2844,6 @@ def _failure_modes(row: dict[str, Any]) -> list[tuple[str, str]]:
         if match:
             modes.append((f"schema rejected argument '{match.group(2)}'", name))
             continue
-        match = _TOOL_REJECTION.search(error)
-        if match:
-            modes.append((f"tool rejected call: {match.group(1)} missing", name))
-            continue
         match = _UPSTREAM_STATUS.search(error)
         if match:
             modes.append((f"upstream returned {match.group(1)}", name))
@@ -3159,9 +2862,12 @@ def _failure_modes(row: dict[str, Any]) -> list[tuple[str, str]]:
     # — the step failed because the expected call never happened, and that text
     # is what lands in `error` — counting it twice would overstate the mode.
     if row.get("status") == "failed" and row.get("error"):
-        detail = " ".join(str(row["error"]).split())[:70]
-        if detail and detail != expected_why:
-            modes.append(("end state: " + detail, tool))
+        error_text = " ".join(str(row["error"]).split())
+        # Compare before truncating: a verdict naming a long endpoint exceeds
+        # the bound, and comparing the cut text would count the same failure
+        # twice.
+        if error_text and error_text != " ".join(str(expected_why).split()):
+            modes.append(("end state: " + error_text[:70], tool))
     return list(dict.fromkeys(modes))
 
 
@@ -3185,7 +2891,6 @@ def summarize_reports(paths: list[str]) -> str:
     """
     rows: list[dict[str, Any]] = []
     notes: list[str] = []
-    surfaces: list[str] = []
     for path in paths:
         with open(path, encoding="utf-8") as handle:
             for line in handle:
@@ -3195,9 +2900,6 @@ def summarize_reports(paths: list[str]) -> str:
                 rows.append(row)
                 if "summary" in row:
                     notes.extend(str(n) for n in (row["summary"].get("notes") or []))
-                    surface = str(row["summary"].get("tool_surface") or "")
-                    if surface and surface not in surfaces:
-                        surfaces.append(surface)
     steps = [row for row in rows if "status" in row]
     if not steps:
         return "no step results in " + ", ".join(paths)
@@ -3217,13 +2919,11 @@ def summarize_reports(paths: list[str]) -> str:
             by_mode.setdefault((mode, tool), []).append(str(row.get("id") or "?"))
 
     counts = Counter(row["status"] for row in steps)
-    surface_note = f", surface={'/'.join(surfaces) or 'unknown'}"
     lines = [
         "=" * 72,
         (
             f"failure modes: {len(paths)} report(s), {len(steps)} step(s) "
             f"({counts.get('passed', 0)} passed, {counts.get('failed', 0)} failed, {counts.get('skipped', 0)} skipped)"
-            + surface_note
         ),
         "=" * 72,
     ]
@@ -3312,18 +3012,6 @@ def main(argv: list[str] | None = None) -> int:
             "evaluation sits between the model and the contract."
         ),
     )
-    parser.add_argument(
-        "--tool-surface",
-        choices=("grouped", "atomic"),
-        default="grouped",
-        help=(
-            "which tools the MCP server publishes behind search_tools/call_tool (sets NEXTDNS_TOOL_SURFACE). "
-            "'grouped' is the eight area tools; 'atomic' generates one tool per NextDNS API operation from the "
-            "shipped OpenAPI spec. On 'atomic' a step's expected call is matched by the API endpoint it executed "
-            "rather than by tool and operation, and steps whose grouped tool is a server-side composite "
-            "(plotAnalytics, dohLookup) are reported as skipped: no endpoint exists for them to match."
-        ),
-    )
     args = parser.parse_args(argv)
 
     # Needs no API key and runs no model: it reads a report that already exists.
@@ -3333,10 +3021,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.tool_search:
         os.environ["NEXTDNS_TOOL_SEARCH"] = args.tool_search
-    # Always explicit: the surface decides both what the server publishes and
-    # which expected-call rule the report applies, so it must never be left to
-    # an inherited environment variable.
-    os.environ["NEXTDNS_TOOL_SURFACE"] = args.tool_surface
 
     # The step catalog needs no API key and runs no model: it is how a user
     # finds the ids and positions a --steps selection takes, and it states what
