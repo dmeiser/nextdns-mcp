@@ -19,7 +19,7 @@ from fastmcp import Client, FastMCP
 
 from nextdns_mcp import atomic_tools
 from nextdns_mcp.call_log import resolve_endpoint
-from nextdns_mcp.surface import list_profiles_call
+from nextdns_mcp.surface import list_profiles_call, validate_tool_surface
 from nextdns_mcp.utils import _note_404_on_a_profile_path
 
 OPERATION_COUNT = 79
@@ -442,8 +442,34 @@ class TestGuidanceFollowsTheSurface:
         assert list_profiles_call() == 'manageProfiles(operation="list")'
 
     def test_an_unrecognised_surface_falls_back_to_grouped(self, monkeypatch):
+        """The guidance path must never raise: it runs while answering a call."""
         monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "whichever")
         assert list_profiles_call() == 'manageProfiles(operation="list")'
+
+    def test_the_surface_is_validated_where_the_server_is_built(self, monkeypatch):
+        """...but building the server on a typo is a configuration error.
+
+        Falling back to ``grouped`` there would serve a different tool contract
+        from the one the operator set, quietly — which is why
+        ``NEXTDNS_TOOL_SEARCH`` rejects an unknown mode the same way.
+        """
+        from nextdns_mcp.config import ConfigurationError
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", "k")
+        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "atmic")
+        with pytest.raises(ConfigurationError, match="Invalid NEXTDNS_TOOL_SURFACE"):
+            build_mcp_server()
+
+    def test_an_unset_or_blank_surface_is_grouped(self, monkeypatch):
+        monkeypatch.delenv("NEXTDNS_TOOL_SURFACE", raising=False)
+        assert validate_tool_surface() == "grouped"
+        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "   ")
+        assert validate_tool_surface() == "grouped"
+
+    def test_the_surface_name_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "ATOMIC")
+        assert validate_tool_surface() == "atomic"
 
     def test_the_404_hint_points_at_the_tool_that_exists(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "atomic")

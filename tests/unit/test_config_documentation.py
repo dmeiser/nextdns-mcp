@@ -38,6 +38,7 @@ from pathlib import Path
 import pytest
 
 from nextdns_mcp.config import ConfigurationError, get_http_timeout
+from nextdns_mcp.surface import validate_tool_surface
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -112,3 +113,105 @@ def test_removed_test_profile_variable_is_absent_from_operator_docs():
         "Remove it and point operators at NEXTDNS_WRITABLE_PROFILES / NEXTDNS_READ_ONLY, "
         "which are the real write guards."
     )
+
+
+# The tool surface is documented in one section of docs/configuration.md and one
+# block of .env.example. Its description is a set of claims about the catalog —
+# which values are accepted, how many tools each surface publishes, and which
+# tools exist on only one of them — so the guard compares those claims against
+# the catalog the server actually builds rather than against a sentence.
+CONFIG_DOC = "docs/configuration.md"
+SURFACE_SECTION = "## Tool Surface"
+SURFACE_ASSIGNMENT = re.compile(r"NEXTDNS_TOOL_SURFACE=(?P<value>[^\s#]*)")
+
+
+def _surface_section() -> str:
+    """The section describing the two catalogs, up to the next heading."""
+    text = _read(CONFIG_DOC)
+    assert SURFACE_SECTION in text, f"{CONFIG_DOC} must document the tool surface"
+    start = text.index(SURFACE_SECTION) + len(SURFACE_SECTION)
+    rest = text[start:]
+    end = rest.find("\n## ")
+    return rest if end == -1 else rest[:end]
+
+
+def test_documented_surface_values_are_the_values_the_code_accepts(monkeypatch):
+    """Every surface value the operator docs name must be one the parser accepts.
+
+    The reverse matters just as much: a surface the code accepts but the docs
+    never mention is a setting operators cannot find, and a template that
+    advertises a value startup rejects documents a setting that will not boot.
+    """
+    from nextdns_mcp.surface import _SURFACES
+
+    section = _surface_section()
+    documented_row = re.search(r"\| NEXTDNS_TOOL_SURFACE \| string \((?P<values>[^)]*)\)", _read(CONFIG_DOC))
+    assert documented_row, f"{CONFIG_DOC} must document NEXTDNS_TOOL_SURFACE in its environment table"
+    row_values = documented_row.group("values").split("/")
+
+    assert sorted(row_values) == sorted(_SURFACES), (
+        f"the table row documents {row_values}, code accepts {list(_SURFACES)}"
+    )
+    for value in _SURFACES:
+        assert value in section, f"{SURFACE_SECTION} must describe {value!r}"
+        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", value)
+        assert validate_tool_surface() == value
+
+    examples = [
+        (n, m.group("value"))
+        for n, line in enumerate(_read(ENV_EXAMPLE).splitlines(), start=1)
+        for m in SURFACE_ASSIGNMENT.finditer(line)
+    ]
+    assert examples, f"{ENV_EXAMPLE} must show an example NEXTDNS_TOOL_SURFACE value"
+    for line_number, value in examples:
+        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", value)
+        try:
+            validate_tool_surface()
+        except ConfigurationError as error:
+            pytest.fail(
+                f"{ENV_EXAMPLE}:{line_number} documents NEXTDNS_TOOL_SURFACE={value}, which startup rejects: {error}"
+            )
+
+
+def test_documented_catalog_sizes_match_the_catalogs_the_server_builds():
+    """The tool counts in the surface section must be the real ones.
+
+    The atomic catalog is generated from the bundled spec, so an endpoint added
+    to the spec changes the number a caller reads in the docs. Asserting the
+    digits against the code means the sentence goes stale in the test, not in the
+    documentation.
+    """
+    from nextdns_mcp.atomic_tools import atomic_tool_names, load_spec, parse_operations
+    from nextdns_mcp.server import _GROUPED_TOOLS
+
+    spec_operations = len(parse_operations(load_spec()))
+    registered = len(atomic_tool_names())
+    section = _surface_section()
+
+    assert str(registered) in section, f"the section must state the {registered} registered atomic tools"
+    assert str(spec_operations) in section, f"the section must state the {spec_operations} spec operations"
+    assert str(len(_GROUPED_TOOLS)) in section, f"the section must state the {len(_GROUPED_TOOLS)} grouped tools"
+
+
+def test_documented_tools_exist_on_the_surface_they_are_described_on():
+    """Names the section attributes to a surface must be real tools of that surface.
+
+    `dohLookup` and `plotAnalytics` are documented as grouped-only because
+    neither has an API endpoint to generate a tool from; the guard derives that
+    set from the catalogs instead of trusting the prose, so a tool that gains or
+    loses an endpoint moves the expectation with it.
+    """
+    from nextdns_mcp.atomic_tools import atomic_tool_names
+    from nextdns_mcp.server import _GROUPED_TOOLS
+
+    section = _surface_section()
+    grouped_names = [tool.__name__ for tool in _GROUPED_TOOLS]
+    atomic_names = set(atomic_tool_names())
+    grouped_only = [name for name in grouped_names if name not in atomic_names]
+
+    assert grouped_only, "the grouped surface is expected to cover more than the API catalog"
+    for name in grouped_names:
+        assert name in section, f"the section must name the grouped tool {name}"
+    for name in grouped_only:
+        assert name in section, f"the section must call out {name} as grouped-only"
+    assert "streamLogs" in section, "the section must explain the spec operation that is not published"
