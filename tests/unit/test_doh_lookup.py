@@ -417,3 +417,26 @@ class TestOptionalProfileIdCoercion:
         tool = await mcp.get_tool("dohLookup")
         result = await tool.run({"domain": "example.com", "profile_id": "4faf86", "record_type": "A"})
         assert result.content[0].text == "'4faf86'"
+
+
+class TestProfileResolutionGuard:
+    """A lookup with no profile to resolve must not go to the resolver anyway.
+
+    ``resolve_profile_id`` returns ``(profile, error)``, and every real failure path
+    fills the error. The guard below is for the case where it answers neither: without
+    it the tool would build a DoH query for an empty profile subdomain, which is a
+    request to a URL nobody chose.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_resolution_with_no_profile_and_no_error_is_an_internal_error(self, monkeypatch):
+        monkeypatch.setattr(doh_module, "resolve_profile_id", lambda profile_id: (None, None))
+
+        def no_client() -> httpx.AsyncClient:
+            raise AssertionError("a lookup with no resolved profile must not build a DoH client")
+
+        monkeypatch.setattr(doh_module, "_get_doh_client", no_client)
+
+        result = await dohLookup("example.com")
+        assert result["code"] == "internal_error"
+        assert "profile resolution failed" in result["error"].lower()

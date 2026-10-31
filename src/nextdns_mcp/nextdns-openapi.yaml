@@ -381,11 +381,18 @@ components:
       name: profile_id
       in: path
       required: true
-      description: Profile ID (6-character alphanumeric identifier)
+      # No example: a concrete id here gets copied. Live runs showed a model
+      # sending the example value verbatim, and because a NextDNS profile id is
+      # six hexadecimal characters, `abc123` reads as a real one - the request
+      # then 404s and the caller has to work out that the id was never a profile.
+      # The pattern says the shape; the profile-listing endpoint gives the values.
+      description: >-
+        Profile ID (6-character alphanumeric identifier). Not the profile's name
+        and not derived from it; the profile-listing endpoint returns the
+        identifiers this API key can reach.
       schema:
         type: string
         pattern: '^[a-z0-9]{6}$'
-      example: abc123
 
     EntryId:
       name: entry_id

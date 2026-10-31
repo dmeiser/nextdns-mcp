@@ -42,9 +42,7 @@ class ErrorCode:
     ACCESS_DENIED = "access_denied"
     MISSING_REQUIRED_ARGUMENT = "missing_required_argument"
     INVALID_ARGUMENT = "invalid_argument"
-    UNSUPPORTED_OPERATION = "unsupported_operation"
     UNSUPPORTED_METRIC = "unsupported_metric"
-    UNSUPPORTED_PARAMETER = "unsupported_parameter"
     HTTP_ERROR = "http_error"
     DOWNLOAD_TOO_LARGE = "download_too_large"
     INTERNAL_ERROR = "internal_error"
@@ -231,39 +229,70 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
             parsed = response.json()
         except (ValueError, TypeError):
             parsed = None
-        if isinstance(parsed, dict) and parsed.get("error"):
-            payload = dict(parsed)
-            payload.setdefault("code", fallback_code)
-            payload.setdefault("status_code", status_code)
-            if _bound_structured_fields(payload):
-                payload["response_body_truncated"] = True
-            return payload
+        structured = _structured_error_payload(parsed, fallback_code, status_code)
+        if structured is not None:
+            return structured
 
     payload = error_payload(fallback_code, message, status_code=status_code)
-    body = getattr(response, "text", None) if response is not None else None
-    if body:
-        truncated = len(body) > MAX_RESPONSE_BODY_CHARS
-        payload["response_body"] = body[:MAX_RESPONSE_BODY_CHARS] + (TRUNCATION_MARKER if truncated else "")
-        payload["response_body_truncated"] = truncated
-    # NextDNS reports failures as {"errors": [{"code": ...}]}: surface those
-    # codes as typed values so callers branch on them instead of parsing the
-    # inlined body string.
-    codes = upstream_error_codes(parsed)
-    if codes:
-        payload["upstream_code"] = codes[0]
-        payload["upstream_codes"] = codes
-    # The transport's message names the URL and the status; the upstream
-    # document names the parameter. A caller acts on the second, so it goes in
-    # the message, not only in a side field.
-    summary = upstream_error_summary(parsed)
-    if summary:
-        payload["error"] = f"{payload['error']} | {summary}"
+    _attach_error_body(payload, response)
+    _add_upstream_diagnosis(payload, parsed)
     # httpx appends a pointer to the MDN page for the status code to every
     # raise_for_status() message. It describes HTTP, not this request, and it
     # eats the room the diagnosis needs - the call log keeps 300 characters of
     # the message, and the link was what survived.
     payload["error"] = _STATUS_DOC_LINK.sub("", str(payload["error"]))
     return payload
+
+
+def _structured_error_payload(parsed: Any, fallback_code: str, status_code: Any) -> dict[str, Any] | None:
+    """The payload when the failed body is already a structured error document.
+
+    Its own fields are kept - they are the diagnosis - with every free-form
+    string bounded, so nothing upstream said is lost. None means the body is
+    not one, and the generic payload path applies instead.
+    """
+    if not (isinstance(parsed, dict) and parsed.get("error")):
+        return None
+    payload = dict(parsed)
+    payload.setdefault("code", fallback_code)
+    payload.setdefault("status_code", status_code)
+    if _bound_structured_fields(payload):
+        payload["response_body_truncated"] = True
+    return payload
+
+
+def _attach_error_body(payload: dict[str, Any], response: Any) -> None:
+    """Include the raw body as a bounded prefix, flagged when it had to be cut.
+
+    An unparseable body is the only case where the text stands in for a
+    diagnosis, so it is included - but bounded, because the payload goes into
+    an LLM context and a 2 MB HTML error page does not (issue #297).
+    """
+    body = getattr(response, "text", None) if response is not None else None
+    if not body:
+        return
+    truncated = len(body) > MAX_RESPONSE_BODY_CHARS
+    payload["response_body"] = body[:MAX_RESPONSE_BODY_CHARS] + (TRUNCATION_MARKER if truncated else "")
+    payload["response_body_truncated"] = truncated
+
+
+def _add_upstream_diagnosis(payload: dict[str, Any], parsed: Any) -> None:
+    """Fold the upstream error document into a generic payload.
+
+    NextDNS reports failures as ``{"errors": [{"code": ...}]}``: the codes go in
+    as typed values so callers branch on them instead of parsing the inlined
+    body string, and the detail text goes into the message. The transport's
+    message names the URL and the status; the upstream document names the
+    parameter. A caller acts on the second, so it goes in the message, not only
+    in a side field.
+    """
+    codes = upstream_error_codes(parsed)
+    if codes:
+        payload["upstream_code"] = codes[0]
+        payload["upstream_codes"] = codes
+    summary = upstream_error_summary(parsed)
+    if summary:
+        payload["error"] = f"{payload['error']} | {summary}"
 
 
 class NextDNSError(RuntimeError):

@@ -10,14 +10,24 @@
 # See docs/troubleshooting.md for details.
 """MCP server creation.
 
-The NextDNS MCP server is built directly from the grouped CRUD tools in
-``src/nextdns_mcp/tools/``. The historical OpenAPI-spec-based tool generation
-(``FastMCP.from_openapi``) was removed: the generated atomic tools were
-immediately stripped from the server (see issue #146, dead OpenAPI loading),
-and FastMCP 4.x's OpenAPI provider expects an ``httpx2.AsyncClient`` while
-this project's ``AccessControlledClient`` subclasses ``httpx.AsyncClient``
-(see issue #141), which broke ``uv run mypy src`` and emitted a
-``FastMCPDeprecationWarning`` at startup.
+The tool catalog is generated from the shipped NextDNS OpenAPI document
+(``spec_tools``): one tool per operation, named by its ``operationId``. FastMCP's
+own OpenAPI *transport* is deliberately not used — it sends through an
+``httpx2.AsyncClient`` of its own, which would bypass this project's
+``AccessControlledClient`` (profile allowlists, read-only mode, the
+protected-profile denylist) and raise away the upstream body that the typed error
+payloads are built from. What is used is FastMCP's OpenAPI *parser*, which turns
+the document into the names, descriptions and parameter schemas; the request then
+goes through this project's own client.
+
+That distinction is the whole answer to the two historical objections to
+spec-based generation here (issues #141 and #146): the earlier attempt used
+``FastMCP.from_openapi``, whose generated tools were both stripped from the server
+and incompatible with ``httpx.AsyncClient``, so the server went back to hand-written
+tools. Parsing the document and owning the transport keeps the single source of truth
+without either problem.
+
+See docs/troubleshooting.md for the extra-field relaxation described above.
 
 SPDX-License-Identifier: MIT
 """
@@ -37,11 +47,9 @@ from fastmcp.tools import ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .arg_errors import ArgumentHintMiddleware
 from .call_log import CallLogMiddleware, call_log_path
 from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
-from .surface import get_tool_surface
 from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import close_doh_client
 from .usage import server_instructions
@@ -289,10 +297,10 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
 def create_mcp_server(client: Any = None, tool_names: Sequence[str] = ()) -> FastMCP:
     """Create and configure the NextDNS MCP server.
 
-    The server exposes only the grouped CRUD tools registered by
-    ``src/nextdns_mcp/server.py`` plus the usage-guide prompt. No tools are
-    generated from the OpenAPI spec anymore (see module docstring and issue
-    #141/#146 for the rationale).
+    The tools themselves are registered by ``src/nextdns_mcp/server.py`` — the
+    generated ones and the two local operations. What happens here is the machinery
+    around them: disclosure, argument relaxation, the call log, and the health
+    endpoint.
 
         Args:
         client: Retained for backward compatibility.
@@ -305,8 +313,6 @@ def create_mcp_server(client: Any = None, tool_names: Sequence[str] = ()) -> Fas
     logger.info("Creating NextDNS MCP server...")
     transforms: list[Any] = []
     tool_search_mode = get_tool_search_mode()
-    tool_surface = get_tool_surface()
-    logger.info("Tool surface: %s", tool_surface)
     search_transform = build_search_transform(tool_search_mode)
     if search_transform is not None:
         transforms.append(search_transform)
@@ -316,7 +322,7 @@ def create_mcp_server(client: Any = None, tool_names: Sequence[str] = ()) -> Fas
         )
     mcp = FastMCP(
         name="NextDNS MCP Server",
-        instructions=server_instructions(tool_search_mode, tool_names, tool_surface),
+        instructions=server_instructions(tool_search_mode, tool_names),
         lifespan=_server_lifespan,
         transforms=transforms,
     )
@@ -343,14 +349,6 @@ def create_mcp_server(client: Any = None, tool_names: Sequence[str] = ()) -> Fas
     if call_log_path():
         mcp.add_middleware(CallLogMiddleware())
         logger.info("Call log enabled: %s", call_log_path())
-
-    # Added last so it sits innermost: it re-raises the enriched failure, and the
-    # call log above records what the caller was actually told. Under disclosure
-    # it is also told where the transform's catalog is, because tools/list no
-    # longer shows the tools whose schemas explain the failure.
-    mcp.add_middleware(
-        ArgumentHintMiddleware(catalog=None if search_transform is None else search_transform.get_tool_catalog)
-    )
 
     logger.info("MCP server created successfully")
     default_profile = get_default_profile()

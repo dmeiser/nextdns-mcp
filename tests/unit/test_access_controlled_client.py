@@ -178,6 +178,29 @@ class TestAccessControlledClientWriteAccess:
         assert exc_info.value.code == "write_access_denied"
 
     @pytest.mark.asyncio
+    async def test_denies_write_on_a_protected_profile_by_name(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """A protected profile names itself as the reason, not the writable list.
+
+        The profile is in NEXTDNS_WRITABLE_PROFILES and the server is not read-only, so
+        the two other refusals this path can give are both wrong here: the caller has to
+        be told the profile is protected, or it will retry with the same arguments.
+        """
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "abc123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("POST", "/profiles/abc123/denylist", json={"id": "example.com"})
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == "write_access_denied"
+        assert exc_info.value.profile_id == "abc123"
+        assert "profile abc123 is protected (NEXTDNS_PROTECTED_PROFILES)" in str(exc_info.value)
+
+    @pytest.mark.asyncio
     async def test_denies_create_profile_when_no_writable_profiles(
         self, mock_super_request: Any, clean_env: Callable[[str, str], None]
     ) -> None:

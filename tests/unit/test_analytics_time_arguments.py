@@ -6,12 +6,18 @@ the interval instead of the range - ~40 calls, no error to act on. ``now-1d``
 answers 400 "`from` must be number". ``partials=false`` answers 400 enum that
 names no allowed values. Each was checked against the live API.
 
+Two paths reach those endpoints now: ``plotAnalytics``, which builds the series
+query itself, and the generated ``;series`` tools, which pass the caller's
+arguments through. Both are covered here, because both have to end up sending the
+spellings the API reads.
+
 SPDX-License-Identifier: MIT
 """
 
 import pytest
 from fastmcp import Client
 
+from nextdns_mcp import spec_tools
 from nextdns_mcp.server import build_mcp_server
 from nextdns_mcp.utils import normalize_partials, normalize_time_value
 
@@ -55,7 +61,14 @@ class TestPartials:
 
 
 class TestTheToolsSaySoThemselves:
-    """The point is that the caller is told, not that the upstream was asked."""
+    """The caller is told in the schema, and the two spellings the API misreads are fixed.
+
+    The grouped tool used to fill in a default window for a series request that named
+    none. The spec says ``from`` is required for every ``;series`` endpoint, so the
+    generated tool publishes it as required and the caller names it — which is what
+    these tests check on the published schema, together with what reaches the wire for
+    the spellings upstream reads wrongly.
+    """
 
     @pytest.fixture(autouse=True)
     def _server_env(self, monkeypatch):
@@ -63,20 +76,9 @@ class TestTheToolsSaySoThemselves:
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
 
-    async def _call(self, tool: str, arguments: dict) -> dict:
-        async with Client(build_mcp_server()) as client:
-            result = await client.call_tool(tool, arguments)
-        return getattr(result, "structured_content", None) or {}
-
-    @pytest.mark.asyncio
-    async def test_a_series_without_a_start_time_gets_the_default_window(self, monkeypatch):
-        """Refusing it lost the step: the caller named `interval` and moved on.
-
-        The `;series` endpoint does require a start time, so the tool supplies
-        the same last day an aggregate request gets when it names none.
-        """
-        from nextdns_mcp.tools import analytics
-
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        """Capture the query parameters the generated tool puts on the wire."""
         captured: dict = {}
 
         async def fake(method, url, params=None, json_body=None):
@@ -84,24 +86,75 @@ class TestTheToolsSaySoThemselves:
             captured["params"] = params or {}
             return {"data": []}
 
-        monkeypatch.setattr(analytics, "_api_request_payload", fake)
-        await analytics.queryAnalytics(metric="encryption", profile_id="aa11aa", series=True)
-        assert captured["url"].endswith("/analytics/encryption;series")
-        assert captured["params"]["from"] == analytics.SERIES_DEFAULT_FROM
+        monkeypatch.setattr(spec_tools, "_api_request_payload", fake)
+        return captured
+
+    async def _call(self, tool: str, arguments: dict) -> dict:
+        async with Client(build_mcp_server()) as client:
+            result = await client.call_tool(tool, arguments)
+        return getattr(result, "structured_content", None) or {}
+
+    def test_the_series_endpoint_asks_for_a_start_time(self):
+        """A series request without a start time answers nothing, so the schema asks.
+
+        Replacing that with a tool-invented default hid the requirement from the
+        caller; the spec states it, and FastMCP publishes it as ``required``.
+        """
+        schema = spec_tools.spec_routes()
+        series = next(route for route in schema if route.operation_id == "getAnalyticsEncryptionSeries")
+        assert "from" in series.flat_param_schema["required"]
+
+    def test_the_window_argument_names_the_relative_spelling(self):
+        """ "Last day" has no absolute spelling, so the offset has to be written down.
+
+        A caller told only about timestamps answers a request for the last day by
+        asking for timestamps instead of acting.
+        """
+        series = next(
+            route for route in spec_tools.spec_routes() if route.operation_id == "getAnalyticsEncryptionSeries"
+        )
+        window = series.flat_param_schema["properties"]["from"]["description"]
+        assert "-1d" in window
+        assert "epoch seconds" in window
 
     @pytest.mark.asyncio
-    async def test_a_series_window_the_caller_named_is_left_alone(self, monkeypatch):
-        from nextdns_mcp.tools import analytics
+    async def test_a_window_the_caller_named_is_left_alone(self, sent):
+        await self._call(
+            "getAnalyticsEncryptionSeries",
+            {"profile_id": "aa11aa", "from": "-7d", "interval": 3600},
+        )
+        assert sent["url"].endswith("/analytics/encryption;series")
+        assert sent["params"]["from"] == "-7d"
 
-        captured: dict = {}
+    @pytest.mark.asyncio
+    async def test_a_bare_negative_window_is_not_sent_as_1969(self, sent):
+        """``from=-86400`` is an offset, and upstream reads the number as 1969.
 
-        async def fake(method, url, params=None, json_body=None):
-            captured["params"] = params or {}
-            return {"data": []}
+        It answers 200 with no rows, so there is no error to act on: across three
+        live runs a model retried that call about 40 times.
+        """
+        await self._call(
+            "getAnalyticsEncryptionSeries",
+            {"profile_id": "aa11aa", "from": -86400, "interval": 3600},
+        )
+        assert sent["params"]["from"] == "-86400s"
 
-        monkeypatch.setattr(analytics, "_api_request_payload", fake)
-        await analytics.queryAnalytics(metric="encryption", profile_id="aa11aa", series=True, from_time="-7d")
-        assert captured["params"]["from"] == "-7d"
+    @pytest.mark.asyncio
+    async def test_the_grafana_spelling_is_sent_in_the_spelling_the_api_uses(self, sent):
+        await self._call(
+            "getAnalyticsEncryptionSeries",
+            {"profile_id": "aa11aa", "from": "now-1d", "interval": 3600},
+        )
+        assert sent["params"]["from"] == "-1d"
+
+    @pytest.mark.asyncio
+    async def test_a_boolean_partials_is_sent_as_the_value_it_means(self, sent):
+        """``partials=false`` answered 400 with an enum naming no allowed values."""
+        await self._call(
+            "getAnalyticsEncryptionSeries",
+            {"profile_id": "aa11aa", "from": "-1d", "interval": 3600, "partials": False},
+        )
+        assert sent["params"]["partials"] == "none"
 
     @pytest.mark.asyncio
     async def test_a_negative_range_is_not_read_as_1969(self):
@@ -118,11 +171,3 @@ class TestTheToolsSaySoThemselves:
         payload = await self._call("plotAnalytics", {"metric": "ips", "profile_id": "aa11aa", "partials": "sometimes"})
         error = str(payload.get("error", ""))
         assert "partials must be one of: none, all" in error
-
-    @pytest.mark.asyncio
-    async def test_a_boolean_partials_is_not_an_error(self):
-        payload = await self._call(
-            "queryAnalytics",
-            {"metric": "dnssec", "profile_id": "aa11aa", "series": True, "from_time": "-1d", "partials": "false"},
-        )
-        assert "partials" not in str(payload.get("error", ""))

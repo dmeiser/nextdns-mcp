@@ -3,12 +3,16 @@
 Validate JSON responses against OpenAPI schema definitions.
 Used by the E2E run as an advisory signal for breaking API changes.
 
-The grouped CRUD tools collapse many OpenAPI operations into a single MCP tool,
-so validation is performed against the union of response schemas for the
-underlying operations. A response is considered valid if it matches any of the
-expected schemas for that grouped tool. Because most vendored schemas declare
-no ``required`` fields, a match is weak evidence rather than a conformance
-proof; assert_operation_coverage() is what keeps the mapping honest.
+A published tool is one OpenAPI operation, named by its ``operationId``, so the
+response a tool returns is the response that operation's schema describes and
+validation needs no mapping: the tool name is the lookup key. The one exception
+is a tool the server performs itself rather than proxying (``plotAnalytics``,
+``dohLookup``, and the download redirect in ``downloadLogs``); those answer with a
+payload no endpoint returns, so their shape is pinned in TOOL_RESPONSE_SCHEMAS.
+
+Because most vendored schemas declare no ``required`` fields, a match is weak
+evidence rather than a conformance proof; assert_operation_coverage() is what
+keeps the catalog honest about what the spec says exists.
 
 Known limitation: a cyclic $ref whose target has no unambiguous expected type
 (e.g. a mixed anyOf/oneOf union) falls back to permissive validation of that
@@ -23,85 +27,26 @@ from typing import Any
 
 import yaml
 
-# Mapping from grouped MCP tool names to the OpenAPI operationIds whose
-# response schemas are validated. Write operations that return a synthetic
-# ``{"success": True}`` payload (204-style) have no response body to validate
-# and are therefore not listed; every listed id must resolve to a schema in
-# the vendored spec (asserted at startup by assert_operation_coverage).
-# A response is valid if it conforms to at least one of the listed schemas.
-GROUPED_TOOL_OPERATIONS: dict[str, list[str]] = {
-    "manageProfiles": [
-        "listProfiles",
-        "createProfile",
-        "getProfile",
-    ],
-    "manageSettings": [
-        "getSettings",
-        "getLogsSettings",
-        "getBlockPageSettings",
-        "getPerformanceSettings",
-        "getSecuritySettings",
-        "getPrivacySettings",
-        "getParentalControlSettings",
-    ],
-    "manageLists": [
-        "getDenylist",
-        "getAllowlist",
-        "getParentalControlServices",
-        "getParentalControlCategories",
-        "getSecurityTLDs",
-        "getPrivacyBlocklists",
-        "getPrivacyNatives",
-    ],
-    "manageRewrites": [
-        "listRewrites",
-        "addRewrite",
-    ],
-    "manageLogs": [
-        "getLogs",
-        "downloadLogs",
-    ],
-    "queryAnalytics": [
-        "getAnalyticsStatus",
-        "getAnalyticsStatusSeries",
-        "getAnalyticsDomains",
-        "getAnalyticsQueryTypes",
-        "getAnalyticsQueryTypesSeries",
-        "getAnalyticsReasons",
-        "getAnalyticsReasonsSeries",
-        "getAnalyticsIPs",
-        "getAnalyticsIPsSeries",
-        "getAnalyticsDNSSEC",
-        "getAnalyticsDNSSECSeries",
-        "getAnalyticsEncryption",
-        "getAnalyticsEncryptionSeries",
-        "getAnalyticsIPVersions",
-        "getAnalyticsIPVersionsSeries",
-        "getAnalyticsProtocols",
-        "getAnalyticsProtocolsSeries",
-        "getAnalyticsDestinations",
-        "getAnalyticsDestinationsSeries",
-        "getAnalyticsDevices",
-        "getAnalyticsDevicesSeries",
-    ],
-    "plotAnalytics": [
-        "getAnalyticsStatusSeries",
-        "getAnalyticsDevicesSeries",
-        "getAnalyticsProtocolsSeries",
-        "getAnalyticsQueryTypesSeries",
-        "getAnalyticsIPVersionsSeries",
-        "getAnalyticsDNSSECSeries",
-        "getAnalyticsEncryptionSeries",
-        "getAnalyticsReasonsSeries",
-        "getAnalyticsIPsSeries",
-    ],
-    "dohLookup": [],
-}
+# Operations the server does not publish, with the reason recorded in
+# nextdns_mcp.spec_tools: ``streamLogs`` is a Server-Sent Events stream, and an MCP
+# tool call is request/response, so the transport cannot carry it. Anything else the
+# spec describes has to be published, which is what assert_operation_coverage checks.
+WITHHELD_OPERATIONS = frozenset({"streamLogs"})
 
-# Response shapes for tools that have no OpenAPI operation to derive a schema
-# from. dohLookup queries dns.nextdns.io directly (outside the NextDNS API
-# spec), so its response shape is pinned here instead: the raw DNS JSON
-# response under ``data`` and lookup context under ``_metadata``.
+# Tools the server performs itself rather than proxying: no endpoint returns their
+# answer, so no operation schema describes them and they are excused from the
+# naming check below.
+LOCAL_TOOLS = frozenset({"plotAnalytics", "dohLookup"})
+
+# Of those, the ones that answer with content instead of a JSON document. A chart is a
+# PNG, so there is no payload for a schema to describe; the runner's assertion for it
+# is that the call came back as an image, which is what run_container_e2e checks.
+CONTENT_TOOLS = frozenset({"plotAnalytics"})
+
+# Response shapes for tools whose answer is not the document their endpoint returns.
+# dohLookup queries dns.nextdns.io directly (outside the NextDNS API spec), so its
+# response shape is pinned here instead: the raw DNS JSON response under ``data`` and
+# lookup context under ``_metadata``.
 TOOL_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
     "dohLookup": {
         "type": "object",
@@ -117,6 +62,30 @@ TOOL_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
                     "query_type": {"type": "string"},
                     "doh_endpoint": {"type": "string"},
                     "status_description": {"type": "string"},
+                },
+            },
+        },
+    },
+    # The download endpoint answers with a redirect to a signed CSV, which the
+    # server follows and streams to disk; what the caller gets is the local
+    # receipt, never the CSV itself. The spec describes the CSV, so the shape of
+    # what this tool actually returns has to be stated here.
+    "downloadLogs": {
+        "type": "object",
+        "required": ["file_path", "size", "row_count", "preview"],
+        "properties": {
+            "file_path": {"type": "string"},
+            "content_type": {"type": ["string", "null"]},
+            "size": {"type": "integer"},
+            "row_count": {"type": "integer"},
+            "preview": {
+                "type": "object",
+                "required": ["text", "line_count", "bytes", "truncated"],
+                "properties": {
+                    "text": {"type": "string"},
+                    "line_count": {"type": "integer"},
+                    "bytes": {"type": "integer"},
+                    "truncated": {"type": "boolean"},
                 },
             },
         },
@@ -159,45 +128,66 @@ def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> di
     return None
 
 
-def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str]) -> None:
-    """Hard-fail when the tool/operation mapping drifts from the spec or the server.
+def spec_operations(spec: dict[str, Any]) -> dict[str, str]:
+    """Every ``operationId`` the spec declares, mapped to its HTTP method.
 
-    Every operationId listed in GROUPED_TOOL_OPERATIONS must resolve to a
-    response schema in ``spec``: an id that resolves to nothing used to
-    degrade to SKIPPED at validation time, which the E2E workflow counts as
-    neither pass nor fail. The key set must match ``expected_tools`` so a
-    tool added to the server without a mapping (or a mapping entry for a
-    tool the server no longer serves) fails here too. A mapped tool must end
-    up with at least one candidate schema, from either its operationIds or
-    TOOL_RESPONSE_SCHEMAS, so that it is validated rather than skipped.
+    The catalog is generated from this document, so this is the statement of what
+    the server is supposed to publish — and the thing a stale container image gets
+    wrong.
+    """
+    operations: dict[str, str] = {}
+    for path_item in spec.get("paths", {}).values():
+        for method, operation in path_item.items():
+            if method in ("get", "post", "put", "patch", "delete"):
+                operation_id = operation.get("operationId")
+                if operation_id:
+                    operations[operation_id] = method
+    return operations
+
+
+def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str]) -> None:
+    """Hard-fail when the served catalog drifts from the spec.
+
+    A published tool *is* an operation, named by its ``operationId``, so this is a
+    direct comparison rather than a lookup through a mapping table:
+
+    - every published tool names an operation the spec declares, unless it is one of
+      the operations the server performs itself (``LOCAL_TOOLS``), whose answer no
+      endpoint returns — that answer is either pinned here or is content rather than a
+      document (``CONTENT_TOOLS``);
+    - every operation the spec declares is published, unless it is withheld with a
+      reason (``WITHHELD_OPERATIONS``) — the case a stale image produces;
+    - every published read resolves to a response schema, because a read whose
+      schema cannot be found is validated as SKIPPED, which the E2E workflow counts
+      as neither pass nor fail.
 
     Raises:
         ValueError: listing the offending tools or operation ids.
     """
-    expected = set(expected_tools)
-    mapped = set(GROUPED_TOOL_OPERATIONS)
-    missing = sorted(expected - mapped)
-    if missing:
-        raise ValueError(f"Tools missing from GROUPED_TOOL_OPERATIONS: {missing}")
-    extra = sorted(mapped - expected)
-    if extra:
-        raise ValueError(f"GROUPED_TOOL_OPERATIONS tools not in the server tool set: {extra}")
-    unresolvable = sorted(
-        op_id
-        for op_ids in GROUPED_TOOL_OPERATIONS.values()
-        for op_id in op_ids
-        if get_operation_response_schema(spec, op_id) is None
+    operations = spec_operations(spec)
+    published = set(expected_tools)
+
+    unknown = sorted(published - set(operations) - LOCAL_TOOLS)
+    if unknown:
+        raise ValueError(f"published tools that name no operation in the spec: {unknown}")
+
+    unpublished = sorted(set(operations) - published - WITHHELD_OPERATIONS)
+    if unpublished:
+        raise ValueError(f"spec operations published as no tool: {unpublished}")
+
+    unpinned = sorted(
+        tool for tool in published & LOCAL_TOOLS if tool not in TOOL_RESPONSE_SCHEMAS and tool not in CONTENT_TOOLS
     )
-    if unresolvable:
-        raise ValueError(f"operationIds that resolve to no response schema: {unresolvable}")
+    if unpinned:
+        raise ValueError(f"local tools whose answer is neither pinned nor content: {unpinned}")
+
     unvalidated = sorted(
-        tool
-        for tool, op_ids in GROUPED_TOOL_OPERATIONS.items()
-        if not any(get_operation_response_schema(spec, op_id) is not None for op_id in op_ids)
-        and tool not in TOOL_RESPONSE_SCHEMAS
+        operation_id
+        for operation_id, method in operations.items()
+        if method == "get" and operation_id in published and get_operation_response_schema(spec, operation_id) is None
     )
     if unvalidated:
-        raise ValueError(f"tools with no candidate response schema: {unvalidated}")
+        raise ValueError(f"published reads that resolve to no response schema: {unvalidated}")
 
 
 def validate_field_type(value: Any, expected_type: str) -> bool:
@@ -213,7 +203,14 @@ def validate_field_type(value: Any, expected_type: str) -> bool:
         "boolean": bool,
         "array": list,
         "object": dict,
+        "null": type(None),
     }
+
+    if isinstance(expected_type, list):
+        # OpenAPI 3.1 writes "a string, or nothing" as ``type: [string, null]``. A value
+        # satisfies that if it satisfies any member; every member is a type name this
+        # validator knows or skips, so the union needs no special case beyond the loop.
+        return any(validate_field_type(value, member) for member in expected_type)
 
     if expected_type not in type_map:
         return True  # Unknown type, skip validation
@@ -398,7 +395,7 @@ def validate_tool_response(
     response_data: Any,
     spec: dict[str, Any],
 ) -> tuple[str, list[str]]:
-    """Validate a tool response against OpenAPI candidate schemas.
+    """Validate a tool response against the schema of the operation it runs.
 
     Returns:
         tuple of (status, error_messages) where status is:
@@ -406,31 +403,30 @@ def validate_tool_response(
         - "VALID" if matches at least one candidate schema
         - "INVALID" if does not match any candidate schema
     """
-    # Synthetic 204-style success responses generated by the grouped tools do not
-    # correspond to any OpenAPI response body and are therefore not validated.
+    # A 204-style success has no upstream body to validate: the transport says the
+    # endpoint answered with nothing, and there is nothing to compare a schema to.
     if response_data == {"success": True}:
         return "SKIPPED", []
 
-    operation_ids = [tool_name]
-    if tool_name in GROUPED_TOOL_OPERATIONS:
-        operation_ids = GROUPED_TOOL_OPERATIONS[tool_name]
-
+    # A proxied tool answers with its endpoint's body, so the operation is the tool
+    # name. A tool with a pinned shape answers with something the endpoint does not
+    # return — a DoH response, or the receipt for a file the endpoint streams elsewhere
+    # — so only the pinned schema applies; checking it against the endpoint's document
+    # would compare a receipt to a CSV.
     schemas: list[tuple[str, dict[str, Any]]] = []
-    for op_id in operation_ids:
-        schema = get_operation_response_schema(spec, op_id)
-        if schema is not None:
-            schemas.append((op_id, schema))
-
-    # Tools without an OpenAPI operation validate against their literal schema.
     literal_schema = TOOL_RESPONSE_SCHEMAS.get(tool_name)
     if literal_schema is not None:
         schemas.append((tool_name, literal_schema))
+    elif tool_name not in LOCAL_TOOLS:
+        operation_schema = get_operation_response_schema(spec, tool_name)
+        if operation_schema is not None:
+            schemas.append((tool_name, operation_schema))
 
     if not schemas:
         return "SKIPPED", [f"No schemas found for tool '{tool_name}'"]
 
-    # Validate against each candidate schema. The response is valid if it matches
-    # at least one of the underlying operations for the grouped tool.
+    # One tool, one operation, one schema; the loop is here so an answer with more than
+    # one candidate is reported by which one it failed.
     all_errors: list[str] = []
     for op_id, schema in schemas:
         resolved_schema = resolve_schema(spec, schema)
@@ -448,7 +444,7 @@ def main():
     """Main entry point for schema validation."""
     if len(sys.argv) < 3:
         print("Usage: validate_schema.py <tool_name> <json_response>", file=sys.stderr)
-        print('Example: validate_schema.py manageProfiles \'{"data":{"id":"abc123"}}\'', file=sys.stderr)
+        print('Example: validate_schema.py listProfiles \'{"data":[{"id":"abc123"}]}\'', file=sys.stderr)
         sys.exit(1)
 
     tool_name = sys.argv[1]

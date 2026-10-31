@@ -22,6 +22,7 @@ SPDX-License-Identifier: MIT
 
 import json
 import logging
+import math
 import re
 from collections import Counter
 from collections.abc import Sequence
@@ -115,6 +116,21 @@ def _strip_scope_mentions(query: str, scope_words: set[str]) -> str:
     return _SCOPE_MENTION.sub(_replace, query)
 
 
+def _leading_word(name: str) -> str:
+    """The first word of a tool name — the operation that name performs.
+
+    Every ``operationId`` in this document is verb-first (``getX``, ``addX``,
+    ``removeX``, ``updateX``, ``plotAnalytics``), so the leading word is the one
+    thing that separates two tools over the same object: ``addToDenylist`` and
+    ``updateDenylistEntry`` differ in nothing else their name says.
+    """
+    for raw in _WORD_SPLIT.split(name):
+        word = raw.casefold()
+        if word:
+            return word[:-1] if len(word) > 3 and word.endswith("s") else word
+    return ""
+
+
 def _name_words(tools: Sequence[Tool]) -> dict[str, set[str]]:
     """The words of each tool's name."""
     return {tool.name: set(_words(tool.name)) for tool in tools}
@@ -140,6 +156,10 @@ def _vocabulary_words(tools: Sequence[Tool]) -> dict[str, set[str]]:
     return out
 
 
+# The slice of a catalog that stops a word singling a tool out; see _shared_words.
+_SHARED_WORD_SHARE = 0.1
+
+
 def _word_counts(by_tool: dict[str, set[str]]) -> Counter[str]:
     """How many tools carry each word."""
     counts: Counter[str] = Counter()
@@ -149,44 +169,103 @@ def _word_counts(by_tool: dict[str, set[str]]) -> Counter[str]:
 
 
 def _shared_words(by_tool: dict[str, set[str]]) -> set[str]:
-    """Words carried by more than one tool, so they single out no tool."""
-    return {word for word, count in _word_counts(by_tool).items() if count > 1}
+    """Words carried by enough of the catalog that they single out no tool.
+
+    The share, not the raw count, is what cancels a word. This rule was written
+    against an eight-tool catalog, where "two tools carry it" meant a quarter of
+    everything; on the 78-operation document a verb like `remove` (six names) or an
+    object like `tld` (four) is carried by a small slice and does say which tool the
+    caller means, while `get` (thirty names) and `profile` (every tool) still cancel
+    themselves out. Counting any second carrier as shared made almost every verb and
+    noun cancel out at this catalog size, which left ties broken by alphabetical
+    order: "remove zip from security_tlds" answered `getSecurityTLDs`.
+    """
+    threshold = max(1, math.ceil(len(by_tool) * _SHARED_WORD_SHARE))
+    return {word for word, count in _word_counts(by_tool).items() if count > threshold}
+
+
+def _shared_word_sets(names: dict[str, set[str]], vocabulary: dict[str, set[str]]) -> tuple[set[str], set[str]]:
+    """The words that say nothing about which tool is meant, per side of the comparison.
+
+    Two sides are discounted separately on purpose. A word carried by much of the
+    catalog's *prose* ("domain", "settings", "profile") describes what tools talk
+    about, not what they do, so it cancels on both sides — unless exactly one tool
+    carries it in its NAME, which is a signal no vocabulary can override: `settings`
+    belongs to one name here, and a caller writing "read the current settings" means
+    that tool.
+
+    The exception on the name side is the leading word. Every ``operationId`` in this
+    document is verb-first, so within a family of tools over one object the verb is
+    the only difference the names carry: ``addToDenylist`` and ``updateDenylistEntry``
+    share "denylist", and only "add"/"update" says which job the caller asked for. The
+    verbs are numerous enough to be "shared" by the share rule, and discounting them
+    was what made "add entry to denylist" answer the update tool.
+    """
+    vocab_shared = _shared_words(vocabulary)
+    unique_to_one_name = {word for word, count in _word_counts(names).items() if count == 1}
+    leading = {_leading_word(name) for name in names}
+    name_shared = (_shared_words(names) | (vocab_shared - unique_to_one_name)) - leading
+    return name_shared, vocab_shared
+
+
+def _words_score(
+    query_words: set[str],
+    name_words: set[str] | None,
+    vocabulary_words: set[str] | None,
+    name_shared: set[str],
+    vocab_shared: set[str],
+    leading_word: str,
+) -> int:
+    """How much of the caller's wording one tool's own words account for.
+
+    A name counts twice a vocabulary word, because a name is what the tool is for
+    while prose is what it talks about. The name's leading word counts once more
+    again: it is the verb, and the verb is the only thing two tools over the same
+    object differ on, so "add entry to denylist" has to answer ``addToDenylist``
+    rather than ``updateDenylistEntry`` on the strength of the word "add".
+    """
+    return (
+        _overlap(query_words, name_words, name_shared) * 2
+        + (1 if leading_word and leading_word in query_words else 0)
+        + _overlap(query_words, vocabulary_words, vocab_shared)
+    )
 
 
 def _rank_by_name_overlap(
     tools: Sequence[Tool],
     query: str,
-    shared: set[str] | None = None,
     names: dict[str, set[str]] | None = None,
     vocabulary: dict[str, set[str]] | None = None,
 ) -> list[Tool]:
     """Order matched tools by how much of the query their own words account for.
 
-    BM25 ranks by prose similarity, so a long description can outrank the tool
-    whose name is literally what the caller asked for: 'generate analytics plot'
-    puts queryAnalytics above plotAnalytics, and 'delete profile' puts four other
-    tools above manageProfiles. Ties keep the underlying ranking.
+    BM25 ranks by prose similarity, so a long description can outrank the tool whose
+    name is literally what the caller asked for: "generate analytics plot" put the
+    analytics query tools above ``plotAnalytics``, and "delete profile" put four other
+    tools above ``deleteProfile``. Ties keep the underlying ranking.
 
-    A word several tools carry is not counted, and a name counts for more than a
-    parameter or an accepted value - except where a word belongs to exactly one
-    tool's name, which is a signal no vocabulary can cancel: `settings` is in
-    manageSettings' name and `get` is an accepted value of four tools, and a
-    caller writing "read the current settings" means manageSettings.
+    A word much of the catalog carries is not counted, and a name counts for more than
+    a parameter or an accepted value; see :func:`_shared_word_sets` for which words
+    those are, and for the verb-first exception that keeps a family of tools over one
+    object sortable by what the caller asked to *do* to it.
     """
     names = _name_words(tools) if names is None else names
     vocabulary = _vocabulary_words(tools) if vocabulary is None else vocabulary
-    vocab_shared = _shared_words(vocabulary)
-    unique_to_one_name = {word for word, count in _word_counts(names).items() if count == 1}
-    name_shared = _shared_words(names) | (vocab_shared - unique_to_one_name)
+    name_shared, vocab_shared = _shared_word_sets(names, vocabulary)
+    leading = {name: _leading_word(name) for name in names}
     query_words = _words(query)
     if not query_words:
         return list(tools)
     indexed = list(enumerate(tools))
     indexed.sort(
         key=lambda pair: (
-            -(
-                _overlap(query_words, names.get(pair[1].name), name_shared) * 2
-                + _overlap(query_words, vocabulary.get(pair[1].name), vocab_shared)
+            -_words_score(
+                query_words,
+                names.get(pair[1].name),
+                vocabulary.get(pair[1].name),
+                name_shared,
+                vocab_shared,
+                leading.get(pair[1].name, ""),
             ),
             pair[0],
         )
@@ -222,21 +301,19 @@ class _CatalogAwareSearchMixin:
         # dropped out of the result set entirely.
         names = _name_words(tools)
         vocabulary = _vocabulary_words(tools)
-        words = _words(query) - _shared_words(names)
+        # The same discounting the re-rank uses, so a tool the caller named with a
+        # verb ("add ... to the denylist") is kept in the answer rather than dropped
+        # because the verb is common: within a family of tools the verb is the only
+        # thing their names differ on.
+        name_shared, _ = _shared_word_sets(names, vocabulary)
+        words = _words(query) - name_shared
         named = {name for name, words_in_name in names.items() if words & words_in_name}
         if not results:
             # Nothing matched at all: the caller's words are the only signal
             # left, so answer with the catalog and let the name order sort it.
             results = list(tools)
-        # A tool the caller named is never left out, but one that BM25 already
-        # ranked keeps the place BM25 gave it: when two tools tie on the words
-        # they carry, the tie should fall back to how well their descriptions
-        # matched, not to the order the tools happen to be registered in.
-        picked = [tool for tool in results if tool.name in named]
-        missing = [tool for tool in tools if tool.name in named and tool.name not in {tool.name for tool in results}]
-        rest = [tool for tool in results if tool.name not in named]
-        merged = picked + missing + rest
-        return _rank_by_name_overlap(merged[: self._max_results], query, None, names, vocabulary)
+        merged = _merge_named_results(results, tools, named)
+        return _rank_by_name_overlap(merged[: self._max_results], query, names, vocabulary)
 
     def _make_search_tool(self) -> Tool:
         """FastMCP's search tool, with this server's discovery contract on it.
@@ -254,6 +331,22 @@ class _CatalogAwareSearchMixin:
         tool = super()._make_call_tool()  # type: ignore[misc]
         tool.description = _CALL_TOOL_DESCRIPTION
         return tool
+
+
+def _merge_named_results(results: Sequence[Tool], tools: Sequence[Tool], named: set[str]) -> list[Tool]:
+    """Put every tool the caller named into the answer, keeping BM25's order.
+
+    A tool the caller named is never left out, but one BM25 already ranked keeps
+    the place BM25 gave it: when two tools tie on the words they carry, the tie
+    should fall back to how well their descriptions matched, not to the order
+    the tools happen to be registered in. So: named-and-ranked first, then
+    named-but-unranked, then everything else in ranked order.
+    """
+    ranked_names = {tool.name for tool in results}
+    picked = [tool for tool in results if tool.name in named]
+    missing = [tool for tool in tools if tool.name in named and tool.name not in ranked_names]
+    rest = [tool for tool in results if tool.name not in named]
+    return picked + missing + rest
 
 
 # Written for the model that reads them, and client-agnostic: nothing here
@@ -337,14 +430,19 @@ def _closest_tools(name: str, tools: Sequence[Tool], limit: int = 3) -> list[Too
         return []
     names = _name_words(tools)
     vocabulary = _vocabulary_words(tools)
-    vocab_shared = _shared_words(vocabulary)
-    unique_to_one_name = {word for word, count in _word_counts(names).items() if count == 1}
-    name_shared = _shared_words(names) | (vocab_shared - unique_to_one_name)
+    name_shared, vocab_shared = _shared_word_sets(names, vocabulary)
+    leading = {name: _leading_word(name) for name in names}
     query_words = _words(name)
     scored = [
         (
-            _overlap(query_words, names.get(tool.name), name_shared) * 2
-            + _overlap(query_words, vocabulary.get(tool.name), vocab_shared),
+            _words_score(
+                query_words,
+                names.get(tool.name),
+                vocabulary.get(tool.name),
+                name_shared,
+                vocab_shared,
+                leading.get(tool.name, ""),
+            ),
             tool,
         )
         for tool in tools
@@ -431,6 +529,28 @@ def _name_from_search_answer(value: Any) -> str:
     return ""
 
 
+def _tool_properties(tool: Tool) -> dict[str, Any]:
+    """The parameters a tool declares, as a name -> schema mapping (empty if none)."""
+    return (tool.parameters or {}).get("properties") or {}
+
+
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    """A supplied value as a dict copy, or empty when it is not a dict at all."""
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _moved_into_arguments(arguments: dict[str, Any], nested: dict[str, Any], moved: list[str]) -> dict[str, Any]:
+    """The wrapper with ``moved`` removed from it and folded into the nested block.
+
+    Nested values win nothing here: ``moved`` never contains a key ``nested``
+    already holds (the caller checked), so the merge cannot overwrite a value
+    the caller put inside ``arguments``.
+    """
+    shaped = {key: value for key, value in arguments.items() if key not in moved}
+    shaped["arguments"] = {**nested, **{key: arguments[key] for key in moved}}
+    return shaped
+
+
 class CallToolShapeMiddleware(Middleware):
     """Make ``call_tool`` mean the call the caller was trying to make.
 
@@ -461,26 +581,14 @@ class CallToolShapeMiddleware(Middleware):
         if getattr(message, "name", "") != self._call_tool_name or not isinstance(arguments, dict):
             return await call_next(context)
 
-        supplied = arguments.get("name")
-        resolved = _name_from_search_answer(supplied)
-        if resolved and resolved != supplied:
-            logger.info("call_tool name given as %s; resolved to the top-ranked %r", type(supplied).__name__, resolved)
+        tools = await self._catalog(context)
+        resolved, target = await self._resolve_tool_name(arguments.get("name"), tools)
 
         shaped = dict(arguments)
-        tools = await self._catalog(context)
-        by_name = {tool.name: tool for tool in tools}
-        if resolved and by_name and resolved not in by_name:
-            matched = _match_tool_name(resolved, list(by_name))
-            if matched:
-                logger.info("call_tool name %r is not a tool; it matches %r once normalised", resolved, matched)
-                resolved = matched
-            else:
-                raise ToolError(_unknown_tool_message(resolved, tools))
         if resolved:
             shaped["name"] = resolved
-
-        if resolved in by_name:
-            lifted = self._lift_flat_arguments(shaped, by_name[resolved])
+        if target is not None:
+            lifted = self._lift_flat_arguments(shaped, target)
             if lifted is not shaped:
                 logger.info("call_tool arguments for %r were sent beside name, not inside arguments", resolved)
                 shaped = lifted
@@ -489,13 +597,37 @@ class CallToolShapeMiddleware(Middleware):
             context.message.arguments = shaped
         return await call_next(context)
 
+    async def _resolve_tool_name(self, supplied: Any, tools: Sequence[Tool]) -> tuple[str | None, Tool | None]:
+        """The tool a call names, and the catalog entry it matches - or None, None.
+
+        A name given as a search answer (a list or dict, not a bare string) is
+        read out of it; a name that is not itself a tool but matches one once
+        normalised is corrected to it; a name that matches nothing is refused
+        with the catalog's own suggestions, because the caller has to see what
+        exists to pick again. An empty catalog - no transform, or one that
+        could not be read - leaves the name as given rather than refusing it.
+        """
+        resolved = _name_from_search_answer(supplied)
+        if resolved and resolved != supplied:
+            logger.info("call_tool name given as %s; resolved to the top-ranked %r", type(supplied).__name__, resolved)
+
+        by_name = {tool.name: tool for tool in tools}
+        if not resolved or not by_name or resolved in by_name:
+            return resolved, by_name.get(resolved) if resolved else None
+
+        matched = _match_tool_name(resolved, list(by_name))
+        if matched:
+            logger.info("call_tool name %r is not a tool; it matches %r once normalised", resolved, matched)
+            return matched, by_name[matched]
+        raise ToolError(_unknown_tool_message(resolved, tools))
+
     @staticmethod
     def _lift_flat_arguments(arguments: dict[str, Any], tool: Tool) -> dict[str, Any]:
         """Move a tool's own parameters out of the wrapper they were sent beside.
 
-        Live, 16 times in one run, on the profile delete step::
+        Live, 16 times in one run, on the denylist step::
 
-            call_tool({name: "manageProfiles", operation: "delete", profile_id: "81b222"})
+            call_tool({name: "addToDenylist", profile_id: "81b222", id: "x.com"})
 
         The caller named the tool and gave its parameters beside ``name``
         instead of inside ``arguments``. They are that tool's parameters, so
@@ -507,17 +639,15 @@ class CallToolShapeMiddleware(Middleware):
         already inside ``arguments``. Anything else is left where it is for the
         filter to report.
         """
-        properties = (tool.parameters or {}).get("properties") or {}
-        nested = arguments.get("arguments")
-        nested = dict(nested) if isinstance(nested, dict) else {}
-        moved = [
-            key for key in arguments if key not in ("name", "arguments") and key in properties and key not in nested
-        ]
+        properties = _tool_properties(tool)
+        nested = _dict_or_empty(arguments.get("arguments"))
+        # The wrapper's own keys, and anything already supplied nested: those
+        # stay exactly where they are.
+        taken = {"name", "arguments"} | set(nested)
+        moved = [key for key in arguments if key in properties and key not in taken]
         if not moved:
             return arguments
-        shaped = {key: value for key, value in arguments.items() if key not in moved}
-        shaped["arguments"] = {**nested, **{key: arguments[key] for key in moved}}
-        return shaped
+        return _moved_into_arguments(arguments, nested, moved)
 
     async def _catalog(self, context: MiddlewareContext) -> Sequence[Tool]:
         """Every tool this server will accept through call_tool."""

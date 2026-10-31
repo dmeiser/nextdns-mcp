@@ -12,7 +12,7 @@ from nextdns_mcp.config import (
     get_writable_profiles,
     parse_profile_list,
 )
-from nextdns_mcp.utils import is_safe_entry_id, is_safe_profile_id
+from nextdns_mcp.utils import is_safe_profile_id
 
 
 @pytest.fixture
@@ -401,17 +401,10 @@ class TestSafeIdValidation:
         assert is_safe_profile_id("abc/def") is False
         assert is_safe_profile_id("") is False
 
-    def test_is_safe_entry_id_allows_domains(self):
-        assert is_safe_entry_id("example.com") is True
-        assert is_safe_entry_id("nextdns-recommended") is True
-        assert is_safe_entry_id("a.b") is True  # single dots are fine
-
-    def test_is_safe_entry_id_rejects_path_traversal(self):
-        assert is_safe_entry_id("../settings") is False
-        assert is_safe_entry_id("foo/bar") is False
-        assert is_safe_entry_id("") is False
-        assert is_safe_entry_id("a..b") is False  # embedded parent-directory sequence
-        assert is_safe_entry_id("foo\\bar") is False  # backslash separator
+    # The entry-id traversal guard lives where the value is used: the generated tool
+    # refuses an id that could address another endpoint (spec_tools._UNSAFE_PATH_VALUE),
+    # which is the only place an entry id is ever put into a URL. See
+    # tests/unit/test_spec_tools.py for that guard's cases.
 
 
 class TestExtractProfileIdFromUrlValidation:

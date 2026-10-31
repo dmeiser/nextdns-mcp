@@ -20,6 +20,12 @@ this module exists at all: FastMCP's own OpenAPI transport sends through its own
 client and raises on a non-2xx status, which would silently bypass the ACL layer
 and drop the body that says *why* a call failed.
 
+The generator adds nothing to what the spec says a call means, with two exceptions,
+both recorded where they are defined: a path argument is refused before it can turn
+into a different endpoint (``_UNSAFE_PATH_VALUE``), and the analytics window
+arguments are rewritten out of the two spellings the API reads wrongly rather than
+rejects (``_QUERY_NORMALIZERS``).
+
 Two operations are treated specially, and both reasons are recorded here because a
 surprising tool is otherwise invisible to a caller:
 
@@ -34,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +51,7 @@ from fastmcp.utilities.openapi import HTTPRoute, parse_openapi_to_http_routes
 
 from .call_log import register_endpoint
 from .errors import ErrorCode, error_payload
-from .utils import _api_request_payload
+from .utils import _api_request_payload, normalize_partials, normalize_time_value
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +74,35 @@ WHOLE_BODY_ARG = "body"
 
 # A path parameter the caller did not fill in leaves its placeholder behind.
 _UNFILLED_PATH_ARG = re.compile(r"\{(\w+)\}")
+
+# The analytics/log window arguments are rewritten on the way out rather than sent
+# exactly as given, which is the one place this generator is not a plain proxy.
+#
+# It is not a guardrail: it exists because two spellings callers reach for fail
+# *silently* upstream. `from=-86400` is a bare negative number, which the API reads
+# as an absolute Unix timestamp in 1969 and answers 200 with no rows — across three
+# live runs a model retried that call about 40 times, varying the interval, with no
+# error to act on. `from=now-1d` (the Grafana spelling) answers "must be number",
+# and `partials=false` answers a 400 enum that names no allowed values. Both have an
+# accepted spelling the caller meant (`-1d`, `none`), and the rewrite is exact, not a
+# guess: see utils.normalize_time_value and normalize_partials for what is and is not
+# rewritten. Timestamps, ISO 8601, `now` and `-1d` pass through untouched.
+_QUERY_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
+    "from": normalize_time_value,
+    "to": normalize_time_value,
+    "partials": normalize_partials,
+}
+
+# Characters that would turn one path argument into a different endpoint. An id is
+# a single path segment; anything here could escape it — ``/`` to another resource,
+# ``?``/``#`` to change the query or fragment, ``\`` because some URL parsers read it
+# as a separator, whitespace, ``..`` to walk up, or a non-printable character. The
+# value is substituted into the request path, and the access-control layer authorizes
+# the request by reading the profile id back out of that path, so an unvetted value
+# can move the call somewhere the caller was not authorized for. Nothing upstream can
+# be assumed to reject it. A domain is a legal entry id, so a lone dot is not refused
+# — only ``..``, which no domain contains.
+_UNSAFE_PATH_VALUE = re.compile(r"[\s/?#\\]|\.\.|[^\x21-\x7e]")
 
 
 def load_spec(path: Path = SPEC_PATH) -> dict[str, Any]:
@@ -111,6 +147,10 @@ def split_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> tuple[str, d
     server's own middleware removes anything outside the published schema before a
     call reaches a tool, and forwarding a stray name into a request body could send
     the API something the spec never described.
+
+    Time-shaped query arguments are rewritten into the form the API reads (see
+    ``_QUERY_NORMALIZERS``), because the two shapes callers reach for fail silently
+    rather than as an error the caller could correct.
     """
     parameter_map = route.parameter_map or {}
     path = route.path
@@ -119,9 +159,7 @@ def split_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> tuple[str, d
     whole_body: Any = None
 
     for name, value in arguments.items():
-        mapped = parameter_map.get(name) or {}
-        openapi_name = str(mapped.get("openapi_name") or name)
-        location = mapped.get("location")
+        openapi_name, location = _mapped_location(parameter_map, name)
         if location == "path":
             # A blank path value is left as the placeholder rather than substituted:
             # an empty profile id in the middle of a URL answers with a 404 that
@@ -129,13 +167,44 @@ def split_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> tuple[str, d
             if str(value).strip():
                 path = path.replace("{" + openapi_name + "}", str(value))
         elif location == "query":
-            query[openapi_name] = value
+            query[openapi_name] = _query_value(openapi_name, value)
         elif location == "body" and openapi_name == WHOLE_BODY_ARG:
             whole_body = value
         elif location == "body":
             body_properties[openapi_name] = value
 
-    return path, query, whole_body if whole_body is not None else (body_properties or None)
+    return path, query, _request_body(whole_body, body_properties)
+
+
+def _mapped_location(parameter_map: dict[str, Any], name: str) -> tuple[str, Any]:
+    """The (OpenAPI name, location) a flattened argument was derived from.
+
+    The parser flattened body properties into the tool's top-level schema, so an
+    argument's own name is not necessarily the API's name for it - and an
+    argument the map does not know about has no location, which drops it.
+    """
+    mapped = parameter_map.get(name) or {}
+    return str(mapped.get("openapi_name") or name), mapped.get("location")
+
+
+def _query_value(openapi_name: str, value: Any) -> Any:
+    """Rewrite one query argument into the form the API reads, if it needs one."""
+    normalize = _QUERY_NORMALIZERS.get(openapi_name)
+    return normalize(value) if normalize else value
+
+
+def _request_body(whole_body: Any, body_properties: dict[str, Any]) -> Any:
+    """The request body: a whole-body argument wins, else the collected properties.
+
+    An endpoint whose body is one declared argument (``body`` in the flattened
+    schema) takes that value as the document; an endpoint whose body is a set of
+    properties takes the object built from them. No body arguments means no
+    body, not an empty object - some endpoints read an empty document as a
+    request to clear what they hold.
+    """
+    if whole_body is not None:
+        return whole_body
+    return body_properties or None
 
 
 class SpecApiTool(Tool):
@@ -158,6 +227,10 @@ class SpecApiTool(Tool):
         if self.name in DELEGATED_OPERATIONS:
             return await self._run_delegated(arguments or {})
 
+        unsafe = _unsafe_path_arguments(self._route, arguments or {})
+        if unsafe:
+            return ToolResult(structured_content=self._unsafe_path_payload(unsafe))
+
         path, query, body = split_arguments(self._route, arguments or {})
         unfilled = _UNFILLED_PATH_ARG.findall(path)
         if unfilled:
@@ -175,6 +248,21 @@ class SpecApiTool(Tool):
             return ToolResult(structured_content=self._missing_payload(["profile_id"]))
         return ToolResult(structured_content=await _download_logs_to_tempfile(profile_id))
 
+    def _unsafe_path_payload(self, names: list[str]) -> dict[str, Any]:
+        """A typed error refusing to put an id-shaped argument anywhere but a path segment."""
+        code = ErrorCode.INVALID_PROFILE_ID if "profile_id" in names else ErrorCode.INVALID_ENTRY_ID
+        hint = (
+            "the profile id is 6 or 10 characters; listProfiles() returns the ids this API key can access"
+            if "profile_id" in names
+            else "the id is the `id` field of the entry in this endpoint's list response"
+        )
+        return error_payload(
+            code,
+            f"{self.name} cannot send {', '.join(names)} as a path segment: it must not contain a slash, "
+            "a query or fragment separator, whitespace, or '..'",
+            hint=hint,
+        )
+
     def _missing_payload(self, missing: list[str]) -> dict[str, Any]:
         """A typed error naming what the endpoint still needs and where it comes from."""
         hints = {
@@ -187,6 +275,25 @@ class SpecApiTool(Tool):
             f"{self.name} needs {', '.join(missing)} for {self._route.method} {self._route.path}",
             hint=hints.get(missing[0], "required by this endpoint: " + ", ".join(_required(self._route))),
         )
+
+
+def _unsafe_path_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> list[str]:
+    """Path arguments whose value could address something other than this tool's endpoint.
+
+    A blank value is not listed here: it is left as the placeholder by
+    :func:`split_arguments` and reported by :meth:`SpecApiTool.run` as a missing
+    argument, which is the more useful thing to say about an empty ``profile_id``.
+    """
+    parameter_map = route.parameter_map or {}
+    rejected: list[str] = []
+    for name, value in arguments.items():
+        mapped = parameter_map.get(name) or {}
+        if mapped.get("location") != "path":
+            continue
+        text = str(value)
+        if _UNSAFE_PATH_VALUE.search(text):
+            rejected.append(str(mapped.get("openapi_name") or name))
+    return rejected
 
 
 def _required(route: HTTPRoute) -> list[str]:

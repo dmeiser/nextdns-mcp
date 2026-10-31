@@ -224,21 +224,6 @@ def _format_resolved(seconds: float | None) -> str:
     return datetime.fromtimestamp(seconds, tz=UTC).isoformat(timespec="seconds")
 
 
-def _series_span_seconds(from_time: str | int, to_time: str | int, now: float) -> float | None:
-    """Return the length in seconds of the requested range, or None if unknown.
-
-    None means the range could not be resolved because one of the two values is
-    unparseable. A span at or below zero (an end not after the start) is
-    returned as computed, so the caller can distinguish an unresolvable range
-    from a nonsensical one.
-    """
-    start = _resolve_time_point(from_time, now)
-    end = _resolve_time_point(to_time, now)
-    if start is None or end is None:
-        return None
-    return end - start
-
-
 def _series_budget_error(
     from_time: str | int,
     to_time: str | int,

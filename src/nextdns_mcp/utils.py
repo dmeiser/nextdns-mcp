@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from . import client, surface
+from . import client
 from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError, _log_safe_error, _redacted
 from .config import get_default_profile
 from .errors import (
@@ -25,9 +25,6 @@ from .errors import (
 
 logger = logging.getLogger(__name__)
 
-# Entry IDs are domain-like identifiers with a looser safe-character set.
-SAFE_ENTRY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.\-]+$")
-
 
 def is_safe_profile_id(value: str | int) -> bool:
     """Return True if value is an API-shaped profile_id (6 or 10 lowercase alphanumeric chars).
@@ -37,21 +34,6 @@ def is_safe_profile_id(value: str | int) -> bool:
     upstream.
     """
     return bool(SAFE_PROFILE_ID_PATTERN.match(str(value)))
-
-
-def is_safe_entry_id(value: str) -> bool:
-    """Return True if value is a safe entry_id segment (allows domain-like IDs).
-
-    Rejects path separators and parent-directory sequences that could be used
-    for path traversal when the ID is embedded in a URL path.
-    """
-    # "." is an allowed character (domain-like entry IDs contain dots), so a
-    # regex-only traversal guard would need a negative lookahead such as
-    # "^(?!.*\.\.)..."; keep the explicit check instead. Empty values and path
-    # separators are already rejected by the character class below.
-    if ".." in value:
-        return False
-    return bool(SAFE_ENTRY_ID_PATTERN.match(value))
 
 
 def is_integer_shaped(value: str) -> bool:
@@ -126,37 +108,6 @@ def resolve_profile_id(
             f"Invalid profile_id format: {profile_id}",
         )
     return str(profile_id), None
-
-
-def _validate_entry_id(entry_id: str) -> dict[str, Any] | None:
-    """Return an error dict if entry_id is not a safe identifier."""
-    if not is_safe_entry_id(entry_id):
-        return error_payload(ErrorCode.INVALID_ENTRY_ID, f"Invalid entry_id format: {entry_id}")
-    return None
-
-
-def _optional_entry_id_error(entry_id: str | None) -> dict[str, Any] | None:
-    """Validate an entry id that is only required by some operations."""
-    if entry_id is None:
-        return None
-    return _validate_entry_id(entry_id)
-
-
-def _cap_limit(value: int | None, cap: int) -> int | None:
-    """Clamp a caller-supplied limit to the server-side range ``[1, cap]``.
-
-    Returns the clamped value, or None when the caller supplied no limit.
-    Values above the cap are clamped down to it and non-positive values are
-    raised to 1, so a bad caller value can never be forwarded upstream as
-    ``?limit=-1`` (issue #267).
-    """
-    if value is None:
-        return None
-    if value < 1:
-        return 1
-    if value > cap:
-        return cap
-    return value
 
 
 def _build_series_params(
@@ -308,26 +259,10 @@ async def _api_request(
     try:
         response = await client.api_client.request(method, url, params=params, json=json_body)
         response.raise_for_status()
-        if response.status_code == 204 or not response.content:
+        if _is_empty_success(response):
             return {"success": True}
         data = response.json()
-        if upstream_error_codes(data) and "data" not in data:
-            # Upstream answered 2xx with a structured error document instead of
-            # a payload (observed: POST /allowlist on an existing entry returns
-            # 200 {"errors":[{"code":"duplicate"}]}, while the same condition
-            # on /privacy/blocklists returns 400). Returning that body as if it
-            # were data makes an error look like a success; normalize it into
-            # the same typed failure every other upstream error produces.
-            error = NextDNSError(
-                # The code is named by http_error_payload from the body, so the
-                # message here only has to say that the status lied.
-                f"HTTP error in {method} {url}: upstream answered {response.status_code} "
-                "with an error document instead of a payload",
-                status_code=response.status_code,
-                response_body=response.text,
-            )
-            error.response = response  # type: ignore[attr-defined]
-            raise error
+        _reject_error_document(method, url, response, data)
         return data
     except AccessDeniedError as e:
         # Raised by the ACL layer before any network request. Kept out of the
@@ -342,13 +277,50 @@ async def _api_request(
     except httpx.HTTPError as e:
         logger.error(f"HTTP error in {method} {_redacted(url)}: {_log_safe_error(e)}")
         message = f"HTTP error in {method} {url}: {e}"
-        response = getattr(e, "response", None)
-        status_code = getattr(response, "status_code", None) if response is not None else None
-        response_body = getattr(response, "text", None) if response is not None else None
+        status_code, response_body = _response_error_parts(getattr(e, "response", None))
         raise _typed_http_error(message, status_code, response_body) from e
     except Exception as e:
         logger.error(f"Unexpected error in {method} {_redacted(url)}: {_log_safe_error(e)}")
         raise NextDNSError(f"Unexpected error in {method} {url}: {e}", status_code=None) from e
+
+
+def _is_empty_success(response: httpx.Response) -> bool:
+    """A 204, or a 2xx with no body, is a successful write with nothing to return."""
+    return response.status_code == 204 or not response.content
+
+
+def _reject_error_document(method: str, url: str, response: httpx.Response, data: Any) -> None:
+    """Raise when a 2xx answer is actually an error document; return when it is data.
+
+    Observed: POST /allowlist on an existing entry returns 200
+    ``{"errors":[{"code":"duplicate"}]}``, while the same condition on
+    /privacy/blocklists returns 400. Returning that body as if it were data
+    makes an error look like a success; it is normalized into the same typed
+    failure every other upstream error produces. The code is named by
+    ``http_error_payload`` from the body, so this message only has to say that
+    the status lied.
+    """
+    if not (upstream_error_codes(data) and "data" not in data):
+        return
+    error = NextDNSError(
+        f"HTTP error in {method} {url}: upstream answered {response.status_code} "
+        "with an error document instead of a payload",
+        status_code=response.status_code,
+        response_body=response.text,
+    )
+    error.response = response  # type: ignore[attr-defined]
+    raise error
+
+
+def _response_error_parts(response: Any) -> tuple[Any, Any]:
+    """The (status code, body text) an httpx exception carried, or (None, None).
+
+    A transport failure (connection refused, timeout) has no response at all;
+    the typed exception still wants the two attributes, as None.
+    """
+    if response is None:
+        return None, None
+    return getattr(response, "status_code", None), getattr(response, "text", None)
 
 
 def _typed_http_error(message: str, status_code: int | None, response_body: str | None) -> NextDNSError:
@@ -391,11 +363,8 @@ def _note_404_on_a_profile_path(payload: dict[str, Any], url: str) -> dict[str, 
     six-character hex string, which is the shape of a real NextDNS profile id,
     so nothing about it reads as a placeholder.
 
-    The hint names both possibilities rather than guessing one, and where to
-    get a real profile id. Which call to name is the surface's business, so the
-    pointer comes from ``surface.list_profiles_call``: pointing at
-    ``manageProfiles`` on a surface that publishes ``listProfiles`` would send
-    the caller looking for a tool it never had.
+    The hint names both possibilities rather than guessing one, and where to get a
+    real profile id: ``listProfiles()``, the tool that lists them.
     """
     if not isinstance(payload, dict) or payload.get("upstream_code") != "notFound":
         return payload
@@ -405,6 +374,6 @@ def _note_404_on_a_profile_path(payload: dict[str, Any], url: str) -> dict[str, 
         **payload,
         "hint": (
             "a 404 here means the profile id or the entry id in this request does not exist. "
-            f"{surface.list_profiles_call()} returns the profile ids this API key can access"
+            "listProfiles() returns the profile ids this API key can access"
         ),
     }

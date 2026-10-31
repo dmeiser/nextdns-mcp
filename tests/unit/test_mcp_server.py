@@ -35,8 +35,10 @@ class TestCreateMcpServer:
     async def test_no_tools_until_registered_by_server(self, mock_api_key, monkeypatch):
         """The server starts with no tools.
 
-        Grouped CRUD tools are registered by server.py after create_mcp_server()
-        returns, so the function itself must expose no OpenAPI-derived tools.
+        ``create_mcp_server`` only builds the machinery around the catalog
+        (disclosure, argument relaxation, the call log, the health endpoint);
+        ``server.build_mcp_server`` registers the generated tools afterwards, so
+        this function must expose none of them.
         """
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
@@ -67,55 +69,70 @@ class TestCreateMcpServer:
 
 
 class TestProductionServerTools:
-    """Test that the production MCP server exposes only the grouped tools."""
+    """The production server's catalog is the generated one, and nothing else."""
 
-    @pytest.mark.asyncio
-    async def test_only_grouped_tools_registered(self):
-        """The production server should expose exactly 8 tools: 7 grouped tools plus dohLookup."""
+    @staticmethod
+    async def _published_names() -> set[str]:
         from nextdns_mcp.server import mcp_server
 
-        tools = await mcp_server.list_tools()
-        tool_names = {tool.name for tool in tools}
+        return {tool.name for tool in await mcp_server.list_tools()}
 
-        expected = {
-            "dohLookup",
+    @pytest.mark.asyncio
+    async def test_the_catalog_is_what_the_server_says_it_is(self):
+        """``published_tool_names()`` is the catalog, not a description of it.
+
+        The ``initialize`` instructions are written from that list before the tools
+        exist, so a catalog that drifts from it would have the server describing
+        tools it never registered.
+        """
+        from nextdns_mcp.server import published_tool_names
+
+        assert await self._published_names() == set(published_tool_names())
+        assert len(published_tool_names()) == len(set(published_tool_names()))
+
+    @pytest.mark.asyncio
+    async def test_the_api_operations_are_published_by_their_own_names(self):
+        """The endpoints are what a caller is given: the spec's names, one per call."""
+        names = await self._published_names()
+        assert {"listProfiles", "createProfile", "addToDenylist", "getLogs", "getAnalyticsDomains"} <= names
+
+    @pytest.mark.asyncio
+    async def test_the_operations_the_server_performs_itself_are_published(self):
+        """No endpoint describes a chart or a DoH lookup, so they are registered by hand."""
+        names = await self._published_names()
+        assert {"plotAnalytics", "dohLookup"} <= names
+
+    @pytest.mark.asyncio
+    async def test_the_grouped_area_tools_are_not_published(self):
+        """The eight area tools are gone, and so is the second choice they imposed.
+
+        A caller that found both ``manageLists`` and ``addToDenylist`` had to decide
+        which spelling of one API call to make; publishing both is what this removes.
+        """
+        grouped = {
             "manageProfiles",
             "manageSettings",
             "manageLists",
             "manageRewrites",
             "manageLogs",
             "queryAnalytics",
-            "plotAnalytics",
         }
-
-        assert tool_names == expected, f"Unexpected tools registered: {tool_names ^ expected}"
+        assert not (await self._published_names()) & grouped, (
+            f"Grouped tools still registered: {await self._published_names() & grouped}"
+        )
 
     @pytest.mark.asyncio
-    async def test_no_atomic_api_tools_registered(self):
-        """Atomic per-endpoint tools (e.g. listProfiles) must not be exposed.
+    async def test_the_streaming_endpoint_is_not_published(self):
+        """``streamLogs`` is a Server-Sent Events stream; a tool call cannot carry it."""
+        assert "streamLogs" not in await self._published_names()
 
-        The server no longer generates tools from the OpenAPI spec (issue #141),
-        so only the grouped CRUD tools are available.
-        """
+    @pytest.mark.asyncio
+    async def test_a_generated_tool_names_the_endpoint_it_calls(self):
+        """The description says which API call a name executes, so the name is checkable."""
         from nextdns_mcp.server import mcp_server
 
-        tools = await mcp_server.list_tools()
-        tool_names = {tool.name for tool in tools}
-
-        atomic_tools = {
-            "listProfiles",
-            "createProfile",
-            "getProfile",
-            "updateProfile",
-            "deleteProfile",
-            "getSettings",
-            "updateSettings",
-            "getAllowlist",
-            "addToAllowlist",
-            "replaceAllowlist",
-        }
-
-        assert not (tool_names & atomic_tools), f"Atomic tools still registered: {tool_names & atomic_tools}"
+        tools = {tool.name: tool for tool in await mcp_server.list_tools()}
+        assert tools["addToDenylist"].description.rstrip().endswith("NextDNS API: POST /profiles/{profile_id}/denylist")
 
 
 class TestServerLifespan:

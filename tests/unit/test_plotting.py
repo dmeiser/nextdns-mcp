@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import server
+from nextdns_mcp import server, spec_tools
 from nextdns_mcp.tools import plots as plots_module
 
 
@@ -373,34 +373,48 @@ class TestPlotAnalyticsSeriesImpl:
         assert "limit" not in params
 
     @pytest.mark.asyncio
-    async def test_plot_and_query_series_send_the_same_series_params(self, clean_env, mock_api_client, monkeypatch):
+    async def test_the_plot_and_the_generated_series_tool_ask_for_the_same_window(
+        self, clean_env, mock_api_client, monkeypatch
+    ):
         """Both ``;series`` callers put identical query params on the wire (issue #267).
 
-        ``plotAnalytics`` and ``queryAnalytics(series=True)`` read the same
-        endpoint, so a shared builder keeps them from drifting; this asserts the
-        observable request both tools actually issue.
+        Two paths read that endpoint now: ``plotAnalytics``, which builds the series
+        query itself, and the generated tool, which passes the caller's arguments
+        through. A chart and the numbers under it have to be answers to the same
+        question, so this asserts the observable request each one actually issues.
         """
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
-        shared = {
+        window = {
             # Absolute timestamps, so the request is deterministic without a clock patch.
             # `partials` is `all`, not `both`: the endpoint answers 400 for `both`,
             # and the tool now rejects that value by name instead of forwarding it.
-            "from_time": 1_700_000_000 - 86_400,
-            "to_time": 1_700_000_000,
+            "from": 1_700_000_000 - 86_400,
+            "to": 1_700_000_000,
             "interval": 3600,
             "alignment": "start",
             "timezone": "UTC",
             "partials": "all",
         }
 
-        await plots_module._plot_analytics_series_impl("status", profile_id="abc123", **shared)
+        await plots_module._plot_analytics_series_impl(
+            "status",
+            profile_id="abc123",
+            from_time=window["from"],
+            to_time=window["to"],
+            interval=window["interval"],
+            alignment=window["alignment"],
+            timezone=window["timezone"],
+            partials=window["partials"],
+        )
         plot_call = mock_api_client.request.call_args
-        await server.queryAnalytics("status", "abc123", series=True, **shared)
-        query_call = mock_api_client.request.call_args
 
-        assert plot_call.args[1] == query_call.args[1] == "/profiles/abc123/analytics/status;series"
-        assert plot_call.kwargs["params"] == query_call.kwargs["params"]
+        route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
+        await spec_tools.SpecApiTool(route).run({"profile_id": "abc123", **window})
+        series_call = mock_api_client.request.call_args
+
+        assert plot_call.args[1] == series_call.args[1] == "/profiles/abc123/analytics/status;series"
+        assert plot_call.kwargs["params"] == series_call.kwargs["params"]
         assert plot_call.kwargs["params"] == {
             "from": 1_700_000_000 - 86_400,
             "to": 1_700_000_000,
@@ -867,3 +881,29 @@ class TestPlotFetchUsesSharedWrapper:
         assert args[0] == "GET"
         assert args[1] == "/profiles/abc123/analytics/status;series"
         assert kwargs["params"]["interval"] == 3600
+
+
+class TestRangeReportingAndProfileGuard:
+    """What a rejected range says, and what happens when no profile comes back."""
+
+    def test_an_unresolved_time_point_is_named_as_unresolved(self):
+        """The budget error names the range it computed.
+
+        A point that could not be parsed has to read as unresolved rather than as a
+        timestamp invented from None, or the error blames the wrong argument.
+        """
+        assert plots_module._format_resolved(None) == "unresolved"
+        assert plots_module._format_resolved(1_700_000_000).endswith("+00:00")
+
+    @pytest.mark.asyncio
+    async def test_a_plot_with_no_resolved_profile_does_not_request_a_series(self, clean_env, monkeypatch):
+        """``(None, None)`` from the resolver would otherwise build /profiles//analytics/..."""
+        monkeypatch.setattr(plots_module, "resolve_profile_id", lambda profile_id, **kwargs: (None, None))
+
+        wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
+        monkeypatch.setattr(plots_module, "_api_request", wrapped)
+
+        result = await plots_module._plot_analytics_series_impl("status", profile_id="abc123")
+        assert result["code"] == "internal_error"
+        assert "profile resolution failed" in result["error"].lower()
+        wrapped.assert_not_awaited()

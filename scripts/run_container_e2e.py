@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts import validate_schema
 from scripts.validate_schema import (
     assert_operation_coverage,
     load_openapi_spec,
@@ -120,30 +121,85 @@ def log_error(msg: str) -> None:
     print(f"{RED}[ERROR]{NC} {msg}", file=sys.stderr)
 
 
-EXPECTED_TOOLS = [
-    "dohLookup",
-    "manageLists",
-    "manageLogs",
-    "manageProfiles",
-    "manageRewrites",
-    "manageSettings",
-    "plotAnalytics",
-    "queryAnalytics",
-]
+def expected_tools(spec: dict[str, Any]) -> list[str]:
+    """The catalog a container built from this spec has to advertise.
 
-LIST_WRITE_CASES = [
-    # (list_type, entry_id, supports_update); "{ts}" in entry_id is substituted
-    # with the run timestamp so repeated runs exercise fresh entries.
-    ("allowlist", "e2e-{ts}-allow.example.com", True),
-    ("denylist", "e2e-{ts}-deny.example.com", True),
-    ("privacy_blocklists", "nextdns-recommended", False),
-    ("privacy_natives", "apple", False),
-    ("security_tlds", "zip", False),
-    ("parental_categories", "gambling", True),
-    ("parental_services", "tiktok", True),
+    Every operation in the document, under its own ``operationId``, except the ones
+    withheld because the transport cannot carry them; plus the operations the server
+    performs itself, which no endpoint describes. The spec is the source, so a
+    container built from a different document fails the preflight instead of quietly
+    testing a different surface. The unit test for this script pins the result to the
+    server's own ``published_tool_names()``.
+    """
+    operations = set(validate_schema.spec_operations(spec)) - validate_schema.WITHHELD_OPERATIONS
+    return sorted(operations | set(validate_schema.LOCAL_TOOLS))
+
+
+# Required query arguments a read cannot be called without. The API reads a relative
+# offset, so the window is written as one rather than as an epoch; ``type`` is the
+# destinations endpoint's own required enum, whose documented first value is countries.
+READ_ARGUMENT_DEFAULTS: dict[str, Any] = {"from": "-1d", "to": "now", "limit": 10, "type": "countries"}
+
+
+# Live write cases, in the order to run them: a tool and the arguments it is called
+# with, after ``{profile}`` and ``{ts}`` are substituted. Every entry that adds
+# something is paired with the one that takes it away, so a completed run leaves the
+# profile as it found it.
+WRITE_CASES: list[tuple[str, dict[str, Any]]] = [
+    ("updateProfile", {"profile_id": "{profile}", "name": "Updated E2E Profile {ts}"}),
+    # One call per settings endpoint the spec describes; the category is the endpoint.
+    ("updateSettings", {"profile_id": "{profile}", "web3": True}),
+    ("updateLogsSettings", {"profile_id": "{profile}", "enabled": True, "retention": 86400}),
+    ("updateBlockPageSettings", {"profile_id": "{profile}", "enabled": True}),
+    ("updatePerformanceSettings", {"profile_id": "{profile}", "ecs": True, "cacheBoost": True}),
+    ("updatePrivacySettings", {"profile_id": "{profile}", "disguisedTrackers": True, "allowAffiliate": False}),
+    (
+        "updateSecuritySettings",
+        {
+            "profile_id": "{profile}",
+            "threatIntelligenceFeeds": True,
+            "googleSafeBrowsing": True,
+        },
+    ),
+    ("updateParentalControlSettings", {"profile_id": "{profile}", "safeSearch": True, "youtubeRestrictedMode": True}),
+    # List entries: add, update where the entry has its own endpoint, remove.
+    ("addToDenylist", {"profile_id": "{profile}", "id": "e2e-{ts}-deny.example.com"}),
+    ("updateDenylistEntry", {"profile_id": "{profile}", "entry_id": "e2e-{ts}-deny.example.com", "active": True}),
+    ("removeFromDenylist", {"profile_id": "{profile}", "entry_id": "e2e-{ts}-deny.example.com"}),
+    ("addToAllowlist", {"profile_id": "{profile}", "id": "e2e-{ts}-allow.example.com"}),
+    ("updateAllowlistEntry", {"profile_id": "{profile}", "entry_id": "e2e-{ts}-allow.example.com", "active": True}),
+    ("removeFromAllowlist", {"profile_id": "{profile}", "entry_id": "e2e-{ts}-allow.example.com"}),
+    ("addSecurityTLD", {"profile_id": "{profile}", "id": "zip"}),
+    ("removeSecurityTLD", {"profile_id": "{profile}", "entry_id": "zip"}),
+    ("addPrivacyNative", {"profile_id": "{profile}", "id": "apple"}),
+    ("removePrivacyNative", {"profile_id": "{profile}", "entry_id": "apple"}),
+    ("addToParentalControlCategories", {"profile_id": "{profile}", "id": "gambling"}),
+    ("updateParentalControlCategoryEntry", {"profile_id": "{profile}", "id": "gambling", "active": True}),
+    ("removeFromParentalControlCategories", {"profile_id": "{profile}", "id": "gambling"}),
+    ("addToParentalControlServices", {"profile_id": "{profile}", "id": "tiktok"}),
+    ("updateParentalControlServiceEntry", {"profile_id": "{profile}", "id": "tiktok", "active": True}),
+    ("removeFromParentalControlServices", {"profile_id": "{profile}", "id": "tiktok"}),
 ]
 
 SPEC_PATH = PROJECT_ROOT / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
+
+# The catalog expected of a container built from the shipped document. Computed here so
+# the summary and the preflight, and the unit test for this script, all read one list.
+EXPECTED_TOOLS = expected_tools(load_openapi_spec(str(SPEC_PATH))) if SPEC_PATH.exists() else []
+
+
+def _input_schema(tool: Any) -> dict[str, Any]:
+    """A served tool's published input schema, under whichever name the SDK calls it.
+
+    The MCP SDK renamed ``inputSchema`` to ``input_schema``, and a container can be
+    built on either side of that rename. Reading one name alone fails with an
+    AttributeError that looks like a server fault rather than a version skew, so both
+    are read here.
+    """
+    schema = getattr(tool, "input_schema", None)
+    if schema is not None:
+        return schema
+    return getattr(tool, "inputSchema", None) or {}
 
 
 class ContainerE2ERunner:
@@ -172,6 +228,11 @@ class ContainerE2ERunner:
         self.expect_health_ok = expect_health_ok
         self.health_only = health_only
         self.report_file = artifacts_dir / f"tools_report_{variant}.jsonl"
+
+        # The schemas the served container advertises, kept from the preflight: the
+        # read sweep builds each call from them rather than from an argument list
+        # maintained beside this script.
+        self.tool_schemas: dict[str, dict[str, Any]] = {}
 
         self.executed_count = 0
         self.failed_count = 0
@@ -411,17 +472,28 @@ class ContainerE2ERunner:
         return passed
 
     async def _preflight(self, session: ClientSession) -> bool:
-        """Enumerate the served tools and verify the expected set is present."""
+        """Enumerate the served tools and require them to be exactly the expected catalog.
+
+        An extra tool is as much drift as a missing one: the container is either
+        advertising something the shipped document does not describe, or holding back
+        something it does. The schemas the same answer carries are what the read sweep
+        below builds its arguments from, which is why they are kept.
+        """
         log_info("Performing preflight checks...")
         tools_result = await session.list_tools()
-        tool_names = [t.name for t in tools_result.tools]
+        served = {tool.name for tool in tools_result.tools}
+        self.tool_schemas = {tool.name: _input_schema(tool) for tool in tools_result.tools}
 
-        missing_tools = [t for t in EXPECTED_TOOLS if t not in tool_names]
-        if missing_tools:
-            log_error(f"Missing expected tools: {missing_tools}")
+        missing = sorted(set(EXPECTED_TOOLS) - served)
+        extra = sorted(served - set(EXPECTED_TOOLS))
+        if missing:
+            log_error(f"Missing expected tools: {missing}")
+        if extra:
+            log_error(f"Tools the shipped spec does not describe: {extra}")
+        if missing or extra:
             return False
 
-        log_success(f"Found {len(tool_names)} tools; all {len(EXPECTED_TOOLS)} expected tools present")
+        log_success(f"Found {len(served)} tools; the served catalog matches the shipped spec")
         return True
 
     async def _create_profile(self, session: ClientSession) -> str:
@@ -429,11 +501,7 @@ class ContainerE2ERunner:
         log_info("Step 1: Creating test profile for live writes...")
         ts = int(time.time())
         p_name = f"E2E Test Profile {ts}"
-        ok, res = await self.execute_call(
-            session,
-            "manageProfiles",
-            {"operation": "create", "name": p_name},
-        )
+        ok, res = await self.execute_call(session, "createProfile", {"name": p_name})
         created_profile_id = ""
         if ok and isinstance(res, dict):
             data_obj = res.get("data") if isinstance(res.get("data"), dict) else res
@@ -448,7 +516,7 @@ class ContainerE2ERunner:
     async def _fetch_existing_profile(self, session: ClientSession) -> str:
         """Fetch an existing profile for read-only tests; empty when none is available."""
         log_info("Step 1: Fetching existing profile for read-only tests...")
-        ok, res = await self.execute_call(session, "manageProfiles", {"operation": "list"})
+        ok, res = await self.execute_call(session, "listProfiles", {})
         if ok and isinstance(res, dict) and "data" in res and res["data"]:
             profile_id = str(res["data"][0].get("id") or "")
             log_success(f"Using existing profile: {profile_id}")
@@ -471,110 +539,77 @@ class ContainerE2ERunner:
         profile_id = await self._fetch_existing_profile(session)
         return profile_id, ""
 
+    def _read_arguments(self, tool_name: str, profile_id: str) -> tuple[dict[str, Any], list[str]]:
+        """The smallest call that satisfies one read's own published schema.
+
+        Arguments are read from the schema the server advertises for the tool rather
+        than from a table kept beside this script: the schema is the contract a client
+        sees, and a sweep that invents its own argument list would test the invention.
+        Optional arguments are left alone, because each has a server-side default.
+
+        Returns:
+            A (arguments, unfilled) pair. ``unfilled`` names a required argument with
+            no value to send; the caller records that as a skip instead of guessing,
+            so the run says which endpoint it could not call.
+        """
+        schema = self.tool_schemas.get(tool_name, {})
+        arguments: dict[str, Any] = {}
+        unfilled: list[str] = []
+        for name in schema.get("required", []):
+            if name == "profile_id":
+                arguments[name] = profile_id
+            elif name in READ_ARGUMENT_DEFAULTS:
+                arguments[name] = READ_ARGUMENT_DEFAULTS[name]
+            else:
+                unfilled.append(name)
+        return arguments, unfilled
+
     async def _run_read_checks(
         self,
         session: ClientSession,
         profile_id: str,
         plot_profile_id: str,
-        one_hour_ago: int,
-        one_day_ago: int,
     ) -> None:
-        """Exercise every read-only tool against the provisioned profile."""
-        log_info(f"Step 2: Testing grouped tools with profile {profile_id}...")
+        """Call every read the shipped document describes, on the provisioned profile.
 
-        # Read-only tests
-        await self.execute_call(session, "manageProfiles", {"operation": "list"})
-        await self.execute_call(session, "manageProfiles", {"operation": "get", "profile_id": profile_id})
+        The list comes from the document, not from a table maintained here: an
+        operation added to the spec is exercised by the next run without this script
+        changing, and an operation the container does not publish shows up as a
+        preflight failure rather than as a silent gap.
 
-        settings_cats = ["general", "privacy", "security", "parental", "performance", "logs", "blockpage"]
-        for cat in settings_cats:
-            await self.execute_call(
-                session,
-                "manageSettings",
-                {"operation": "get", "category": cat, "profile_id": profile_id},
-            )
-
-        list_types = [
-            "allowlist",
-            "denylist",
-            "privacy_blocklists",
-            "privacy_natives",
-            "security_tlds",
-            "parental_categories",
-            "parental_services",
-        ]
-        for lt in list_types:
-            await self.execute_call(
-                session,
-                "manageLists",
-                {"operation": "get", "list_type": lt, "profile_id": profile_id},
-            )
-
-        await self.execute_call(session, "manageRewrites", {"operation": "list", "profile_id": profile_id})
-        await self.execute_call(
-            session,
-            "manageLogs",
-            {"operation": "get", "profile_id": profile_id, "from_time": str(one_hour_ago), "limit": 10},
+        Analytics reads use the plot profile when one is configured, because those
+        endpoints answer empty for a profile with no traffic and an empty answer looks
+        like a working endpoint either way.
+        """
+        operations = validate_schema.spec_operations(self.spec)
+        reads = sorted(
+            name
+            for name, method in operations.items()
+            if method == "get" and name not in validate_schema.WITHHELD_OPERATIONS
         )
-        await self.execute_call(
-            session,
-            "manageLogs",
-            {"operation": "download", "profile_id": profile_id},
-        )
+        log_info(f"Step 2: Testing {len(reads)} read operations against profile {profile_id}...")
+
+        analytics_profile = plot_profile_id or profile_id
+        for operation_id in reads:
+            if operation_id not in self.tool_schemas:
+                self.record_skip(operation_id, "not published by the served container")
+                continue
+            profile = analytics_profile if operation_id.startswith("getAnalytics") else profile_id
+            arguments, unfilled = self._read_arguments(operation_id, profile)
+            if unfilled:
+                self.record_skip(operation_id, f"required arguments with no value to send: {unfilled}")
+                continue
+            await self.execute_call(session, operation_id, arguments)
+
+        # A DoH lookup is not an API endpoint: it queries the profile's resolver, so
+        # nothing in the document describes it and it is called here on its own.
         await self.execute_call(
             session,
             "dohLookup",
             {"domain": "example.com", "profile_id": profile_id, "record_type": "A"},
         )
 
-        # Analytics metrics
-        analytics_metrics = [
-            "status",
-            "domains",
-            "queryTypes",
-            "reasons",
-            "ips",
-            "dnssec",
-            "encryption",
-            "ipVersions",
-            "protocols",
-            "devices",
-            "destinations",
-        ]
-        for metric in analytics_metrics:
-            q_args: dict[str, Any] = {
-                "metric": metric,
-                "profile_id": plot_profile_id,
-                "from_time": str(one_day_ago),
-            }
-            if metric == "destinations":
-                q_args["destination_type"] = "countries"
-            await self.execute_call(session, "queryAnalytics", q_args)
-
-        series_metrics = [
-            "status",
-            "queryTypes",
-            "reasons",
-            "ips",
-            "dnssec",
-            "encryption",
-            "ipVersions",
-            "protocols",
-            "devices",
-            "destinations",
-        ]
-        for metric in series_metrics:
-            q_args = {
-                "metric": metric,
-                "profile_id": plot_profile_id,
-                "from_time": str(one_day_ago),
-                "series": True,
-            }
-            if metric == "destinations":
-                q_args["destination_type"] = "countries"
-            await self.execute_call(session, "queryAnalytics", q_args)
-
-    async def _run_plot_sweep(self, session: ClientSession, plot_profile_id: str, one_day_ago: int) -> None:
+    async def _run_plot_sweep(self, session: ClientSession, plot_profile_id: str) -> None:
         """Exercise plotAnalytics for each metric, or record skips when no plot profile is set."""
         plot_metrics = [
             "status",
@@ -592,176 +627,58 @@ class ContainerE2ERunner:
                 await self.execute_call(
                     session,
                     "plotAnalytics",
-                    {"metric": metric, "profile_id": plot_profile_id, "from_time": str(one_day_ago)},
+                    # The API reads a relative offset, and the chart is of the last day.
+                    {"metric": metric, "profile_id": plot_profile_id, "from_time": "-1d"},
                 )
         else:
             log_warn("NEXTDNS_PLOT_PROFILE not set; skipping plotAnalytics tools")
             for metric in plot_metrics:
                 self.record_skip("plotAnalytics", f"metric={metric}: NEXTDNS_PLOT_PROFILE not set")
 
+    @staticmethod
+    def _substitute(template: dict[str, Any], profile_id: str, ts: int) -> dict[str, Any]:
+        """Fill ``{profile}`` and ``{ts}`` in one write case's arguments.
+
+        The timestamp makes an entry unique per run, which is what lets a repeated run
+        exercise a real add instead of the answer to adding something that is already
+        there.
+        """
+        return {
+            name: value.format(profile=profile_id, ts=ts) if isinstance(value, str) else value
+            for name, value in template.items()
+        }
+
     async def _run_write_checks(self, session: ClientSession, profile_id: str) -> None:
-        """Exercise profile/settings updates, every list type, rewrites, and log clearing."""
-        log_info("Step 3: Running live write tests...")
+        """Exercise every write this surface offers, and leave the profile as it was found.
+
+        The settings writes are one per settings endpoint, because that is what the
+        document says the settings are: there is no single settings call. Each list
+        case adds an entry, changes it where the entry has its own endpoint, and removes
+        it again.
+        """
+        log_info(f"Step 3: Running {len(WRITE_CASES)} live write cases against profile {profile_id}...")
         ts = int(time.time())
 
-        await self.execute_call(
-            session,
-            "manageProfiles",
-            {"operation": "update", "profile_id": profile_id, "name": f"Updated E2E Profile {ts}"},
-        )
-        await self.execute_call(
-            session,
-            "manageSettings",
-            {
-                "operation": "update",
-                "category": "general",
-                "profile_id": profile_id,
-                "settings": {"web3": True},
-            },
-        )
-        await self.execute_call(
-            session,
-            "manageSettings",
-            {
-                "operation": "update",
-                "category": "logs",
-                "profile_id": profile_id,
-                "settings": {"enabled": True, "retention": 86400},
-            },
-        )
-        await self.execute_call(
-            session,
-            "manageSettings",
-            {
-                "operation": "update",
-                "category": "blockpage",
-                "profile_id": profile_id,
-                "settings": {"enabled": True},
-            },
-        )
-        await self.execute_call(
-            session,
-            "manageSettings",
-            {
-                "operation": "update",
-                "category": "performance",
-                "profile_id": profile_id,
-                "settings": {"ecs": True, "cacheBoost": True},
-            },
-        )
-        await self.execute_call(
-            session,
-            "manageSettings",
-            {
-                "operation": "update",
-                "category": "privacy",
-                "profile_id": profile_id,
-                "settings": {"disguisedTrackers": True, "allowAffiliate": False},
-            },
-        )
-        await self.execute_call(
-            session,
-            "manageSettings",
-            {
-                "operation": "update",
-                "category": "security",
-                "profile_id": profile_id,
-                "settings": {"threatIntelligenceFeeds": True, "googleSafeBrowsing": True},
-            },
-        )
-        await self.execute_call(
-            session,
-            "manageSettings",
-            {
-                "operation": "update",
-                "category": "parental",
-                "profile_id": profile_id,
-                "settings": {"safeSearch": True, "youtubeRestrictedMode": True},
-            },
-        )
+        for tool_name, template in WRITE_CASES:
+            await self.execute_call(session, tool_name, self._substitute(template, profile_id, ts))
 
-        for list_type, entry_template, supports_update in LIST_WRITE_CASES:
-            entry_id = entry_template.format(ts=ts)
-            await self.execute_call(
-                session,
-                "manageLists",
-                {
-                    "list_type": list_type,
-                    "operation": "replace",
-                    "profile_id": profile_id,
-                    "entries": [{"id": entry_id}],
-                },
-            )
-            if supports_update:
-                await self.execute_call(
-                    session,
-                    "manageLists",
-                    {
-                        "list_type": list_type,
-                        "operation": "update",
-                        "profile_id": profile_id,
-                        "entry_id": entry_id,
-                        "entry": {"active": True},
-                    },
-                )
-            await self.execute_call(
-                session,
-                "manageLists",
-                {
-                    "list_type": list_type,
-                    "operation": "remove",
-                    "profile_id": profile_id,
-                    "entry_id": entry_id,
-                },
-            )
-            await self.execute_call(
-                session,
-                "manageLists",
-                {
-                    "list_type": list_type,
-                    "operation": "add",
-                    "profile_id": profile_id,
-                    "entry": {"id": entry_id},
-                },
-            )
-            await self.execute_call(
-                session,
-                "manageLists",
-                {
-                    "list_type": list_type,
-                    "operation": "remove",
-                    "profile_id": profile_id,
-                    "entry_id": entry_id,
-                },
-            )
-
-        # rewrites
+        # A rewrite's id comes back only from the call that adds it, so this pair lives
+        # here rather than in the table: add it, read the id out of the answer, delete it.
         ok, rw_res = await self.execute_call(
             session,
-            "manageRewrites",
-            {
-                "operation": "add",
-                "profile_id": profile_id,
-                "name": f"e2e-{ts}.example.com",
-                "content": "192.0.2.1",
-            },
+            "addRewrite",
+            {"profile_id": profile_id, "name": f"e2e-{ts}.example.com", "content": "192.0.2.1"},
         )
+        rewrite_id = ""
         if ok and isinstance(rw_res, dict):
             rw_data = rw_res.get("data") if isinstance(rw_res.get("data"), dict) else rw_res
-            rw_id = str(rw_data.get("id") or "") if isinstance(rw_data, dict) else ""
-            if rw_id:
-                await self.execute_call(
-                    session,
-                    "manageRewrites",
-                    {"operation": "delete", "profile_id": profile_id, "entry_id": rw_id},
-                )
+            rewrite_id = str(rw_data.get("id") or "") if isinstance(rw_data, dict) else ""
+        if rewrite_id:
+            await self.execute_call(session, "deleteRewrite", {"profile_id": profile_id, "entry_id": rewrite_id})
+        else:
+            self.record_skip("deleteRewrite", "the rewrite add returned no id to delete")
 
-        # logs clear
-        await self.execute_call(
-            session,
-            "manageLogs",
-            {"operation": "clear", "profile_id": profile_id},
-        )
+        await self.execute_call(session, "clearLogs", {"profile_id": profile_id})
 
     async def _cleanup(self, created_profile_id: str) -> None:
         """Delete the test profile if this run created it."""
@@ -774,11 +691,7 @@ class ContainerE2ERunner:
                 ClientSession(r, w) as cleanup_session,
             ):
                 await cleanup_session.initialize()
-                await self.execute_call(
-                    cleanup_session,
-                    "manageProfiles",
-                    {"operation": "delete", "profile_id": created_profile_id},
-                )
+                await self.execute_call(cleanup_session, "deleteProfile", {"profile_id": created_profile_id})
         except Exception as e:  # noqa: BLE001
             log_warn(f"Failed to delete test profile {created_profile_id}: {e}")
         finally:
@@ -835,13 +748,10 @@ class ContainerE2ERunner:
                 if not profile_id:
                     return 1
 
-                now_ts = int(time.time())
-                one_day_ago = now_ts - 86400
-                one_hour_ago = now_ts - 3600
                 plot_profile_id = self.plot_profile or profile_id
 
-                await self._run_read_checks(session, profile_id, plot_profile_id, one_hour_ago, one_day_ago)
-                await self._run_plot_sweep(session, plot_profile_id, one_day_ago)
+                await self._run_read_checks(session, profile_id, plot_profile_id)
+                await self._run_plot_sweep(session, plot_profile_id)
 
                 if self.allow_live_writes:
                     await self._run_write_checks(session, profile_id)

@@ -1,9 +1,8 @@
 """A 404 under /profiles/<id> says which id it could be blaming, and the
 examples the server publishes never offer an identifier that could be sent.
 
-Live runs show the model calling manageRewrites(add, profile_id="abc123") and
-manageProfiles(create, name="Home Network") - values copied out of the tool
-descriptions. `abc123` is six hex characters, which is exactly the shape of a
+Live runs show the model sending ``profile_id="abc123"`` copied out of a tool
+description. `abc123` is six hex characters, which is exactly the shape of a
 real NextDNS profile id, so nothing about it reads as a placeholder.
 
 SPDX-License-Identifier: MIT
@@ -33,7 +32,9 @@ class TestTheTwoIdsAProfilePathCanMiss:
         )
         hint = payload["hint"]
         assert "profile id or the entry id" in hint
-        assert 'manageProfiles(operation="list")' in hint
+        # The one call that answers the question, named in the form the caller can
+        # actually make on this surface.
+        assert "listProfiles()" in hint
 
     def test_a_404_on_an_entry_under_a_real_profile_gets_the_same_two_way_hint(self):
         """The server cannot tell which id missed, so the hint must not claim one."""
@@ -42,6 +43,7 @@ class TestTheTwoIdsAProfilePathCanMiss:
             "/profiles/51c8a4/parentalControl/services/tiktok",
         )
         assert "51c8a4" not in payload["hint"]
+        assert "listProfiles()" in payload["hint"]
 
     @pytest.mark.parametrize(
         ("payload", "url"),
@@ -93,11 +95,19 @@ class TestPublishedExamples:
             if "profile_id=" in description:
                 assert 'profile_id="<profile id>"' in description, name
                 shown += 1
-        assert shown >= 6, f"only {shown} tools show a profile_id example"
+        # Only the two hand-written tools write a worked call in their own prose; a
+        # generated description is the spec's summary plus the endpoint line. Requiring
+        # at least one keeps the loop above from passing because nothing was checked.
+        assert shown >= 1, "no published description shows a profile_id example"
+        assert {"plotAnalytics", "dohLookup"} <= set(described), "the hand-written tools are not published"
 
-    def test_the_usage_guide_the_server_sends_is_the_same(self):
-        from nextdns_mcp.usage import nextdns_usage_guide
+    def test_the_instructions_the_server_sends_are_the_same(self):
+        """The ``initialize`` instructions are the other text this server puts in front of a caller."""
+        from nextdns_mcp.server import published_tool_names
+        from nextdns_mcp.usage import server_instructions
 
-        guide = nextdns_usage_guide()
-        assert "abc123" not in guide
-        assert 'profile_id="<profile id>"' in guide
+        instructions = server_instructions("off", published_tool_names())
+        assert "abc123" not in instructions
+        # And it must not promise an argument this surface does not have: the server
+        # describing itself wrongly is how a caller ends up sending `operation`.
+        assert "no operation to choose" in instructions

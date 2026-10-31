@@ -94,6 +94,21 @@ class TestGeneratedCatalog:
     def test_descriptions_stay_bounded(self, routes):
         assert all(len(spec_tools.describe(route)) <= spec_tools.DESCRIPTION_MAX_CHARS for route in routes.values())
 
+    def test_the_published_schema_offers_no_copyable_profile_id(self, routes):
+        """An example profile id in a schema is a value a caller will send.
+
+        A NextDNS profile id is six hexadecimal characters, which is the shape of a
+        real one, so an example like ``abc123`` reads as a live profile and the call
+        404s blaming a profile that never existed — the exact loop the 404 hint
+        exists for. The pattern states the shape; the profile listing gives values.
+        """
+        for route in routes.values():
+            published = (route.flat_param_schema or {}).get("properties", {}).get("profile_id")
+            if published is None:
+                continue
+            assert "example" not in published, f"{route.operation_id} publishes an example id"
+            assert "profile-listing" in published["description"]
+
     def test_the_window_contract_a_caller_can_act_on_is_in_the_parameter(self, routes):
         """Every spelling the live API accepts, and the one it rejects, in the docs.
 
@@ -174,12 +189,48 @@ class TestToolCall:
 
     async def test_an_unfilled_path_argument_names_the_endpoint_and_the_id(self, monkeypatch, calls):
         tool = self._tool(monkeypatch, calls, "getDenylist")
-        payload = (await tool.run({"profile_id": " "})).structured_content
+        payload = (await tool.run({"profile_id": ""})).structured_content
         assert payload["code"] == "missing_required_argument"
         assert "profile_id" in payload["error"]
         assert "GET /profiles/{profile_id}/denylist" in payload["error"]
         assert "listProfiles()" in payload["hint"]
         assert calls == []
+
+    @pytest.mark.parametrize(
+        "entry_id",
+        ["../x", "a/../../b", "id?admin=1", "id#fragment", "id name", "id\x01name", "foo\\bar"],
+    )
+    async def test_an_entry_id_that_could_address_another_endpoint_is_refused(self, monkeypatch, calls, entry_id):
+        """An id is one path segment, and the guard refuses anything else.
+
+        The value is substituted into the request path and the access-control layer
+        authorizes the request by reading the profile id back out of that path, so an
+        unvetted value could move the call to an endpoint the caller was not
+        authorized for. Nothing upstream can be assumed to reject it.
+        """
+        tool = self._tool(monkeypatch, calls, "deleteRewrite")
+        payload = (await tool.run({"profile_id": "abc123", "entry_id": entry_id})).structured_content
+        assert payload["code"] == "invalid_entry_id"
+        assert "must not contain a slash" in payload["error"]
+        assert calls == []
+
+    @pytest.mark.parametrize("profile_id", ["abc/def", "..", "ab?c", "ab c"])
+    async def test_a_profile_id_that_could_address_another_endpoint_is_refused(self, monkeypatch, calls, profile_id):
+        tool = self._tool(monkeypatch, calls, "getDenylist")
+        payload = (await tool.run({"profile_id": profile_id})).structured_content
+        assert payload["code"] == "invalid_profile_id"
+        assert "listProfiles()" in payload["hint"]
+        assert calls == []
+
+    async def test_a_query_value_is_never_checked_as_a_path_value(self, monkeypatch, calls):
+        """The guard is about the request path, not about every argument.
+
+        A log search term legitimately contains spaces and symbols; refusing those
+        would break the endpoint rather than protect it.
+        """
+        tool = self._tool(monkeypatch, calls, "getLogs")
+        await tool.run({"profile_id": "abc123", "search": "a b?c#d", "limit": 5})
+        assert calls[0]["params"] == {"search": "a b?c#d", "limit": 5}
 
     async def test_a_missing_entry_argument_says_where_entry_ids_come_from(self, monkeypatch, calls):
         tool = self._tool(monkeypatch, calls, "removeFromDenylist")

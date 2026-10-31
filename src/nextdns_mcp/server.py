@@ -1,4 +1,4 @@
-"""NextDNS MCP Server - FastMCP-based implementation built from grouped CRUD tools.
+"""NextDNS MCP Server - FastMCP-based implementation built from the NextDNS OpenAPI document.
 
 SPDX-License-Identifier: MIT
 """
@@ -21,100 +21,52 @@ from .config import (
 )
 from .openapi import create_mcp_server
 from .spec_tools import register_spec_tools, spec_tool_names
-from .surface import ATOMIC, validate_tool_surface
-from .tools.analytics import queryAnalytics
 from .tools.doh import dohLookup
-from .tools.lists import manageLists
-from .tools.logs import manageLogs
 from .tools.plots import plotAnalytics
-from .tools.profiles import manageProfiles
-from .tools.rewrites import manageRewrites
-from .tools.settings import manageSettings
-from .usage import nextdns_usage_guide
 
 logger = logging.getLogger(__name__)
-
-# Grouped MCP tools to register on the server instance
-_GROUPED_TOOLS = (
-    manageProfiles,
-    manageSettings,
-    manageLists,
-    manageRewrites,
-    manageLogs,
-    queryAnalytics,
-    plotAnalytics,
-    dohLookup,
-)
 
 # Operations the server performs itself instead of calling one API endpoint for:
 # `dohLookup` resolves a name through a DNS-over-HTTPS resolver, and `plotAnalytics`
 # renders a chart from an analytics query. Neither has an endpoint for the spec to
-# describe, so on the spec surface they are the two hand-written tools published
-# beside the generated ones — and a caller of that surface would otherwise have no
-# way to know they exist.
+# describe, so they are the two hand-written tools published beside the generated
+# ones — and a caller would otherwise have no way to know they exist.
 _COMPOSITE_TOOLS = (plotAnalytics, dohLookup)
 
 _mcp_server: FastMCP | None = None
 
 
-def build_mcp_server() -> FastMCP:
-    """Create the MCP server for the configured tool surface.
+def published_tool_names() -> list[str]:
+    """Every tool name this server publishes, before any of them is registered.
 
-    ``NEXTDNS_TOOL_SURFACE=grouped`` (the default) registers the eight area
-    tools; ``atomic`` registers one tool per NextDNS API operation instead,
-    generated from the shipped OpenAPI document (``spec_tools``), plus the two
-    operations the server performs itself (``plotAnalytics``, ``dohLookup``). The
-    two surfaces are mutually exclusive on purpose: a caller that finds both
-    ``manageLists`` and ``addToDenylist`` is being asked to choose which spelling
-    of one API call to make.
+    The ``initialize`` instructions describe the catalog, and they are written when
+    the server is constructed — before the tools exist — so the names have to be
+    derivable without registering anything.
+    """
+    return [*spec_tool_names(), *(tool.__name__ for tool in _COMPOSITE_TOOLS)]
+
+
+def build_mcp_server() -> FastMCP:
+    """Create the MCP server: one tool per NextDNS API operation, plus the two local ones.
+
+    The catalog is generated from the shipped OpenAPI document by ``spec_tools`` — a
+    tool per operation, named by its ``operationId``, with the spec's own description
+    and parameter schemas. Registered on top of it are the two operations this server
+    performs itself (``plotAnalytics``, ``dohLookup``), which the document cannot
+    describe because there is no endpoint to describe.
 
     Returns:
         FastMCP: Configured MCP server instance with all tools registered
-
-    Raises:
-        ConfigurationError: If ``NEXTDNS_TOOL_SURFACE`` is set to something other
-            than ``grouped`` or ``atomic``. Serving the default in that case
-            would silently change the tool contract the operator asked for, which
-            is the same reasoning ``NEXTDNS_TOOL_SEARCH`` applies to its own value.
     """
     logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
-    tool_surface = validate_tool_surface()
-    if tool_surface == ATOMIC:
-        names = [*spec_tool_names(), *(tool.__name__ for tool in _COMPOSITE_TOOLS)]
-        server = create_mcp_server(tool_names=names)
-        register_spec_tools(server)
-        for tool in _COMPOSITE_TOOLS:
-            # The same reason the grouped registrations pass the docstring
-            # explicitly: FastMCP publishes only the first section of a docstring
-            # as a tool description, and what a caller needs here is the whole of
-            # it — accepted values and the worked example included.
-            server.tool(description=inspect.getdoc(tool) or "")(tool)
-        # The usage guide walks the grouped tools and their `operation`
-        # argument. Publishing it on a surface that has neither would be the
-        # server documenting tools the caller was never given.
-        return server
-
-    server = create_mcp_server(tool_names=[tool.__name__ for tool in _GROUPED_TOOLS])
-    for tool in _GROUPED_TOOLS:
-        # FastMCP publishes only the first text section of a docstring as the
-        # tool description, splitting at the first `Header:` line. Measured on
-        # this server, manageLists published 192 of its 2538 docstring
-        # characters and queryAnalytics 279 of 2029: the operations list, the
-        # accepted values and the worked examples never reached a caller that
-        # discovers tools through search_tools. Passing the docstring
-        # explicitly publishes all of it, and the per-parameter descriptions
-        # are still parsed out of it.
+    server = create_mcp_server(tool_names=published_tool_names())
+    register_spec_tools(server)
+    for tool in _COMPOSITE_TOOLS:
+        # FastMCP publishes only the first text section of a docstring as the tool
+        # description, so the accepted values and the worked example further down
+        # would never reach a caller — and for these two tools that is exactly the
+        # part a caller needs (a chart's interval range, a lookup's record types).
         server.tool(description=inspect.getdoc(tool) or "")(tool)
-    server.prompt(name="nextdns-usage-guide", description="Comprehensive guide for using the NextDNS MCP server tools")(
-        nextdns_usage_guide
-    )
-    # Also expose the guide as an MCP *resource* so models that discover tools
-    # by enumerating resources find actionable documentation, not an empty list.
-    server.resource(
-        "nextdns://usage",
-        name="nextdns-usage-guide",
-        description="Comprehensive guide for using the NextDNS MCP server tools",
-    )(nextdns_usage_guide)
     return server
 
 

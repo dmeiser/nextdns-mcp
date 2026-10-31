@@ -127,9 +127,10 @@ class TestStripExtraFieldsMiddleware:
     async def test_reports_ignored_arguments_on_the_result(self, middleware, mock_context):
         """A stripped argument must be named in the result, not vanish silently.
 
-        The relaxation is deliberate, but silence is what let a model send
-        manageProfiles(update, privacy={...}), get "name is required", and
-        believe its privacy change had been attempted.
+        The relaxation is deliberate — AI clients send extra fields — but silence
+        is what let a model send a field the tool never declared, get a plain
+        success back, and believe its change had been attempted. The call still
+        succeeds; the result has to say which arguments were not applied.
         """
         from fastmcp.tools import ToolResult
 

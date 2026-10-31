@@ -5,9 +5,16 @@ Every tool failure must surface as a dict of the form ``{"error": <str>, "code":
 branch on. These tests assert the contract holds across tools and across failure
 classes (validation, access control, unsupported input, and HTTP/network errors).
 
+The vehicle is a generated tool: :func:`spec_call` builds the :class:`SpecApiTool`
+the server registers for one ``operationId`` and returns what a caller would
+receive. That is what makes these contract tests rather than per-tool tests - the
+contract has to hold for a tool nobody hand-wrote, so it is asserted against the
+generator's own path through the access-controlled client.
+
 SPDX-License-Identifier: MIT
 """
 
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,7 +22,7 @@ import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import server
+from nextdns_mcp import server, spec_tools
 from nextdns_mcp.errors import (
     MAX_RESPONSE_BODY_CHARS,
     TRUNCATION_MARKER,
@@ -24,11 +31,7 @@ from nextdns_mcp.errors import (
     http_error_payload,
     upstream_error_codes,
 )
-from nextdns_mcp.tools.logs import _manage_logs_impl
 from nextdns_mcp.tools.plots import _plot_analytics_series_impl
-from nextdns_mcp.tools.profiles import _manage_profiles_impl
-from nextdns_mcp.tools.rewrites import _manage_rewrites_impl
-from nextdns_mcp.tools.settings import _manage_settings_impl
 
 
 @pytest.fixture
@@ -39,9 +42,21 @@ def mock_api_client(monkeypatch):
     return client
 
 
+@pytest.fixture
+def spec_call() -> Callable[..., Any]:
+    """Run one generated tool and return its payload, as a caller sees it."""
+    routes = {route.operation_id: route for route in spec_tools.spec_routes()}
+
+    async def _call(operation_id: str, **arguments: Any) -> Any:
+        result = await spec_tools.SpecApiTool(routes[operation_id]).run(arguments)
+        return result.structured_content
+
+    return _call
+
+
 @pytest.fixture(autouse=True)
 def open_profile_access(monkeypatch):
-    """Allow all profile read/write access for grouped-tool tests."""
+    """Allow all profile read/write access unless a test narrows it."""
     monkeypatch.setenv("NEXTDNS_API_KEY", "test-api-key")
     monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
     monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
@@ -77,7 +92,9 @@ class TestErrorPayloadShape:
         assert ErrorCode.WRITE_ACCESS_DENIED == "write_access_denied"
         assert ErrorCode.HTTP_ERROR == "http_error"
         assert ErrorCode.INTERNAL_ERROR == "internal_error"
-        assert ErrorCode.UNSUPPORTED_OPERATION == "unsupported_operation"
+        # The two codes a generated tool can produce before any request is sent.
+        assert ErrorCode.INVALID_ENTRY_ID == "invalid_entry_id"
+        assert ErrorCode.MISSING_REQUIRED_ARGUMENT == "missing_required_argument"
 
     def test_http_error_payload_surfaces_structured_json_body(self):
         # An ACL denial body: the typed code and reason must be preserved.
@@ -245,72 +262,67 @@ class TestErrorPayloadShape:
 
 
 class TestValidationErrorContract:
-    """Validation failures return the structured shape (not an exception)."""
+    """Validation failures return the structured shape (not an exception).
+
+    On this surface the only validation a tool does locally is on the arguments it
+    substitutes into the request path: those decide *which* endpoint is called, so a
+    malformed one is refused here rather than sent upstream. Everything else is the
+    API's answer, covered by the HTTP classes below.
+    """
 
     @pytest.mark.asyncio
-    async def test_query_analytics_invalid_profile(self):
-        result = await server.queryAnalytics("status", "abc/def")
+    async def test_profile_id_with_a_path_separator(self, spec_call):
+        result = await spec_call("getAnalyticsStatus", profile_id="abc/def")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.INVALID_PROFILE_ID
 
     @pytest.mark.asyncio
-    async def test_manage_lists_invalid_profile(self):
-        result = await server.manageLists("allowlist", "get", "abc/def")
+    async def test_profile_id_with_parent_traversal(self, spec_call):
+        result = await spec_call("getDenylist", profile_id="../abc123")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.INVALID_PROFILE_ID
 
     @pytest.mark.asyncio
-    async def test_manage_settings_invalid_profile(self):
-        result = await server.manageSettings("get", "general", "abc/def")
+    async def test_entry_id_with_a_query_separator(self, spec_call, mock_api_client):
+        """An entry id is one path segment; a ``?`` would change the request's query."""
+        result = await spec_call("deleteRewrite", profile_id="abc123", entry_id="x?id=1")
         _assert_error_contract(result)
-        assert result["code"] == ErrorCode.INVALID_PROFILE_ID
+        assert result["code"] == ErrorCode.INVALID_ENTRY_ID
+        mock_api_client.request.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_manage_rewrites_invalid_profile(self):
-        result = await server.manageRewrites("list", "abc/def")
-        _assert_error_contract(result)
-        assert result["code"] == ErrorCode.INVALID_PROFILE_ID
-
-    @pytest.mark.asyncio
-    async def test_manage_logs_invalid_profile(self):
-        result = await server.manageLogs("get", "abc/def")
-        _assert_error_contract(result)
-        assert result["code"] == ErrorCode.INVALID_PROFILE_ID
-
-    @pytest.mark.asyncio
-    async def test_query_analytics_unsupported_series_is_payload_not_exception(self):
-        # Regression: this previously raised ValueError.
-        result = await server.queryAnalytics("domains", "abc123", series=True)
-        _assert_error_contract(result)
-        assert result["code"] == ErrorCode.UNSUPPORTED_PARAMETER
-
-    @pytest.mark.asyncio
-    async def test_query_analytics_missing_destination_type(self):
-        result = await server.queryAnalytics("destinations", "abc123")
+    async def test_a_blank_path_argument_names_the_endpoint(self, spec_call, mock_api_client):
+        result = await spec_call("getLogs", profile_id="")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.MISSING_REQUIRED_ARGUMENT
+        assert "GET /profiles/{profile_id}/logs" in result["error"]
+        mock_api_client.request.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unsupported_operations_across_tools(self):
-        for coro in (
-            _manage_settings_impl("nope", "general", "abc123"),
-            _manage_rewrites_impl("nope", "abc123"),
-            _manage_logs_impl("nope", "abc123"),
-            _manage_profiles_impl("nope", profile_id="abc123"),
-        ):
-            result = await coro
-            _assert_error_contract(result)
-            assert result["code"] == ErrorCode.UNSUPPORTED_OPERATION
+    async def test_a_missing_entry_id_says_where_entry_ids_come_from(self, spec_call, mock_api_client):
+        result = await spec_call("deleteRewrite", profile_id="abc123")
+        _assert_error_contract(result)
+        assert result["code"] == ErrorCode.MISSING_REQUIRED_ARGUMENT
+        assert "entry id" in result["hint"]
+        mock_api_client.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_delegated_download_still_needs_a_profile(self, spec_call, mock_api_client):
+        """``downloadLogs`` is not a plain request, and still refuses a blank id."""
+        result = await spec_call("downloadLogs", profile_id="")
+        _assert_error_contract(result)
+        assert result["code"] == ErrorCode.MISSING_REQUIRED_ARGUMENT
+        mock_api_client.stream.assert_not_called()
 
 
 class TestAccessControlErrorContract:
     """ACL denials carry a typed code and preserve the denial reason."""
 
     @pytest.mark.asyncio
-    async def test_read_denial_is_typed_with_reason(self, monkeypatch):
+    async def test_read_denial_is_typed_with_reason(self, monkeypatch, spec_call):
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "xyz999")
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "")
-        result = await server.queryAnalytics("status", "abc123")
+        result = await spec_call("getAnalyticsStatus", profile_id="abc123")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.READ_ACCESS_DENIED
         assert result["status_code"] == 403
@@ -330,21 +342,21 @@ class TestAccessControlErrorContract:
         assert "Read access denied for profile: abc123" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_write_denial_is_typed_with_reason(self, monkeypatch):
+    async def test_write_denial_is_typed_with_reason(self, monkeypatch, spec_call):
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "xyz999")
-        result = await server.manageLists("allowlist", "add", "abc123", entry={"id": "x.com"})
+        result = await spec_call("addToDenylist", profile_id="abc123", id="x.com")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.WRITE_ACCESS_DENIED
         assert result["status_code"] == 403
         assert "Write access denied for profile: abc123" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_upstream_403_is_http_error_not_acl_denial(self, mock_api_client):
+    async def test_upstream_403_is_http_error_not_acl_denial(self, mock_api_client, spec_call):
         """A genuine upstream 403 (raise_for_status) must NOT be mapped to an
         ACL denial: it keeps the existing http_error path (issue #178)."""
         mock_api_client.request.side_effect = _http_error(403)
-        result = await server.manageSettings("get", "general", "abc123")
+        result = await spec_call("getPrivacySettings", profile_id="abc123")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.HTTP_ERROR
         assert result["status_code"] == 403
@@ -354,46 +366,64 @@ class TestHttpErrorContract:
     """HTTP/network failures are structured and distinguishable by status_code."""
 
     @pytest.mark.asyncio
-    async def test_get_tool_http_error_distinguishable(self, mock_api_client):
+    async def test_get_tool_http_error_distinguishable(self, mock_api_client, spec_call):
         for status in (401, 403, 429, 500):
             mock_api_client.request.side_effect = _http_error(status)
-            result = await server.manageSettings("get", "general", "abc123")
+            result = await spec_call("getPrivacySettings", profile_id="abc123")
             _assert_error_contract(result)
             assert result["code"] == ErrorCode.HTTP_ERROR
             assert result["status_code"] == status
 
     @pytest.mark.asyncio
-    async def test_query_analytics_http_error(self, mock_api_client):
+    async def test_analytics_endpoint_http_error(self, mock_api_client, spec_call):
         mock_api_client.request.side_effect = _http_error(429)
-        result = await server.queryAnalytics("status", "abc123")
+        result = await spec_call("getAnalyticsStatus", profile_id="abc123", **{"from": "-1d"})
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.HTTP_ERROR
         assert result["status_code"] == 429
 
     @pytest.mark.asyncio
-    async def test_manage_logs_download_http_error(self, mock_api_client):
+    async def test_logs_download_http_error(self, mock_api_client, spec_call):
         mock_api_client.stream = MagicMock(side_effect=_http_error(503))
-        result = await server.manageLogs("download", "abc123")
+        result = await spec_call("downloadLogs", profile_id="abc123")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.HTTP_ERROR
         assert result["status_code"] == 503
         assert "response_body" in result
 
     @pytest.mark.asyncio
-    async def test_network_error_without_status(self, mock_api_client):
+    async def test_network_error_without_status(self, mock_api_client, spec_call):
         mock_api_client.request.side_effect = httpx.ConnectError("network down")
-        result = await server.manageSettings("get", "general", "abc123")
+        result = await spec_call("getPrivacySettings", profile_id="abc123")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.HTTP_ERROR
         assert result["status_code"] is None
         assert "response_body" not in result
 
     @pytest.mark.asyncio
-    async def test_unexpected_error_is_internal(self, mock_api_client):
+    async def test_unexpected_error_is_internal(self, mock_api_client, spec_call):
         mock_api_client.request.side_effect = RuntimeError("boom")
-        result = await server.manageSettings("get", "general", "abc123")
+        result = await spec_call("getPrivacySettings", profile_id="abc123")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.INTERNAL_ERROR
+
+
+class TestEmptyResponseContract:
+    """An endpoint that answers with nothing still answers in the contract's shape."""
+
+    @pytest.mark.asyncio
+    async def test_a_204_answers_success_without_a_body(self, mock_api_client, spec_call):
+        """``DELETE`` returns 204 with no body, and there is no JSON to hand back.
+
+        Inventing ``{}`` would leave a caller unable to tell a deleted entry from an
+        empty list, so the transport names the outcome.
+        """
+        response = MagicMock()
+        response.status_code = 204
+        response.content = b""
+        mock_api_client.request.return_value = response
+        result = await spec_call("deleteRewrite", profile_id="abc123", entry_id="example.com")
+        assert result == {"success": True}
 
 
 class TestPlotAndDohErrorContract:
@@ -474,7 +504,7 @@ class TestUpstreamErrorDocument:
         assert payload["upstream_codes"] == ["duplicate"]
 
     @pytest.mark.asyncio
-    async def test_2xx_error_document_becomes_a_typed_error(self, mock_api_client):
+    async def test_2xx_error_document_becomes_a_typed_error(self, mock_api_client, spec_call):
         """An upstream 2xx carrying an error document must not look like data."""
         response = MagicMock()
         response.status_code = 200
@@ -482,19 +512,19 @@ class TestUpstreamErrorDocument:
         response.json.return_value = {"errors": [{"code": "notFound"}]}
         response.text = '{"errors":[{"code":"notFound"}]}'
         mock_api_client.request.return_value = response
-        result = await _manage_profiles_impl("get", "abc123")
+        result = await spec_call("getProfile", profile_id="abc123")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.HTTP_ERROR
         assert result["status_code"] == 200
         assert result["upstream_code"] == "notFound"
 
     @pytest.mark.asyncio
-    async def test_2xx_data_payload_still_passes_through(self, mock_api_client):
+    async def test_2xx_data_payload_still_passes_through(self, mock_api_client, spec_call):
         """Normalization is limited to error documents: real data is untouched."""
         response = MagicMock()
         response.status_code = 200
         response.content = b'{"data": [{"id": "x.com"}]}'
         response.json.return_value = {"data": [{"id": "x.com"}]}
         mock_api_client.request.return_value = response
-        result = await _manage_profiles_impl("list")
+        result = await spec_call("listProfiles")
         assert result == {"data": [{"id": "x.com"}]}

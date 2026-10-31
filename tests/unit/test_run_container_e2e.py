@@ -11,7 +11,8 @@ from mcp.types import ImageContent, TextContent, Tool
 
 from scripts.run_container_e2e import (
     EXPECTED_TOOLS,
-    LIST_WRITE_CASES,
+    SPEC_PATH,
+    WRITE_CASES,
     ContainerE2ERunner,
     check_health_endpoint,
     parse_args,
@@ -31,33 +32,94 @@ def runner(tmp_path: Path) -> ContainerE2ERunner:
 
 
 def test_expected_tools_match_registered_and_schema_tools():
-    """The E2E tool list, the server's registered tools, and the schema
-    operation map must name the same tools (issue #271)."""
-    from nextdns_mcp.server import _GROUPED_TOOLS
-    from scripts.validate_schema import GROUPED_TOOL_OPERATIONS
+    """The E2E expectation, the server's published catalog, and the spec name one set (issue #271).
 
-    assert EXPECTED_TOOLS == sorted(t.__name__ for t in _GROUPED_TOOLS)
-    assert set(EXPECTED_TOOLS) == set(GROUPED_TOOL_OPERATIONS)
+    The list is derived from the document instead of typed out beside it, so what needs
+    checking is that the three agree: the document the container is built from, the
+    catalog the server publishes from it, and the list the container is graded against.
+    """
+    from nextdns_mcp.server import published_tool_names
+    from scripts.validate_schema import assert_operation_coverage, load_openapi_spec, spec_operations
+
+    spec = load_openapi_spec(str(SPEC_PATH))
+
+    assert set(EXPECTED_TOOLS) == set(published_tool_names())
+    # No drift to report, in either direction, against the server's own catalog.
+    assert_operation_coverage(spec, published_tool_names())
+    # The withheld operation is the only one the document describes and the server lacks.
+    assert set(spec_operations(spec)) - set(EXPECTED_TOOLS) == {"streamLogs"}
+
+
+def test_operation_coverage_fails_when_the_container_lacks_an_operation():
+    """A stale image is drift, and it has to fail loudly rather than skip quietly."""
+    from scripts.validate_schema import assert_operation_coverage, load_openapi_spec
+
+    spec = load_openapi_spec(str(SPEC_PATH))
+    stale = [tool for tool in EXPECTED_TOOLS if tool != "getLogsSettings"]
+
+    with pytest.raises(ValueError, match="spec operations published as no tool.*getLogsSettings"):
+        assert_operation_coverage(spec, stale)
+
+
+def test_operation_coverage_fails_on_a_tool_the_spec_does_not_describe():
+    """The grouped tool names are exactly what this surface no longer has.
+
+    A container that still advertises `manageLists` would pass a check written against
+    the old surface; here it fails, because no operation in the document is called that.
+    """
+    from scripts.validate_schema import assert_operation_coverage, load_openapi_spec
+
+    spec = load_openapi_spec(str(SPEC_PATH))
+
+    with pytest.raises(ValueError, match="published tools that name no operation.*manageLists"):
+        assert_operation_coverage(spec, [*EXPECTED_TOOLS, "manageLists"])
+
+
+def test_read_arguments_come_from_the_served_schema(runner: ContainerE2ERunner):
+    """The read sweep asks the server what a call needs, and refuses to guess the rest.
+
+    A required argument with no value to send is reported as unfilled rather than
+    invented: the run then says which endpoint it could not call, instead of sending
+    something the endpoint never asked for and reporting on the answer to that.
+    """
+    runner.tool_schemas = {
+        "getLogs": {"required": ["profile_id", "from"]},
+        "getAnalyticsDestinations": {"required": ["profile_id", "from", "type"]},
+        "listProfiles": {"required": []},
+        "getAnOperationNobodyPlannedFor": {"required": ["widget"]},
+    }
+
+    assert runner._read_arguments("getLogs", "abc123") == ({"profile_id": "abc123", "from": "-1d"}, [])
+    assert runner._read_arguments("getAnalyticsDestinations", "abc123") == (
+        {"profile_id": "abc123", "from": "-1d", "type": "countries"},
+        [],
+    )
+    # A collection endpoint takes no profile, so it is called with nothing.
+    assert runner._read_arguments("listProfiles", "abc123") == ({}, [])
+
+    arguments, unfilled = runner._read_arguments("getAnOperationNobodyPlannedFor", "abc123")
+    assert arguments == {}
+    assert unfilled == ["widget"]
 
 
 def test_record_result(runner: ContainerE2ERunner, tmp_path: Path):
     """Test that record_result appends valid JSON lines."""
     runner.record_result(
-        tool="manageProfiles",
+        tool="listProfiles",
         status="OK",
         schema_status="VALID",
         schema_error="",
-        args="operation=list",
+        args="",
         duration=0.5,
     )
 
     report_lines = runner.report_file.read_text(encoding="utf-8").strip().split("\n")
     assert len(report_lines) == 1
     data = json.loads(report_lines[0])
-    assert data["tool"] == "manageProfiles"
+    assert data["tool"] == "listProfiles"
     assert data["status"] == "OK"
     assert data["schema_validation"] == "VALID"
-    assert data["args"] == "operation=list"
+    assert data["args"] == ""
     assert data["duration"] == "0.50s"
 
 
@@ -83,7 +145,7 @@ async def test_execute_call_success(runner: ContainerE2ERunner):
     mock_result.content = [TextContent(type="text", text='{"data":[{"id":"p123","name":"Test"}]}')]
     session.call_tool.return_value = mock_result
 
-    ok, res = await runner.execute_call(session, "manageProfiles", {"operation": "list"})
+    ok, res = await runner.execute_call(session, "listProfiles", {})
 
     assert ok is True
     assert res == {"data": [{"id": "p123", "name": "Test"}]}
@@ -100,7 +162,7 @@ async def test_execute_call_error_in_json(runner: ContainerE2ERunner):
     mock_result.content = [TextContent(type="text", text='{"error":"Profile not found"}')]
     session.call_tool.return_value = mock_result
 
-    ok, _ = await runner.execute_call(session, "manageProfiles", {"operation": "get", "profile_id": "bad"})
+    ok, _ = await runner.execute_call(session, "getProfile", {"profile_id": "bad"})
 
     assert ok is False
     assert runner.failed_count == 1
@@ -122,7 +184,7 @@ async def test_execute_call_error_key_marks_call_failed_even_when_value_is_falsy
     mock_result.content = [TextContent(type="text", text=json.dumps({"data": "ignored", "error": error_value}))]
     session.call_tool.return_value = mock_result
 
-    ok, _ = await runner.execute_call(session, "manageProfiles", {"operation": "get", "profile_id": "bad"})
+    ok, _ = await runner.execute_call(session, "getProfile", {"profile_id": "bad"})
 
     assert ok is False
     assert runner.failed_count == 1
@@ -143,7 +205,7 @@ async def test_execute_call_retry_on_exception(runner: ContainerE2ERunner):
 
     session.call_tool.side_effect = [RuntimeError("temporary error"), mock_result]
 
-    ok, _ = await runner.execute_call(session, "manageProfiles", {"operation": "get"}, max_retries=2, retry_delay=0.01)
+    ok, _ = await runner.execute_call(session, "getProfile", {"profile_id": "p123"}, max_retries=2, retry_delay=0.01)
 
     assert ok is True
     assert runner.executed_count == 1
@@ -219,9 +281,28 @@ async def test_run_success_read_only(runner: ContainerE2ERunner):
     mock_session = AsyncMock()
     mock_session.list_tools.return_value = mock_tools_res
 
+    # Each read answers with a document its own schema describes: getProfile is one
+    # profile rather than a list, and downloadLogs answers with the receipt for the file
+    # it streamed rather than with the CSV.
+    answers = {
+        "getProfile": '{"id":"test-profile-id","name":"E2E"}',
+        "downloadLogs": json.dumps(
+            {
+                "file_path": "/tmp/nextdns_logs_x/download.csv",
+                "content_type": "text/csv",
+                "size": 12,
+                "row_count": 1,
+                "preview": {"text": "a.com,blocked\n", "line_count": 1, "bytes": 14, "truncated": False},
+            }
+        ),
+    }
+
     def _call_tool(name, arguments):
         mock_res = MagicMock()
         mock_res.is_error = False
+        if name in answers:
+            mock_res.content = [TextContent(type="text", text=answers[name])]
+            return mock_res
         if name == "dohLookup":
             mock_res.content = [
                 TextContent(
@@ -256,40 +337,56 @@ async def test_run_success_read_only(runner: ContainerE2ERunner):
         assert runner.executed_count > 0
 
 
-# Independent oracle for the write-phase list sweep: the exact manageLists
-# sequence the runner must issue per list type. entry_id is a regex for the two
-# timestamped entries and a literal for the fixed ones. Kept hardcoded (not
-# derived from LIST_WRITE_CASES) so a bad edit to the table fails here.
-LIST_WRITE_ORACLE = [
-    ("allowlist", r"e2e-\d+-allow\.example\.com", ("replace", "update", "remove", "add", "remove")),
-    ("denylist", r"e2e-\d+-deny\.example\.com", ("replace", "update", "remove", "add", "remove")),
-    ("privacy_blocklists", "nextdns-recommended", ("replace", "remove", "add", "remove")),
-    ("privacy_natives", "apple", ("replace", "remove", "add", "remove")),
-    ("security_tlds", "zip", ("replace", "remove", "add", "remove")),
-    ("parental_categories", "gambling", ("replace", "update", "remove", "add", "remove")),
-    ("parental_services", "tiktok", ("replace", "update", "remove", "add", "remove")),
+# Independent oracle for the live write phase: the tools the runner must call, in
+# order, each with the argument that names its entry and the value it must carry.
+# (tool, entry-argument name, entry value or a regex for the timestamped ones.) Kept
+# hardcoded rather than derived from WRITE_CASES, so a bad edit to that table fails
+# here instead of agreeing with itself.
+WRITE_ORACLE: list[tuple[str, str | None, str | None]] = [
+    ("updateProfile", None, None),
+    ("updateSettings", None, None),
+    ("updateLogsSettings", None, None),
+    ("updateBlockPageSettings", None, None),
+    ("updatePerformanceSettings", None, None),
+    ("updatePrivacySettings", None, None),
+    ("updateSecuritySettings", None, None),
+    ("updateParentalControlSettings", None, None),
+    ("addToDenylist", "id", r"e2e-\d+-deny\.example\.com"),
+    ("updateDenylistEntry", "entry_id", r"e2e-\d+-deny\.example\.com"),
+    ("removeFromDenylist", "entry_id", r"e2e-\d+-deny\.example\.com"),
+    ("addToAllowlist", "id", r"e2e-\d+-allow\.example\.com"),
+    ("updateAllowlistEntry", "entry_id", r"e2e-\d+-allow\.example\.com"),
+    ("removeFromAllowlist", "entry_id", r"e2e-\d+-allow\.example\.com"),
+    ("addSecurityTLD", "id", "zip"),
+    ("removeSecurityTLD", "entry_id", "zip"),
+    ("addPrivacyNative", "id", "apple"),
+    ("removePrivacyNative", "entry_id", "apple"),
+    ("addToParentalControlCategories", "id", "gambling"),
+    ("updateParentalControlCategoryEntry", "id", "gambling"),
+    ("removeFromParentalControlCategories", "id", "gambling"),
+    ("addToParentalControlServices", "id", "tiktok"),
+    ("updateParentalControlServiceEntry", "id", "tiktok"),
+    ("removeFromParentalControlServices", "id", "tiktok"),
 ]
 
-
-def test_list_write_cases_table_matches_the_documented_sequence():
-    """LIST_WRITE_CASES is the single source of truth for the write-phase list sweep."""
-    assert [case[0] for case in LIST_WRITE_CASES] == [entry[0] for entry in LIST_WRITE_ORACLE]
-    assert {case[0]: case[2] for case in LIST_WRITE_CASES} == {
-        list_type: "update" in operations for list_type, _, operations in LIST_WRITE_ORACLE
-    }
+# The three calls that cannot live in the table: a rewrite's id comes back only from
+# the call that adds it, and clearing the logs is the last thing a write run does.
+WRITE_TAIL = ["addRewrite", "deleteRewrite", "clearLogs"]
 
 
-def _entry_id_from_args(args: dict) -> str:
-    if "entry_id" in args:
-        return args["entry_id"]
-    if "entry" in args:
-        return args["entry"]["id"]
-    return args["entries"][0]["id"]
+def test_write_cases_are_the_documented_sequence():
+    """WRITE_CASES is the single source of truth for the write phase; the oracle says so."""
+    assert [name for name, _ in WRITE_CASES] == [name for name, _, _ in WRITE_ORACLE]
 
 
 @pytest.mark.asyncio
-async def test_run_write_checks_issues_the_documented_sequence_per_list_type(runner: ContainerE2ERunner):
-    """The write phase drives every list type through replace -> [update] -> remove -> add -> remove."""
+async def test_run_write_checks_issues_the_documented_sequence(runner: ContainerE2ERunner):
+    """Each entry is added, changed where it has its own endpoint, and removed again.
+
+    The settings writes are one per settings endpoint: the document has no single
+    settings call to update, and a runner that invented one would report a pass for an
+    endpoint that does not exist.
+    """
     session = AsyncMock()
     mock_call_res = MagicMock()
     mock_call_res.is_error = False
@@ -298,31 +395,172 @@ async def test_run_write_checks_issues_the_documented_sequence_per_list_type(run
 
     await runner._run_write_checks(session, "profile-123")
 
-    list_calls = [c for c in session.call_tool.call_args_list if c.args[0] == "manageLists"]
-    actual_sequence = [(c.kwargs["arguments"]["list_type"], c.kwargs["arguments"]["operation"]) for c in list_calls]
-    expected_sequence = [
-        (list_type, operation) for list_type, _, operations in LIST_WRITE_ORACLE for operation in operations
-    ]
-    assert actual_sequence == expected_sequence
+    calls = [(call.args[0], call.kwargs["arguments"]) for call in session.call_tool.call_args_list]
+    assert [name for name, _ in calls] == [name for name, _, _ in WRITE_ORACLE] + WRITE_TAIL
 
-    entry_ids = {c.kwargs["arguments"]["list_type"]: _entry_id_from_args(c.kwargs["arguments"]) for c in list_calls}
-    for list_type, entry_pattern, _ in LIST_WRITE_ORACLE:
-        assert re.fullmatch(entry_pattern, entry_ids[list_type]), entry_ids[list_type]
+    for (name, arguments), (_, entry_name, pattern) in zip(calls, WRITE_ORACLE):
+        assert arguments["profile_id"] == "profile-123", name
+        if entry_name is None:
+            continue
+        value = arguments[entry_name]
+        assert re.fullmatch(pattern, value), f"{name}: {value!r} does not match {pattern}"
 
-    update_calls = [c for c in list_calls if c.kwargs["arguments"]["operation"] == "update"]
-    assert {c.kwargs["arguments"]["list_type"] for c in update_calls} == {
-        list_type for list_type, _, operations in LIST_WRITE_ORACLE if "update" in operations
+    # The settings writes carry their own fields rather than a wrapped settings object.
+    settings = dict(calls[1:8])
+    assert settings["updateSettings"] == {"profile_id": "profile-123", "web3": True}
+    assert settings["updateLogsSettings"]["retention"] == 86400
+    assert settings["updatePerformanceSettings"] == {
+        "profile_id": "profile-123",
+        "ecs": True,
+        "cacheBoost": True,
     }
-    assert all(c.kwargs["arguments"]["entry"] == {"active": True} for c in update_calls)
 
-    tool_sequence = [c.args[0] for c in session.call_tool.call_args_list]
-    assert tool_sequence.count("manageLists") == len(expected_sequence)
-    assert tool_sequence.count("manageSettings") == 7
-    assert tool_sequence.count("manageProfiles") == 1
-    # The rewrite add succeeds against the mock, so its delete runs too.
-    assert tool_sequence.count("manageRewrites") == 2
-    assert tool_sequence.count("manageLogs") == 1
-    assert tool_sequence[-2:] == ["manageRewrites", "manageLogs"]
+    # The rewrite is deleted with the id the add returned, which is why it is not in
+    # the table: no static argument list can name it.
+    rewrite_add = next(arguments for name, arguments in calls if name == "addRewrite")
+    rewrite_delete = next(arguments for name, arguments in calls if name == "deleteRewrite")
+    assert rewrite_delete == {"profile_id": "profile-123", "entry_id": "rewrite-1"}
+    assert rewrite_add["name"].startswith("e2e-") and rewrite_add["content"] == "192.0.2.1"
+
+
+@pytest.mark.asyncio
+async def test_every_write_that_adds_an_entry_also_removes_it(runner: ContainerE2ERunner):
+    """A live write phase has to leave the profile as it found it.
+
+    Entries left behind change what the next run reads, and a check that alters the
+    account cannot be run twice to find out whether it passes. The pairing is checked
+    by name and by entry, so an add whose removal was renamed or pointed at a different
+    entry fails here.
+    """
+    session = AsyncMock()
+    mock_call_res = MagicMock()
+    mock_call_res.is_error = False
+    mock_call_res.content = [TextContent(type="text", text='{"data":{"id":"rewrite-1"}}')]
+    session.call_tool.return_value = mock_call_res
+
+    await runner._run_write_checks(session, "profile-123")
+
+    calls = [(call.args[0], call.kwargs["arguments"]) for call in session.call_tool.call_args_list]
+
+    def entry(arguments: dict) -> str:
+        return str(arguments.get("entry_id") or arguments.get("id") or "")
+
+    removed = {name: {entry(arguments) for name_, arguments in calls if name_ == name} for name, _ in calls}
+
+    for name, arguments in calls:
+        if not name.startswith("add") or name == "addRewrite":
+            # The rewrite pair is asserted separately: its removal names the id the add
+            # returned, which no static argument list can know.
+            continue
+        # `addToX` has an endpoint called `removeFromX`; `addSecurityTLD` has
+        # `removeSecurityTLD`. Both spellings exist in this document, so both are tried.
+        partner = "removeFrom" + name[len("addTo") :] if name.startswith("addTo") else "remove" + name[len("add") :]
+        assert partner in removed, f"{name} has no endpoint that removes its entry"
+        assert entry(arguments) in removed[partner], f"{name} adds {entry(arguments)}, {partner} removes none of them"
+
+
+@pytest.mark.asyncio
+async def test_run_write_checks_skips_the_rewrite_delete_when_the_add_returns_no_id(runner: ContainerE2ERunner):
+    """No id back means nothing to delete, and the run says so instead of calling blindly.
+
+    A delete with a made-up entry id would answer 404 and read as an endpoint failure
+    when the real gap is that the add gave nothing back.
+    """
+    session = AsyncMock()
+    mock_call_res = MagicMock()
+    mock_call_res.is_error = False
+    mock_call_res.content = [TextContent(type="text", text='{"data":{"name":"no id here"}}')]
+    session.call_tool.return_value = mock_call_res
+
+    await runner._run_write_checks(session, "profile-123")
+
+    called = [call.args[0] for call in session.call_tool.call_args_list]
+    assert "deleteRewrite" not in called
+    assert "clearLogs" in called
+    skips = runner.report_file.read_text(encoding="utf-8")
+    assert "deleteRewrite" in skips and "no id" in skips
+
+
+@pytest.mark.asyncio
+async def test_read_checks_cover_every_read_the_spec_describes(runner: ContainerE2ERunner):
+    """The sweep is the document's read list, so a new operation is covered by the next run.
+
+    Without this, an endpoint added to the spec would sit untested until someone
+    remembered to add it to a list in this script, which is the maintenance the
+    generated surface was adopted to remove.
+    """
+    from scripts.validate_schema import WITHHELD_OPERATIONS, load_openapi_spec, spec_operations
+
+    spec = load_openapi_spec(str(SPEC_PATH))
+    reads = {name for name, method in spec_operations(spec).items() if method == "get"} - set(WITHHELD_OPERATIONS)
+    assert reads, "the shipped spec describes no reads"
+
+    runner.tool_schemas = {name: {"required": ["profile_id"]} for name in reads}
+
+    session = AsyncMock()
+    mock_call_res = MagicMock()
+    mock_call_res.is_error = False
+    mock_call_res.content = [TextContent(type="text", text='{"data":[]}')]
+    session.call_tool.return_value = mock_call_res
+
+    await runner._run_read_checks(session, "profile-123", "plot-profile")
+
+    called = [call.args[0] for call in session.call_tool.call_args_list]
+    assert set(called) == reads | {"dohLookup"}
+    assert runner.failed_count == 0
+
+
+@pytest.mark.asyncio
+async def test_an_unplanned_required_argument_is_recorded_as_a_skip(runner: ContainerE2ERunner):
+    """An endpoint whose required argument nobody has a value for is reported, not guessed.
+
+    The schema the container serves is the truth about what an endpoint needs, so a
+    required argument this script has no value for is a gap in the run: skipping it by
+    name says which endpoint went untested, where inventing a value would quietly
+    report on something other than the endpoint.
+    """
+    from scripts.validate_schema import WITHHELD_OPERATIONS, load_openapi_spec, spec_operations
+
+    spec = load_openapi_spec(str(SPEC_PATH))
+    reads = {name for name, method in spec_operations(spec).items() if method == "get"} - set(WITHHELD_OPERATIONS)
+    runner.tool_schemas = {name: {"required": ["profile_id"]} for name in reads}
+    runner.tool_schemas["getLogs"] = {"required": ["profile_id", "aWindowNobodyNamed"]}
+
+    session = AsyncMock()
+    mock_call_res = MagicMock()
+    mock_call_res.is_error = False
+    mock_call_res.content = [TextContent(type="text", text='{"data":[]}')]
+    session.call_tool.return_value = mock_call_res
+
+    await runner._run_read_checks(session, "profile-123", "")
+
+    called = [call.args[0] for call in session.call_tool.call_args_list]
+    assert "getLogs" not in called
+    assert "getDenylist" in called
+    report = runner.report_file.read_text(encoding="utf-8")
+    assert "aWindowNobodyNamed" in report
+
+
+@pytest.mark.asyncio
+async def test_an_operation_the_container_does_not_publish_is_skipped(runner: ContainerE2ERunner):
+    """The spec can describe more than a stale container serves; the run says which."""
+    from scripts.validate_schema import WITHHELD_OPERATIONS, load_openapi_spec, spec_operations
+
+    spec = load_openapi_spec(str(SPEC_PATH))
+    reads = {name for name, method in spec_operations(spec).items() if method == "get"} - set(WITHHELD_OPERATIONS)
+    runner.tool_schemas = {name: {"required": ["profile_id"]} for name in reads - {"getLogs"}}
+
+    session = AsyncMock()
+    mock_call_res = MagicMock()
+    mock_call_res.is_error = False
+    mock_call_res.content = [TextContent(type="text", text='{"data":[]}')]
+    session.call_tool.return_value = mock_call_res
+
+    await runner._run_read_checks(session, "profile-123", "")
+
+    called = [call.args[0] for call in session.call_tool.call_args_list]
+    assert "getLogs" not in called
+    assert "not published" in runner.report_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -648,18 +886,42 @@ def test_parse_args_health_overrides(monkeypatch):
         assert args.expect_health == "ok"
 
 
-def test_runner_startup_fails_when_mapping_unresolvable(tmp_path: Path, monkeypatch):
-    """A spec whose mapped operations do not resolve is a hard error at startup.
+def test_runner_startup_fails_when_the_document_and_the_catalog_disagree(tmp_path: Path, monkeypatch):
+    """Grading a container against a document that does not describe its tools is an error.
 
-    Before the coverage assertion, an unresolvable operationId degraded to
-    SKIPPED at validation time, which the E2E workflow counts as neither pass
-    nor fail.
+    A run whose spec and catalog disagree cannot report anything useful: the drift has
+    to stop the run at startup rather than degrade to SKIPPED, which the workflow counts
+    as neither pass nor fail.
     """
     empty_spec = tmp_path / "empty-spec.yaml"
     empty_spec.write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr("scripts.run_container_e2e.SPEC_PATH", empty_spec)
 
-    with pytest.raises(ValueError, match="resolve to no response schema"):
+    with pytest.raises(ValueError, match="published tools that name no operation"):
+        ContainerE2ERunner(
+            endpoint="http://127.0.0.1:8000/mcp",
+            variant="slim",
+            allow_live_writes=False,
+            plot_profile="",
+            artifacts_dir=tmp_path,
+        )
+
+
+def test_runner_startup_fails_when_a_published_read_has_no_response_schema(tmp_path: Path, monkeypatch):
+    """A read with no response schema in the document would validate as SKIPPED forever.
+
+    The document is what tells the run what a tool's answer should look like; a read it
+    describes without a schema is the silent gap this check exists to close.
+    """
+    spec = tmp_path / "one-read.yaml"
+    spec.write_text(
+        "paths:\n  /profiles/{profile_id}/logs:\n    get:\n      operationId: getLogs\n      responses:\n        '200': {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.run_container_e2e.SPEC_PATH", spec)
+    monkeypatch.setattr("scripts.run_container_e2e.EXPECTED_TOOLS", ["getLogs"])
+
+    with pytest.raises(ValueError, match="published reads that resolve to no response schema"):
         ContainerE2ERunner(
             endpoint="http://127.0.0.1:8000/mcp",
             variant="slim",

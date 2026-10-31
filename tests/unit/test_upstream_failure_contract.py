@@ -12,14 +12,16 @@ error payload rather than success.
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
 import pytest
+from fastmcp import Client
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import server as server_module
 from nextdns_mcp import utils
 from nextdns_mcp.errors import NextDNSAuthError, NextDNSError, NextDNSRateLimitError, NextDNSServerError
+from nextdns_mcp.server import build_mcp_server
 
 # Path served by the stub -> (status, body). The plot series path carries a
 # query string; the stub matches on path only.
@@ -31,6 +33,14 @@ class _StubUpstream(BaseHTTPRequestHandler):
 
     def _serve(self) -> None:
         path = urlsplit(self.path).path
+        # Drain the request body before answering. The stub speaks HTTP/1.1 with
+        # keep-alive, so an unread body stays in the socket buffer and is parsed as
+        # the next request line: a POST's JSON would come back as the following
+        # call's method name and the stub would answer 501 instead of the status
+        # under test.
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
         status, body = _UPSTREAM[path]
         raw = body.encode()
         self.send_response(status)
@@ -53,6 +63,7 @@ async def stub_nextdns_api(monkeypatch):
             "/profiles": (200, json.dumps({"data": [{"id": "abc123", "name": "Home Network"}]})),
             "/profiles/abc123/settings": (200, json.dumps({"data": {"name": "Home"}})),
             "/profiles/abc123/denylist": (200, json.dumps({"data": []})),
+            "/profiles/abc123/privacy": (200, json.dumps({"data": []})),
             "/profiles/abc123/rewrites": (200, json.dumps({"data": []})),
             "/profiles/abc123/logs": (200, json.dumps({"data": []})),
             "/profiles/abc123/analytics/status;series": (200, json.dumps({"data": []})),
@@ -142,27 +153,52 @@ async def test_non_http_failure_raises_base_exception_without_status(stub_nextdn
 
 
 class TestToolsReportUpstreamFailuresAsPayloads:
-    """No tool may report success, or an untyped crash, when upstream fails."""
+    """No tool may report success, or an untyped crash, when upstream fails.
+
+    The set below is representative rather than exhaustive: one call per HTTP
+    method the surface uses (GET, POST, PUT, PATCH, DELETE), a collection
+    endpoint beside the profile-scoped ones, and the hand-written plot tool,
+    which reaches the API through its own fetch helper instead of a generated
+    body. Those are the paths where a failure can be swallowed differently.
+    """
+
+    _CALLS: ClassVar[tuple[tuple[str, dict[str, Any]], ...]] = (
+        ("listProfiles", {}),
+        ("getSettings", {"profile_id": "abc123"}),
+        ("getDenylist", {"profile_id": "abc123"}),
+        ("addToDenylist", {"profile_id": "abc123", "id": "example.com"}),
+        ("replaceDenylist", {"profile_id": "abc123", "body": [{"id": "example.com"}]}),
+        ("updatePrivacySettings", {"profile_id": "abc123", "disguisedTrackers": True}),
+        ("listRewrites", {"profile_id": "abc123"}),
+        ("getLogs", {"profile_id": "abc123"}),
+        ("clearLogs", {"profile_id": "abc123"}),
+        ("getAnalyticsStatusSeries", {"profile_id": "abc123"}),
+        ("plotAnalytics", {"metric": "status", "profile_id": "abc123"}),
+    )
+
+    @pytest.fixture(autouse=True)
+    def _server_env(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "test-key")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("status", [401, 429, 500, 503])
     async def test_every_tool_returns_typed_error_payload(self, stub_nextdns_api, status):
         _serve(status, '{"error":"upstream failure"}')
 
-        for tool, args in (
-            ("manageProfiles", {"operation": "list"}),
-            ("manageSettings", {"operation": "get", "category": "general", "profile_id": "abc123"}),
-            ("manageLists", {"list_type": "denylist", "operation": "get", "profile_id": "abc123"}),
-            ("manageRewrites", {"operation": "list", "profile_id": "abc123"}),
-            ("manageLogs", {"operation": "get", "profile_id": "abc123"}),
-            ("plotAnalytics", {"metric": "status", "profile_id": "abc123"}),
-        ):
-            result = await getattr(server_module, tool)(**args)
-            assert result.get("code") == "http_error", f"{tool} did not report http_error: {result}"
-            assert result.get("status_code") == status, f"{tool} lost the upstream status: {result}"
-            assert "success" not in result
+        async with Client(build_mcp_server()) as client:
+            for tool, args in self._CALLS:
+                result = await client.call_tool(tool, args)
+                payload = result.structured_content
+                assert payload.get("code") == "http_error", f"{tool} did not report http_error: {payload}"
+                assert payload.get("status_code") == status, f"{tool} lost the upstream status: {payload}"
+                assert "success" not in payload
 
     @pytest.mark.asyncio
     async def test_tools_still_succeed_when_upstream_is_healthy(self, stub_nextdns_api):
-        result = await server_module.manageProfiles("list")
-        assert result == {"data": [{"id": "abc123", "name": "Home Network"}]}
+        """The failure handling above must not swallow a good response."""
+        async with Client(build_mcp_server()) as client:
+            profiles = await client.call_tool("listProfiles", {})
+            denylist = await client.call_tool("getDenylist", {"profile_id": "abc123"})
+        assert profiles.structured_content == {"data": [{"id": "abc123", "name": "Home Network"}]}
+        assert denylist.structured_content == {"data": []}

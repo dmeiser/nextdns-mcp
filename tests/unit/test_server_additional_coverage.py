@@ -58,12 +58,6 @@ def test_shape_helpers():
     assert utils_module.is_float_shaped("") is False
 
 
-def test_coerce_json_arg_invalid_json_returns_value():
-    # String that looks like JSON but fails to parse should be returned as-is.
-    assert coercion._coerce_json_arg('{"broken": ') == '{"broken": '
-    assert coercion._coerce_json_arg("[1, 2, ") == "[1, 2, "
-
-
 class DummyTool:
     parameters: ClassVar[dict[str, object]] = {"properties": {"keep": {"type": "boolean"}}}
 

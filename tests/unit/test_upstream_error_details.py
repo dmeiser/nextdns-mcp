@@ -47,6 +47,29 @@ class TestUpstreamDiagnosis:
     def test_a_body_without_a_useful_document_yields_nothing(self, body):
         assert upstream_error_details(body) == []
 
+    def test_an_error_array_holding_what_is_not_an_object_is_skipped(self):
+        """A malformed entry cannot take the diagnosis down with it.
+
+        The array is upstream's, so its element shape is not ours to assume: one
+        bare string in a list of error objects must not raise or hide the detail
+        that is there.
+        """
+        document = {
+            "errors": [
+                "just a string",
+                None,
+                {"code": "type"},
+                {"detail": "   "},
+                {"detail": "`limit` must be number."},
+            ]
+        }
+        assert upstream_error_details(document) == ["`limit` must be number."]
+
+    def test_a_source_that_is_not_an_object_still_yields_its_detail(self):
+        """The parameter is a bonus; the detail stands on its own without it."""
+        document = {"errors": [{"detail": "bad value", "source": "partials"}]}
+        assert upstream_error_details(document) == ["bad value"]
+
     def test_the_message_the_caller_reads_carries_it(self):
         exc = httpx.HTTPError("boom")
         exc.response = _response(
@@ -82,9 +105,16 @@ class TestUpstreamDiagnosis:
         assert "detail 3" not in payload["error"]
 
 
-class TestTheTwoLogToolsPointAtEachOther:
+class TestTheTwoLogEndpointsSayWhichOneTheyRead:
     """`settings.logs.read` failed because the model read the query log when the
-    task was the logging setting. Nothing said the two are different."""
+    task was the logging setting. Both endpoints are spelled with the word
+    "logs", so each published description has to carry the path it reads.
+
+    On this surface the endpoint line is the disambiguation: ``GET
+    /profiles/{profile_id}/logs`` is the query log and ``GET
+    /profiles/{profile_id}/settings/logs`` is the retention setting. A caller
+    that reads both cannot take one for the other.
+    """
 
     @pytest.fixture(autouse=True)
     def _server_env(self, monkeypatch):
@@ -93,19 +123,22 @@ class TestTheTwoLogToolsPointAtEachOther:
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
 
     @pytest.mark.asyncio
-    async def test_the_query_log_tool_names_the_setting_that_controls_it(self):
+    async def test_the_query_log_tool_names_the_endpoint_it_reads(self):
         async with Client(build_mcp_server()) as client:
             described = {tool.name: (tool.description or "") for tool in await client.list_tools()}
-        logs = " ".join(described["manageLogs"].split())
-        assert "manageSettings" in logs
-        assert 'category="logs"' in logs
+        logs = " ".join(described["getLogs"].split())
+        assert "GET /profiles/{profile_id}/logs" in logs
+        # Reading the retention setting is a different call; the query log's own
+        # description must not read like it.
+        assert "settings/logs" not in logs
 
     @pytest.mark.asyncio
-    async def test_the_settings_tool_names_the_log_entries_it_does_not_read(self):
+    async def test_the_logging_setting_names_the_setting_it_reads(self):
         async with Client(build_mcp_server()) as client:
             described = {tool.name: (tool.description or "") for tool in await client.list_tools()}
-        settings = " ".join(described["manageSettings"].split())
-        assert "manageLogs" in settings
+        setting = " ".join(described["getLogsSettings"].split())
+        assert "retention" in setting
+        assert "GET /profiles/{profile_id}/settings/logs" in setting
 
 
 class TestTheMessageFitsWhatIsRecorded:

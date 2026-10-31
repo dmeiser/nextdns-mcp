@@ -20,7 +20,6 @@ import pytest
 from nextdns_mcp import client as client_module
 from nextdns_mcp import config
 from nextdns_mcp.tools import doh as doh_module
-from nextdns_mcp.tools import profiles as profiles_module
 
 ACL_ENV_VARS = (
     "NEXTDNS_READ_ONLY",
@@ -327,35 +326,15 @@ def test_convenience_wrappers_match_snapshot(monkeypatch):
     assert config.is_read_only() is snapshot.read_only
 
 
-# --- Collection tools share one snapshot for the whole operation (issue #257)
+# --- The collection endpoints need no tool-side snapshot -------------------
 
-
-@pytest.mark.parametrize(
-    ("operation", "kwargs", "env"),
-    [
-        ("list", {}, {"NEXTDNS_READABLE_PROFILES": "abc123"}),
-        ("create", {"name": "new"}, {"NEXTDNS_WRITABLE_PROFILES": "abc123"}),
-    ],
-)
-def test_collection_tool_takes_one_snapshot_per_operation(monkeypatch, operation, kwargs, env):
-    """manageProfiles reads the ACL environment once per logical call.
-
-    The tool's own checks used to take one snapshot each (two for
-    ``create``, which consults both the read-only flag and the writable
-    set), so a single MCP call read every ACL variable twice. The upstream
-    request is stubbed out here: this asserts the tool-side contract, the
-    client's own send-time re-check is covered by the request tests above.
-    """
-    for var, value in env.items():
-        monkeypatch.setenv(var, value)
-    counts = _counted_getenv(monkeypatch)
-
-    with patch.object(profiles_module, "_api_request_payload", new_callable=AsyncMock) as mock_request:
-        mock_request.return_value = {"profiles": []}
-        result = run(profiles_module.manageProfiles(operation, **kwargs))
-
-    assert "error" not in result
-    assert counts == {var: 1 for var in ACL_ENV_VARS}
+# A collection call on the spec surface (`listProfiles`, `createProfile`) is a
+# generated tool: it performs no ACL check of its own, so there is nothing
+# tool-side to snapshot and this file used to assert exactly that for
+# `manageProfiles(list|create)` (issue #257). The guarantee now lives entirely in
+# the access-controlled client, whose one-snapshot-per-request behaviour is what
+# the request tests above cover: a generated tool that consulted the environment a
+# second time would be re-deciding authorization after the client already did.
 
 
 # --- DoH lookups share the request's snapshot ------------------------------

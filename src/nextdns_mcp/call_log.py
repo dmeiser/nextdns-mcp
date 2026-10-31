@@ -3,20 +3,22 @@
 SPDX-License-Identifier: MIT
 
 Verifying an outcome over REST cannot see a read: after a step that asked for
-``manageProfiles(operation="get")`` the profile still exists whether or not the
-call ever happened, so a harness that only reads the API passes a step whose
-transcript was nothing but errors. The server is the only component that knows
-which tools it ran and whether they succeeded, so it writes that down.
+``getProfile``, the profile still exists whether or not the call ever happened,
+so a harness that only reads the API passes a step whose transcript was nothing
+but errors. The server is the only component that knows which tools it ran and
+whether they succeeded, so it writes that down.
 
 Set ``NEXTDNS_CALL_LOG`` to a JSONL path and every executed tool call appends
 one line::
 
-    {"ts": 1761571200.5, "tool": "manageProfiles", "operation": "get",
-     "profile_id": "abc123", "ok": true, "error": ""}
+    {"ts": 1761571200.5, "tool": "getProfile", "endpoint": "GET /profiles/{profile_id}",
+     "profile_id": "abc123", "ok": true, "error": "", "write": false}
 
-A tool generated from the OpenAPI spec (the atomic surface, ``atomic_tools``)
-carries ``"endpoint": "GET /profiles/{profile_id}"`` instead of an operation,
-and its ``write`` flag comes from the HTTP method.
+Every tool here is bound to an endpoint, so the record names it: the tool name
+says what the caller asked for, the endpoint says what the server sent upstream,
+and the HTTP method is what makes a call a write. The two operations this server
+performs itself (``plotAnalytics``, ``dohLookup``) have no endpoint and record as
+reads.
 
 The search transform's synthetic tools are not recorded: the middleware also
 sees the real tool that ``call_tool`` dispatches to, and that is the entry
@@ -32,7 +34,7 @@ from typing import Any
 
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 
-from .coercion import resolve_operation
+from .client import is_write_operation
 
 logger = logging.getLogger(__name__)
 
@@ -93,25 +95,10 @@ def result_error(res: Any) -> str:
     return ""
 
 
-# Operations that change server state. Reads (get/list) and the query tools
-# (queryAnalytics, plotAnalytics, dohLookup) are the complement: they leave the
-# account as they found it, so a caller may run them after doing the work.
-WRITE_OPERATIONS = frozenset({"add", "replace", "update", "remove", "create", "delete", "clear"})
-
-
-def is_write(operation: str) -> bool:
-    """Whether an operation mutates state (empty operation means it does not)."""
-    return operation in WRITE_OPERATIONS
-
-
-# HTTP methods that change state, for tools bound to an endpoint instead of to
-# an `operation` argument (the atomic surface, see atomic_tools).
-WRITE_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
-
-# tool name -> (method, path template), filled in when the atomic surface
-# registers its generated tools. A record for one of those tools carries the
-# endpoint it executed, which is the only way that surface can be verified: it
-# has no operation argument, and the tool body decides the request itself.
+# tool name -> (method, path template), filled in when the generated tools are
+# registered. Every tool on this surface is bound to an endpoint, and the record
+# of which one it executed is the only way that surface can be verified: the tool
+# name says what the caller asked for, not what the server sent upstream.
 _ENDPOINTS: dict[str, tuple[str, str]] = {}
 
 
@@ -121,7 +108,7 @@ def register_endpoint(tool: str, method: str, path: str) -> None:
 
 
 def resolve_endpoint(tool: str) -> tuple[str, str] | None:
-    """The (method, path) a registered tool executes, or None if it is grouped."""
+    """The (method, path) a registered tool executes, or None for a local operation."""
     return _ENDPOINTS.get(tool)
 
 
@@ -149,22 +136,14 @@ class CallLogMiddleware(Middleware):
         if not self._path:
             return
         arguments = args if isinstance(args, dict) else {}
-        sent = str(arguments.get("operation", ""))
-        # The alias validator rewrites synonyms before the tool body runs, so
-        # the operation that executed is not always the verb that was sent.
-        # This record is what a read is judged on, so it names the operation
-        # that ran; the caller's own word is kept beside it.
-        operation = resolve_operation(tool, sent)
         endpoint = resolve_endpoint(tool)
         row = {
             "ts": time.time(),
             "tool": tool,
-            "operation": operation,
-            "write": is_write(operation),
             "profile_id": str(arguments.get("profile_id", "")),
             # Enough of the arguments to match the call the harness asked for
-            # (which list, which metric, which entry), bounded so a large
-            # settings payload or a long entry list cannot bloat the log.
+            # (which endpoint, which entry), bounded so a large settings payload
+            # or a long entry list cannot bloat the log.
             "args": json.dumps(_loggable(arguments), sort_keys=True, default=str)[:600],
             "ok": ok,
             "error": error[:300],
@@ -172,16 +151,15 @@ class CallLogMiddleware(Middleware):
             # API cannot show that a read happened, but it can show that this
             # read answered with data.
             "result": _result_text(result),
+            # Whether the call changed state. A generated tool is bound to an
+            # endpoint, so the HTTP method decides it: `POST
+            # /profiles/{profile_id}/rewrites` changed state whatever the tool
+            # was named. The two local operations (plotAnalytics, dohLookup) have
+            # no endpoint and answer questions, so they are reads.
+            "write": is_write_operation(endpoint[0]) if endpoint else False,
         }
-        if operation != sent:
-            row["operation_as_sent"] = sent
         if endpoint:
-            # A generated tool has no `operation` argument, so the endpoint it
-            # is bound to is both the record of what ran and the reason to call
-            # it a write: `POST /profiles/{profile_id}/rewrites` changed state
-            # whatever the tool was named.
             row["endpoint"] = f"{endpoint[0]} {endpoint[1]}"
-            row["write"] = endpoint[0] in WRITE_METHODS
         try:
             with _write_lock, open(self._path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -190,8 +168,8 @@ class CallLogMiddleware(Middleware):
 
 
 def _loggable(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Argument keys worth matching on, with the operation removed (it has its own field)."""
-    return {k: v for k, v in arguments.items() if k != "operation"}
+    """Argument keys worth matching on, bounded by the caller's own shape."""
+    return dict(arguments)
 
 
 def _result_text(result: Any) -> str:

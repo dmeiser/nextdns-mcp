@@ -1,6 +1,16 @@
-"""Grouped query log management tool for NextDNS MCP Server.
+"""The guarded log-download path behind the ``downloadLogs`` tool.
 
 SPDX-License-Identifier: MIT
+
+The endpoint answers with a redirect to a signed URL, so the download is not a
+plain API call the generated tool can make: it needs the access-controlled client
+for the first request, an *unauthenticated* client for the redirect chain so the
+API key never crosses to another host, a check that every hop is https on a
+globally routable host, a total-size cap applied while streaming, and a bounded
+preview so a CSV export cannot blow up the caller's context.
+
+That is why ``spec_tools`` delegates this one operation here instead of issuing
+the request the way it issues every other one.
 """
 
 import asyncio
@@ -9,26 +19,19 @@ import logging
 import os
 import socket
 import tempfile
-from typing import Annotated, Any, Literal, get_args
+from typing import Any
 
 import httpx
 
 from .. import client
 from ..client import AccessDeniedError, _log_safe_error
-from ..coercion import ProfileId, before_validator, operation_aliases
 from ..config import get_download_max_bytes
 from ..errors import (
     ErrorCode,
     error_payload,
     http_error_payload,
 )
-from ..utils import (
-    _api_request_payload,
-    _build_query_params,
-    _cap_limit,
-    access_denied_payload,
-    resolve_profile_id,
-)
+from ..utils import access_denied_payload
 
 logger = logging.getLogger(__name__)
 
@@ -48,19 +51,6 @@ def _unlink_temp_file(path: str) -> None:
     except OSError:
         pass
 
-
-# Grouped-tool literal type aliases exposed to FastMCP for nice schemas.
-LogOperation = Literal["get", "clear", "download"]
-
-# "list the logs" asks for operation="get", and "delete" for "clear".
-LogOperationId = Annotated[
-    LogOperation,
-    before_validator(operation_aliases(get_args(LogOperation), {"list": "get", "delete": "clear"}, tool="manageLogs")),
-]
-
-# Server-side cap for the ``limit`` parameter on ``get`` (maximum accepted by
-# the NextDNS API).
-LOGS_LIMIT_MAX = 1000
 
 # Caps for log downloads: the CSV is streamed to a temp file (never buffered
 # twice or inlined into the tool payload) and only a bounded preview is
@@ -258,7 +248,7 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
         await unauthenticated.aclose()
 
 
-async def _stream_download_to_path(profile_id: ProfileId, path: str) -> dict[str, Any]:
+async def _stream_download_to_path(profile_id: str, path: str) -> dict[str, Any]:
     """Stream the log download for ``profile_id`` into ``path`` and return the payload."""
     async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download") as initial:
         # A non-redirect response is written straight to disk;
@@ -270,7 +260,7 @@ async def _stream_download_to_path(profile_id: ProfileId, path: str) -> dict[str
     return await _follow_redirects_to_tempfile(redirect_url, path)
 
 
-async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
+async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     """Stream a log CSV download to a temp file without double-buffering.
 
     The response body is streamed directly to disk (bounded by the OS temp
@@ -328,100 +318,3 @@ async def _download_logs_to_tempfile(profile_id: ProfileId) -> dict[str, Any]:
     finally:
         if not downloaded:
             _unlink_temp_file(path)
-
-
-async def _manage_logs_impl(
-    operation: LogOperationId,
-    profile_id: ProfileId,
-    from_time: str | int | None = None,
-    to_time: str | int | None = None,
-    limit: int | None = None,
-    user: str | None = None,
-    device: str | None = None,
-    raw: bool | None = None,
-) -> dict[str, Any]:
-    """Grouped implementation for query logs (get, clear, download)."""
-    target_profile, error = resolve_profile_id(profile_id, allow_default=False)
-    if error:
-        return error
-    if target_profile is None:
-        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
-
-    base_url = f"/profiles/{target_profile}/logs"
-
-    if operation == "get":
-        capped_limit = _cap_limit(limit, LOGS_LIMIT_MAX)
-        params = _build_query_params(
-            **{"from": from_time, "to": to_time, "limit": capped_limit, "device": device, "search": user, "raw": raw}
-        )
-        return await _api_request_payload("GET", base_url, params=params)
-
-    if operation == "clear":
-        return await _api_request_payload("DELETE", base_url)
-
-    if operation == "download":
-        return await _download_logs_to_tempfile(target_profile)
-
-    return error_payload(ErrorCode.UNSUPPORTED_OPERATION, f"Unsupported operation: {operation}")
-
-
-async def manageLogs(
-    operation: LogOperationId,
-    profile_id: ProfileId,
-    from_time: str | int | None = None,
-    to_time: str | int | None = None,
-    limit: int | None = None,
-    user: str | None = None,
-    device: str | None = None,
-    raw: bool | None = None,
-) -> dict[str, Any]:
-    """Get, clear or download a NextDNS profile's DNS query log: the recent resolved
-    domains, the client and device that asked, the answer and reason, over a time
-    range — and the CSV export of those retained log entries.
-
-    This is the log itself, not the setting that controls it: whether logging is
-    on and how long entries are retained is ``manageSettings`` with
-    ``category="logs"``.
-
-
-    Operations:
-        - ``get``: Return recent query log entries (use ``limit`` to cap results).
-          Set ``raw=true`` to bypass deduplication/noise filtering.
-        - ``clear``: Delete all stored logs for the profile.
-        - ``download``: Download retained logs as CSV. ``from_time`` and ``to_time`` are
-          ignored by the NextDNS download endpoint. The CSV is streamed to a
-          temporary file; only the file path, size, row count, and a small
-          capped preview are returned (the full text is never inlined).
-          A hard total-size cap bounds how much is streamed to disk (the
-          ``NEXTDNS_DOWNLOAD_MAX_BYTES`` environment variable, default 1 GiB);
-          a download that would exceed it is aborted mid-stream and the
-          partial file is removed. On success the temp
-          file is *not* cleaned up: the CSV stays in the OS temp directory
-          (mode 0600) and the returned path is the only record of it, so
-          delete it when it is no longer needed. Failed downloads do remove
-          the temp file and its parent directory.
-
-    Time values can be Unix timestamps or relative strings like ``-1d`` or ``-7d``.
-    They are only used by ``get``.
-
-    ``limit`` is clamped server-side to the range 1-1000 entries for ``get``
-    (the range accepted by the NextDNS API): values above 1000 are reduced to
-    1000 and non-positive values to 1. The clamp is silent, so ask for at
-    most 1000.
-
-    Examples:
-        - get recent: ``manageLogs(operation="get", profile_id="<profile id>", limit=10)``
-        - get raw logs: ``manageLogs(operation="get", profile_id="<profile id>", raw=true)``
-        - download: ``manageLogs(operation="download", profile_id="<profile id>", from_time="-1d")``
-        - clear: ``manageLogs(operation="clear", profile_id="<profile id>")``
-    """
-    return await _manage_logs_impl(
-        operation=operation,
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-        user=user,
-        device=device,
-        raw=raw,
-    )
