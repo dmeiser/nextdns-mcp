@@ -18,9 +18,11 @@ from fastmcp import Client, FastMCP
 from nextdns_mcp import spec_tools
 from nextdns_mcp.call_log import resolve_endpoint
 
-# Operations in nextdns-openapi.yaml, and the one that is not offered.
+# Operations in nextdns-openapi.yaml, the one that is not offered, and the two the
+# server performs itself.
 SPEC_OPERATIONS = 79
 WITHHELD = ("streamLogs",)
+COMPOSITES = ("plotAnalytics", "dohLookup")
 
 
 def _fake_api(payload: dict[str, Any], calls: list[Any]):
@@ -256,9 +258,40 @@ class TestRegistration:
 
         async with Client(build_mcp_server()) as client:
             names = [tool.name for tool in await client.list_tools()]
-        assert len(names) == SPEC_OPERATIONS - len(WITHHELD)
+        assert len(names) == SPEC_OPERATIONS - len(WITHHELD) + len(COMPOSITES)
         assert "addToDenylist" in names
         assert "manageLists" not in names
+
+    async def test_the_composite_operations_are_published_here(self, monkeypatch):
+        """DoH resolution and charting have no endpoint, so the spec cannot name them.
+
+        They are registered by hand beside the generated tools; without that, a
+        caller of this surface has no way to find out the server can do either.
+        """
+        monkeypatch.setenv("NEXTDNS_API_KEY", "k")
+        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "atomic")
+        from nextdns_mcp.server import build_mcp_server
+
+        async with Client(build_mcp_server()) as client:
+            tools = {tool.name: tool for tool in await client.list_tools()}
+        assert set(COMPOSITES) <= set(tools)
+        # The whole docstring, not FastMCP's first-section excerpt: what a caller
+        # needs here is the accepted interval range and the worked example.
+        assert "interval`` must be between 60 and 86400 seconds" in tools["plotAnalytics"].description
+
+    async def test_a_composite_is_found_by_search(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "k")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        monkeypatch.setenv("NEXTDNS_TOOL_SURFACE", "atomic")
+        from nextdns_mcp.server import build_mcp_server
+
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": "DNS-over-HTTPS lookup"})
+            hits = [hit["name"] for hit in (found.structured_content or {})["result"]]
+            charted = await client.call_tool("search_tools", {"query": "render a chart of analytics over time"})
+            chart_hits = [hit["name"] for hit in (charted.structured_content or {})["result"]]
+        assert hits[0] == "dohLookup"
+        assert chart_hits[0] == "plotAnalytics"
 
     async def test_loose_argument_types_are_coerced_before_the_call(self, monkeypatch):
         """A client that sends "20" for an integer parameter means 20.

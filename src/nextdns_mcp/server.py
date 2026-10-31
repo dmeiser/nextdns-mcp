@@ -46,6 +46,14 @@ _GROUPED_TOOLS = (
     dohLookup,
 )
 
+# Operations the server performs itself instead of calling one API endpoint for:
+# `dohLookup` resolves a name through a DNS-over-HTTPS resolver, and `plotAnalytics`
+# renders a chart from an analytics query. Neither has an endpoint for the spec to
+# describe, so on the spec surface they are the two hand-written tools published
+# beside the generated ones — and a caller of that surface would otherwise have no
+# way to know they exist.
+_COMPOSITE_TOOLS = (plotAnalytics, dohLookup)
+
 _mcp_server: FastMCP | None = None
 
 
@@ -54,10 +62,11 @@ def build_mcp_server() -> FastMCP:
 
     ``NEXTDNS_TOOL_SURFACE=grouped`` (the default) registers the eight area
     tools; ``atomic`` registers one tool per NextDNS API operation instead,
-    generated from the shipped OpenAPI document (``spec_tools``), and the two are
-    mutually exclusive on purpose: a caller that finds both ``manageLists`` and
-    ``addToDenylist`` is being asked to choose which spelling of one API call to
-    make.
+    generated from the shipped OpenAPI document (``spec_tools``), plus the two
+    operations the server performs itself (``plotAnalytics``, ``dohLookup``). The
+    two surfaces are mutually exclusive on purpose: a caller that finds both
+    ``manageLists`` and ``addToDenylist`` is being asked to choose which spelling
+    of one API call to make.
 
     Returns:
         FastMCP: Configured MCP server instance with all tools registered
@@ -71,8 +80,15 @@ def build_mcp_server() -> FastMCP:
     logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
     tool_surface = validate_tool_surface()
     if tool_surface == ATOMIC:
-        server = create_mcp_server(tool_names=spec_tool_names())
+        names = [*spec_tool_names(), *(tool.__name__ for tool in _COMPOSITE_TOOLS)]
+        server = create_mcp_server(tool_names=names)
         register_spec_tools(server)
+        for tool in _COMPOSITE_TOOLS:
+            # The same reason the grouped registrations pass the docstring
+            # explicitly: FastMCP publishes only the first section of a docstring
+            # as a tool description, and what a caller needs here is the whole of
+            # it — accepted values and the worked example included.
+            server.tool(description=inspect.getdoc(tool) or "")(tool)
         # The usage guide walks the grouped tools and their `operation`
         # argument. Publishing it on a surface that has neither would be the
         # server documenting tools the caller was never given.
