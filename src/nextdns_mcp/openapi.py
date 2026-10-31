@@ -41,6 +41,7 @@ from .arg_errors import ArgumentHintMiddleware
 from .call_log import CallLogMiddleware, call_log_path
 from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
+from .surface import get_tool_surface
 from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import close_doh_client
 from .usage import server_instructions
@@ -304,6 +305,8 @@ def create_mcp_server(client: Any = None, tool_names: Sequence[str] = ()) -> Fas
     logger.info("Creating NextDNS MCP server...")
     transforms: list[Any] = []
     tool_search_mode = get_tool_search_mode()
+    tool_surface = get_tool_surface()
+    logger.info("Tool surface: %s", tool_surface)
     search_transform = build_search_transform(tool_search_mode)
     if search_transform is not None:
         transforms.append(search_transform)
@@ -313,7 +316,7 @@ def create_mcp_server(client: Any = None, tool_names: Sequence[str] = ()) -> Fas
         )
     mcp = FastMCP(
         name="NextDNS MCP Server",
-        instructions=server_instructions(tool_search_mode, tool_names),
+        instructions=server_instructions(tool_search_mode, tool_names, tool_surface),
         lifespan=_server_lifespan,
         transforms=transforms,
     )

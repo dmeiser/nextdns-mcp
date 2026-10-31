@@ -11,6 +11,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from .atomic_tools import atomic_tool_names, register_atomic_tools
 from .client import get_api_client
 from .config import (
     NEXTDNS_BASE_URL,
@@ -20,6 +21,7 @@ from .config import (
     validate_configuration,
 )
 from .openapi import create_mcp_server
+from .surface import ATOMIC, get_tool_surface
 from .tools.analytics import queryAnalytics
 from .tools.doh import dohLookup
 from .tools.lists import manageLists
@@ -48,12 +50,27 @@ _mcp_server: FastMCP | None = None
 
 
 def build_mcp_server() -> FastMCP:
-    """Create the MCP server and register the grouped tools and usage prompt.
+    """Create the MCP server for the configured tool surface.
+
+    ``NEXTDNS_TOOL_SURFACE=grouped`` (the default) registers the eight area
+    tools; ``atomic`` registers one tool per NextDNS API operation instead, and
+    the two are mutually exclusive on purpose: a caller that finds both
+    ``manageLists`` and ``addToDenylist`` is being asked to choose which
+    spelling of one API call to make.
 
     Returns:
         FastMCP: Configured MCP server instance with all tools registered
     """
     logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
+    tool_surface = get_tool_surface()
+    if tool_surface == ATOMIC:
+        server = create_mcp_server(tool_names=atomic_tool_names())
+        register_atomic_tools(server)
+        # The usage guide walks the grouped tools and their `operation`
+        # argument. Publishing it on a surface that has neither would be the
+        # server documenting tools the caller was never given.
+        return server
+
     server = create_mcp_server(tool_names=[tool.__name__ for tool in _GROUPED_TOOLS])
     for tool in _GROUPED_TOOLS:
         # FastMCP publishes only the first text section of a docstring as the

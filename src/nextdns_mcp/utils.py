@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from . import client
+from . import client, surface
 from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError, _log_safe_error, _redacted
 from .config import get_default_profile
 from .errors import (
@@ -392,7 +392,10 @@ def _note_404_on_a_profile_path(payload: dict[str, Any], url: str) -> dict[str, 
     so nothing about it reads as a placeholder.
 
     The hint names both possibilities rather than guessing one, and where to
-    get a real profile id.
+    get a real profile id. Which call to name is the surface's business, so the
+    pointer comes from ``surface.list_profiles_call``: pointing at
+    ``manageProfiles`` on a surface that publishes ``listProfiles`` would send
+    the caller looking for a tool it never had.
     """
     if not isinstance(payload, dict) or payload.get("upstream_code") != "notFound":
         return payload
@@ -402,6 +405,6 @@ def _note_404_on_a_profile_path(payload: dict[str, Any], url: str) -> dict[str, 
         **payload,
         "hint": (
             "a 404 here means the profile id or the entry id in this request does not exist. "
-            'manageProfiles(operation="list") returns the profile ids this API key can access'
+            f"{surface.list_profiles_call()} returns the profile ids this API key can access"
         ),
     }
