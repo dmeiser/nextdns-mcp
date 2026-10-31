@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 import textwrap
 from collections.abc import Sequence
 
+from .surface import ATOMIC, GROUPED
 from .tools.metrics import ANALYTICS_METRICS
 
 # Below this many tools, the instructions describe the catalog instead of
@@ -24,13 +25,18 @@ def _analytics_metric_bullets() -> str:
     return textwrap.fill(listed, width=72, initial_indent="- ", subsequent_indent="  ")
 
 
-def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = ()) -> str:
+def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = (), tool_surface: str = GROUPED) -> str:
     """Short instructions sent in the MCP ``initialize`` handshake.
 
     This is the spec's own server-to-client channel (clients put it in the model
     context), so the server — not any test harness or agent CLI — is the one
     describing itself. It stays client-agnostic (no agent-specific wording) and
     only describes this server: what it exposes and what its responses look like.
+
+    It also has to describe the surface that is actually published: the grouped
+    tools' ``operation`` argument does not exist on the atomic surface, and an
+    introduction that says otherwise is the server misdescribing itself to every
+    caller in the handshake.
 
     Whether it names its tools is a size question, not a secret. Progressive
     disclosure exists so a large catalog does not eat context; with a catalog of
@@ -49,11 +55,24 @@ def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = ()) -
     lines = [
         "# NextDNS MCP server",
         "",
-        "This server manages a NextDNS account through a small set of grouped tools:",
-        "profiles, settings, allow/deny and block lists, DNS rewrites, analytics",
-        "(query and plot), query logs, and DNS-over-HTTPS lookups. Each tool takes",
-        "an `operation` (get, list, add, replace, update, remove, create, delete)",
-        "plus a `profile_id`; the profile tool's `list` returns the ids.",
+    ]
+    if tool_surface == ATOMIC:
+        lines += [
+            "This server exposes the NextDNS API as one tool per endpoint. A tool is",
+            "named for the API operation it performs (`getAllowlist`, `addToDenylist`,",
+            "`getAnalyticsDevices`) and takes that endpoint's own arguments: `profile_id`",
+            "plus the path, query and body fields the endpoint documents. The name says",
+            "what the call does, so there is no operation to choose.",
+        ]
+    else:
+        lines += [
+            "This server manages a NextDNS account through a small set of grouped tools:",
+            "profiles, settings, allow/deny and block lists, DNS rewrites, analytics",
+            "(query and plot), query logs, and DNS-over-HTTPS lookups. Each tool takes",
+            "an `operation` (get, list, add, replace, update, remove, create, delete)",
+            "plus a `profile_id`; the profile tool's `list` returns the ids.",
+        ]
+    lines += [
         "",
         "- A failed call returns a JSON payload with an error `code`, plus a `hint`",
         "  whenever the server can say what to send instead.",

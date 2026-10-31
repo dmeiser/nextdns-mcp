@@ -1188,6 +1188,150 @@ class TestClientTransientsAreNotModelProse:
         )
 
 
+class TestAtomicSurfaceExpectations:
+    """On ``--tool-surface atomic`` a step's expected call is the endpoint it performed.
+
+    The steps are written once, against the grouped surface; this is how the
+    same checklist measures a server whose tools are API operations.
+    """
+
+    def _steps(self, h) -> dict:
+        return {step.id: step for step in h.build_steps(h.TaskTargets(profile_name="PN", tag="tg"))}
+
+    def test_every_comparable_step_expects_a_real_operation(self, h):
+        """Each derived endpoint must be an operation the server can generate."""
+        from nextdns_mcp import atomic_tools
+
+        operations = {f"{op.method} {op.path}" for op in atomic_tools.parse_operations(atomic_tools.load_spec())}
+        expected = [e["endpoints"][0] for step in self._steps(h).values() if (e := h._atomic_expectation(step))]
+        assert len(expected) == 79, "the other steps have no endpoint to match"
+        assert not [ep for ep in expected if ep not in operations]
+
+    def test_the_composite_steps_have_no_endpoint(self, h):
+        """Plotting and DoH resolution are server-side composites, not endpoints.
+
+        Reporting them as skipped rather than failed is what keeps a comparison
+        of the two surfaces a comparison over the steps both can perform.
+        """
+        steps = self._steps(h)
+        assert h._atomic_expectation(steps["doh.lookup"]) is None
+        assert h._atomic_expectation(steps["plots.status"]) is None
+
+    def test_the_category_word_moves_from_the_arguments_into_the_endpoint(self, h):
+        expect = h._atomic_expectation(self._steps(h)["lists.denylist.add"])
+        assert expect["endpoints"] == ["POST /profiles/{profile_id}/denylist"]
+        assert expect["args"] == ["ai-e2e-denylist-add-tg.example.com"]
+
+    def test_a_parental_entry_is_addressed_by_its_id_parameter(self, h):
+        """The spec spells that path parameter `id`, not `entry_id`."""
+        expect = h._atomic_expectation(self._steps(h)["lists.parental_services.remove"])
+        assert expect["endpoints"] == ["DELETE /profiles/{profile_id}/parentalControl/services/{id}"]
+
+    def test_a_series_step_expects_the_series_endpoint(self, h):
+        steps = self._steps(h)
+        assert h._atomic_expectation(steps["analytics.series.devices"])["endpoints"] == [
+            "GET /profiles/{profile_id}/analytics/devices;series"
+        ]
+        assert h._atomic_expectation(steps["analytics.aggregate.devices"])["endpoints"] == [
+            "GET /profiles/{profile_id}/analytics/devices"
+        ]
+
+    def test_a_step_with_no_expectation_still_passes(self, h):
+        assert h._expected_call_ok([], {}, "abc123") == (True, "")
+
+    def test_the_endpoint_record_satisfies_the_step(self, h):
+        records = [
+            {
+                "tool": "addToDenylist",
+                "endpoint": "POST /profiles/{profile_id}/denylist",
+                "ok": True,
+                "args": '{"id": "x.example.com"}',
+                "result": '{"data": []}',
+                "write": True,
+            }
+        ]
+        expect = {"endpoints": ["POST /profiles/{profile_id}/denylist"], "args": ["x.example.com"], "data": True}
+        ok, why = h._expected_call_ok(records, expect, "abc123")
+        assert ok, why
+
+    def test_a_different_endpoint_is_named_as_the_missing_call(self, h):
+        records = [
+            {
+                "tool": "getDenylist",
+                "endpoint": "GET /profiles/{profile_id}/denylist",
+                "ok": True,
+                "args": "{}",
+                "result": '{"data": []}',
+            }
+        ]
+        expect = {"endpoints": ["POST /profiles/{profile_id}/denylist"], "args": [], "data": True}
+        ok, why = h._expected_call_ok(records, expect, "abc123")
+        assert not ok
+        assert why == "server recorded no POST /profiles/{profile_id}/denylist call in this attempt"
+
+    def test_a_write_after_the_endpoint_call_undoes_the_step(self, h):
+        records = [
+            {
+                "tool": "addToDenylist",
+                "endpoint": "POST /profiles/{profile_id}/denylist",
+                "ok": True,
+                "args": '{"id": "x"}',
+                "result": '{"data": []}',
+                "write": True,
+            },
+            {
+                "tool": "removeFromDenylist",
+                "endpoint": "DELETE /profiles/{profile_id}/denylist/{entry_id}",
+                "ok": True,
+                "args": "{}",
+                "result": '{"success": true}',
+                "write": True,
+            },
+        ]
+        expect = {"endpoints": ["POST /profiles/{profile_id}/denylist"], "args": ["x"], "data": True}
+        ok, why = h._expected_call_ok(records, expect, "abc123")
+        assert not ok
+        assert "DELETE /profiles/{profile_id}/denylist/{entry_id}" in why
+
+    def test_every_failed_call_to_the_endpoint_is_still_reported(self, h):
+        records = [{"tool": "addToDenylist", "endpoint": "POST /profiles/{profile_id}/denylist", "ok": False}]
+        expect = {"endpoints": ["POST /profiles/{profile_id}/denylist"], "args": [], "data": True}
+        ok, why = h._expected_call_ok(records, expect, "abc123")
+        assert not ok
+        assert "every such call failed" in why
+
+    def test_the_server_record_is_read_by_endpoint_when_it_has_one(self, h):
+        assert h._call_label({"endpoint": "POST /profiles"}) == "POST /profiles"
+        assert h._call_label({"tool": "manageLists", "operation": "add"}) == "manageLists(add)"
+
+    def test_the_harness_profile_lifecycle_names_a_tool_the_surface_has(self, h):
+        """Otherwise a targeted atomic run cannot provision or clean up its profile.
+
+        Observed on the first atomic run: the grouped-only cleanup call died with
+        `Unknown tool: 'manageProfiles'` after the steps had all passed.
+        """
+        assert h._profile_lifecycle_call("grouped", "create", name="PN") == (
+            "manageProfiles",
+            {"operation": "create", "name": "PN"},
+            "manageProfiles(create)",
+        )
+        assert h._profile_lifecycle_call("atomic", "create", name="PN") == (
+            "createProfile",
+            {"name": "PN"},
+            "createProfile",
+        )
+        assert h._profile_lifecycle_call("atomic", "delete", pid="abc123") == (
+            "deleteProfile",
+            {"profile_id": "abc123"},
+            "deleteProfile",
+        )
+        assert h._profile_lifecycle_call("grouped", "delete", pid="abc123") == (
+            "manageProfiles",
+            {"operation": "delete", "profile_id": "abc123"},
+            "manageProfiles(delete)",
+        )
+
+
 class TestTransientActorFailure:
     """Only infrastructure transients re-run a step; slow-but-working attempts do not."""
 

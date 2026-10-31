@@ -86,6 +86,25 @@ the tools register natively as ``nextdns_<tool>``; under progressive disclosure
 that is ``nextdns_search_tools`` and ``nextdns_call_tool``, so the same contract
 is measured without that layer.
 
+Tool surface
+------------
+``--tool-surface grouped|atomic`` (default ``grouped``) chooses which tools the
+server publishes behind ``search_tools``/``call_tool``. ``grouped`` is the eight
+area tools; ``atomic`` generates one tool per operation of the shipped OpenAPI
+spec (``addToDenylist``, ``getAnalyticsDevicesSeries``, …), 78 of them, each
+taking that endpoint's own arguments. Progressive disclosure is unchanged either
+way — ``tools/list`` still exposes two tools — only the searchable catalog
+changes size.
+
+The two surfaces give the server different things to record, so condition 1
+below is matched two ways: tool + operation on ``grouped``, and the API endpoint
+the call executed on ``atomic`` (``POST /profiles/{profile_id}/rewrites``). The
+endpoint a step is about is derived from the expectation that step was written
+with, so the same step measures the same API call on either surface. Two groups
+of steps have no endpoint: ``plotAnalytics`` and ``dohLookup`` are server-side
+composites, not operations in the API. On ``atomic`` they are reported as
+skipped, not failed, because the surface has no tool to run.
+
 Targeted runs
 -------------
 ``--print-steps`` lists the checklist (ids plus 1-based positions) on stdout;
@@ -108,7 +127,8 @@ How each step is judged
 Three conditions, all of which must hold:
 
 1. The MCP server recorded the step's **exact** expected call — tool, operation
-   and identifying arguments — and that call succeeded and answered with a
+   and identifying arguments on the grouped surface, the API endpoint it
+   executed on the atomic one — and that call succeeded and answered with a
    payload. The server writes what it executed to a JSONL call log
    (``NEXTDNS_CALL_LOG``, see ``nextdns_mcp.call_log``); the harness reads back
    the lines its own attempt appended. ``--print-steps`` prints each step's
@@ -281,6 +301,10 @@ class HarnessConfig:
     # registration removes that layer while leaving progressive disclosure
     # (nextdns_search_tools / nextdns_call_tool) exactly what is measured.
     codemode: bool = False
+    # Which tool surface the MCP server publishes for this run: "grouped" (the
+    # eight area tools) or "atomic" (one tool per NextDNS API operation). The
+    # expected-call rule is written differently for each, so the run records it.
+    tool_surface: str = "grouped"
     # Targeted run: comma-separated step ids, 1-based positions and inclusive
     # A-B ranges (see select_steps). start_step/end_step are the single-range
     # shorthand for the same thing; empty means "the whole checklist".
@@ -357,10 +381,13 @@ class HarnessConfig:
             "NEXTDNS_WRITABLE_PROFILES",
             "NEXTDNS_DEFAULT_PROFILE",
             "NEXTDNS_TOOL_SEARCH",
+            "NEXTDNS_TOOL_SURFACE",
             "NEXTDNS_PROTECTED_PROFILES",
         ):
             if val := os.environ.get(var):
                 cfg.server["env"].setdefault(var, val)
+        if surface := os.environ.get("NEXTDNS_TOOL_SURFACE"):
+            cfg.tool_surface = surface.strip().lower() or "grouped"
         # The data-bearing profile used for plots/log-download steps is only
         # ever read by the actor; protect it against hallucinated writes
         # (e.g. manageProfiles delete with the wrong id) even under ALL.
@@ -1320,6 +1347,26 @@ async def _mcp_call(server: dict[str, Any], tool: str, arguments: dict[str, Any]
     return {"ok": not error, "data": data, "error": error}
 
 
+def _profile_lifecycle_call(
+    surface: str, action: str, pid: str = "", name: str = ""
+) -> tuple[str, dict[str, Any], str]:
+    """The call the harness makes for a profile action it owns.
+
+    Creating and deleting the test profile goes through the MCP server, not
+    straight to the API, so the server's read/write ACLs apply to the harness's
+    own bookkeeping too. That means naming a tool the published surface
+    actually has: the grouped surface's ``manageProfiles``, or this operation's
+    endpoint tool on the atomic surface. Returns (tool, arguments, label).
+    """
+    if surface == "atomic":
+        if action == "create":
+            return "createProfile", {"name": name}, "createProfile"
+        return "deleteProfile", {"profile_id": pid}, "deleteProfile"
+    if action == "create":
+        return "manageProfiles", {"operation": "create", "name": name}, "manageProfiles(create)"
+    return "manageProfiles", {"operation": "delete", "profile_id": pid}, "manageProfiles(delete)"
+
+
 async def _harness_provision_profile(config: HarnessConfig, targets: TaskTargets) -> tuple[str, str]:
     """Create the test profile through the MCP tool; returns (profile_id, note).
 
@@ -1327,18 +1374,20 @@ async def _harness_provision_profile(config: HarnessConfig, targets: TaskTargets
     for every later step to act on, and the harness owns that profile either
     way, so it creates it the way the server exposes it.
     """
-    res = await _mcp_call(config.server, "manageProfiles", {"operation": "create", "name": targets.profile_name})
+    tool, arguments, label = _profile_lifecycle_call(config.tool_surface, "create", name=targets.profile_name)
+    res = await _mcp_call(config.server, tool, arguments)
     data = res.get("data")
     body = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
     pid = str(body.get("id", "")) if isinstance(body, dict) else ""
     if not pid:
-        return "", f"FAILED: manageProfiles(create) returned {res.get('error') or data!r}"
-    return pid, f"test profile {targets.profile_name!r} provisioned by the harness via manageProfiles(create)"
+        return "", f"FAILED: {label} returned {res.get('error') or data!r}"
+    return pid, f"test profile {targets.profile_name!r} provisioned by the harness via {label}"
 
 
 async def _harness_delete_profile(config: HarnessConfig, pid: str) -> str:
     """Delete the test profile through the MCP tool; returns an error string."""
-    res = await _mcp_call(config.server, "manageProfiles", {"operation": "delete", "profile_id": pid})
+    tool, arguments, _label = _profile_lifecycle_call(config.tool_surface, "delete", pid=pid)
+    res = await _mcp_call(config.server, tool, arguments)
     return str(res.get("error") or "")
 
 
@@ -1393,6 +1442,125 @@ def _expect(
         "args": list(args),
         "result": list(result),
         "data": data,
+    }
+
+
+# ---------------------------------------------------------------------------
+# The atomic surface: what a step's expected call means when the tools are
+# API endpoints rather than area tools.
+# ---------------------------------------------------------------------------
+
+# category -> (endpoint path, name of the entry's path parameter). Taken from
+# the spec the atomic surface generates its tools from
+# (src/nextdns_mcp/nextdns-openapi.yaml): a list step is about one collection
+# endpoint, and the category word that named it in a grouped call is carried by
+# the path instead. Parental control is the one family whose entry parameter is
+# spelled `id` rather than `entry_id`.
+_LIST_ENDPOINTS: dict[str, tuple[str, str]] = {
+    "denylist": ("/profiles/{profile_id}/denylist", "entry_id"),
+    "allowlist": ("/profiles/{profile_id}/allowlist", "entry_id"),
+    "parental_categories": ("/profiles/{profile_id}/parentalControl/categories", "id"),
+    "parental_services": ("/profiles/{profile_id}/parentalControl/services", "id"),
+    "privacy_blocklists": ("/profiles/{profile_id}/privacy/blocklists", "entry_id"),
+    "privacy_natives": ("/profiles/{profile_id}/privacy/natives", "entry_id"),
+    "security_tlds": ("/profiles/{profile_id}/security/tlds", "entry_id"),
+}
+
+# category -> settings endpoint. The seven categories of the grouped tool are
+# seven different endpoints here.
+_SETTINGS_ENDPOINTS: dict[str, str] = {
+    "general": "/profiles/{profile_id}/settings",
+    "logs": "/profiles/{profile_id}/settings/logs",
+    "blockpage": "/profiles/{profile_id}/settings/blockPage",
+    "performance": "/profiles/{profile_id}/settings/performance",
+    "security": "/profiles/{profile_id}/security",
+    "privacy": "/profiles/{profile_id}/privacy",
+    "parental": "/profiles/{profile_id}/parentalControl",
+}
+
+# The HTTP verb each grouped operation performs.
+_OPERATION_VERBS: dict[str, str] = {
+    "create": "POST",
+    "list": "GET",
+    "get": "GET",
+    "download": "GET",
+    "update": "PATCH",
+    "replace": "PUT",
+    "add": "POST",
+    "remove": "DELETE",
+    "delete": "DELETE",
+    "clear": "DELETE",
+}
+
+# Steps whose grouped tool is a server-side composite with no endpoint behind
+# it: chart generation and the DNS-over-HTTPS lookup. Neither exists in the API
+# spec, so no atomic catalog contains them.
+_NO_ENDPOINT_TOOLS = frozenset({"plotAnalytics", "dohLookup"})
+
+
+def _atomic_expectation(step: Step) -> dict[str, Any] | None:
+    """The endpoint form of a step's expected call, or None if it has none.
+
+    The endpoint is what the step is about, so a step authored for the grouped
+    surface is judged on the same API call on this one: a successful call that
+    hit that endpoint, no successful write after it, and the REST end state the
+    step already checks.
+
+    ``None`` means the step is not comparable on this surface rather than that
+    the model failed it — see ``_NO_ENDPOINT_TOOLS``.
+
+    Arguments are kept only where they still identify the call once the path
+    carries the category: the profile name, the entry being written, the
+    settings field being changed. The category word itself ("denylist",
+    "parental_services") is dropped because it is now in the endpoint, and the
+    analytics metric is dropped for the same reason.
+    """
+    expect = step.expect or {}
+    tool = str(expect.get("tool", ""))
+    operation = str(expect.get("operation", ""))
+    args = [str(item) for item in expect.get("args", [])]
+    if tool in _NO_ENDPOINT_TOOLS:
+        return None
+
+    endpoints: list[str] = []
+    keep: list[str] = []
+    if tool == "manageProfiles":
+        path = "/profiles" if operation in ("create", "list") else "/profiles/{profile_id}"
+        endpoints = [f"{_OPERATION_VERBS[operation]} {path}"]
+        keep = args
+    elif tool == "manageSettings":
+        endpoints = [f"{_OPERATION_VERBS[operation]} {_SETTINGS_ENDPOINTS[args[0]]}"]
+        keep = args[1:]
+    elif tool == "manageLists":
+        path, entry_param = _LIST_ENDPOINTS[args[0]]
+        verb = _OPERATION_VERBS[operation]
+        suffix = f"/{{{entry_param}}}" if operation in ("update", "remove") else ""
+        endpoints = [f"{verb} {path}{suffix}"]
+        keep = args[1:]
+    elif tool == "manageRewrites":
+        verb = _OPERATION_VERBS[operation]
+        suffix = "/{entry_id}" if operation == "delete" else ""
+        endpoints = [f"{verb} /profiles/{{profile_id}}/rewrites{suffix}"]
+        keep = args
+    elif tool == "manageLogs":
+        if operation == "download":
+            endpoints = ["GET /profiles/{profile_id}/logs/download"]
+        elif operation == "get":
+            endpoints = ["GET /profiles/{profile_id}/logs"]
+        else:
+            endpoints = ["DELETE /profiles/{profile_id}/logs"]
+    elif tool == "queryAnalytics":
+        metric = args[0]
+        suffix = ";series" if "series" in args else ""
+        endpoints = [f"GET /profiles/{{profile_id}}/analytics/{metric}{suffix}"]
+    else:
+        raise ValueError(f"step {step.id}: no endpoint mapping for the {tool!r} tool")
+
+    return {
+        "endpoints": endpoints,
+        "args": keep,
+        "result": list(expect.get("result", [])),
+        "data": bool(expect.get("data", True)),
     }
 
 
@@ -1493,10 +1661,19 @@ def _walk_identifiers(node: Any) -> list[tuple[str, list[str]]]:
 def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid: str) -> tuple[bool, str]:
     """The two transcript conditions of the pass rule.
 
-    1. the server recorded a SUCCESSFUL call matching this step's expected
-       operation exactly — tool, operation, and the arguments that identify it
-       (which list, which metric, which entry) — and, for a read, the call
-       answered with a payload, since the API cannot show that a read happened;
+    1. the server recorded a SUCCESSFUL call matching this step's expected call
+       exactly, and, for a read, the call answered with a payload, since the API
+       cannot show that a read happened. The expectation is written one of two
+       ways, because the two tool surfaces give the server different things to
+       record:
+       - grouped: the tool name, its `operation`, and the arguments that
+         identify it (which list, which metric, which entry);
+       - atomic: the API endpoint the call executed
+         (``POST /profiles/{profile_id}/rewrites``), which the server knows
+         because each generated tool is bound to one. A step's endpoint
+         expectation is derived from the grouped expectation it was written with
+         (see ``_atomic_expectation``), so "the call this step is about" means
+         the same thing on both surfaces.
     2. no state-changing call came AFTER it in the same attempt. Confirming
        reads afterwards are normal and allowed; undoing the step's own write is
        not.
@@ -1507,6 +1684,10 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
         return True, ""
     tool = str(expect.get("tool", ""))
     operation = str(expect.get("operation", ""))
+    # Endpoint expectations are matched against the spec's path templates, so
+    # `{profile_id}` stays literal and a step whose call targets another
+    # profile (plots, log download) still matches.
+    endpoints = [str(item) for item in expect.get("endpoints", [])]
     want_args = [s.replace("{profile_id}", pid) for s in expect.get("args", [])]
     want_result = [s.replace("{profile_id}", pid) for s in expect.get("result", [])]
     # An identifier the server handed back in this same attempt names the thing
@@ -1515,19 +1696,22 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
     # caller that its id is `c41a6xwk`, and deleting by that id is the workflow
     # the server documents and hints at. Both spellings identify the record.
     ids_by_name = _identifiers_from_answers(records)
-    label = f"{tool}({operation or '-'})"
+    label = " or ".join(endpoints) if endpoints else f"{tool}({operation or '-'})"
+
+    def matches(record: dict[str, Any]) -> bool:
+        if endpoints:
+            return str(record.get("endpoint", "")) in endpoints
+        return record.get("tool") == tool and (not operation or str(record.get("operation", "")) == operation)
 
     # Why the closest candidate was rejected, so a failure names the condition
     # it failed instead of guessing from the tool name alone.
     why = f"server recorded no {label} call in this attempt"
-    if any(r.get("tool") == tool and not r.get("ok") for r in records):
+    if any(matches(r) and not r.get("ok") for r in records):
         why = f"{label} reached the server but every such call failed"
 
     for index in range(len(records) - 1, -1, -1):
         record = records[index]
-        if record.get("tool") != tool or not record.get("ok"):
-            continue
-        if operation and str(record.get("operation", "")) != operation:
+        if not matches(record) or not record.get("ok"):
             continue
         args_text = str(record.get("args", ""))
         missing_args = [
@@ -1550,12 +1734,22 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
         later = [r for r in records[index + 1 :] if r.get("write") and r.get("ok")]
         if later:
             undo = later[0]
-            return False, (
-                f"{label} succeeded but was followed by the write {undo.get('tool')}({undo.get('operation')})"
-            )
+            return False, f"{label} succeeded but was followed by the write {_call_label(undo)}"
         return True, ""
 
     return False, why
+
+
+def _call_label(record: dict[str, Any]) -> str:
+    """How the server's own record of a call is named.
+
+    The atomic surface records the endpoint it executed, which is what says what
+    happened there; the grouped surface's tool and operation is what says it.
+    """
+    endpoint = str(record.get("endpoint") or "")
+    if endpoint:
+        return endpoint
+    return f"{record.get('tool')}({record.get('operation') or '-'})"
 
 
 def _server_calls_text(records: list[dict[str, Any]]) -> str:
@@ -1563,8 +1757,7 @@ def _server_calls_text(records: list[dict[str, Any]]) -> str:
     if not records:
         return "(no tool call reached the server)"
     return "; ".join(
-        f"{r.get('tool')}({r.get('operation') or '-'})" + ("" if r.get("ok") else f" ERR {str(r.get('error'))[:60]}")
-        for r in records[:6]
+        _call_label(r) + ("" if r.get("ok") else f" ERR {str(r.get('error'))[:60]}") for r in records[:6]
     ) + (f"; ... {len(records) - 6} more" if len(records) > 6 else "")
 
 
@@ -2495,6 +2688,9 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     report = Report(started_at=time.time(), api_key_present=True, profile_name=targets.profile_name)
     report.actor_kind = "mcp-native-harness (per-step)"
     report.actor_command = config.command
+    report.tool_surface = config.tool_surface
+    if config.tool_surface != "grouped":
+        _progress(f"tool surface: {config.tool_surface}; expected calls are matched by API endpoint")
 
     steps = build_steps(targets)
     selected = select_steps(steps, config.step_selection(len(steps)))
@@ -2588,6 +2784,27 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                     )
                 )
                 continue
+            expect = _atomic_expectation(step) if config.tool_surface == "atomic" else step.expect
+            if expect is None:
+                # Not a model failure: the surface has no tool to run. Chart
+                # making and the DoH lookup are server-side composites with no
+                # operation in the API spec, so an atomic catalog cannot offer
+                # them; scoring them as failures would compare the surfaces over
+                # a set they do not share.
+                report.results.append(
+                    CheckResult(
+                        step.id,
+                        step.section,
+                        step.description,
+                        "skipped",
+                        mcp_tool=step.tool,
+                        reason=(
+                            f"the {config.tool_surface} catalog has no tool for this step: "
+                            f"{step.tool} is a server-side composite, not an API endpoint"
+                        ),
+                    )
+                )
+                continue
             if step.section != "profiles" and pid:
                 # The actor may delete the test profile mid-run (wrong-tool
                 # mistake); recreate it so the report measures each step, not
@@ -2646,7 +2863,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 # read it cannot see the call at all. So the server's own record
                 # decides the transcript half of the verdict: the exact expected
                 # call succeeded, and nothing wrote over it afterwards.
-                call_ok, call_why = _expected_call_ok(server_calls, step.expect, pid)
+                call_ok, call_why = _expected_call_ok(server_calls, expect, pid)
                 if status == "passed" and not call_ok:
                     status = "failed"
                     error = call_why
@@ -2968,6 +3185,7 @@ def summarize_reports(paths: list[str]) -> str:
     """
     rows: list[dict[str, Any]] = []
     notes: list[str] = []
+    surfaces: list[str] = []
     for path in paths:
         with open(path, encoding="utf-8") as handle:
             for line in handle:
@@ -2977,6 +3195,9 @@ def summarize_reports(paths: list[str]) -> str:
                 rows.append(row)
                 if "summary" in row:
                     notes.extend(str(n) for n in (row["summary"].get("notes") or []))
+                    surface = str(row["summary"].get("tool_surface") or "")
+                    if surface and surface not in surfaces:
+                        surfaces.append(surface)
     steps = [row for row in rows if "status" in row]
     if not steps:
         return "no step results in " + ", ".join(paths)
@@ -2996,11 +3217,13 @@ def summarize_reports(paths: list[str]) -> str:
             by_mode.setdefault((mode, tool), []).append(str(row.get("id") or "?"))
 
     counts = Counter(row["status"] for row in steps)
+    surface_note = f", surface={'/'.join(surfaces) or 'unknown'}"
     lines = [
         "=" * 72,
         (
             f"failure modes: {len(paths)} report(s), {len(steps)} step(s) "
             f"({counts.get('passed', 0)} passed, {counts.get('failed', 0)} failed, {counts.get('skipped', 0)} skipped)"
+            + surface_note
         ),
         "=" * 72,
     ]
@@ -3089,6 +3312,18 @@ def main(argv: list[str] | None = None) -> int:
             "evaluation sits between the model and the contract."
         ),
     )
+    parser.add_argument(
+        "--tool-surface",
+        choices=("grouped", "atomic"),
+        default="grouped",
+        help=(
+            "which tools the MCP server publishes behind search_tools/call_tool (sets NEXTDNS_TOOL_SURFACE). "
+            "'grouped' is the eight area tools; 'atomic' generates one tool per NextDNS API operation from the "
+            "shipped OpenAPI spec. On 'atomic' a step's expected call is matched by the API endpoint it executed "
+            "rather than by tool and operation, and steps whose grouped tool is a server-side composite "
+            "(plotAnalytics, dohLookup) are reported as skipped: no endpoint exists for them to match."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # Needs no API key and runs no model: it reads a report that already exists.
@@ -3098,6 +3333,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.tool_search:
         os.environ["NEXTDNS_TOOL_SEARCH"] = args.tool_search
+    # Always explicit: the surface decides both what the server publishes and
+    # which expected-call rule the report applies, so it must never be left to
+    # an inherited environment variable.
+    os.environ["NEXTDNS_TOOL_SURFACE"] = args.tool_surface
 
     # The step catalog needs no API key and runs no model: it is how a user
     # finds the ids and positions a --steps selection takes, and it states what

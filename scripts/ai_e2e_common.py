@@ -243,6 +243,10 @@ class Report:
     actor_stderr: str = ""
     actor_raw_lines: list[str] = field(default_factory=list)
     actor_duration_ms: int = 0
+    # Which tool surface the server published for this run ("grouped" = the
+    # area tools, "atomic" = one tool per API operation). The expected-call rule
+    # differs between them, so a score means nothing without it.
+    tool_surface: str = ""
 
     @property
     def passed(self) -> int:
@@ -278,6 +282,7 @@ class Report:
             "skipped_sections": self.skipped_sections,
             "notes": self.notes,
             "actor_kind": self.actor_kind,
+            "tool_surface": self.tool_surface,
             "actor_tool_calls": self.actor_tool_calls,
             "actor_tools_used": self.actor_tools_used,
             "actor_duration_ms": self.actor_duration_ms,

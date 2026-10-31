@@ -14,6 +14,10 @@ one line::
     {"ts": 1761571200.5, "tool": "manageProfiles", "operation": "get",
      "profile_id": "abc123", "ok": true, "error": ""}
 
+A tool generated from the OpenAPI spec (the atomic surface, ``atomic_tools``)
+carries ``"endpoint": "GET /profiles/{profile_id}"`` instead of an operation,
+and its ``write`` flag comes from the HTTP method.
+
 The search transform's synthetic tools are not recorded: the middleware also
 sees the real tool that ``call_tool`` dispatches to, and that is the entry
 worth having.
@@ -100,6 +104,27 @@ def is_write(operation: str) -> bool:
     return operation in WRITE_OPERATIONS
 
 
+# HTTP methods that change state, for tools bound to an endpoint instead of to
+# an `operation` argument (the atomic surface, see atomic_tools).
+WRITE_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
+
+# tool name -> (method, path template), filled in when the atomic surface
+# registers its generated tools. A record for one of those tools carries the
+# endpoint it executed, which is the only way that surface can be verified: it
+# has no operation argument, and the tool body decides the request itself.
+_ENDPOINTS: dict[str, tuple[str, str]] = {}
+
+
+def register_endpoint(tool: str, method: str, path: str) -> None:
+    """Record the API endpoint a generated tool is bound to."""
+    _ENDPOINTS[tool] = (method.upper(), path)
+
+
+def resolve_endpoint(tool: str) -> tuple[str, str] | None:
+    """The (method, path) a registered tool executes, or None if it is grouped."""
+    return _ENDPOINTS.get(tool)
+
+
 class CallLogMiddleware(Middleware):
     """Append one record per tool call this server executes."""
 
@@ -130,6 +155,7 @@ class CallLogMiddleware(Middleware):
         # This record is what a read is judged on, so it names the operation
         # that ran; the caller's own word is kept beside it.
         operation = resolve_operation(tool, sent)
+        endpoint = resolve_endpoint(tool)
         row = {
             "ts": time.time(),
             "tool": tool,
@@ -149,6 +175,13 @@ class CallLogMiddleware(Middleware):
         }
         if operation != sent:
             row["operation_as_sent"] = sent
+        if endpoint:
+            # A generated tool has no `operation` argument, so the endpoint it
+            # is bound to is both the record of what ran and the reason to call
+            # it a write: `POST /profiles/{profile_id}/rewrites` changed state
+            # whatever the tool was named.
+            row["endpoint"] = f"{endpoint[0]} {endpoint[1]}"
+            row["write"] = endpoint[0] in WRITE_METHODS
         try:
             with _write_lock, open(self._path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
