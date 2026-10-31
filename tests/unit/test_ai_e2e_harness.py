@@ -1135,11 +1135,67 @@ class TestMeasureState:
         assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == ""
 
 
+class TestClientTransientsAreNotModelProse:
+    """A model that says a tool is missing is not the client saying it."""
+
+    WORDS = 'No tool named "nextdns_search_tools" is currently available.'
+
+    def test_the_words_in_the_model_narration_are_not_a_transient(self, h):
+        """nemotron-3-nano-omni made no calls at all and wrote this as prose.
+
+        It was labelled "MCP tool not registered yet" and retried three times as
+        infrastructure; the event stream was step_start/text/step_finish with no
+        tool_use event, so the step measured a refusal, not a registration race.
+        """
+        run = h.ActorRun(command=["x"], final_text=self.WORDS)
+        blob = self.WORDS.lower()  # the model's narration, and nothing else
+        assert h._transient_actor_failure(run, blob) == ("", "")
+
+    def test_the_same_words_from_a_failed_client_call_are_still_a_transient(self, h):
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [h.ToolCall(name="nextdns_search_tools", args={}, is_error=True, result_text=self.WORDS)]
+        assert h._transient_actor_failure(run, self.WORDS.lower()) == (
+            "unknown-tool",
+            "MCP tool not registered yet",
+        )
+
+    def test_the_code_mode_path_is_still_detected_from_the_client_error(self, h):
+        """Regression for the 25 live attempts that were real registration misses."""
+        words = 'No tool named "tools.nextdns.search_tools" is currently available.'
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [h.ToolCall(name="execute", args={}, is_error=True, result_text=words)]
+        assert h._transient_actor_failure(run, words.lower()) == (
+            "wrong-tool-path",
+            "actor called the code-mode tool name directly",
+        )
+
+    def test_the_harness_error_string_counts_as_client_reported(self, h):
+        run = h.ActorRun(command=["x"], error=self.WORDS)
+        assert self.WORDS.lower() in h._client_reported_errors(run)
+
+    def test_a_resolution_error_recorded_as_a_successful_call_still_counts(self, h):
+        """opencode answers a bad tool name with a *completed* call whose output
+        is the error text — observed live as
+        "Error calling tool 'call_tool': Unknown tool: 'delete_dns_rewrite_record'"
+        recorded with ok=True. Filtering on the ok flag loses the real cases.
+        """
+        words = "Error calling tool 'call_tool': Unknown tool: 'delete_dns_rewrite_record'"
+        run = h.ActorRun(command=["x"])
+        run.tool_calls = [h.ToolCall(name="call_tool", args={}, result_text=words)]
+        assert h._transient_actor_failure(run, words.lower()) == (
+            "unknown-tool",
+            "MCP tool not registered yet",
+        )
+
+
 class TestTransientActorFailure:
     """Only infrastructure transients re-run a step; slow-but-working attempts do not."""
 
     def test_lazy_tool_registration_is_retried(self, h):
         run = h.ActorRun(command=["x"])
+        run.tool_calls = [
+            h.ToolCall(name="nextdns.foo", args={}, is_error=True, result_text="failed with unknown tool 'nextdns.foo'")
+        ]
         assert h._transient_actor_failure(run, "failed with unknown tool 'nextdns.foo'") == (
             "unknown-tool",
             "MCP tool not registered yet",
@@ -1150,10 +1206,13 @@ class TestTransientActorFailure:
 
         The name in the message is the one opencode registers for a direct MCP
         tool, `<server>_<tool>`: that call was aimed correctly and met a server
-        that had not finished registering.
+        that had not finished registering. The words have to come from a failed
+        call — the same sentence in the model's own narration is a refusal, not
+        a registration race (see TestClientTransientsAreNotModelProse).
         """
         run = h.ActorRun(command=["x"])
         blob = 'No tool named "nextdns_search_tools" is currently available.'
+        run.tool_calls = [h.ToolCall(name="nextdns_search_tools", args={}, is_error=True, result_text=blob)]
         assert h._transient_actor_failure(run, blob.lower()) == (
             "unknown-tool",
             "MCP tool not registered yet",
@@ -1168,6 +1227,7 @@ class TestTransientActorFailure:
         """
         run = h.ActorRun(command=["x"])
         blob = 'No tool named "tools.nextdns.search_tools" is currently available.'
+        run.tool_calls = [h.ToolCall(name="execute", args={}, is_error=True, result_text=blob)]
         assert h._transient_actor_failure(run, blob.lower()) == (
             "wrong-tool-path",
             "actor called the code-mode tool name directly",
