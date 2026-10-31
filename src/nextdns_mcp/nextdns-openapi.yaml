@@ -400,18 +400,32 @@ components:
       name: from
       in: query
       required: true
-      description: Start timestamp for analytics (Unix timestamp or ISO 8601)
+      # The narrow wording ("Unix timestamp or ISO 8601") was not the contract
+      # this API actually honours: a relative offset works, and it is the only
+      # spelling that expresses a window measured from now. Verified against the
+      # live API, and already what the grouped analytics tool sends
+      # (tools/analytics.py SERIES_DEFAULT_FROM = "-1d").
+      description: >-
+        Start of the time window. Accepted spellings: epoch seconds
+        (1762000000), ISO 8601 (2026-10-30T00:00:00Z), a bare date
+        (2026-10-30), or a relative offset from now (-1d, -12h, -30d),
+        where now means now. For a window measured from now use the
+        relative offset - the last day is -1d, and that is what this
+        server sends when it asks for recent data. The Grafana spelling
+        now-1d is rejected upstream (``from`` must be number).
       schema:
         type: string
-      example: '2024-01-01T00:00:00Z'
+      example: '-1d'
 
     To:
       name: to
       in: query
-      description: End timestamp for analytics (Unix timestamp or ISO 8601)
+      description: >-
+        End of the time window, in any spelling `from` accepts; omit it to end
+        at now.
       schema:
         type: string
-      example: '2024-01-31T23:59:59Z'
+      example: now
 
     Cursor:
       name: cursor
