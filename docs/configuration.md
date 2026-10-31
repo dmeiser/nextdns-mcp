@@ -22,6 +22,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 | NEXTDNS_WRITABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for writes; special value "ALL" allows writes to all profiles; empty/unset denies all writes; ignored if NEXTDNS_READ_ONLY=true |
 | NEXTDNS_PROTECTED_PROFILES | string | (unset) | No | Comma-separated profile IDs that are NEVER writable, overriding even `NEXTDNS_WRITABLE_PROFILES=ALL`; reads are unaffected. Intended for data-bearing/production profiles a test agent must not modify or delete |
 | NEXTDNS_TOOL_SEARCH | string (off/regex/bm25) | off | No | Progressive tool disclosure via FastMCP search transforms. `regex`/`bm25` replace `tools/list` with the synthetic `search_tools` + `call_tool` pair (the real tools stay callable, they are only hidden from the listing); `off` advertises the full catalog. An invalid value fails startup with `ConfigurationError` |
+| NEXTDNS_TOOL_SURFACE | string (grouped/atomic) | grouped | No | Which tool catalog the server publishes: `grouped` (default) exposes the eight area tools, each selecting an API call with an `operation` argument (`manageLists(operation="add")`); `atomic` exposes one tool per NextDNS API operation, named for the operation itself (`addToDenylist`) and taking that endpoint's own arguments. Case-insensitive and trimmed; unset or blank means `grouped`; any other value fails startup with `ConfigurationError`, like `MCP_TRANSPORT`. See "Tool Surface" below |
 | MCP_TRANSPORT | string | stdio | No | `stdio` (default) or `http` (streamable-HTTP). Case-insensitive and trimmed. Any other value fails startup with `ConfigurationError`. See "HTTP Transport" in the README |
 | MCP_HOST | string | 127.0.0.1 | No | Bind interface for HTTP transport. Loopback-only by default; a non-loopback value is an explicit opt-in that requires reverse-proxy/auth protection |
 | MCP_PORT | number | 8000 | No | Port for HTTP transport. Must be an integer in 1-65535; an invalid value fails fast at startup with `ConfigurationError`, like `NEXTDNS_HTTP_TIMEOUT` |
@@ -50,6 +51,26 @@ Notes
 - `dohLookup` uses a separate DoH endpoint, but it still enforces the per-profile read check: the queried profile must be in the effective readable set, i.e. `NEXTDNS_READABLE_PROFILES` or `NEXTDNS_WRITABLE_PROFILES` ("write implies read", below), or either set must be "ALL".
 - "Write implies read": profiles allowed for writes are automatically considered readable.
 - On the `AccessControlledClient` request and stream paths, for the `dohLookup` send, and for the collection-denial checks in the `manageProfiles` `list`/`create` operations, access control settings are read once per operation into an immutable snapshot (`nextdns_mcp.config.load_profile_access_control()`) that authorizes all of that operation's checks together, so a change to the environment applies from the next request onward, never midway through one in flight. A single MCP call therefore reads each profile ACL variable once rather than once per check. No cache invalidation or restart is needed: there is no cross-request cache to expire.
+
+## Tool Surface
+
+The server publishes one of two tool catalogs, chosen by `NEXTDNS_TOOL_SURFACE`. The two are mutually exclusive on purpose: a caller that finds both `manageLists` and `addToDenylist` has to guess which spelling of one API call to make.
+
+**`grouped` (default)** — eight area tools (`manageProfiles`, `manageSettings`, `manageLists`, `manageRewrites`, `manageLogs`, `queryAnalytics`, `plotAnalytics`, `dohLookup`). Each takes an `operation` argument that selects the API call, plus a `profile_id`.
+
+**`atomic`** — one tool per NextDNS API operation, generated at startup from the bundled OpenAPI spec (`src/nextdns_mcp/nextdns-openapi.yaml`): 78 of the spec's 79 operations, each named for its own `operationId` (`getAllowlist`, `addToDenylist`, `getSync`) and taking that endpoint's own arguments — `profile_id` plus the path, query and body fields the endpoint documents, with an endpoint whose body is a JSON array taking them as `entries`. There is no `operation` argument. Because each atomic tool is bound to exactly one endpoint, the call log records the method and path template a call hit and whether it was a write, taken from the HTTP method rather than from an operation name. `streamLogs` — the live query-log Server-Sent Events stream — is the one spec operation that is not published: an SSE stream cannot answer a request/response tool call, and the grouped surface does not expose it either.
+
+Two grouped tools have no NextDNS API endpoint behind them, so they have no atomic equivalent and **are not available on `atomic`**: `dohLookup` resolves a name over DNS-over-HTTPS, and `plotAnalytics` renders a chart from analytics data. Every other NextDNS API endpoint the grouped tools reach has an atomic tool.
+
+Everything the server says about its own catalog is written from the surface that is actually published, so the two never mix in one conversation:
+
+- The `initialize` instructions describe the surface in front of the caller. The grouped wording explains the `operation` argument; the atomic wording says each tool takes that endpoint's own arguments and there is no operation to choose — a promise of an `operation` argument on a surface that has none would be the server misdescribing itself.
+- Error hints name a call the caller can actually make: the hint that points at profile discovery reads `manageProfiles(operation="list")` on grouped and `listProfiles()` on atomic.
+- The usage guide (`nextdns-usage-guide` prompt, `nextdns://usage` resource) is published only on grouped, because it walks the eight area tools and their `operation` argument.
+
+The two settings compose: `NEXTDNS_TOOL_SEARCH` indexes and calls whichever tools are registered. On grouped (8 tools) the instructions also list the tool names, since a catalog of 12 or fewer is cheaper to state than to search for; on atomic (78) they point at `search_tools` and `tools/list` instead.
+
+Unlike the guidance path, which falls back to `grouped` rather than failing while answering a call, `build_mcp_server()` validates the value and raises `ConfigurationError` on anything else — quietly serving the default would mean serving a different tool contract from the one you set.
 
 ## Examples
 

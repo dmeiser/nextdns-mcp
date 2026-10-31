@@ -21,7 +21,7 @@ from .config import (
     validate_configuration,
 )
 from .openapi import create_mcp_server
-from .surface import ATOMIC, get_tool_surface
+from .surface import ATOMIC, validate_tool_surface
 from .tools.analytics import queryAnalytics
 from .tools.doh import dohLookup
 from .tools.lists import manageLists
@@ -60,9 +60,15 @@ def build_mcp_server() -> FastMCP:
 
     Returns:
         FastMCP: Configured MCP server instance with all tools registered
+
+    Raises:
+        ConfigurationError: If ``NEXTDNS_TOOL_SURFACE`` is set to something other
+            than ``grouped`` or ``atomic``. Serving the default in that case
+            would silently change the tool contract the operator asked for, which
+            is the same reasoning ``NEXTDNS_TOOL_SEARCH`` applies to its own value.
     """
     logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
-    tool_surface = get_tool_surface()
+    tool_surface = validate_tool_surface()
     if tool_surface == ATOMIC:
         server = create_mcp_server(tool_names=atomic_tool_names())
         register_atomic_tools(server)
