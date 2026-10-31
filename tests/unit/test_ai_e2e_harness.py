@@ -787,13 +787,13 @@ class TestMcpConfigGeneration:
         front of it goes away.
         """
         cfg = h.HarnessConfig.load(None)
-        assert cfg.codemode is True  # opencode's default: baselines stay comparable
-        doc = json.loads(h.write_mcp_config(cfg, tmp_path).read_text(encoding="utf-8"))
-        assert doc["mcp"]["nextdns"]["codemode"] is True
-
-        cfg.codemode = False
+        assert cfg.codemode is False  # off by default; `--codemode on` restores opencode's default
         doc = json.loads(h.write_mcp_config(cfg, tmp_path).read_text(encoding="utf-8"))
         assert doc["mcp"]["nextdns"]["codemode"] is False
+
+        cfg.codemode = True
+        doc = json.loads(h.write_mcp_config(cfg, tmp_path).read_text(encoding="utf-8"))
+        assert doc["mcp"]["nextdns"]["codemode"] is True
 
     def test_the_codemode_flag_reaches_the_config(self, h, monkeypatch, tmp_path):
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
@@ -804,7 +804,10 @@ class TestMcpConfigGeneration:
             return h.Report(started_at=1.0, finished_at=2.0)
 
         monkeypatch.setattr(h, "run_harness", fake_run)
-        h.main(["--codemode", "off", "--quiet", "--report", str(tmp_path / "r.jsonl")])
+        h.main(["--codemode", "on", "--quiet", "--report", str(tmp_path / "r.jsonl")])
+        assert seen == {"codemode": True}
+        seen.clear()
+        h.main(["--quiet", "--report", str(tmp_path / "r2.jsonl")])
         assert seen == {"codemode": False}
 
     def test_write_mcp_config_is_valid_json_schema_shaped(self, h, tmp_path):

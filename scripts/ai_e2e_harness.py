@@ -74,6 +74,18 @@ Usage::
 The JSONL report defaults to ``artifacts/ai_e2e_report.jsonl`` (``--report`` to
 override, ``-`` for stdout).
 
+Client mode
+-----------
+``--codemode on|off`` (default ``off``) controls whether opencode mounts this
+server through Code Mode. Code Mode is opencode's own default: the model's only
+native tool is ``execute`` and this server's tools are JavaScript bindings inside
+it, which puts a client-side JS evaluation between the model and the contract —
+a body written ``async () => { ... }`` evaluates to a function, calls nothing,
+and the client reports it as a successful call returning ``null``. With it off,
+the tools register natively as ``nextdns_<tool>``; under progressive disclosure
+that is ``nextdns_search_tools`` and ``nextdns_call_tool``, so the same contract
+is measured without that layer.
+
 Targeted runs
 -------------
 ``--print-steps`` lists the checklist (ids plus 1-based positions) on stdout;
@@ -263,7 +275,12 @@ class HarnessConfig:
     # opencode mounts MCP servers through Code Mode unless told otherwise: the
     # model's only native tool is `execute`, and this server's tools are JS
     # bindings inside it. False registers them natively as `nextdns_<tool>`.
-    codemode: bool = True
+    # Off by default: a live run lost a step to a code-mode body written as
+    # `async () => { ... }`, which evaluates to a function, calls nothing, and
+    # is reported by the client as a successful call returning `null`. Native
+    # registration removes that layer while leaving progressive disclosure
+    # (nextdns_search_tools / nextdns_call_tool) exactly what is measured.
+    codemode: bool = False
     # Targeted run: comma-separated step ids, 1-based positions and inclusive
     # A-B ranges (see select_steps). start_step/end_step are the single-range
     # shorthand for the same thing; empty means "the whole checklist".
@@ -3043,11 +3060,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--codemode",
         choices=("on", "off"),
-        default="on",
+        default="off",
         help=(
-            "opencode Code Mode (default: on, its documented default). 'off' registers this server's "
-            "tools natively as nextdns_<tool> instead of exposing them only as JavaScript bindings "
-            "inside execute, so no client-side JS evaluation sits between the model and the contract."
+            "opencode Code Mode (default: off). 'on' restores opencode's own default, where the "
+            "model's only native tool is `execute` and this server's tools are JavaScript bindings "
+            "inside it; 'off' registers them natively as nextdns_<tool>, so no client-side JS "
+            "evaluation sits between the model and the contract."
         ),
     )
     args = parser.parse_args(argv)
