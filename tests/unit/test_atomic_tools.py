@@ -181,6 +181,42 @@ class TestCoercion:
         assert atomic_tools._coerce("w", "1.5", {"type": "number"}) == 1.5
 
 
+class TestPublishedContractIsTheRealOne:
+    """The wording a caller reads has to be the contract this API honours.
+
+    The generated tools inherit the spec's parameter descriptions, and the spec
+    said the analytics window is "Unix timestamp or ISO 8601". Probed against the
+    live API it also accepts a relative offset (`-1d`, `-12h`, `-30d`) and `now`,
+    rejects the Grafana spelling `now-1d` with "`from` must be number.", and ends
+    at now when `to` is left out — which is what the grouped tool relies on
+    (`SERIES_DEFAULT_FROM`). A caller told only about absolute timestamps has no
+    way to say "the last day", and one live run answered that step by asking the
+    user for timestamps instead of acting.
+    """
+
+    def _from_doc(self, operations) -> str:
+        return _by_id(operations)["getAnalyticsDomains"].parameters["properties"]["from"]["description"]
+
+    def test_the_relative_offset_is_named_in_the_this_server_sends(self, operations):
+        from nextdns_mcp.tools.analytics import SERIES_DEFAULT_FROM
+
+        assert SERIES_DEFAULT_FROM in self._from_doc(operations)
+
+    def test_every_accepted_spelling_is_named(self, operations):
+        doc = self._from_doc(operations)
+        for spelling in ("epoch seconds", "ISO 8601", "bare date", "now"):
+            assert spelling in doc
+
+    def test_the_spelling_upstream_rejects_is_named_too(self, operations):
+        doc = self._from_doc(operations)
+        assert "now-1d" in doc
+        assert "must be number" in doc
+
+    def test_to_can_be_left_out(self, operations):
+        doc = _by_id(operations)["getAnalyticsDomains"].parameters["properties"]["to"]["description"]
+        assert "omit" in doc
+
+
 class TestRegistration:
     async def test_the_atomic_surface_publishes_one_tool_per_operation(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_API_KEY", "k")
