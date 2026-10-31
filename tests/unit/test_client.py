@@ -1,9 +1,32 @@
 """Unit tests for HTTP client creation."""
 
+import sys
+
 import httpx
 import pytest
 
 from nextdns_mcp.config import ConfigurationError
+
+
+@pytest.fixture(autouse=True)
+def restore_nextdns_modules():
+    """Put back every ``nextdns_mcp`` module this file's tests drop from ``sys.modules``.
+
+    Several tests below delete ``nextdns_mcp.config`` and ``nextdns_mcp.server`` so the
+    client is built against a freshly imported module. The deletion outlives the test:
+    the next import of anything that touches ``config`` (``surface``, ``server``,
+    ``atomic_tools``, …) re-creates it as a *new module object*, and its
+    ``ConfigurationError`` is then a different class from the one every other test module
+    bound at collection time — so ``pytest.raises(ConfigurationError)`` in those modules
+    stops matching and they fail with ``MissingApiKeyError`` escaping instead. The whole
+    run's pass list therefore depends on which files re-import config after this one, so
+    the reload is kept inside the test that asks for it.
+    """
+    saved = {name: module for name, module in sys.modules.items() if name.startswith("nextdns_mcp")}
+    yield
+    for name in [name for name in sys.modules if name.startswith("nextdns_mcp") and name not in saved]:
+        del sys.modules[name]
+    sys.modules.update(saved)
 
 
 class TestCreateNextdnsClient:
