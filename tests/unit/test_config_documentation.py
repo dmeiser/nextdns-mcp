@@ -181,11 +181,13 @@ def test_documented_catalog_sizes_match_the_catalogs_the_server_builds():
     digits against the code means the sentence goes stale in the test, not in the
     documentation.
     """
-    from nextdns_mcp.atomic_tools import atomic_tool_names, load_spec, parse_operations
-    from nextdns_mcp.server import _GROUPED_TOOLS
+    from fastmcp.utilities.openapi import parse_openapi_to_http_routes
 
-    spec_operations = len(parse_operations(load_spec()))
-    registered = len(atomic_tool_names())
+    from nextdns_mcp.server import _GROUPED_TOOLS
+    from nextdns_mcp.spec_tools import load_spec, spec_tool_names
+
+    spec_operations = len(parse_openapi_to_http_routes(load_spec()))
+    registered = len(spec_tool_names())
     section = _surface_section()
 
     assert str(registered) in section, f"the section must state the {registered} registered atomic tools"
@@ -201,12 +203,12 @@ def test_documented_tools_exist_on_the_surface_they_are_described_on():
     set from the catalogs instead of trusting the prose, so a tool that gains or
     loses an endpoint moves the expectation with it.
     """
-    from nextdns_mcp.atomic_tools import atomic_tool_names
     from nextdns_mcp.server import _GROUPED_TOOLS
+    from nextdns_mcp.spec_tools import spec_tool_names
 
     section = _surface_section()
     grouped_names = [tool.__name__ for tool in _GROUPED_TOOLS]
-    atomic_names = set(atomic_tool_names())
+    atomic_names = set(spec_tool_names())
     grouped_only = [name for name in grouped_names if name not in atomic_names]
 
     assert grouped_only, "the grouped surface is expected to cover more than the API catalog"

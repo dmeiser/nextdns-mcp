@@ -1200,9 +1200,9 @@ class TestAtomicSurfaceExpectations:
 
     def test_every_comparable_step_expects_a_real_operation(self, h):
         """Each derived endpoint must be an operation the server can generate."""
-        from nextdns_mcp import atomic_tools
+        from nextdns_mcp import spec_tools
 
-        operations = {f"{op.method} {op.path}" for op in atomic_tools.parse_operations(atomic_tools.load_spec())}
+        operations = {f"{route.method} {route.path}" for route in spec_tools.spec_routes(spec_tools.load_spec())}
         expected = [e["endpoints"][0] for step in self._steps(h).values() if (e := h._atomic_expectation(step))]
         assert len(expected) == 79, "the other steps have no endpoint to match"
         assert not [ep for ep in expected if ep not in operations]
