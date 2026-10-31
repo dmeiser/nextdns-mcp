@@ -2333,9 +2333,14 @@ def _transient_actor_failure(run: ActorRun, blob: str) -> tuple[str, str]:
       ``state.error`` (observed: "OpenAI Chat stream ended without
       finish_reason", which read as the model calling ``call_tool({})``).
     """
-    if any(marker in blob for marker in _CODE_MODE_TOOL_PATH_MARKERS):
+    # These two are the client's own words about a name it could not resolve.
+    # They must be read from what the client reported, never from the model's
+    # narration: a model that writes "the tool is not available" without making
+    # a call has refused to act, which is a verdict, not a retry.
+    client = _client_reported_errors(run)
+    if any(marker in client for marker in _CODE_MODE_TOOL_PATH_MARKERS):
         return "wrong-tool-path", "actor called the code-mode tool name directly"
-    if any(marker in blob for marker in _LAZY_REGISTRATION_MARKERS):
+    if any(marker in client for marker in _LAZY_REGISTRATION_MARKERS):
         return "unknown-tool", "MCP tool not registered yet"
     if "timed out" in run.error.lower() and not run.tool_calls:
         return "stall", run.error
@@ -2344,6 +2349,22 @@ def _transient_actor_failure(run: ActorRun, blob: str) -> tuple[str, str]:
     if not run.tool_calls and any(marker in blob for marker in _PROVIDER_OUTAGE_MARKERS):
         return "provider-unavailable", "model provider is not serving this model"
     return "", ""
+
+
+def _client_reported_errors(run: ActorRun) -> str:
+    """Lower-cased text the *client* produced, as opposed to the model's narration.
+
+    Tool results count even when the call is flagged ok: opencode reports a
+    resolution failure as a completed call whose output is the error text
+    (observed: "Error calling tool 'call_tool': Unknown tool: 'x'" recorded with
+    ok=True). What is excluded is the model's own final text and the harness's
+    verdict strings — a model that writes "the tool is not available" without
+    making a call has refused to act, which is a verdict, not a retry.
+    """
+    parts = [run.error or "", run.stderr or ""]
+    parts += [call.result_text or "" for call in run.tool_calls]
+    parts += _extract_error_events(run)
+    return " ".join(parts).lower()
 
 
 # Signatures of opencode's lazy MCP tool registration, not of a model decision.
