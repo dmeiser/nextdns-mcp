@@ -35,19 +35,18 @@ The middleware only filters top-level tool arguments; fields nested inside an ar
 - If the message is `Blocked request to non-NextDNS host: <host>`, the request targeted a host outside the client's destination allow-list and was refused before any request was sent. See [safety.md](safety.md).
 
 ## Log download refused
-- If `manageLogs(operation="download")` returns `Refusing log download redirect to a non-public or non-https destination`, the download endpoint pointed its redirect at a destination that is not https on a globally routable host, and the redirect was refused before that target was contacted. See [safety.md](safety.md).
+- If `downloadLogs` returns `Refusing log download redirect to a non-public or non-https destination`, the download endpoint pointed its redirect at a destination that is not https on a globally routable host, and the redirect was refused before that target was contacted. See [safety.md](safety.md).
 
 ## Invalid JSON or array expected
 - Bulk tools take a JSON array of entry objects, e.g. `'[{"id": "ads.example.com"}, {"id": "tracker.net"}]'`.
 - Use single quotes to avoid escaping inner quotes in shells.
-- `manageLists(operation="replace", ...)` validates each entry before forwarding: every entry must be an object
-  with a string `id`, otherwise it returns `invalid_argument` naming the offending `entries[<index>]`. Extra keys
-  inside an entry are forwarded as-is.
+- The array is validated against the endpoint's published schema before any request goes out: it must be an array of
+  objects with a string `id`, and a malformed value is rejected by argument validation without reaching the API.
 
 ## Network/DNS issues
 - Ensure outbound HTTPS to `api.nextdns.io` and `dns.nextdns.io`.
 - Increase `NEXTDNS_HTTP_TIMEOUT` if needed, then restart the server process: the timeout is read when the HTTP clients are built, so an in-place change has no effect (see [configuration.md](configuration.md)).
 
 ## No default profile
-- Some tools accept `profile_id`; if omitted, set `NEXTDNS_DEFAULT_PROFILE` or pass `--profile_id` explicitly.
-- The other tools (`manageProfiles` get/update/delete, `manageSettings`, `manageLists`, `manageLogs`, `manageRewrites`, `queryAnalytics`) require `profile_id` and never fall back to `NEXTDNS_DEFAULT_PROFILE`. They report the two failure modes with distinct codes: an omitted (or blank) `profile_id` returns `missing_profile_id`, while a malformed one returns `invalid_profile_id` with the rejected value quoted back.
+- `dohLookup` and `plotAnalytics` accept an optional `profile_id`; if omitted, set `NEXTDNS_DEFAULT_PROFILE` or pass `profile_id` explicitly.
+- Every other profile-scoped tool — all the generated operation tools (`getProfile`, `updateDenylistEntry`, `getAnalyticsStatus`, …) — requires `profile_id` and never falls back to `NEXTDNS_DEFAULT_PROFILE`; only `dohLookup` and `plotAnalytics` use the default. They report the two failure modes with distinct codes: an omitted (or blank) `profile_id` returns `missing_profile_id`, while a malformed one returns `invalid_profile_id` with the rejected value quoted back.

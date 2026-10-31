@@ -1,25 +1,25 @@
 # NextDNS MCP Server
 
-A Model Context Protocol (MCP) server for the NextDNS API, built with FastMCP and a small set of grouped CRUD tools.
+A Model Context Protocol (MCP) server for the NextDNS API, built with FastMCP and generated from a bundled OpenAPI document.
 
 ## Overview
 
-This project provides an MCP server that exposes NextDNS API operations as tools that can be used by AI assistants and other MCP clients. The server registers a small set of domain-grouped CRUD tools directly; it does not generate tools from an OpenAPI spec.
+This project provides an MCP server that exposes NextDNS API operations as tools that can be used by AI assistants and other MCP clients. The bundled OpenAPI document is the tool contract: the server generates one tool per operation in it, named for the operation itself (`getAllowlist`, `addToDenylist`, `getAnalyticsDevices`) and taking that endpoint's own arguments, plus the two operations no endpoint describes — `plotAnalytics` and `dohLookup`.
 
 ## Features
 
-- **Domain-grouped CRUD tools** exposing the full NextDNS API surface through ~8 high-level tools
+- **One tool per API operation** — 78 tools named for the operation itself, each taking that endpoint's own arguments, so the name says what the call does and there is no operation argument to choose
 - **Profile Management**: Full CRUD operations - create, read, update, and delete profiles
 - **Profile Access Control**: Fine-grained read/write restrictions per profile, with read-only mode support
 - **DNS-over-HTTPS Testing**: Perform DoH lookups to test DNS resolution through profiles
-- **Settings Configuration**: Comprehensive grouped settings management including logs, block page, and performance
+- **Settings Configuration**: Comprehensive settings management including logs, block page, and performance
 - **Logs**: Query log retrieval, download, and clearing
 - **Analytics**: Comprehensive DNS query analytics and statistics, including time-series and plotting
 - **Content Lists**: Manage denylist, allowlist, privacy blocklists, native tracking, security TLDs, and parental control
 - **Security**: Complete security settings and TLD blocking configuration
 - **Privacy**: Privacy settings, blocklists, and native tracking protection management
 - **Parental Control**: Settings management with safe search and YouTube restrictions
-- **Reference OpenAPI spec**: The bundled [nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml) documents the NextDNS API surface for validation tooling
+- **OpenAPI document as the tool contract**: The bundled [nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml) generates every published tool and drives the validation tooling
 - **Docker Support**: Containerized deployment with proper OCI labels
 - **Safety Mechanisms**: Write operation protections and validation
 
@@ -169,14 +169,14 @@ MCP_TRANSPORT=http MCP_HOST=0.0.0.0 uv run python -m nextdns_mcp.server
 
 This server uses a modern, declarative approach:
 
-1. **OpenAPI Specification** ([nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml)): Complete NextDNS API documentation
-2. **FastMCP Foundation**: Server built from grouped CRUD tools registered in `src/nextdns_mcp/tools/`; the OpenAPI spec is a reference for validation only (issues #141/#146)
+1. **OpenAPI Specification** ([nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml)): The tool contract — every published tool is generated from it
+2. **FastMCP Foundation**: `spec_tools` generates one tool per spec operation with FastMCP's OpenAPI parser; requests run through the server's own access-controlled HTTP client rather than `FastMCP.from_openapi()`'s transport (issues #141/#146)
 3. **HTTP Client**: Authenticated `httpx.AsyncClient` with profile-level access control for NextDNS API calls
 4. **MCP Protocol**: Tools, resources, and prompts exposed via Model Context Protocol
 
 ### Key Components
 
-- `src/nextdns_mcp/nextdns-openapi.yaml`: OpenAPI 3.0 specification for NextDNS API (reference/validation only); a Spectral lint workflow ([openapi-lint.yml](.github/workflows/openapi-lint.yml)) enforces explicit per-operation security declarations via [spectral.yaml](spectral.yaml), runnable locally with `npx @stoplight/spectral lint -r spectral.yaml src/nextdns_mcp/nextdns-openapi.yaml`
+- `src/nextdns_mcp/nextdns-openapi.yaml`: OpenAPI 3.0 specification for the NextDNS API — the document every published tool is generated from; a Spectral lint workflow ([openapi-lint.yml](.github/workflows/openapi-lint.yml)) enforces explicit per-operation security declarations via [spectral.yaml](spectral.yaml), runnable locally with `npx @stoplight/spectral lint -r spectral.yaml src/nextdns_mcp/nextdns-openapi.yaml`
 - `src/nextdns_mcp/server.py`: FastMCP server implementation
 - `Dockerfile`: Container definition with OCI labels for container metadata
 - `AGENT.md`: Development guidelines and safety rules
