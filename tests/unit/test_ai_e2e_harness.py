@@ -810,6 +810,7 @@ class TestMcpConfigGeneration:
             "grep",
             "list",
             "webfetch",
+            "execute",
             "shell",
             "bash",
             "write",

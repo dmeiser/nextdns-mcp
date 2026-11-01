@@ -487,6 +487,11 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
             "write": False,
             "edit": False,
             "patch": False,
+            # Code Mode's `execute` survived opencode 2.2.5's per-server
+            # `codemode: false` and reached `require('fs')` anyway: every
+            # failed step of the first target-model run opened by browsing
+            # the workdir in JS before (instead of) calling the contract.
+            "execute": False,
             # Filesystem browsing was live-observed (a live run read this very
             # config back into model context, and a step failed on a model
             # that poked the workdir instead of calling the contract): with the
