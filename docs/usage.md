@@ -15,9 +15,10 @@ argument to choose.
 - **Access control**: The server reads `NEXTDNS_READABLE_PROFILES` and
   `NEXTDNS_WRITABLE_PROFILES`. Reads/writes outside those profiles are rejected.
 - **Read-only mode**: If `NEXTDNS_READ_ONLY=true`, write operations are blocked.
-- **Discovery**: With `NEXTDNS_TOOL_SEARCH=regex|bm25`, `tools/list` exposes
+- **Discovery**: By default (`NEXTDNS_TOOL_SEARCH=bm25`), `tools/list` exposes
   only `search_tools` + `call_tool`, and the model finds the operation tools
-  by searching; they stay callable either way.
+  by searching; they stay callable either way. Set `NEXTDNS_TOOL_SEARCH=off`
+  to advertise the full catalog in the listing instead.
 
 ## Finding the tools
 

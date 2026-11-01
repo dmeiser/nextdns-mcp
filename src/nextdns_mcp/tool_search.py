@@ -1,11 +1,13 @@
 """Progressive-disclosure search transforms tuned for small models.
 
-The FastMCP search transforms (``BM25SearchTransform`` / ``RegexSearchTransform``)
-power progressive tool disclosure: ``tools/list`` exposes only ``search_tools``
-+ ``call_tool``, and the model discovers the real tools by searching.
+FastMCP's ``BM25SearchTransform`` powers progressive tool disclosure:
+``tools/list`` exposes only ``search_tools`` + ``call_tool``, and the model
+discovers the real tools by searching. (FastMCP also offers a regex transform;
+it is not mounted here — it ranks nothing, and no live validation ran under
+it, so it was removed before shipping.)
 
-Both transforms can return an EMPTY list when a query shares no tokens with any
-tool, and both rank by prose similarity rather than by what the caller asked to
+The transform can return an EMPTY list when a query shares no tokens with any
+tool, and it ranks by prose similarity rather than by what the caller asked to
 *do*. Small models reliably query with guessed tool names (``updateProfile``,
 ``replace_parental_services``, ``add dns rewrite record``) rather than task
 descriptions, so the search comes back empty and the model then invents a
@@ -30,7 +32,7 @@ from typing import Any
 
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.server.transforms.search import BM25SearchTransform, RegexSearchTransform
+from fastmcp.server.transforms.search import BM25SearchTransform
 from fastmcp.tools.base import Tool
 
 logger = logging.getLogger(__name__)
@@ -341,19 +343,17 @@ class _CatalogAwareSearchMixin:
     """
 
     _max_results: int
-    # How variants are appended to a query: bm25 concatenates terms, regex
-    # alternates patterns. None (the base-mixin default) leaves queries alone.
-    _variant_join: str | None = None
 
     def _augment_query(self, query: str, variants: set[str]) -> str:
-        """Widen a lexical query with the catalog's own other spellings."""
-        if not variants or self._variant_join is None:
+        """Widen a lexical query with the catalog's own other spellings.
+
+        bm25 indexes raw text with no stemming, so the partner spellings ride
+        along as extra terms (see _variant_words). Without variants, the
+        caller's query is exactly what was asked and stays untouched.
+        """
+        if not variants:
             return query
-        augmented = self._variant_join.join([query, *sorted(variants)])
-        budget = getattr(self, "_max_pattern_length", 0)
-        if budget and len(augmented) > budget:
-            return query
-        return augmented
+        return " ".join([query, *sorted(variants)])
 
     async def _search(self, tools: Sequence[Tool], query: str) -> Sequence[Tool]:
         # A scope reference is scored out before anything else, because it is
@@ -453,14 +453,6 @@ a JSON payload with an error `code` and, when available, a `hint`.
 
 class FallbackBM25SearchTransform(_CatalogAwareSearchMixin, BM25SearchTransform):
     """BM25 search with a full-catalog fallback and name-aware ranking."""
-
-    _variant_join = " "
-
-
-class FallbackRegexSearchTransform(_CatalogAwareSearchMixin, RegexSearchTransform):
-    """Regex search with a full-catalog fallback and name-aware ranking."""
-
-    _variant_join = "|"
 
 
 def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
@@ -739,12 +731,8 @@ class CallToolShapeMiddleware(Middleware):
             return ()
 
 
-def build_search_transform(mode: str) -> BM25SearchTransform | RegexSearchTransform | None:
+def build_search_transform(mode: str) -> BM25SearchTransform | None:
     """Return the configured search transform for ``mode`` (``off`` -> None)."""
-    if mode == "regex":
-        return FallbackRegexSearchTransform(
-            max_results=CATALOG_MAX_RESULTS, search_result_serializer=_compact_search_results
-        )
     if mode == "bm25":
         return FallbackBM25SearchTransform(
             max_results=CATALOG_MAX_RESULTS, search_result_serializer=_compact_search_results

@@ -21,15 +21,15 @@ from nextdns_mcp.spec_tools import spec_tool_names
 class TestGetToolSearchMode:
     """Tests for the NEXTDNS_TOOL_SEARCH parser."""
 
-    def test_default_is_off(self, monkeypatch):
+    def test_default_is_bm25(self, monkeypatch):
         monkeypatch.delenv("NEXTDNS_TOOL_SEARCH", raising=False)
-        assert get_tool_search_mode() == "off"
+        assert get_tool_search_mode() == "bm25"
 
-    def test_empty_value_is_off(self, monkeypatch):
+    def test_empty_value_is_bm25(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "")
-        assert get_tool_search_mode() == "off"
+        assert get_tool_search_mode() == "bm25"
 
-    @pytest.mark.parametrize("mode", ["off", "regex", "bm25"])
+    @pytest.mark.parametrize("mode", ["off", "bm25"])
     def test_accepted_modes(self, monkeypatch, mode):
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
         assert get_tool_search_mode() == mode
@@ -116,20 +116,13 @@ class TestNameAwareRanking:
         assert ranked == ["plotAnalytics", "getAnalyticsDomains", "listProfiles"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("mode", "params"),
-        [
-            ("bm25", {"query": "generate analytics plot"}),
-            ("regex", {"pattern": "plot"}),
-        ],
-    )
-    async def test_plot_query_ranks_plot_analytics_first(self, monkeypatch, mode, params):
+    async def test_plot_query_ranks_plot_analytics_first(self, monkeypatch):
         """'generate analytics plot' used to put the analytics query tools ahead of it."""
         from fastmcp import Client
 
-        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", params)
+            found = await client.call_tool("search_tools", {"query": "generate analytics plot"})
             names = [t.get("name") for t in found.data]
             assert names[0] == "plotAnalytics"
 
@@ -185,30 +178,18 @@ class TestMorphologicalQueryExpansion:
         vocabulary = {"profile", "profiles", "category", "categories"}
         assert _variant_words("delete profile categories", vocabulary, exclude={"profile"}) == {"category"}
 
-    def test_bm25_concatenates_variants_regex_alternates_them(self):
-        from nextdns_mcp.tool_search import FallbackBM25SearchTransform, FallbackRegexSearchTransform
+    def test_bm25_concatenates_variants_into_the_query(self):
+        from nextdns_mcp.tool_search import FallbackBM25SearchTransform
 
         assert (
             FallbackBM25SearchTransform()._augment_query("parental categories", {"category"})
             == "parental categories category"
         )
-        assert (
-            FallbackRegexSearchTransform()._augment_query("parental categories", {"category"})
-            == "parental categories|category"
-        )
 
-    def test_augmentation_needs_variants_and_a_join(self):
-        from nextdns_mcp.tool_search import FallbackBM25SearchTransform, _CatalogAwareSearchMixin
+    def test_augmentation_without_variants_leaves_the_query_alone(self):
+        from nextdns_mcp.tool_search import FallbackBM25SearchTransform
 
         assert FallbackBM25SearchTransform()._augment_query("natives", set()) == "natives"
-        assert _CatalogAwareSearchMixin()._augment_query("natives", {"native"}) == "natives"
-
-    def test_augmentation_stops_at_the_pattern_budget(self):
-        from nextdns_mcp.tool_search import FallbackRegexSearchTransform
-
-        transform = FallbackRegexSearchTransform()
-        transform._max_pattern_length = 10
-        assert transform._augment_query("parental categories", {"category"}) == "parental categories"
 
     @pytest.mark.asyncio
     async def test_a_plural_noun_query_reaches_the_singular_named_tool(self, monkeypatch):
@@ -227,15 +208,6 @@ class TestMorphologicalQueryExpansion:
         async with Client(build_mcp_server()) as client:
             found = await client.call_tool("search_tools", {"query": "update profile privacy_natives"})
         assert "replacePrivacyNatives" in [tool.get("name") for tool in found.data]
-
-    @pytest.mark.asyncio
-    async def test_regex_queries_are_widened_too(self, monkeypatch):
-        from fastmcp import Client
-
-        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "regex")
-        async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"pattern": "parental categories"})
-        assert "updateParentalControlCategoryEntry" in [tool.get("name") for tool in found.data]
 
 
 class TestPublishedDescriptions:
@@ -394,11 +366,10 @@ class TestSyntheticToolDescriptions:
     """Under disclosure the two synthetic tools are the only always-visible text."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", ["bm25", "regex"])
-    async def test_they_describe_the_discovery_mechanism(self, monkeypatch, mode):
+    async def test_they_describe_the_discovery_mechanism(self, monkeypatch):
         from fastmcp import Client
 
-        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
             described = {t.name: (t.description or "") for t in await client.list_tools()}
         # Prose wraps, so compare on collapsed whitespace.
@@ -407,8 +378,7 @@ class TestSyntheticToolDescriptions:
         assert "exact name" in described["call_tool"].casefold()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", ["bm25", "regex"])
-    async def test_they_state_the_shape_of_the_answer_and_the_name_it_wants(self, monkeypatch, mode):
+    async def test_they_state_the_shape_of_the_answer_and_the_name_it_wants(self, monkeypatch):
         """The most common way a call never reaches a tool is a shape mistake.
 
         Observed live: `call_tool(name=<the whole search result array>)`. The
@@ -420,7 +390,7 @@ class TestSyntheticToolDescriptions:
         """
         from fastmcp import Client
 
-        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
             described = {t.name: (t.description or "") for t in await client.list_tools()}
         # Prose wraps, so compare on collapsed whitespace.
@@ -431,11 +401,10 @@ class TestSyntheticToolDescriptions:
         assert "highest-ranked tool in it" in call
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", ["bm25", "regex"])
-    async def test_they_instruct_no_behaviour_and_name_no_client_or_real_tool(self, monkeypatch, mode):
+    async def test_they_instruct_no_behaviour_and_name_no_client_or_real_tool(self, monkeypatch):
         from fastmcp import Client
 
-        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         async with Client(build_mcp_server()) as client:
             described = {t.name: (t.description or "") for t in await client.list_tools()}
@@ -456,9 +425,18 @@ class TestToolSearchServerWiring:
     """Tests for the transform wiring on the built MCP server."""
 
     @pytest.mark.asyncio
-    async def test_default_lists_full_catalog(self, monkeypatch):
-        """Without the flag the whole generated catalog is advertised."""
+    async def test_default_is_bm25_disclosure(self, monkeypatch):
+        """An unset flag gives bm25, the mode every live validation ran under."""
         monkeypatch.delenv("NEXTDNS_TOOL_SEARCH", raising=False)
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        server = build_mcp_server()
+        names = {t.name for t in await server.list_tools()}
+        assert names == {"search_tools", "call_tool"}
+
+    @pytest.mark.asyncio
+    async def test_off_lists_full_catalog(self, monkeypatch):
+        """The explicit opt-out advertises the whole generated catalog."""
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         server = build_mcp_server()
         names = {t.name for t in await server.list_tools()}
@@ -468,10 +446,9 @@ class TestToolSearchServerWiring:
         assert "call_tool" not in names
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", ["regex", "bm25"])
-    async def test_enabled_modes_replace_catalog(self, monkeypatch, mode):
-        """With a mode enabled only the synthetic discovery pair is listed."""
-        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+    async def test_enabled_mode_replaces_catalog(self, monkeypatch):
+        """With bm25 only the synthetic discovery pair is listed."""
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         server = build_mcp_server()
         names = {t.name for t in await server.list_tools()}
@@ -483,11 +460,11 @@ class TestToolSearchServerWiring:
         tools and the call_tool proxy reaches them."""
         from fastmcp import Client
 
-        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "regex")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         server = build_mcp_server()
         async with Client(server) as client:
-            found = await client.call_tool("search_tools", {"pattern": "addToDenylist"})
+            found = await client.call_tool("search_tools", {"query": "addToDenylist"})
             assert any(t.get("name") == "addToDenylist" for t in found.data)
 
             # The hidden tool is still resolvable server-side (call path),
@@ -500,8 +477,7 @@ class TestSearchFallback:
     """Empty-result fallback: guessed-name queries still surface the catalog."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", ["bm25", "regex"])
-    async def test_unmatchable_query_falls_back_to_a_usable_catalog(self, monkeypatch, mode):
+    async def test_unmatchable_query_falls_back_to_a_usable_catalog(self, monkeypatch):
         """A guessed tool name sharing no tokens with any tool must not return empty.
 
         This is the small model's dominant failure: it searches for a name it
@@ -511,12 +487,11 @@ class TestSearchFallback:
         """
         from fastmcp import Client
 
-        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", mode)
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         server = build_mcp_server()
         async with Client(server) as client:
-            params = {"query": "updateProfileZzz"} if mode == "bm25" else {"pattern": "updateProfileZzz"}
-            found = await client.call_tool("search_tools", params)
+            found = await client.call_tool("search_tools", {"query": "updateProfileZzz"})
             names = [t.get("name") for t in found.data]
 
         assert names, "an unmatchable query returned nothing"
@@ -528,14 +503,9 @@ class TestSearchFallback:
         assert len(names) <= ts.CATALOG_MAX_RESULTS
 
     def test_build_transform_types(self):
-        from nextdns_mcp.tool_search import (
-            FallbackBM25SearchTransform,
-            FallbackRegexSearchTransform,
-            build_search_transform,
-        )
+        from nextdns_mcp.tool_search import FallbackBM25SearchTransform, build_search_transform
 
         assert isinstance(build_search_transform("bm25"), FallbackBM25SearchTransform)
-        assert isinstance(build_search_transform("regex"), FallbackRegexSearchTransform)
         assert build_search_transform("off") is None
 
 
@@ -789,7 +759,10 @@ class TestATypedNameSaysWhichNamesThereAre:
     def _server_env(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
-        monkeypatch.delenv("NEXTDNS_TOOL_SEARCH", raising=False)
+        # This class compares against the real catalog, so it asks for the
+        # full listing explicitly; the shipped default (bm25) would publish
+        # only the synthetic discovery pair.
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
 
     def _catalog(self) -> list:
         """The real tools, which is what the shape middleware compares against."""

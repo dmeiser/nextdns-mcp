@@ -176,22 +176,31 @@ def get_writable_profiles() -> set[str] | None:
     return parse_profile_list(profiles)
 
 
-# Tool-search modes accepted by NEXTDNS_TOOL_SEARCH. "off" (the default)
-# advertises the full tool catalog; "regex"/"bm25" replace the listing with
-# FastMCP's synthetic search_tools/call_tool pair (progressive disclosure).
-TOOL_SEARCH_MODES: tuple[str, ...] = ("off", "regex", "bm25")
+# Tool-search modes accepted by NEXTDNS_TOOL_SEARCH. "bm25" (the default)
+# replaces the listing with FastMCP's synthetic search_tools/call_tool pair
+# (progressive disclosure); "off" advertises the full tool catalog. FastMCP
+# also offers a regex transform; it was dropped before shipping because it
+# ranks nothing (registration order within a pattern match) and none of the
+# live model validations that shaped this feature ran under it.
+TOOL_SEARCH_MODES: tuple[str, ...] = ("off", "bm25")
+
+# What an unset (or empty) NEXTDNS_TOOL_SEARCH resolves to. bm25 is what
+# every live-model validation of this contract ran under, so the full
+# 80-tool listing is the explicit opt-out rather than the default everyone
+# trips over.
+DEFAULT_TOOL_SEARCH_MODE = "bm25"
 
 
 def get_tool_search_mode() -> str:
     """Get the tool-search (progressive disclosure) mode from the environment.
 
-    Reads ``NEXTDNS_TOOL_SEARCH``: ``"regex"`` or ``"bm25"`` enable FastMCP's
-    search transforms, which hide the real tool catalog behind a
-    ``search_tools`` + ``call_tool`` pair; ``"off"`` (or unset) keeps the
-    normal full listing.
+    Reads ``NEXTDNS_TOOL_SEARCH``: ``"bm25"`` (the default) enables FastMCP's
+    search transform, which hides the real tool catalog behind a
+    ``search_tools`` + ``call_tool`` pair; ``"off"`` keeps the normal full
+    listing. Unset or empty means ``"bm25"``.
 
     Returns:
-        str: One of ``"off"``, ``"regex"``, or ``"bm25"`` (default ``"off"``).
+        str: One of ``"off"`` or ``"bm25"`` (default ``"bm25"``).
 
     Raises:
         ConfigurationError: If NEXTDNS_TOOL_SEARCH is not one of the accepted
@@ -199,7 +208,7 @@ def get_tool_search_mode() -> str:
     """
     raw = os.getenv("NEXTDNS_TOOL_SEARCH", "").strip().lower()
     if not raw:
-        return "off"
+        return DEFAULT_TOOL_SEARCH_MODE
     if raw not in TOOL_SEARCH_MODES:
         raise ConfigurationError(
             f"Invalid NEXTDNS_TOOL_SEARCH: {raw!r}. Expected one of: {', '.join(TOOL_SEARCH_MODES)}."
