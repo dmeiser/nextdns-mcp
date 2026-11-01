@@ -83,12 +83,18 @@ jobs:
         env:
           NEXTDNS_API_KEY: ${{ secrets.NEXTDNS_API_KEY }}
         run: |
+          # Disclosure now defaults to bm25 (only search_tools + call_tool are
+          # listed); this suite's preflight asserts tools/list equals the
+          # shipped document's full tool set, so the served container pins the
+          # full listing. The bm25 path is covered by the unit suite and the
+          # live-model harness.
           docker run -d \
             --name nextdns-container-e2e \
             -p 8000:8000 \
             -e NEXTDNS_API_KEY="${NEXTDNS_API_KEY}" \
             -e NEXTDNS_READABLE_PROFILES="ALL" \
             -e NEXTDNS_WRITABLE_PROFILES="ALL" \
+            -e NEXTDNS_TOOL_SEARCH="off" \
             -e MCP_TRANSPORT="http" \
             -e MCP_HOST="0.0.0.0" \
             -e MCP_PORT="8000" \
