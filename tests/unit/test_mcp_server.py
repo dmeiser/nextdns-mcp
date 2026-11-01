@@ -41,6 +41,9 @@ class TestCreateMcpServer:
         this function must expose none of them.
         """
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        # The machinery under test is the bare server; disclosure (the default
+        # now) would list its synthetic pair before any catalog is registered.
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
 
         result = create_mcp_server()
 
@@ -71,11 +74,22 @@ class TestCreateMcpServer:
 class TestProductionServerTools:
     """The production server's catalog is the generated one, and nothing else."""
 
+    @pytest.fixture(autouse=True)
+    def _full_listing(self, monkeypatch):
+        """The catalog's shape is only visible under the full listing.
+
+        Disclosure defaults to bm25 now, which lists just the synthetic pair;
+        these tests assert the shape of the catalog itself, so they pin the
+        explicit opt-out and build the server fresh (the lazy singleton would
+        carry whatever mode the first server in the process saw).
+        """
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
+
     @staticmethod
     async def _published_names() -> set[str]:
-        from nextdns_mcp.server import mcp_server
+        from nextdns_mcp.server import build_mcp_server
 
-        return {tool.name for tool in await mcp_server.list_tools()}
+        return {tool.name for tool in await build_mcp_server().list_tools()}
 
     @pytest.mark.asyncio
     async def test_the_catalog_is_what_the_server_says_it_is(self):
@@ -129,9 +143,9 @@ class TestProductionServerTools:
     @pytest.mark.asyncio
     async def test_a_generated_tool_names_the_endpoint_it_calls(self):
         """The description says which API call a name executes, so the name is checkable."""
-        from nextdns_mcp.server import mcp_server
+        from nextdns_mcp.server import build_mcp_server
 
-        tools = {tool.name: tool for tool in await mcp_server.list_tools()}
+        tools = {tool.name: tool for tool in await build_mcp_server().list_tools()}
         assert tools["addToDenylist"].description.rstrip().endswith("NextDNS API: POST /profiles/{profile_id}/denylist")
 
 

@@ -304,6 +304,7 @@ class TestRegistration:
 
     async def test_the_surface_publishes_one_tool_per_operation(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_API_KEY", "k")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
@@ -319,6 +320,7 @@ class TestRegistration:
         caller of this surface has no way to find out the server can do either.
         """
         monkeypatch.setenv("NEXTDNS_API_KEY", "k")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
