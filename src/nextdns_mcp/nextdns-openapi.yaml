@@ -1552,7 +1552,7 @@ paths:
     put:
       summary: Replace denylist
       description: |
-        Replaces the entire denylist with the provided list of domains.
+        Replaces the entire denylist with the provided list of domains. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
         **Warning**: This operation removes all existing entries and replaces them.
         **Safety Note**: Only use with designated test profiles.
@@ -1682,7 +1682,7 @@ paths:
     put:
       summary: Replace allowlist
       description: |
-        Replaces the entire allowlist with the provided list of domains.
+        Replaces the entire allowlist with the provided list of domains. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
         **Warning**: This operation removes all existing entries and replaces them.
         **Safety Note**: Only use with designated test profiles.
@@ -1789,7 +1789,7 @@ paths:
     put:
       summary: Replace parental control services
       description: |
-        Replaces the entire list of blocked services.
+        Replaces the entire list of blocked services. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
       operationId: replaceParentalControlServices
       security:
@@ -1921,7 +1921,7 @@ paths:
     put:
       summary: Replace parental control categories
       description: |
-        Replaces the entire list of blocked categories.
+        Replaces the entire list of blocked categories. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
       operationId: replaceParentalControlCategories
       security:
@@ -2295,7 +2295,7 @@ paths:
     put:
       summary: Replace security TLD blocklist
       description: |
-        Replaces the entire security TLD blocklist with the provided list.
+        Replaces the entire security TLD blocklist with the provided list. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
         **Warning**: This operation removes all existing entries and replaces them.
         **Safety Note**: Only use with designated test profiles.
@@ -2394,7 +2394,7 @@ paths:
     put:
       summary: Replace privacy blocklists
       description: |
-        Replaces the entire privacy blocklists collection with the provided list.
+        Replaces the entire privacy blocklists collection with the provided list. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
         **Warning**: This operation removes all existing entries and replaces them.
         **Safety Note**: Only use with designated test profiles.
@@ -2493,7 +2493,7 @@ paths:
     put:
       summary: Replace native tracking protection
       description: |
-        Replaces the entire native tracking protection collection with the provided list.
+        Replaces the entire native tracking protection collection with the provided list. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
         **Warning**: This operation removes all existing entries and replaces them.
         **Safety Note**: Only use with designated test profiles.
