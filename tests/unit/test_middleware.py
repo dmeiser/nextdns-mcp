@@ -361,3 +361,43 @@ class TestStripExtraFieldsMiddleware:
         """Test fallback to original string if int() raises ValueError."""
         monkeypatch.setattr("nextdns_mcp.openapi.is_integer_shaped", lambda _s: True)
         assert middleware._coerce_string_value("invalid", {"integer"}) == "invalid"
+
+
+class TestIgnoredArgumentOwnerHint:
+    """The ignored-arguments hint names the tool that declares the dropped keys.
+
+    A generic 'check the parameter list' let a model that sent updateSettings
+    the keys of updateSecuritySettings report a wrong-endpoint success (live,
+    target-model run). The hint has to name the owning tool when exactly one
+    tool declares each dropped argument.
+    """
+
+    def test_single_owner_is_named(self):
+        from nextdns_mcp.openapi import _owner_hint
+
+        hint = _owner_hint(["googleSafeBrowsing", "threatIntelligenceFeeds"], "updateSettings")
+        assert "not parameters" in hint
+        assert "updateSecuritySettings" in hint
+        assert "call it with them" in hint
+
+    def test_multiple_owners_are_split(self):
+        from nextdns_mcp.openapi import _owner_hint
+
+        hint = _owner_hint(["googleSafeBrowsing", "allowAffiliate"], "updateSettings")
+        assert "updateSecuritySettings" in hint
+        assert "updatePrivacySettings" in hint
+        assert "each named tool" in hint
+
+    def test_unowned_arguments_note_alongside_an_owner(self):
+        from nextdns_mcp.openapi import _owner_hint
+
+        hint = _owner_hint(["googleSafeBrowsing", "extra_field"], "updateSettings")
+        assert "updateSecuritySettings" in hint
+        assert "extra_field" in hint
+        assert "dropped too" in hint
+
+    def test_generic_hint_when_nothing_has_an_owner(self):
+        from nextdns_mcp.openapi import _owner_hint
+
+        hint = _owner_hint(["extra_field", "unknown"], "updateSettings")
+        assert "check the tool's parameter list" in hint

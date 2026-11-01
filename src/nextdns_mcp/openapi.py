@@ -36,6 +36,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from typing import Any, NamedTuple
 
 import httpx
@@ -98,7 +99,47 @@ class HealthFailure(NamedTuple):
 _health_probe_cache: tuple[float, HealthFailure | None] | None = None
 
 
-def _report_ignored_arguments(result: ToolResult, ignored: list[str]) -> None:
+@lru_cache(maxsize=1)
+def _argument_index() -> dict[str, tuple[str, ...]]:
+    """Each flattened argument name mapped to the spec tools that declare it."""
+    from .spec_tools import spec_routes
+
+    index: dict[str, set[str]] = {}
+    for route in spec_routes():
+        for prop in (route.flat_param_schema or {}).get("properties") or {}:
+            index.setdefault(str(prop), set()).add(str(route.operation_id))
+    return {name: tuple(sorted(ops)) for name, ops in index.items()}
+
+
+def _owner_hint(ignored: list[str], tool_name: str) -> str:
+    """Name the tool that actually declares each dropped argument.
+
+    'check the parameter list' left the caller to rediscover what it had
+    already held: a model that sent updateSettings the keys belonging to
+    updateSecuritySettings read the generic annotation as success and reported
+    the wrong endpoint changed (live, target-model run). Naming the owning
+    tool turns the ignored-arguments annotation into a correction the caller
+    can act on; arguments no single other tool declares stay a generic note.
+    """
+    grouped: dict[str, list[str]] = {}
+    unowned: list[str] = []
+    for arg in ignored:
+        owners = [op for op in _argument_index().get(arg, ()) if op != tool_name]
+        if len(owners) == 1:
+            grouped.setdefault(owners[0], []).append(arg)
+        else:
+            unowned.append(arg)
+    base = "these arguments are not parameters of this tool and were not applied"
+    if not grouped:
+        return base + "; check the tool's parameter list before assuming the change happened"
+    where = "; ".join(f"{', '.join(args)} are parameters of {tool}" for tool, args in sorted(grouped.items()))
+    tail = " — call it with them" if len(grouped) == 1 else ": call each named tool with its own arguments"
+    if unowned:
+        where += f"; {', '.join(unowned)} matched no single other tool and was dropped too"
+    return f"{base}. {where}{tail}"
+
+
+def _report_ignored_arguments(result: ToolResult, ignored: list[str], tool_name: str = "") -> None:
     """Name the arguments the relaxation dropped instead of dropping them silently.
 
     Dropping unknown top-level arguments is deliberate (AI clients send them),
@@ -111,10 +152,7 @@ def _report_ignored_arguments(result: ToolResult, ignored: list[str]) -> None:
     structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         structured["ignored_arguments"] = ignored
-        structured["hint"] = (
-            "these arguments are not parameters of this tool and were not applied; "
-            "check the tool's parameter list before assuming the change happened"
-        )
+        structured["hint"] = _owner_hint(ignored, tool_name)
 
 
 class StripExtraFieldsMiddleware(Middleware):
@@ -278,7 +316,7 @@ class StripExtraFieldsMiddleware(Middleware):
 
         result = await call_next(context)
         if ignored:
-            _report_ignored_arguments(result, ignored)
+            _report_ignored_arguments(result, ignored, context.message.name)
         return result
 
 
