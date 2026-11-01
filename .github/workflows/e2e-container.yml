@@ -196,6 +196,14 @@ jobs:
           path: artifacts/tools_report_${{ matrix.variant }}.jsonl
           if-no-files-found: warn
 
+      - name: Upload security toggle verdicts (${{ matrix.variant }})
+        if: always() && steps.check-secrets.outputs.has_secret == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-toggles-${{ matrix.variant }}
+          path: artifacts/security_toggles_${{ matrix.variant }}.json
+          if-no-files-found: warn
+
       - name: Display test summary (${{ matrix.variant }})
         if: always()
         env:
@@ -239,4 +247,18 @@ jobs:
             fi
           else
             echo "❌ No test report generated ($REPORT_FILE)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Display security toggle verdicts (${{ matrix.variant }})
+        if: always() && steps.check-secrets.outputs.has_secret == 'true'
+        env:
+          TOGGLE_FILE: artifacts/security_toggles_${{ matrix.variant }}.json
+        run: |
+          if [ -f "$TOGGLE_FILE" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Security Toggle Verification" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Key | Verdict |" >> $GITHUB_STEP_SUMMARY
+            echo "|-----|---------|" >> $GITHUB_STEP_SUMMARY
+            jq -r 'to_entries[] | "| \(.key) | \(.value) |"' "$TOGGLE_FILE" >> $GITHUB_STEP_SUMMARY
           fi
