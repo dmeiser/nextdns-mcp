@@ -288,7 +288,11 @@ class TestPublishedDescriptions:
     async def test_a_search_answer_stays_small_enough_to_be_worth_reading(self, monkeypatch):
         """Measured live: with the full descriptions and four results the answer
         was 10-18 KB for a one-line task, and the run stalled 27 times in 29
-        steps. The payload is part of the contract, not an implementation detail."""
+        steps. The payload is part of the contract, not an implementation detail.
+        The count is CATALOG_MAX_RESULTS (six: a noun-only query must be able to
+        show a whole operation family); the byte budget is what actually bounds
+        the payload, and the compactor enforces it regardless of the count.
+        """
         import json
 
         from fastmcp import Client
@@ -298,7 +302,7 @@ class TestPublishedDescriptions:
             for query in ("add entry to allowlist", "analytics top domains", "query logs last hour"):
                 found = await client.call_tool("search_tools", {"query": query})
                 assert len(json.dumps(found.data)) < 8500, query
-                assert len(found.data) <= 4, query
+                assert len(found.data) <= ts.CATALOG_MAX_RESULTS, query
 
     def test_a_description_with_no_line_break_is_still_cut_at_the_budget(self):
         """Cutting at a line boundary is a preference, not a licence to overflow.

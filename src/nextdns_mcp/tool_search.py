@@ -35,14 +35,13 @@ from fastmcp.tools.base import Tool
 
 logger = logging.getLogger(__name__)
 
-# The NextDNS server exposes a small fixed catalog (the grouped CRUD tools), so
-# a search should be able to surface all of it - but not at any cost. Each
-# result carries the tool's whole description, and a live run measured the
-# answer at 10-18 KB (about 4k tokens) for a one-line task: the actor then
-# stalled 27 times across 29 steps, and 13 of those steps never reached a tool
-# at all. Four results plus name-matched inclusion keeps the answer near the
-# size it was before the full descriptions went live.
-CATALOG_MAX_RESULTS = 4
+# The slice the answer carries. Four could not show a whole operation family:
+# a noun-only query ('denylist', 'security tlds') names a family whose members
+# all carry the word, so the sixth member the caller still needed
+# (replaceDenylist, getSecurityTLDs) was crowded out and the caller acted
+# through the wrong sibling (measured live on the target model). Six shows the
+# family; the whole-answer byte budget below still bounds what each carries.
+CATALOG_MAX_RESULTS = 6
 
 # Per-result budget for the description in a search answer. Sized so the parts
 # that decide the call - the list types, the operations, the metrics - fit, and
