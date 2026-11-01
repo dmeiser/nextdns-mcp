@@ -461,6 +461,14 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
     """
     srv = config.server
     srv_env = {str(k): str(v) for k, v in srv.get("env", {}).items()}
+    # Never write the API key into the file. A live run showed the model can
+    # browse the workdir with opencode's `read` tool, and this file is what it
+    # reads first; an inlined key would then reach the model endpoint. The
+    # harness launches the actor with NEXTDNS_API_KEY in its environment, and
+    # opencode expands `{env:...}` when it loads the config, so the server
+    # still receives the key while the file carries only a reference.
+    if "NEXTDNS_API_KEY" in srv_env:
+        srv_env["NEXTDNS_API_KEY"] = "{env:NEXTDNS_API_KEY}"
     # The server records here every tool call it actually executes. A read
     # leaves no trace in the NextDNS API, so this is the only evidence that a
     # step's operation really happened — the harness reads it back per step.
@@ -475,9 +483,19 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
             "bash": False,
             "search": False,
             "websearch": False,
+            "webfetch": False,
             "write": False,
             "edit": False,
             "patch": False,
+            # Filesystem browsing was live-observed (a live run read this very
+            # config back into model context, and a step failed on a model
+            # that poked the workdir instead of calling the contract): with the
+            # key now only env-referenced the read is inert, but a browsing
+            # model wastes its one session on it, so the tools are off too.
+            "read": False,
+            "glob": False,
+            "grep": False,
+            "list": False,
             # Observed in a live run: the model delegated a step to a subagent,
             # which is a second actor with its own context and tool access.
             "subagent": False,

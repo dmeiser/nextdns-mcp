@@ -772,9 +772,55 @@ class TestMcpConfigGeneration:
         assert srv["command"][0] == cfg.server["command"]
         assert srv["command"][1:] == cfg.server["args"]
         assert srv["cwd"] == cfg.server["cwd"]
-        assert srv["environment"]["NEXTDNS_API_KEY"] == "sk-test"
+        assert srv["environment"]["NEXTDNS_API_KEY"] == "{env:NEXTDNS_API_KEY}"
         assert srv["environment"]["NEXTDNS_API_BASE"] == h.API_BASE
         assert srv["enabled"] is True
+
+    def test_the_config_carries_no_inline_api_key(self, h, tmp_path, monkeypatch):
+        """The workdir file must never hold the real key.
+
+        A live run showed the model reads ``opencode.json`` with opencode's
+        built-in read tool; whatever this file contains reaches the model
+        endpoint. The key must therefore travel only as an ``{env:...}``
+        reference that opencode expands from the actor's own environment.
+        """
+        secret = "sk-live-secret-9f3a"
+        monkeypatch.setenv("NEXTDNS_API_KEY", secret)
+        cfg = h.HarnessConfig.load(None)
+        out = h.write_mcp_config(cfg, tmp_path)
+        text = out.read_text(encoding="utf-8")
+        assert secret not in text
+        assert json.loads(text)["mcp"]["nextdns"]["environment"]["NEXTDNS_API_KEY"] == "{env:NEXTDNS_API_KEY}"
+
+    def test_filesystem_browsing_builtins_are_disabled(self, h, tmp_path):
+        """Nothing outside the nextdns tools may touch the workdir or network.
+
+        A live run burned a step browsing the workdir (`read` on the directory
+        listing and on this config) instead of calling the contract, and read
+        the config back into model context. Browsing and fetching tools are off
+        alongside the write/exec ones so the model's only move is the MCP call.
+        """
+        cfg = h.HarnessConfig.load(None)
+        doc = json.loads(h.write_mcp_config(cfg, tmp_path).read_text(encoding="utf-8"))
+        tools = doc["tools"]
+        assert tools["nextdns*"] is True
+        for name in (
+            "read",
+            "glob",
+            "grep",
+            "list",
+            "webfetch",
+            "shell",
+            "bash",
+            "write",
+            "edit",
+            "patch",
+            "subagent",
+            "task",
+            "websearch",
+            "search",
+        ):
+            assert tools[name] is False
 
     def test_codemode_off_registers_the_tools_natively(self, h, tmp_path):
         """`codemode: false` is opencode's per-server opt-out of Code Mode.
