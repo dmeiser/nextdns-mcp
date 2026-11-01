@@ -10,6 +10,7 @@ SPDX-License-Identifier: MIT
 
 import importlib.util
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -820,6 +821,9 @@ class TestMcpConfigGeneration:
             "task",
             "websearch",
             "search",
+            "question",
+            "opencode_*",
+            "experimental_*",
         ):
             assert tools[name] is False
 
@@ -2313,3 +2317,47 @@ class TestActorStreamCollection:
         run = await h.run_actor(cfg, "do the thing", tmp_path, retries=0)
         assert "timed out" in run.error
         assert run.tool_calls == []
+
+
+class TestScratchIsolation:
+    """Live-run forensics: downloadLogs keeps the CSV it downloads (the caller
+    gets the path), and a retained-logs CSV is ~500 MB. Weeks of runs left
+    ~6 GB of nextdns_logs_* dirs on /tmp — a tmpfs with a per-user quota —
+    until EDQUOT failed a live download and degraded four later sessions.
+    """
+
+    def test_sweep_removes_only_harness_download_dirs(self, h, tmp_path):
+        stale = tmp_path / "nextdns_logs_abc123"
+        stale.mkdir()
+        (tmp_path / "nextdns_logs_def456").mkdir()
+        keeper = tmp_path / "nextdns_logs_not_a_dir"
+        keeper.write_text("keep me", encoding="utf-8")
+        unrelated = tmp_path / "other-project"
+        unrelated.mkdir()
+
+        assert h._sweep_stale_download_dirs(tmp_path) == 2
+        assert not stale.exists()
+        assert keeper.exists()
+        assert unrelated.exists()
+
+    def test_sweep_of_empty_or_missing_base_is_zero(self, h, tmp_path):
+        assert h._sweep_stale_download_dirs(tmp_path) == 0
+        assert h._sweep_stale_download_dirs(tmp_path / "missing") == 0
+
+    def test_prepare_scratch_moves_tmpdir_to_home_and_sweeps_old_tmp(self, h, tmp_path, monkeypatch):
+        old_tmp = tmp_path / "oldtmp"
+        stale = old_tmp / "nextdns_logs_abc123"
+        stale.mkdir(parents=True)
+        home = tmp_path / "home"
+        monkeypatch.setattr(h.tempfile, "gettempdir", lambda: str(old_tmp))
+        monkeypatch.setattr(h.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("TMPDIR", "preset")  # snapshot + restore TMPDIR around the test
+
+        scratch = h._prepare_scratch_dir()
+        try:
+            assert not stale.exists()
+            assert scratch.is_dir()
+            assert home in scratch.parents
+            assert os.environ["TMPDIR"] == str(scratch)
+        finally:
+            h.shutil.rmtree(scratch, ignore_errors=True)

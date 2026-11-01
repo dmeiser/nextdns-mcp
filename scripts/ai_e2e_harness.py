@@ -147,6 +147,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import json
 import os
 import re
@@ -156,7 +157,7 @@ import tempfile
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Self
 
@@ -505,6 +506,16 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
             # which is a second actor with its own context and tool access.
             "subagent": False,
             "task": False,
+            # Nemotron live-run forensics: the remaining escape hatches were
+            # opencode's own meta-tools — opencode_list_mcp_resources fired
+            # before the model gave up on a step, experimental_image_generate
+            # fabricated a plot PNG (google/gemini-nano-banana) instead of
+            # calling plotAnalytics, and question asked the user instead of
+            # calling. The wildcards close the families, not just the three
+            # instances seen.
+            "opencode_*": False,
+            "experimental_*": False,
+            "question": False,
         },
         "mcp": {
             "nextdns": {
@@ -2435,6 +2446,41 @@ def _feedback_block(
     return out
 
 
+def _sweep_stale_download_dirs(base: Path) -> int:
+    """Delete leftover download-scratch dirs from previous harness runs.
+
+    ``downloadLogs`` deliberately keeps the CSV it downloads (the caller gets
+    the path back), and a retained-logs CSV is ~500 MB. Weeks of live runs
+    left ~6 GB of ``nextdns_logs_*`` dirs on /tmp — a tmpfs with a per-user
+    quota — until the quota failed a live download with EDQUOT and degraded
+    four later actor sessions. The harness sweeps what its own server leaves
+    behind, in the default temp location it used before scratch moved.
+    """
+    removed = 0
+    for entry in base.glob("nextdns_logs_*"):
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+    return removed
+
+
+def _prepare_scratch_dir() -> Path:
+    """Give the run a TMPDIR off the tmpfs quota, removed when the process ends.
+
+    Set before any actor (and therefore every per-step MCP server, which the
+    actor spawns and hands its environment to) can create a temp file: the
+    downloadLogs CSV lands here, on the root filesystem, instead of filling
+    the /tmp user quota. atexit removes the directory so runs do not
+    accumulate.
+    """
+    _sweep_stale_download_dirs(Path(tempfile.gettempdir()))
+    scratch = Path.home() / ".cache" / "nextdns-mcp-e2e" / f"run-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+    scratch.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(scratch)
+    atexit.register(partial(shutil.rmtree, scratch, ignore_errors=True))
+    return scratch
+
+
 async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     tag = common._random_tag()
     resolved_profile_name = common._resolve_profile_name(config.profile_name or None)
@@ -2454,6 +2500,10 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
         )
         _progress(f"targeted run: {len(selected)} of {total} steps ({ids})")
     _progress(f"profile name: {targets.profile_name}  ({len(selected)} of {total} steps)")
+    # Before any temp file is created (the workdir's mkdtemp and every
+    # per-step server's tempfile use TMPDIR), move scratch off the quota'd
+    # tmpfs and sweep leftovers from earlier runs.
+    _prepare_scratch_dir()
     workdir = Path(config.workdir) if config.workdir else Path(tempfile.mkdtemp(prefix="nextdns_e2e_"))
     workdir.mkdir(parents=True, exist_ok=True)
     write_mcp_config(config, workdir)
@@ -2988,9 +3038,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--actor-log", help="path for the actor raw event stream (default: <report>.actor.jsonl)")
     parser.add_argument(
         "--tool-search",
-        choices=("off", "regex", "bm25"),
-        help="enable FastMCP progressive tool disclosure on the MCP server "
-        "(sets NEXTDNS_TOOL_SEARCH; tools/list then exposes only search_tools + call_tool)",
+        choices=("off", "bm25"),
+        help="override FastMCP progressive tool disclosure on the MCP server "
+        "(sets NEXTDNS_TOOL_SEARCH; default bm25: tools/list exposes only "
+        "search_tools + call_tool, off advertises the full catalog)",
     )
     parser.add_argument(
         "--budget", type=float, help="overall run budget in seconds (default 7200; slow models need more)"
