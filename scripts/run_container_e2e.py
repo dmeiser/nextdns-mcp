@@ -785,7 +785,9 @@ class ContainerE2ERunner:
             return res
         return None
 
-    async def _patch_security_key(self, session: ClientSession, profile_id: str, key: str, value: Any) -> tuple[bool, str]:
+    async def _patch_security_key(
+        self, session: ClientSession, profile_id: str, key: str, value: Any
+    ) -> tuple[bool, str]:
         """PATCH a single security key; returns (ok, error_detail)."""
         ok, res = await self.execute_call(
             session,
