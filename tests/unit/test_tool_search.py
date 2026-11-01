@@ -50,11 +50,15 @@ class TestNameAwareRanking:
     def test_words_splits_camel_case_and_singularizes(self):
         from nextdns_mcp.tool_search import _words
 
-        assert _words("queryTimeSeries") == {"query", "time", "serie"}
+        assert _words("queryTimeSeries") == {"query", "time", "sery"}
         # "analytics" loses its trailing s the same way "Domains" does, which is what
         # lets a caller write either spelling and still match the tool's name.
         assert _words("getAnalyticsDomains") == {"get", "analytic", "domain"}
         assert _words("delete profile") == {"delete", "profile"}
+        # '-ies' folds to 'y' on both sides, so a plural query reaches a tool
+        # whose name and prose spell it singular ('categories' names 'Category').
+        assert _words("categories") == {"category"}
+        assert "category" in _words("getPrivacyCategories")
 
     def test_a_word_is_shared_by_share_not_by_count(self):
         """Two carriers out of four cancel a word; two out of forty do not.
@@ -149,6 +153,89 @@ class TestNameAwareRanking:
         async with Client(build_mcp_server()) as client:
             found = await client.call_tool("search_tools", {"query": "doh"})
         assert "dohLookup" in [tool.get("name") for tool in found.data]
+
+
+class TestMorphologicalQueryExpansion:
+    """Lexical search has to bridge plurals: live gemma 12b queries failed on them.
+
+    'parental categories' never surfaced updateParentalControlCategoryEntry and
+    'update profile privacy_natives' never surfaced replacePrivacyNatives, so
+    the model bulk-replaced through the only write tool the search had shown.
+    """
+
+    def test_variant_words_adds_catalog_partners(self):
+        from nextdns_mcp.tool_search import _variant_words
+
+        vocabulary = {"category", "categories", "native", "natives"}
+        assert _variant_words("categories natives", vocabulary) == {"category", "native"}
+
+    def test_variant_words_ignores_partners_the_catalog_never_wrote(self):
+        from nextdns_mcp.tool_search import _variant_words
+
+        assert _variant_words("categories aa", {"categories"}) == set()
+
+    def test_variant_words_adds_plural_of_a_singular_word(self):
+        from nextdns_mcp.tool_search import _variant_words
+
+        assert _variant_words("category entry", {"categories", "entries"}) == {"categories", "entries"}
+
+    def test_variant_words_skips_words_that_name_every_tool(self):
+        from nextdns_mcp.tool_search import _variant_words
+
+        vocabulary = {"profile", "profiles", "category", "categories"}
+        assert _variant_words("delete profile categories", vocabulary, exclude={"profile"}) == {"category"}
+
+    def test_bm25_concatenates_variants_regex_alternates_them(self):
+        from nextdns_mcp.tool_search import FallbackBM25SearchTransform, FallbackRegexSearchTransform
+
+        assert (
+            FallbackBM25SearchTransform()._augment_query("parental categories", {"category"})
+            == "parental categories category"
+        )
+        assert (
+            FallbackRegexSearchTransform()._augment_query("parental categories", {"category"})
+            == "parental categories|category"
+        )
+
+    def test_augmentation_needs_variants_and_a_join(self):
+        from nextdns_mcp.tool_search import FallbackBM25SearchTransform, _CatalogAwareSearchMixin
+
+        assert FallbackBM25SearchTransform()._augment_query("natives", set()) == "natives"
+        assert _CatalogAwareSearchMixin()._augment_query("natives", {"native"}) == "natives"
+
+    def test_augmentation_stops_at_the_pattern_budget(self):
+        from nextdns_mcp.tool_search import FallbackRegexSearchTransform
+
+        transform = FallbackRegexSearchTransform()
+        transform._max_pattern_length = 10
+        assert transform._augment_query("parental categories", {"category"}) == "parental categories"
+
+    @pytest.mark.asyncio
+    async def test_a_plural_noun_query_reaches_the_singular_named_tool(self, monkeypatch):
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": "parental categories"})
+        assert "updateParentalControlCategoryEntry" in [tool.get("name") for tool in found.data]
+
+    @pytest.mark.asyncio
+    async def test_a_plural_query_reaches_the_bulk_replace_tool(self, monkeypatch):
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": "update profile privacy_natives"})
+        assert "replacePrivacyNatives" in [tool.get("name") for tool in found.data]
+
+    @pytest.mark.asyncio
+    async def test_regex_queries_are_widened_too(self, monkeypatch):
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "regex")
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"pattern": "parental categories"})
+        assert "updateParentalControlCategoryEntry" in [tool.get("name") for tool in found.data]
 
 
 class TestPublishedDescriptions:

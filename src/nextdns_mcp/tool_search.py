@@ -64,17 +64,72 @@ def _words(text: str) -> set[str]:
 
     Trailing 's' is stripped from longer words so the plural of a tool's name
     ('manageProfiles' -> 'profile') matches the caller's wording ('delete
-    profile'). This is deliberately crude: it only needs to make a name and a
-    short query comparable, not to parse language.
+    profile'), and '-ies' folds the same way ('categories' -> 'category') so a
+    plural query reaches a tool whose name and prose spell it singular. Both
+    sides go through this function, so a crude fold is fine as long as it is
+    symmetric: it only needs to make a name and a short query comparable, not
+    to parse language.
     """
     words = set()
     for raw in _WORD_SPLIT.split(text):
         word = raw.casefold()
-        if len(word) > 3 and word.endswith("s"):
+        if len(word) > 3 and word.endswith("ies"):
+            word = word[:-3] + "y"
+        elif len(word) > 3 and word.endswith("s"):
             word = word[:-1]
         if word:
             words.add(word)
     return words
+
+
+def _catalog_name_words(tools: Sequence[Tool]) -> set[str]:
+    """The raw casefolded words of every tool NAME — the guard for variants.
+
+    A partner spelling earns a ride in the query only when a tool name is
+    actually spelled that way: 'category' names update...CategoryEntry and
+    'categories' names get...Categories. Prose-only partners ('adds',
+    'deletes' from the 'Adds.../Deletes...' description boilerplate) describe
+    every tool and no tool, so they stay out of the expansion.
+    """
+    words: set[str] = set()
+    for tool in tools:
+        words.update(w.casefold() for w in _WORD_SPLIT.split(tool.name) if w)
+    return words
+
+
+def _morphological_partners(word: str) -> set[str]:
+    """The plural/singular spellings this word could trade places with."""
+    partners = {word + "s", word + "es"}
+    if word.endswith("ies"):
+        partners.add(word[:-3] + "y")
+    elif word.endswith("y"):
+        partners.add(word[:-1] + "ies")
+    if word.endswith("s"):
+        partners.add(word[:-1])
+    return partners
+
+
+def _variant_words(query: str, vocabulary: set[str], exclude: set[str] | frozenset[str] = frozenset()) -> set[str]:
+    """Plural/singular partners of the query's words that tool names do use.
+
+    bm25 indexes raw text with no stemming, so a query that says 'categories'
+    never reaches a tool whose name and prose say 'category' - measured live,
+    noun-only queries ('parental categories') left the per-entry update tool
+    out of the answer entirely, and the caller bulk-replaced instead. The
+    partner spellings ride along as extra query terms, but only when a tool
+    name spells them, so the widening adds the missing signal and no guessed
+    noise. A word the exclusion names says what every tool is scoped to and
+    singles out nothing; widening it only strengthens every tool at once
+    ('profiles' made listProfiles outrank deleteProfile for 'delete
+    profile'), so it is left alone.
+    """
+    extra: set[str] = set()
+    for raw in _WORD_SPLIT.split(query):
+        word = raw.casefold()
+        if len(word) < 3 or any(folded in exclude for folded in _words(word)):
+            continue
+        extra.update(c for c in _morphological_partners(word) if len(c) > 2 and c in vocabulary and c != word)
+    return extra
 
 
 # A word that names what every tool is scoped to, written straight before an
@@ -287,33 +342,53 @@ class _CatalogAwareSearchMixin:
     """
 
     _max_results: int
+    # How variants are appended to a query: bm25 concatenates terms, regex
+    # alternates patterns. None (the base-mixin default) leaves queries alone.
+    _variant_join: str | None = None
+
+    def _augment_query(self, query: str, variants: set[str]) -> str:
+        """Widen a lexical query with the catalog's own other spellings."""
+        if not variants or self._variant_join is None:
+            return query
+        augmented = self._variant_join.join([query, *sorted(variants)])
+        budget = getattr(self, "_max_pattern_length", 0)
+        if budget and len(augmented) > budget:
+            return query
+        return augmented
 
     async def _search(self, tools: Sequence[Tool], query: str) -> Sequence[Tool]:
         # A scope reference is scored out before anything else, because it is
         # the one phrase every task in this API contains and the one that most
         # often points the ranking at the wrong tool.
-        query = _strip_scope_mentions(query, _scope_words(tools))
-        results = list(await super()._search(tools, query) or [])  # type: ignore[misc]
-        # A tool whose own name carries the caller's word is never left out of
-        # the answer. BM25 ranks prose, so which prose wins changes when a
-        # description gets longer: publishing the full docstrings took `doh`
-        # from dohLookup to queryAnalytics, and the tool named for the request
-        # dropped out of the result set entirely.
+        stripped = _strip_scope_mentions(query, _scope_words(tools))
         names = _name_words(tools)
         vocabulary = _vocabulary_words(tools)
         # The same discounting the re-rank uses, so a tool the caller named with a
         # verb ("add ... to the denylist") is kept in the answer rather than dropped
         # because the verb is common: within a family of tools the verb is the only
         # thing their names differ on.
-        name_shared, _ = _shared_word_sets(names, vocabulary)
-        words = _words(query) - name_shared
+        name_shared, vocab_shared = _shared_word_sets(names, vocabulary)
+        # Only the scoring query widens; the name-inclusion below stays on the
+        # caller's own words, which is what "named" has always meant. Shared
+        # scope words are never widened - they name every tool at once.
+        scored = self._augment_query(
+            stripped,
+            _variant_words(stripped, _catalog_name_words(tools), exclude=name_shared | vocab_shared),
+        )
+        results = list(await super()._search(tools, scored) or [])  # type: ignore[misc]
+        # A tool whose own name carries the caller's word is never left out of
+        # the answer. BM25 ranks prose, so which prose wins changes when a
+        # description gets longer: publishing the full docstrings took `doh`
+        # from dohLookup to queryAnalytics, and the tool named for the request
+        # dropped out of the result set entirely.
+        words = _words(stripped) - name_shared
         named = {name for name, words_in_name in names.items() if words & words_in_name}
         if not results:
             # Nothing matched at all: the caller's words are the only signal
             # left, so answer with the catalog and let the name order sort it.
             results = list(tools)
         merged = _merge_named_results(results, tools, named)
-        return _rank_by_name_overlap(merged[: self._max_results], query, names, vocabulary)
+        return _rank_by_name_overlap(merged[: self._max_results], stripped, names, vocabulary)
 
     def _make_search_tool(self) -> Tool:
         """FastMCP's search tool, with this server's discovery contract on it.
@@ -380,9 +455,13 @@ a JSON payload with an error `code` and, when available, a `hint`.
 class FallbackBM25SearchTransform(_CatalogAwareSearchMixin, BM25SearchTransform):
     """BM25 search with a full-catalog fallback and name-aware ranking."""
 
+    _variant_join = " "
+
 
 class FallbackRegexSearchTransform(_CatalogAwareSearchMixin, RegexSearchTransform):
     """Regex search with a full-catalog fallback and name-aware ranking."""
+
+    _variant_join = "|"
 
 
 def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
