@@ -1591,7 +1591,7 @@ paths:
     patch:
       summary: Update denylist entry
       description: |
-        Updates properties of a denylist entry (e.g., enable/disable).
+        Updates properties of a denylist entry — one of the profile's denylist entries/domains — (e.g., enable or disable one entry).
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateDenylistEntry
@@ -1721,7 +1721,7 @@ paths:
     patch:
       summary: Update allowlist entry
       description: |
-        Updates properties of an allowlist entry (e.g., enable/disable).
+        Updates properties of an allowlist entry — one of the profile's allowlist entries/domains — (e.g., enable or disable one entry).
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateAllowlistEntry
@@ -1843,7 +1843,7 @@ paths:
     patch:
       summary: Update parental control service entry
       description: |
-        Updates properties of a parental control service entry (e.g., enable/disable).
+        Updates properties of a parental control service entry — one of the profile's blocked services, a parental-control services entry — (e.g., enable or disable one entry).
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateParentalControlServiceEntry
@@ -1975,7 +1975,7 @@ paths:
     patch:
       summary: Update parental control category entry
       description: |
-        Updates properties of a parental control category entry (e.g., enable/disable).
+        Updates properties of a parental control category entry — one of the profile's blocked categories, a parental-control categories entry — (e.g., enable or disable one category entry).
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateParentalControlCategoryEntry
