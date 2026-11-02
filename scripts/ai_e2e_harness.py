@@ -444,11 +444,7 @@ class HarnessConfig:
         # ever read by the actor; protect it against hallucinated writes
         # (e.g. deleteProfile with the wrong id) even under ALL.
         if plot_pid := os.environ.get("NEXTDNS_PLOT_PROFILE"):
-            protected = cfg.server["env"].get("NEXTDNS_PROTECTED_PROFILES", "")
-            ids = [p for p in protected.split(",") if p.strip()]
-            if plot_pid.strip().lower() not in {p.strip().lower() for p in ids}:
-                ids.append(plot_pid.strip())
-            cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"] = ",".join(ids)
+            _protect_server_profile(cfg, plot_pid.strip())
         return cfg
 
     def render_argv(self, values: dict[str, str]) -> list[str]:
@@ -500,6 +496,22 @@ def render_argv(template: list[str], values: dict[str, str]) -> list[str]:
 # the server's to publish, through channels any MCP client sees — the MCP
 # ``initialize`` instructions, the tool descriptions, and the usage
 # prompt/resource (see ``nextdns_mcp.usage`` and ``tool_search``).
+def _protect_server_profile(config: HarnessConfig, profile_id: str) -> None:
+    """Add ``profile_id`` to the child server's NEXTDNS_PROTECTED_PROFILES.
+
+    The protected set is what stops an actor holding WRITABLE=ALL from
+    deleting a profile it was only meant to read. Both paths that pick a
+    data-bearing plot/log profile - the explicit env var and the resolved
+    fallback - go through here, so neither can select a profile the child
+    server leaves writable.
+    """
+    env = config.server["env"] = dict(config.server["env"])
+    ids = [p for p in env.get("NEXTDNS_PROTECTED_PROFILES", "").split(",") if p.strip()]
+    if profile_id.lower() not in {p.strip().lower() for p in ids}:
+        ids.append(profile_id)
+    env["NEXTDNS_PROTECTED_PROFILES"] = ",".join(ids)
+
+
 def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
     """Write the generated MCP client config (``opencode.json``) into workdir.
 
@@ -584,7 +596,7 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
         },
     }
     out = Path(dest_dir) / "opencode.json"
-    out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    common.write_private_text(out, json.dumps(doc, indent=2) + "\n")
     return out
 
 
@@ -1493,24 +1505,17 @@ CALL_LOG_NAME = "mcp_calls.jsonl"
 
 
 def _read_new_calls(path: Path, offset: int) -> list[dict[str, Any]]:
-    """Call records the server appended since ``offset`` bytes into the log."""
+    """Call records the server appended since ``offset`` bytes into the log.
+
+    The server's own row reader (nextdns_mcp.call_log.read_call_log_rows):
+    one definition of what a valid row is, shared with the server's
+    get_call_log, instead of a second parser free to drift from it.
+    """
     if not path.exists():
         return []
-    with path.open("r", encoding="utf-8") as fh:
-        fh.seek(offset)
-        chunk = fh.read()
-    rows: list[dict[str, Any]] = []
-    for line in chunk.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
+    from nextdns_mcp.call_log import read_call_log_rows
+
+    return read_call_log_rows(str(path), offset)
 
 
 def _answered(result_text: str) -> bool:
@@ -1965,7 +1970,7 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         instr = f"Query aggregate analytics for profile '{{profile_id}}' for metric '{m}' over the last day"
         args: tuple[str, ...] = ()
         if m == "destinations":
-            instr += ", with destination_type 'countries'"
+            instr += ", restricted to type 'countries'"
             args = ("countries",)
         steps.append(
             Step(
@@ -1984,11 +1989,11 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         vdata_s: dict[str, Any] = {"metric": m, "series": True}
         instr = (
             f"Query the time series for profile '{{profile_id}}' for metric '{m}' "
-            "over the last day (series=true, interval 3600)"
+            "over the last day (from -1d, interval 3600)"
         )
         args_s: tuple[str, ...] = ()
         if m == "destinations":
-            instr += ", with destination_type 'countries'"
+            instr += ", restricted to type 'countries'"
             args_s = ("countries",)
         steps.append(
             Step(
@@ -2752,14 +2757,12 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     all_raw: deque[str] = deque(maxlen=500)
 
     async with MeasureClient(api_key) as m:
-        # Remove stale same-name profiles left by earlier interrupted runs so
-        # they cannot pollute this run's verification.
-        for nm in (targets.profile_name, targets.renamed_name):
-            stale = await m.find_profile(nm)
-            if stale is not None:
-                _progress(f"removing stale profile {stale.get('id')} ({nm}) from an earlier run")
-                await m.rest_delete(f"/profiles/{stale['id']}")
-
+        # No startup deletion of same-name profiles: a name this run did not
+        # create has no proven link to it, and deleting it would destroy a
+        # concurrent user's or another run's profile. The default profile name
+        # is now run-unique (common._resolve_profile_name), so an interrupted
+        # earlier run cannot leave a name collision here either; everything
+        # this run deletes it first proved it created (created_ids below).
         # Profiles this run PROVED it created (successful createProfile
         # receipts in the server's call log, plus harness provisioning and
         # self-heal). The stray sweep at teardown deletes only these — never
@@ -2787,6 +2790,14 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
         ):
             report.notes.append(plot_note)
             _progress(f"plot profile: {plot_note}")
+            # The fallback selection must reach the child server's protected
+            # set too: the explicit NEXTDNS_PLOT_PROFILE is protected when the
+            # config is built, but a fallback resolved after that point was
+            # left writable — the one data-bearing profile the actor must never
+            # mutate. Re-protect and re-write the config before any step launches.
+            if chosen := os.environ.get("NEXTDNS_PLOT_PROFILE", "").strip():
+                _protect_server_profile(config, chosen)
+                write_mcp_config(config, workdir)
 
         aborted_reason = ""
         outage_streak = 0
@@ -2986,6 +2997,11 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             # this step's own verdict failed. Otherwise every later prompt
             # renders a literal "{profile_id}" and the report measures a
             # cascade of argument errors instead of the model's behaviour.
+            # Finding by name is proof of ownership here: the default name is
+            # run-unique (common._resolve_profile_name), so no other run or
+            # user can own a profile answering to this run's name - and the
+            # adopted id feeds the same created_ids set every later deletion
+            # must be a member of.
             if not pid and step.verify in ("profile_exists", "profile_renamed"):
                 prof = await m.find_profile(targets.profile_name) or await m.find_profile(targets.renamed_name)
                 if prof is not None:
@@ -3055,22 +3071,21 @@ def write_report(report: Report, path: str, actor_log: str | None = None) -> Non
         return
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w", encoding="utf-8") as fh:
-        for r in report.results:
-            fh.write(json.dumps(r.to_dict()) + "\n")
-        fh.write(json.dumps({"summary": report.summary()}) + "\n")
+    lines = [json.dumps(r.to_dict()) for r in report.results]
+    lines.append(json.dumps({"summary": report.summary()}))
+    common.write_private_text(out, "\n".join(lines) + "\n")
     # Sidecar: the actor's raw event stream, for debugging model behavior.
     sidecar = Path(actor_log) if actor_log else out.with_name(out.stem + ".actor.jsonl")
     if report.actor_raw_lines:
         sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text("\n".join(report.actor_raw_lines) + "\n", encoding="utf-8")
+        common.write_private_text(sidecar, "\n".join(report.actor_raw_lines) + "\n")
         print(f"Actor event stream written to {sidecar}", file=sys.stderr)
 
 
 def write_skip_report(path: str, reason: str = "NEXTDNS_API_KEY not set") -> None:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"verdict": "SKIP", "reason": reason}) + "\n", encoding="utf-8")
+    common.write_private_text(out, json.dumps({"verdict": "SKIP", "reason": reason}) + "\n")
 
 
 def render_text_report(report: Report) -> str:
@@ -3418,7 +3433,17 @@ def main(argv: list[str] | None = None) -> int:
         print("--- actor stderr ---")
         print(report.actor_stderr)
         print("--- end stderr ---")
-    return 1 if report.failed else 0
+    # A skipped step certifies nothing: it is neither a pass nor a failure,
+    # and treating it as neither keeps "the suite is green" meaning every
+    # published behaviour actually ran. (Targeted --steps runs select their
+    # own subset; steps INSIDE the selection that skip still fail the exit.)
+    summary = report.summary()
+    if summary["failed"]:
+        return 1
+    if summary["skipped"]:
+        print(f"{summary['skipped']} step(s) skipped; steps that did not run do not certify the tool they stand for")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

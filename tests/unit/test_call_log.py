@@ -356,6 +356,10 @@ class TestBoundedProjection:
         row = json.loads(path.read_text(encoding="utf-8"))
         assert len(row["result"]) <= RESULT_CHARS
         assert "_omitted_items" in row["result"]
+        # The bound must never cut mid-document: verifying readers parse this
+        # column, so the truncation itself has to be a valid JSON object.
+        parsed = json.loads(row["result"])
+        assert isinstance(parsed, dict)
 
 
 class TestOffsetReader:
@@ -447,3 +451,17 @@ def test_a_fchmod_failure_still_writes_the_row(tmp_path, monkeypatch):
     path = tmp_path / "calls.jsonl"
     _append_row(str(path), {"tool": "x", "ok": True})
     assert "x" in path.read_text()
+
+
+def test_an_over_cap_result_is_a_valid_truncation_envelope():
+    """The bound must never cut mid-document (the harness json.loads-es this)."""
+    from nextdns_mcp.call_log import RESULT_CHARS, _result_text
+
+    class _Wide:
+        structured_content: ClassVar[dict[str, str]] = {f"key{i}": "x" * 200 for i in range(50)}
+
+    text = _result_text(_Wide())
+    assert len(text) <= RESULT_CHARS
+    parsed = json.loads(text)
+    assert parsed["truncated"] is True
+    assert parsed["head"]

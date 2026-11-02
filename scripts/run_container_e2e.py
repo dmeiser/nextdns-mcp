@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -27,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from nextdns_mcp.constants import is_write_operation
 from scripts import ai_e2e_common, validate_schema
 from scripts.validate_schema import (
     assert_operation_coverage,
@@ -218,7 +220,72 @@ WRITE_CASES: list[tuple[str, dict[str, Any]]] = [
     ("addToParentalControlServices", {"profile_id": "{profile}", "id": "tiktok"}),
     ("updateParentalControlServiceEntry", {"profile_id": "{profile}", "id": "tiktok", "active": True}),
     ("removeFromParentalControlServices", {"profile_id": "{profile}", "id": "tiktok"}),
+    # Privacy blocklists: add and remove (the account-recommended id, the same
+    # value the actor harness pins).
+    ("addPrivacyBlocklist", {"profile_id": "{profile}", "id": "nextdns-recommended"}),
+    ("removePrivacyBlocklist", {"profile_id": "{profile}", "entry_id": "nextdns-recommended"}),
+    # Whole-array replacements (mega-review ARCH-3): the endpoints that take
+    # the entire list were the documented coverage hole - add a one-entry list,
+    # then replace with the empty list, so the run still leaves the profile as
+    # it found it. The replace call itself is the distinct generator path the
+    # item asked to be executed live, not just published. Rewrites and
+    # clearLogs stay outside this table: the runner gives them their own
+    # add/id-capture/delete phase because the delete needs the answered id.
+    ("replaceDenylist", {"profile_id": "{profile}", "body": [{"id": "e2e-{ts}-replace.example.com"}]}),
+    ("replaceDenylist", {"profile_id": "{profile}", "body": []}),
+    ("replaceAllowlist", {"profile_id": "{profile}", "body": [{"id": "e2e-{ts}-replace-allow.example.com"}]}),
+    ("replaceAllowlist", {"profile_id": "{profile}", "body": []}),
+    ("replaceSecurityTLDs", {"profile_id": "{profile}", "body": [{"id": "zip"}]}),
+    ("replaceSecurityTLDs", {"profile_id": "{profile}", "body": []}),
+    ("replacePrivacyNatives", {"profile_id": "{profile}", "body": [{"id": "apple"}]}),
+    ("replacePrivacyNatives", {"profile_id": "{profile}", "body": []}),
+    ("replacePrivacyBlocklists", {"profile_id": "{profile}", "body": [{"id": "nextdns-recommended"}]}),
+    ("replacePrivacyBlocklists", {"profile_id": "{profile}", "body": []}),
+    ("replaceParentalControlCategories", {"profile_id": "{profile}", "body": [{"id": "gambling"}]}),
+    ("replaceParentalControlCategories", {"profile_id": "{profile}", "body": []}),
+    ("replaceParentalControlServices", {"profile_id": "{profile}", "body": [{"id": "tiktok"}]}),
+    ("replaceParentalControlServices", {"profile_id": "{profile}", "body": []}),
 ]
+
+# Write operations the shipped document publishes that this script does not
+# execute live, each with the reason it is excluded (ARCH-3: an exclusion must
+# say why, and test_run_container_e2e fails the day a new write operation is
+# neither exercised above nor listed here).
+UNEXERCISED_WRITE_OPERATIONS: dict[str, str] = {
+    "createProfile": "the profile lifecycle is this script's own setup; it provisions the disposable profile over REST",
+    "deleteProfile": "the same lifecycle: deleting the profile is the run's teardown, not a case to verify mid-run",
+}
+
+# The write phase also issues these three outside the table (a rewrite delete
+# needs the id the add returned; clearing logs is the run's last act). They
+# count as exercised for the ARCH-3 gate.
+WRITE_TAIL_OPERATIONS: tuple[str, ...] = ("addRewrite", "deleteRewrite", "clearLogs")
+
+
+def _write_operation_id(method: str, op: Any) -> str | None:
+    """The operationId when (method, op) is a published write operation; None otherwise."""
+    if not isinstance(op, dict) or not is_write_operation(method):
+        return None
+    op_id = op.get("operationId")
+    return str(op_id) if op_id else None
+
+
+def _spec_write_operations(spec: dict[str, Any]) -> set[str]:
+    """operationIds of every state-changing operation in a parsed document."""
+    found: set[str] = set()
+    for item in spec.get("paths", {}).values():
+        methods = item.items() if isinstance(item, dict) else ()
+        for method, op in methods:
+            if op_id := _write_operation_id(method, op):
+                found.add(op_id)
+    return found
+
+
+def uncovered_write_operations() -> list[str]:
+    """Published write operations neither exercised nor excluded - the ARCH-3 gate."""
+    exercised = {tool for tool, _ in WRITE_CASES} | set(WRITE_TAIL_OPERATIONS)
+    return sorted(_spec_write_operations(_load_spec_once(SPEC_PATH)) - exercised - set(UNEXERCISED_WRITE_OPERATIONS))
+
 
 SPEC_PATH = PROJECT_ROOT / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
 
@@ -319,6 +386,28 @@ def _document_reads(operations: dict[str, str]) -> list[str]:
     )
 
 
+@contextlib.contextmanager
+def _private_open(path: Path, mode: str):
+    """Open a report artifact 0600, creating or tightening it.
+
+    The report records tool names with profile ids and call payloads; the
+    container's umask default would leave that readable by every user of the
+    CI host. The mode is applied through the fd so a pre-existing permissive
+    file is tightened too, not only a brand-new one made private.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    fh = os.fdopen(fd, mode, encoding="utf-8")
+    try:
+        yield fh
+    finally:
+        fh.close()
+
+
 class ContainerE2ERunner:
     """Orchestrates E2E testing of the NextDNS MCP container over MCP."""
 
@@ -389,7 +478,7 @@ class ContainerE2ERunner:
         if error_msg:
             record["error"] = error_msg
 
-        with open(self.report_file, "a", encoding="utf-8") as f:
+        with _private_open(self.report_file, "a") as f:
             f.write(json.dumps(record) + "\n")
 
     def record_skip(self, tool: str, reason: str) -> None:
@@ -400,7 +489,7 @@ class ContainerE2ERunner:
             "reason": reason,
             "timestamp": datetime.now(UTC).isoformat(),
         }
-        with open(self.report_file, "a", encoding="utf-8") as f:
+        with _private_open(self.report_file, "a") as f:
             f.write(json.dumps(record) + "\n")
         self.skipped_count += 1
 
@@ -636,7 +725,8 @@ class ContainerE2ERunner:
         ok, res = await self.execute_call(session, "createProfile", {"name": p_name})
         created_profile_id = _unwrap_id(res) if ok else ""
         if created_profile_id:
-            (self.artifacts_dir / "test_profile_id.txt").write_text(created_profile_id, encoding="utf-8")
+            with _private_open(self.artifacts_dir / "test_profile_id.txt", "w") as f:
+                f.write(created_profile_id)
             log_success(f"Created test profile: {created_profile_id}")
         else:
             log_error("Failed to create test profile")
@@ -903,7 +993,8 @@ class ContainerE2ERunner:
                 log_error(f"  {key}: {verdict}")
 
         verdict_file = self.artifacts_dir / f"security_toggles_{self.variant}.json"
-        verdict_file.write_text(json.dumps(toggle_verdicts, indent=2), encoding="utf-8")
+        with _private_open(verdict_file, "w") as f:
+            f.write(json.dumps(toggle_verdicts, indent=2))
         log_info(f"Toggle verdicts written to {verdict_file}")
 
     async def _cleanup(self, created_profile_id: str) -> None:
@@ -994,7 +1085,8 @@ class ContainerE2ERunner:
         """Run the full container E2E suite."""
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         # Clear previous report file
-        self.report_file.write_text("", encoding="utf-8")
+        with _private_open(self.report_file, "w"):
+            pass
 
         log_info("================================")
         log_info(f"NextDNS MCP Container E2E Test ({self.variant})")

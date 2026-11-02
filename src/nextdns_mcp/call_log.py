@@ -278,10 +278,21 @@ def _open_log_file(path: str) -> Any:
 
 
 def _result_text(result: Any) -> str:
-    """Bounded text form of a tool result, for matching read outcomes."""
+    """Bounded text form of a tool result, for matching read outcomes.
+
+    Always valid JSON, even when bounded: a slice cut mid-document is what a
+    verifying reader (the harness json.loads-es this column) would choke on,
+    so an over-cap result records a ``{"truncated": true, "head": ...}``
+    envelope instead of a fragment.
+    """
     structured = getattr(result, "structured_content", None)
     if structured is not None:
-        return json.dumps(_project_result(structured), sort_keys=True, default=str)[:RESULT_CHARS]
+        raw = json.dumps(_project_result(structured), sort_keys=True, default=str)
+        if len(raw) <= RESULT_CHARS:
+            return raw
+        # json.dumps of a string can double it (quote/backslash escaping), so
+        # the head takes at most half the budget minus the envelope.
+        return json.dumps({"truncated": True, "head": raw[: (RESULT_CHARS - 64) // 2]}, sort_keys=True)
     # No structured payload (e.g. plotAnalytics returns image content blocks):
     # record the shape of what came back rather than the bytes.
     blocks = getattr(result, "content", None) or []

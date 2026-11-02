@@ -28,6 +28,7 @@ import random
 import string
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, get_args
 
 from nextdns_mcp.tools.metrics import PlotMetric
@@ -178,24 +179,52 @@ def _random_tag(n: int = 6) -> str:
     return "e2eh" + "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
+# One run suffix per process: two resolutions of the name inside one run must
+# agree, while two runs on the same day must not.
+_RUN_SUFFIX = f"{random.randrange(0x10000):04x}"
+
+
 def _resolve_profile_name(template: str | None = None) -> str:
     """Resolve a profile-name template into a concrete name.
 
-    Supports the ``{date}`` placeholder (``YYYYMMDD``) and ``{timestamp}``
-    placeholder (``YYYYMMDDHHMMSS``). Defaults to ``TEST_PROFILE_{date}``
-    unless ``NEXTDNS_E2E_PROFILE_NAME`` overrides the template.
+    Supports the ``{date}`` placeholder (``YYYYMMDD``), ``{timestamp}``
+    (``YYYYMMDDHHMMSS``) and ``{run}`` (a per-process random suffix). The
+    default carries ``{run}`` on purpose: the harness may only delete what
+    this run proved it created, and a name unique to the run is what turns
+    "found by this exact name" into such proof. An operator who pins the
+    name via ``NEXTDNS_E2E_PROFILE_NAME`` reclaims the name - and with it
+    the responsibility for what shares it.
     """
     if template is None:
-        template = os.environ.get("NEXTDNS_E2E_PROFILE_NAME", "TEST_PROFILE_{date}")
+        template = os.environ.get("NEXTDNS_E2E_PROFILE_NAME", "TEST_PROFILE_{date}_{run}")
     return template.format(
         date=time.strftime("%Y%m%d"),
         timestamp=time.strftime("%Y%m%d%H%M%S"),
+        run=_RUN_SUFFIX,
     )
 
 
 def make_profile_name(template: str | None = None) -> str:
-    """The test profile name: a fixed name plus the date (overridable)."""
+    """The test profile name: date-scoped and run-scoped (overridable)."""
     return _resolve_profile_name(template)
+
+
+def write_private_text(path: Any, text: str) -> None:
+    """Write a harness artifact 0600: reports and configs quote account data.
+
+    The run report names profile ids, entry names and call arguments; the
+    generated MCP config carries the server env. Both must not be readable
+    by other users of the CI machine the way a umask-default 0644 would be.
+    """
+    p = Path(path)
+    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)  # the creation mode only covers a brand-new file
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 # =========================================================================== #

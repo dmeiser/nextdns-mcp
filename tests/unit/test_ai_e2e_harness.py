@@ -271,9 +271,23 @@ class TestRestHelpers:
         name = h.make_profile_name()
         assert name.startswith("TEST_PROFILE_")
 
-        assert re.fullmatch(r"TEST_PROFILE_\d{8}", name) is not None
-        # date-based name is deterministic within a day
-        assert h.make_profile_name() == h.make_profile_name()
+        assert re.fullmatch(r"TEST_PROFILE_\d{8}_[0-9a-f]{4}", name) is not None
+        # The name is run-unique WITHIN a process (two resolutions must agree)
+        # and differs BETWEEN processes: that is what scopes destructive
+        # harness cleanup to what the run proved it created.
+        assert h.make_profile_name() == name
+        import os
+        import subprocess
+        import sys
+
+        other = subprocess.run(
+            [sys.executable, "-c", "from scripts.ai_e2e_common import make_profile_name; print(make_profile_name())"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(h.__file__).removesuffix("/scripts"),
+        ).stdout.strip()
+        assert other != name
 
     def test_list_specs_shape(self, h):
         assert len(h._LIST_SPECS) == 7
@@ -2863,3 +2877,35 @@ class TestScratchIsolation:
     def test_the_startup_sweep_is_gone(self, h):
         """No global temp sweep may come back: it deletes other processes' files."""
         assert not hasattr(h, "_sweep_stale_download_dirs")
+
+
+class TestRunScopedSafetyHelpers:
+    """The cleanup/permissions helpers the re-review asked for, pinned directly."""
+
+    def test_protect_server_profile_is_additive_and_idempotent(self, h):
+        cfg = h.HarnessConfig()
+        cfg.server["env"] = {"NEXTDNS_PROTECTED_PROFILES": "AAAAAA"}
+        h._protect_server_profile(cfg, "bbbbbb")
+        h._protect_server_profile(cfg, "BBBBBB")
+        ids = set(cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"].lower().split(","))
+        assert ids == {"aaaaaa", "bbbbbb"}
+
+    def test_harness_artifacts_are_written_private(self, h, tmp_path):
+        import os
+        import stat
+
+        path = tmp_path / "report.jsonl"
+        h.common.write_private_text(path, '{"x": 1}\n')
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        os.chmod(path, 0o644)
+        h.common.write_private_text(path, '{"x": 2}\n')
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_read_new_calls_reuses_the_server_offset_reader(self, h, tmp_path):
+        path = tmp_path / "calls.jsonl"
+        path.write_text('{"tool": "one"}\n{"tool": "two"}\n', encoding="utf-8")
+        first = h._read_new_calls(path, 0)
+        assert [r["tool"] for r in first] == ["one", "two"]
+        offset = len(b'{"tool": "one"}\n')
+        assert [r["tool"] for r in h._read_new_calls(path, offset)] == ["two"]
+        assert h._read_new_calls(tmp_path / "missing.jsonl", 0) == []

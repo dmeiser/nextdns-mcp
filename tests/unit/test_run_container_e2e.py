@@ -368,6 +368,23 @@ WRITE_ORACLE: list[tuple[str, str | None, str | None]] = [
     ("addToParentalControlServices", "id", "tiktok"),
     ("updateParentalControlServiceEntry", "id", "tiktok"),
     ("removeFromParentalControlServices", "id", "tiktok"),
+    ("addPrivacyBlocklist", "id", "nextdns-recommended"),
+    ("removePrivacyBlocklist", "entry_id", "nextdns-recommended"),
+    # Whole-array replacements, each fill-then-clear (ARCH-3 execution coverage).
+    ("replaceDenylist", None, None),
+    ("replaceDenylist", None, None),
+    ("replaceAllowlist", None, None),
+    ("replaceAllowlist", None, None),
+    ("replaceSecurityTLDs", None, None),
+    ("replaceSecurityTLDs", None, None),
+    ("replacePrivacyNatives", None, None),
+    ("replacePrivacyNatives", None, None),
+    ("replacePrivacyBlocklists", None, None),
+    ("replacePrivacyBlocklists", None, None),
+    ("replaceParentalControlCategories", None, None),
+    ("replaceParentalControlCategories", None, None),
+    ("replaceParentalControlServices", None, None),
+    ("replaceParentalControlServices", None, None),
 ]
 
 # The three calls that cannot live in the table: a rewrite's id comes back only from
@@ -1050,3 +1067,56 @@ def test_runner_startup_fails_when_a_published_read_has_no_response_schema(tmp_p
             plot_profile="",
             artifacts_dir=tmp_path,
         )
+
+
+class TestExecutionCoverageIsClosed:
+    """ARCH-3: published write operations must be executed or excluded by name.
+
+    Publication coverage alone cannot fail a whole-array replacement that no
+    case ever sends, so the gate is execution: every state-changing operation
+    in the shipped document either appears in WRITE_CASES or sits in
+    UNEXERCISED_WRITE_OPERATIONS with a stated reason.
+    """
+
+    def test_every_published_write_operation_is_exercised_or_excluded(self):
+        from scripts.run_container_e2e import uncovered_write_operations
+
+        assert uncovered_write_operations() == []
+
+    def test_every_exclusion_states_a_reason(self):
+        from scripts.run_container_e2e import UNEXERCISED_WRITE_OPERATIONS
+
+        assert all(reason.strip() for reason in UNEXERCISED_WRITE_OPERATIONS.values())
+
+    def test_whole_array_replacements_are_exercised(self):
+        exercised = {tool for tool, _ in WRITE_CASES}
+        for op in (
+            "replaceDenylist",
+            "replaceAllowlist",
+            "replaceSecurityTLDs",
+            "replacePrivacyNatives",
+            "replacePrivacyBlocklists",
+            "replaceParentalControlCategories",
+            "replaceParentalControlServices",
+        ):
+            assert op in exercised
+
+
+class TestPrivateArtifacts:
+    """Report artifacts carry profile ids and payloads: 0600, create or tighten."""
+
+    def test_new_artifact_is_created_private_and_existing_ones_are_tightened(self, tmp_path):
+        import os
+        import stat
+
+        from scripts.run_container_e2e import _private_open
+
+        path = tmp_path / "report.jsonl"
+        with _private_open(path, "a") as fh:
+            fh.write('{"x": 1}\n')
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        os.chmod(path, 0o644)
+        with _private_open(path, "a") as fh:
+            fh.write('{"x": 2}\n')
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert len(path.read_text().splitlines()) == 2

@@ -42,7 +42,7 @@ FastMCP's OpenAPI parser, with the transport kept ours.** In the shorthand the c
   and wraps each route as a `SpecApiTool`: the tool's name is the `operationId`, its
   description is the document's own summary/description, and its `inputSchema` is that
   endpoint's path, query, and request-body fields flattened one level.
-- `SpecApiTool.run()` executes through `utils._api_request_payload`, i.e. the
+- `SpecApiTool.run()` executes through `transport._api_request_payload`, i.e. the
   access-controlled client, and returns the server's typed error payloads. `Tool.run` is
   the only FastMCP behaviour the class relies on.
 - Arguments are validated against the endpoint's published schema before a request goes
