@@ -38,6 +38,7 @@ surprising tool is otherwise invisible to a caller:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -53,7 +54,7 @@ from fastmcp.utilities.openapi import HTTPRoute, parse_openapi_to_http_routes
 from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
 from .tools import logs as _logs
-from .tools.plots import _series_budget_error
+from .tools.plots import _now, _resolve_time_point, _series_budget_error
 from .transport import _api_request_payload
 from .utils import is_safe_profile_id, normalize_partials, normalize_time_value, resolve_profile_id, schema_required
 
@@ -63,6 +64,19 @@ SPEC_PATH = Path(__file__).with_name("nextdns-openapi.yaml")
 
 # See the module docstring.
 WITHHELD_OPERATIONS = frozenset({"streamLogs"})
+
+# The endpoint's adaptive series-interval default, priced for calls that state
+# no interval. Probed live 2026-11: windows over 7 days answer at 86400s with
+# no self-cap (a 4000-day range returns 4000 points), 7-day windows at 10800s.
+_UNINTERVALLED_FINEST_DEFAULT = 10800
+_UNINTERVALLED_FINEST_WINDOW = 7 * 86400
+_UNINTERVALLED_COARSEST_DEFAULT = 86400
+
+# Ceiling on a generated ``;series`` tool result, measured as JSON bytes. The
+# request-side point budgets bound one series; the endpoint's upstream top-N
+# bounds its rows; this is the whole-response backstop, generous enough that
+# a budgeted answer (10 rows x 2000 points ~ 200 KB) always fits.
+MAX_SERIES_RESPONSE_BYTES = 512_000
 
 
 def _delegate_download_logs(profile_id: str) -> Awaitable[dict[str, Any]]:
@@ -396,9 +410,18 @@ class SpecApiTool(Tool):
         return await self._call_endpoint(path, query, body)
 
     async def _call_endpoint(self, path: str, query: dict[str, Any], body: Any) -> ToolResult:
-        """Send the request this route describes and wrap its payload."""
+        """Send the request this route describes and wrap its payload.
+
+        A ``;series`` payload gets the response-side ceiling check: the
+        request-side budgets bound the arithmetic, this bounds what actually
+        arrives, so an over-wide answer comes back as a typed refusal instead
+        of an oversized context dump.
+        """
         request = self._transport or _api_request_payload
         payload = await request(self._route.method, path, params=query or None, json_body=body)
+        oversized = _series_response_ceiling_error(self._route, payload)
+        if oversized is not None:
+            return ToolResult(structured_content=oversized)
         return ToolResult(structured_content=payload)
 
     async def _run_delegated(self, arguments: dict[str, Any]) -> ToolResult:
@@ -503,6 +526,13 @@ def _malformed_profile_id_payload(route: HTTPRoute, arguments: dict[str, Any]) -
 # How many schema violations one payload names before saying "and N more".
 _SCHEMA_ERROR_LIMIT = 5
 
+# Cap on one described violation. jsonschema quotes the offending value into
+# the message, so a caller who sends a 5 MB string in place of an enum value
+# would get that string quoted straight back - and kept (the call log's error
+# column, the run transcript). Naming the violation needs its first lines,
+# not its payload.
+_SCHEMA_ERROR_MSG_CHARS = 300
+
 
 def _without_nulls(arguments: dict[str, Any]) -> dict[str, Any]:
     """Drop explicitly-null arguments: null means "not provided" (see _query_arguments)."""
@@ -515,7 +545,10 @@ def _schema_error_where(error: jsonschema.ValidationError) -> str:
 
 
 def _describe_schema_errors(problems: list[jsonschema.ValidationError]) -> str:
-    named = [f"{_schema_error_where(error)}: {error.message}" for error in problems[:_SCHEMA_ERROR_LIMIT]]
+    named = [
+        f"{_schema_error_where(error)}: {error.message[:_SCHEMA_ERROR_MSG_CHARS]}"
+        for error in problems[:_SCHEMA_ERROR_LIMIT]
+    ]
     extra = len(problems) - _SCHEMA_ERROR_LIMIT
     return "; ".join(named) + (f"; and {extra} more" if extra > 0 else "")
 
@@ -578,29 +611,92 @@ def _interval_seconds(value: Any) -> int | None:
 
 
 def _series_budget_for_generated_call(route: HTTPRoute, query: dict[str, Any]) -> dict[str, Any] | None:
-    """Refuse a generated ``;series`` call whose stated range and interval outpoint the budget.
+    """Refuse a generated ``;series`` call whose range, interval or row count outpoint the budget.
 
-    ``plotAnalytics`` refuses a range that would return more than
-    ``PLOT_MAX_POINTS`` points; the generated ``getAnalytics*Series`` tools
-    read the same endpoint with the same per-interval cost, so they get the
-    same refusal (issue #267 applies to both doors). It fires when the caller
-    stated a ``from`` and an ``interval``: a call naming no ``interval`` takes
-    the endpoint's own adaptive default, which is itself bounded - probed
-    2026-11 against live profiles, the API answers at most one point per
-    second of real range at its coarsest (a 365-day window returns 365
-    points at interval 86400; 30 days returns 30), so an un-interval'd call
-    can never outpoint the budget the server enforces when an interval is
-    stated. A stated ``to`` of 0 is the epoch, not an omission: ``or`` would
-    silently swap in ``now`` and re-price the window.
+    Two ceilings are enforced before the request is constructed, on every
+    call that states a ``from``:
+
+    * Per series: the same 2000-point budget ``plotAnalytics`` enforces
+      (issue #267 applies to both doors). A call that names no interval is
+      priced at the endpoint's adaptive default rather than passed through:
+      probed live 2026-11, windows over 7 days answer at 86400 with **no
+      self-cap** - a 4000-day range returns 4000 points - so the old
+      "default is already bounded" pass-through was wrong. The estimate is
+      10800s for windows up to 7 days (probed: 7d -> 10800) and 86400s above
+      it (probed: 30d, 365d, 4000d all answer at 86400), which bounds every
+      no-interval call the same way a stated interval is bounded.
+    * Across the whole response: rows a ``;series`` endpoint returns are
+      capped upstream (a default top-N this server does not publish), so the
+      row count is not fully ours to price up front; the fetched payload
+      gets a byte ceiling instead (:meth:`_series_response_ceiling_error`).
+
+    A stated ``to`` of 0 is the epoch, not an omission: ``or`` would silently
+    swap in ``now`` and re-price the window.
+    """
+    if ";series" not in route.path or query.get("from") is None:
+        return None
+    return _price_series_range(query["from"], query.get("to"), _interval_seconds(query.get("interval")))
+
+
+def _price_series_range(from_time: Any, to_time_raw: Any, interval: int | None) -> dict[str, Any] | None:
+    """Price one series call's range, estimating the interval default when unnamed."""
+    if interval is None:
+        interval = _default_interval_estimate(from_time, to_time_raw)
+        if interval is None:
+            return None  # unresolvable range: the endpoint gives its own 400
+    to_time = "now" if to_time_raw is None else to_time_raw
+    return _series_budget_error(from_time, to_time, interval)
+
+
+def _default_interval_estimate(from_time: Any, to_time_raw: Any) -> int | None:
+    """Price the endpoint's adaptive interval default for a no-interval call.
+
+    Probed live 2026-11: windows over 7 days answer at 86400s with no
+    self-cap (a 4000-day range returns 4000 points), 7-day windows at
+    10800s. Neither range resolving (garbage input) means no price here -
+    the endpoint gives its own 400.
+    """
+    now = _now()
+    to_time = "now" if to_time_raw is None else to_time_raw
+    start = _resolve_time_point(from_time, now)
+    end = _resolve_time_point(to_time, now)
+    if start is None or end is None:
+        return None
+    return (
+        _UNINTERVALLED_FINEST_DEFAULT
+        if end - start <= _UNINTERVALLED_FINEST_WINDOW
+        else _UNINTERVALLED_COARSEST_DEFAULT
+    )
+
+
+def _series_response_ceiling_error(route: HTTPRoute, payload: Any) -> dict[str, Any] | None:
+    """Typed refusal when a fetched ``;series`` payload is too big to hand back.
+
+    The request-side budgets bound one series' point count, and the endpoint's
+    default top-N bounds its row count - but this server does not publish the
+    row cap, so the row count upstream actually returns is not fully ours to
+    price up front. The response-side ceiling is the backstop: a payload whose
+    JSON is over ``MAX_SERIES_RESPONSE_BYTES`` is refused as a typed error
+    rather than dumped into the caller's context. The budgets make it a rare
+    refusal; the guard makes "rare" enforceable.
     """
     if ";series" not in route.path:
         return None
-    interval = _interval_seconds(query.get("interval"))
-    from_time = query.get("from")
-    if interval is None or from_time is None:
+    try:
+        size = len(json.dumps(payload, default=str))
+    except (TypeError, ValueError):  # pragma: no cover - transport payloads are JSON-shaped
+        size = len(str(payload))
+    if size <= MAX_SERIES_RESPONSE_BYTES:
         return None
-    to_time = query.get("to")
-    return _series_budget_error(from_time, "now" if to_time is None else to_time, interval)
+    return error_payload(
+        ErrorCode.INVALID_ARGUMENT,
+        f"{route.operation_id} answered {size} bytes, more than the "
+        f"{MAX_SERIES_RESPONSE_BYTES}-byte series response ceiling; the range/interval produced "
+        "more data than this server returns in one tool result",
+        hint="use a larger interval or a shorter range, or read an aggregate endpoint instead of ;series",
+        max_response_bytes=MAX_SERIES_RESPONSE_BYTES,
+        response_bytes=size,
+    )
 
 
 def _required(route: HTTPRoute) -> list[str]:

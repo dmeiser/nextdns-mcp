@@ -1157,3 +1157,19 @@ class TestPrivateArtifacts:
             fh.write('{"x": 2}\n')
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert len(path.read_text().splitlines()) == 2
+
+
+def test_private_open_refuses_when_the_mode_cannot_be_established(tmp_path, monkeypatch):
+    """No 0600, no artifact: the report carries profile ids and payloads."""
+    import os
+
+    from scripts.run_container_e2e import _private_open
+
+    def boom(fd: int, mode: int) -> None:
+        raise PermissionError("not ours")
+
+    monkeypatch.setattr(os, "fchmod", boom)
+    path = tmp_path / "report.jsonl"
+    with pytest.raises(PermissionError), _private_open(path, "a"):
+        pass
+    assert not path.exists() or path.stat().st_size == 0

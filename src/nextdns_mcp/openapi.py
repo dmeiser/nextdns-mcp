@@ -192,7 +192,12 @@ def _owner_hint(ignored: list[str], tool_name: str, index: dict[str, tuple[str, 
     return _render_owner_hint(base, grouped, unowned)
 
 
-def _report_ignored_arguments(result: ToolResult, ignored: list[str], hint: str) -> None:
+def _report_ignored_arguments(
+    result: ToolResult,
+    ignored: list[str],
+    hint: str,
+    hint_for: Callable[[list[str]], str] | None = None,
+) -> None:
     """Name the arguments the relaxation dropped instead of dropping them silently.
 
     Dropping unknown top-level arguments is deliberate (AI clients send them),
@@ -207,6 +212,12 @@ def _report_ignored_arguments(result: ToolResult, ignored: list[str], hint: str)
     tool's answer to what *was* applied; the ignored-arguments annotation is
     appended to it, and the full owner text stays available under
     ``ignored_arguments_hint`` even when the merged hint had to be compact.
+
+    ``hint_for`` (when the caller can re-derive owner text for an arbitrary
+    name set) makes the merge re-render the owner attribution for the FULL
+    merged set instead of concatenating the two passes' sentences: a name
+    the inner pass and the outer pass both dropped would otherwise be
+    attributed twice.
     """
     structured = getattr(result, "structured_content", None)
     if not isinstance(structured, dict):
@@ -217,9 +228,33 @@ def _report_ignored_arguments(result: ToolResult, ignored: list[str], hint: str)
     # pass reports the names dropped from the wrapper it unpacked. Both are
     # true about the same call; overwriting hides one pass behind the other.
     already = structured.get("ignored_arguments")
-    merged = list(dict.fromkeys([*(already if isinstance(already, list) else []), *ignored]))
+    prior_names = already if isinstance(already, list) else []
+    merged = list(dict.fromkeys([*prior_names, *ignored]))
     structured["ignored_arguments"] = merged
+    if hint_for is not None and prior_names:
+        _rerender_owner_annotation(structured, merged, hint_for)
+        return
     _merge_ignored_hints(structured, hint)
+
+
+def _rerender_owner_annotation(
+    structured: dict[str, Any], merged: list[str], hint_for: Callable[[list[str]], str]
+) -> None:
+    """Replace the earlier owner annotation with one rendering of the union.
+
+    The tool's own base hint survives untouched; only the annotation this
+    mechanism owns is swapped, so the result carries one owner sentence for
+    all dropped names rather than two overlapping ones.
+    """
+    owner_text = hint_for(merged)
+    prior_hint = structured.get("ignored_arguments_hint")
+    structured["ignored_arguments_hint"] = owner_text
+    base = structured.get("hint", "")
+    if not isinstance(base, str):  # a payload with a non-string hint gets re-set, not crashed on
+        base = ""
+    if isinstance(prior_hint, str) and prior_hint:
+        base = base.replace(prior_hint, "").strip(" |")
+    structured["hint"] = f"{base} | {owner_text}" if base else owner_text
 
 
 def _merge_ignored_hints(structured: dict[str, Any], hint: str) -> None:
@@ -499,14 +534,11 @@ class StripExtraFieldsMiddleware(Middleware):
 
         result = await call_next(context)
         if ignored:
-            hint = await self._ignored_hint(context, ignored)
-            _report_ignored_arguments(result, ignored, hint)
+            await self._annotate_ignored(result, context, ignored)
         return result
 
-    async def _ignored_hint(
-        self, context: MiddlewareContext[mcp.types.CallToolRequestParams], ignored: list[str]
-    ) -> str:
-        """The owner annotation for this call's dropped arguments.
+    async def _annotate_ignored(self, result: ToolResult, context: MiddlewareContext, ignored: list[str]) -> None:
+        """Report this pass's dropped arguments, able to re-render the union's owner text.
 
         ``ignored`` is only non-empty when a FastMCP context was present (the
         strip needs the tool's schema), but the None path keeps a defensive
@@ -514,7 +546,12 @@ class StripExtraFieldsMiddleware(Middleware):
         """
         server = context.fastmcp_context.fastmcp if context.fastmcp_context else None
         index = await self._owner_index(server) if server is not None else {}
-        return _owner_hint(ignored, context.message.name, index)
+        _report_ignored_arguments(
+            result,
+            ignored,
+            _owner_hint(ignored, context.message.name, index),
+            hint_for=lambda names: _owner_hint(names, context.message.name, index),
+        )
 
 
 @asynccontextmanager

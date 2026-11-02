@@ -210,21 +210,24 @@ def make_profile_name(template: str | None = None) -> str:
 
 
 def write_private_text(path: Any, text: str) -> None:
-    """Write a harness artifact 0600: reports and configs quote account data.
+    """Write a harness artifact 0600, or refuse: reports and configs quote account data.
 
     The run report names profile ids, entry names and call arguments; the
     generated MCP config carries the server env. Both must not be readable
     by other users of the CI machine the way a umask-default 0644 would be.
+    Fail closed: the tightening ``fchmod`` covers a pre-existing permissive
+    file; if it fails, nothing is written and the error propagates - an
+    artifact that cannot be made private is an artifact not written.
     """
     p = Path(path)
     fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.fchmod(fd, 0o600)  # the creation mode only covers a brand-new file
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-    except BaseException:
+    except OSError:
         os.close(fd)
         raise
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
 
 
 # =========================================================================== #

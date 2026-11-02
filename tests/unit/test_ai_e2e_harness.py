@@ -1044,17 +1044,19 @@ class TestMeasureState:
         assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == "pid-new"
         assert m.posted == [("/profiles", {"name": "P-renamed"})]  # renamed name
 
-    def test_self_heal_falls_back_to_find_profile(self, h):
+    def test_self_heal_refuses_adopt_by_name_when_create_answered_no_id(self, h):
         t = h.TaskTargets(profile_name="P", tag="abc")
         import asyncio
 
-        # POST ok but body shape unhelpful -> recover the id by name lookup.
+        # POST ok but body carried no id: there is no proof of what it made,
+        # so self-heal fails. A profile answering the run's name must never
+        # be adopted and later deleted on a name lookup's say-so.
         m = _FakeClient(
             by_path={"/profiles/pid1": {"status": 404, "ok": False, "body": {}}},
             profiles=[{"id": "pid-lookup", "name": "P-renamed"}],
             post_result={"status": 201, "ok": True, "body": {}},
         )
-        assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == "pid-lookup"
+        assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == ""
 
     def test_self_heal_returns_empty_when_recreation_fails(self, h):
         t = h.TaskTargets(profile_name="P", tag="abc")
@@ -2909,3 +2911,74 @@ class TestRunScopedSafetyHelpers:
         offset = len(b'{"tool": "one"}\n')
         assert [r["tool"] for r in h._read_new_calls(path, offset)] == ["two"]
         assert h._read_new_calls(tmp_path / "missing.jsonl", 0) == []
+
+
+class TestCreationReceiptGate:
+    """Adoption and teardown require a create receipt; a name is never proof."""
+
+    def test_name_lookup_without_receipt_is_refused(self, h):
+        # A profile answering the run's exact name, created by nobody in this
+        # run (operator-pinned name, a concurrent run, or the actor's own
+        # createProfile under a different step): never adopted.
+        assert h._proven_created_id({"id": "pid-foreign", "name": "TEST_PROFILE_20261102_ab12"}, set()) == ""
+        assert h._proven_created_id({"id": "pid-foreign"}, {"pid-someone-else"}) == ""
+
+    def test_name_lookup_backed_by_a_receipt_is_adopted(self, h):
+        assert h._proven_created_id({"id": "pid-ours"}, {"pid-ours"}) == "pid-ours"
+        assert h._proven_created_id(None, {"pid-ours"}) == ""
+
+    def test_teardown_delete_requires_membership(self, h):
+        assert h._deletable_by_this_run("pid-ours", {"pid-ours"})
+        assert not h._deletable_by_this_run("pid-foreign", {"pid-ours"})
+        assert not h._deletable_by_this_run("", {"pid-ours"})
+
+
+def test_write_private_text_refuses_when_the_mode_cannot_be_established(h, tmp_path, monkeypatch):
+    """No 0600, no artifact (fail closed, and no double-close on the way out)."""
+    import os
+
+    def boom(fd: int, mode: int) -> None:
+        raise PermissionError("not ours")
+
+    monkeypatch.setattr(os, "fchmod", boom)
+    path = tmp_path / "report.jsonl"
+    with pytest.raises(PermissionError):
+        h.common.write_private_text(path, "secret\n")
+    assert not path.exists() or path.stat().st_size == 0
+
+
+class TestEvidenceBackedExtraction:
+    """Receipts and identities read from the evidence column, not the lossy result."""
+
+    def test_created_id_comes_from_evidence_when_result_is_a_truncated_head(self, h):
+        row = {
+            "endpoint": "POST /profiles",
+            "ok": True,
+            # The result column: a truncation envelope whose head never
+            # reaches data.id - json.loads succeeds, the id is simply absent.
+            "result": '{"truncated": true, "head": "{\\"data\\": {\\"nam"}',
+            "evidence": {"created_id": "pid-created-77"},
+        }
+        assert h._created_ids_from_records([row]) == {"pid-created-77"}
+
+    def test_created_id_falls_back_to_the_result_for_older_rows(self, h):
+        row = {"endpoint": "POST /profiles", "ok": True, "result": '{"data": {"id": "pid-old"}}'}
+        assert h._created_ids_from_records([row]) == {"pid-old"}
+
+    def test_identity_pairs_beyond_the_projection_still_map(self, h):
+        """A list row projected to five items still yields all evidence identities."""
+        row = {
+            "endpoint": "GET /profiles/{profile_id}/denylist",
+            "ok": True,
+            "result": '{"data": [{"id": "id-one-aaaa", "name": "entry-one"}]}',
+            "evidence": {
+                "ids": [
+                    {"id": "id-six-bbbb", "name": "entry-six"},
+                    {"id": "id-seven-cccc", "name": "entry-seven"},
+                ]
+            },
+        }
+        ident = h._identifiers_from_answers([row])
+        assert ident["entry-six"] == ["id-six-bbbb"]
+        assert ident["entry-seven"] == ["id-seven-cccc"]
+        assert ident["entry-one"] == ["id-one-aaaa"]

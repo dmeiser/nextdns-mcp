@@ -148,6 +148,22 @@ async def _host_resolves_to_public_address(host: str) -> bool:
     return await _resolve_public_addresses(host) is not None
 
 
+# The pinned-resolver swap is process-global (httpcore reaches the resolver
+# only through the ``socket`` module attribute), so two downloads running
+# their check/fetch windows at the same moment could restore each other's
+# wrapper out of order and leave a stale pin installed, or continue one hop
+# unpinned. ``_PIN_FETCH_LOCK`` serializes the complete vet-and-fetch
+# critical section across all concurrent downloadLogs calls: for one
+# download at a time, every hop's resolution, connect, header read and body
+# stream run with its own pin installed and nothing else's. A
+# per-connection resolver would avoid the serialization, but httpx/httpcore
+# expose no hook for one short of replacing the transport stack wholesale;
+# serializing is the honest trade, and downloadLogs is a rare call (issue
+# #266 review). httpx ties body streaming to the open stream context, so the
+# body is inside the section rather than re-resolving outside it.
+_PIN_FETCH_LOCK = asyncio.Lock()
+
+
 @contextlib.contextmanager
 def _pinned_dns(host: str | None, infos: list[Any] | None) -> Iterator[None]:
     """Make ``socket.getaddrinfo`` return the vetted ``infos`` for ``host``.
@@ -156,11 +172,13 @@ def _pinned_dns(host: str | None, infos: list[Any] | None) -> Iterator[None]:
     opens dials the address that was vetted, closing the rebinding window
     (module note above). httpcore resolves through the event loop, which
     reaches ``socket.getaddrinfo`` by module attribute at call time - the only
-    hook available without replacing the transport stack. The patch is
-    process-global while active; concurrent name lookups for other hosts pass
-    through to the real resolver, and a concurrent lookup of *this* host gets
-    addresses already vetted as public. A no-op for pinned allow hosts
-    (``infos is None``), which skip resolution entirely.
+    hook available without replacing the transport stack. The swap is
+    process-global while active, so the caller must hold
+    :data:`_PIN_FETCH_LOCK` across check-and-fetch: with the lock, no other
+    download's swap can interleave, restore out of order, or leave this
+    window unpinned. Other name lookups (any host but ``host``) pass through
+    to the real resolver while the pin is installed. A no-op for pinned
+    allow hosts (``infos is None``), which skip resolution entirely.
     """
     if host is None or infos is None:
         yield
@@ -311,6 +329,20 @@ def _previewable(carry: str, text: str) -> tuple[str, str]:
     return piece[: cut + 1], piece[cut + 1 :]
 
 
+def _skip_dropped_record_tail(piece: str, dropping: bool) -> tuple[str, bool]:
+    """Cut the leading fragment of a record already dropped from the preview.
+
+    ``piece`` is whole lines, so a non-empty piece always ends with a newline:
+    its first line is the dropped record's tail (or several lines of it), and
+    only what follows the first newline is a record of its own and previewable.
+    Without this, a record longer than the preview cap would re-surface in the
+    preview as a fresh record every time its tail crossed a chunk boundary.
+    """
+    if not dropping or not piece:
+        return piece, dropping
+    return piece[piece.find("\n") + 1 :], False
+
+
 def _flush_tail(preview: list[str], preview_bytes: int, carry: str, open_line: bool) -> tuple[int, int]:
     """The stream's final unterminated record: extra rows and the new preview size."""
     if carry:
@@ -346,6 +378,11 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     open_line = False
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
     preview_carry = ""
+    # True while skipping the remainder of a record already dropped from the
+    # preview for being longer than the whole preview cap: without it, the
+    # record's tail - arriving in a later chunk, after the carry was dropped -
+    # would be appended to the preview as if it were a new record.
+    dropping_record = False
     # fdopen (not open) so the file handle stays usable from the event loop
     # without tripping ASYNC230; per-chunk writes are small and cheap.
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out:
@@ -365,6 +402,8 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
                 # A single record longer than the whole preview can never fit
                 # in it: drop the carry instead of growing it with the line.
                 preview_carry = ""
+                dropping_record = True
+            piece, dropping_record = _skip_dropped_record_tail(piece, dropping_record)
             preview_bytes = _append_preview(preview, preview_bytes, piece)
     extra_rows, preview_bytes = _flush_tail(preview, preview_bytes, preview_carry, open_line)
     row_count += extra_rows
@@ -393,26 +432,31 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
     Redirects are bounded so a loop cannot hang the call, and every hop (the
     first included) is checked to be https on a globally routable host, so a
     redirect cannot aim the fetch at an internal or metadata service.
+
+    The whole chain runs under ``_PIN_FETCH_LOCK``: vetting and fetching must
+    be one indivisible section process-wide, or a concurrent download's
+    resolver swap interleaves with this one (see the module note).
     """
     redirects = 0
     unauthenticated = httpx.AsyncClient(timeout=client.get_http_timeout(), follow_redirects=False)
     try:
-        while True:
-            # Checked before every fetch, so the first ``Location`` is covered
-            # by the same rule as the rest of the chain; the fetch then dials
-            # the vetted addresses rather than re-resolving the name.
-            infos = await _check_download_redirect_target(next_url)
-            with _pinned_dns(next_url.host, infos):
-                async with unauthenticated.stream("GET", next_url) as response:
-                    if response.has_redirect_location:
-                        redirects += 1
-                        if redirects > _MAX_DOWNLOAD_REDIRECTS:
-                            raise httpx.TooManyRedirects(
-                                f"Exceeded {_MAX_DOWNLOAD_REDIRECTS} redirects", request=response.request
-                            )
-                        next_url = response.request.url.join(response.headers["location"])
-                        continue
-                    return await _write_stream_to_tempfile(response, path)
+        async with _PIN_FETCH_LOCK:
+            while True:
+                # Checked before every fetch, so the first ``Location`` is covered
+                # by the same rule as the rest of the chain; the fetch then dials
+                # the vetted addresses rather than re-resolving the name.
+                infos = await _check_download_redirect_target(next_url)
+                with _pinned_dns(next_url.host, infos):
+                    async with unauthenticated.stream("GET", next_url) as response:
+                        if response.has_redirect_location:
+                            redirects += 1
+                            if redirects > _MAX_DOWNLOAD_REDIRECTS:
+                                raise httpx.TooManyRedirects(
+                                    f"Exceeded {_MAX_DOWNLOAD_REDIRECTS} redirects", request=response.request
+                                )
+                            next_url = response.request.url.join(response.headers["location"])
+                            continue
+                        return await _write_stream_to_tempfile(response, path)
     finally:
         await unauthenticated.aclose()
 

@@ -441,16 +441,25 @@ class TestExistingLogPermissions:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-def test_a_fchmod_failure_still_writes_the_row(tmp_path, monkeypatch):
-    """Tightening is best-effort: an alien-owned file must not lose the record."""
+def test_a_fchmod_failure_drops_the_row_rather_than_writing_permissively(tmp_path, monkeypatch, caplog):
+    """Fail closed: without an established 0600, account data is not appended.
+
+    The alternative - the previous behavior - wrote the row anyway and left
+    it readable by whoever owns the file. Dropping one log row and warning
+    is the honest cost of a log that cannot be made private.
+    """
 
     def boom(fd: int, mode: int) -> None:
         raise PermissionError("not ours")
 
     monkeypatch.setattr(os, "fchmod", boom)
     path = tmp_path / "calls.jsonl"
-    _append_row(str(path), {"tool": "x", "ok": True})
-    assert "x" in path.read_text()
+    with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
+        _append_row(str(path), {"tool": "x", "ok": True})
+    # os.open creates the (empty, 0600-mode) file before chmod runs; the
+    # contract is that no account data reaches a file it cannot protect.
+    assert not path.exists() or path.stat().st_size == 0, "a row reached a file whose mode is not established"
+    assert any("call log write failed" in r.getMessage() for r in caplog.records)
 
 
 def test_an_over_cap_result_is_a_valid_truncation_envelope():
@@ -465,3 +474,78 @@ def test_an_over_cap_result_is_a_valid_truncation_envelope():
     parsed = json.loads(text)
     assert parsed["truncated"] is True
     assert parsed["head"]
+
+
+class TestEvidenceColumn:
+    """Identity facts survive result truncation in a dedicated bounded field."""
+
+    class _R:
+        def __init__(self, structured):
+            self.is_error = False
+            self.structured_content = structured
+
+    def _row(self, tool, endpoints, ok, structured):
+        mw = CallLogMiddleware(path="", endpoints=endpoints)
+        return mw._record_row(tool, {"profile_id": "p1"}, ok, "", self._R(structured))
+
+    def test_a_create_row_carries_a_created_id_receipt(self):
+        row = self._row(
+            "createProfile",
+            {"createProfile": ("POST", "/profiles")},
+            True,
+            {"data": {"id": "pid-9f3a", "name": "TEST_PROFILE_x"}},
+        )
+        assert row["write"] is True
+        assert row["evidence"]["created_id"] == "pid-9f3a"
+
+    def test_a_read_answer_is_never_mislabelled_as_a_create(self):
+        row = self._row(
+            "getProfile",
+            {"getProfile": ("GET", "/profiles/{profile_id}")},
+            True,
+            {"data": {"id": "pid-9f3a"}},
+        )
+        assert row.get("evidence", {}).get("created_id") is None
+
+    def test_identities_survive_a_truncated_result_column(self):
+        """The projection keeps five list items; evidence keeps fifty pairs."""
+        from nextdns_mcp.call_log import RESULT_CHARS, _result_text
+
+        entries = {"data": [{"id": f"id-{i:04d}-padpadpad", "name": f"entry-{i:04d}"} for i in range(80)]}
+        row = self._row("getDenylist", {"getDenylist": ("GET", "/profiles/{profile_id}/denylist")}, True, entries)
+        assert len(row["evidence"]["ids"]) == 50  # EVIDENCE_MAX_ITEMS
+        assert {"id": "id-0007-padpadpad", "name": "entry-0007"} in row["evidence"]["ids"]
+        # The result column, by contrast, is lossy for this payload: the
+        # projection keeps five list items, so a reader matching identity #7
+        # through it alone would be reading a truth the row never recorded.
+        projected = json.loads(_result_text(self._R(entries)))["data"]
+        assert len(projected) == 6  # PROJECT_MAX_ITEMS + the omission marker
+        assert all("entry-0007" not in json.dumps(item) for item in projected)
+        assert len(json.dumps(row["evidence"])) < RESULT_CHARS * 3  # bounded by construction
+
+    def test_evidence_absent_for_error_and_payloadless_rows(self):
+        row = self._row("createProfile", {"createProfile": ("POST", "/profiles")}, False, {"error": "boom"})
+        assert "evidence" not in row
+
+    def test_a_write_answer_without_a_data_id_records_no_receipt(self):
+        row = self._row("createProfile", {"createProfile": ("POST", "/profiles")}, True, {"data": None})
+        assert "evidence" not in row
+
+    def test_an_identity_without_a_name_still_records_its_id(self):
+        row = self._row(
+            "getRewrites",
+            {"getRewrites": ("GET", "/profiles/{profile_id}/rewrites")},
+            True,
+            {"data": [{"id": "rewrite-1", "action": "blocklist"}]},
+        )
+        assert row["evidence"]["ids"] == [{"id": "rewrite-1"}]
+
+    def test_identities_are_found_through_nested_objects(self):
+        """The walk descends id-less wrapper objects to reach the entries."""
+        row = self._row(
+            "getRewrites",
+            {"getRewrites": ("GET", "/profiles/{profile_id}/rewrites")},
+            True,
+            {"data": {"results": [{"id": "nest-1", "name": "nested-entry"}]}},
+        )
+        assert row["evidence"]["ids"] == [{"id": "nest-1", "name": "nested-entry"}]

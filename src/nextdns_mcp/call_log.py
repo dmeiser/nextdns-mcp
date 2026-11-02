@@ -30,6 +30,9 @@ sensitive data, and the log exists for one run's verification, not for sharing.
 Serialization and disk I/O run on a worker thread so a call never blocks the
 event loop on ``open()``, and both the arguments row and the result projection
 are bounded *before* serialization, not by truncating a full dump afterwards.
+The ``evidence`` column lifts the identity facts a verifier matches on (a
+write's created id, a list answer's id/name pairs) out of the full payload
+before any bounding, so a lossy result projection cannot lose them.
 """
 
 import asyncio
@@ -66,6 +69,12 @@ ERROR_CHARS = 300
 PROJECT_MAX_ITEMS = 5
 PROJECT_MAX_KEYS = 50
 PROJECT_MAX_STRING_CHARS = 200
+
+# Dedicated bounded evidence (see ``_result_evidence``): how many id/name pairs
+# one row may carry, and how long each field may be. An id or name over the cap
+# is an anomaly; 50 pairs covers every list this server publishes a budget for.
+EVIDENCE_MAX_ITEMS = 50
+EVIDENCE_MAX_ID_CHARS = 120
 
 # One server process may serve concurrent calls; keep records whole.
 _write_lock = threading.Lock()
@@ -203,6 +212,12 @@ class CallLogMiddleware(Middleware):
         """The one JSON row describing this call."""
         arguments = args if isinstance(args, dict) else {}
         endpoint = self._endpoints.get(tool)
+        # Whether the call changed state. A generated tool is bound to an
+        # endpoint, so the HTTP method decides it: `POST
+        # /profiles/{profile_id}/rewrites` changed state whatever the tool
+        # was named. The two local operations (plotAnalytics, dohLookup) have
+        # no endpoint and answer questions, so they are reads.
+        write = is_write_operation(endpoint[0]) if endpoint else False
         row = {
             "ts": time.time(),
             "tool": tool,
@@ -217,16 +232,20 @@ class CallLogMiddleware(Middleware):
             # API cannot show that a read happened, but it can show that this
             # read answered with data.
             "result": _result_text(result),
-            # Whether the call changed state. A generated tool is bound to an
-            # endpoint, so the HTTP method decides it: `POST
-            # /profiles/{profile_id}/rewrites` changed state whatever the tool
-            # was named. The two local operations (plotAnalytics, dohLookup) have
-            # no endpoint and answer questions, so they are reads.
-            "write": is_write_operation(endpoint[0]) if endpoint else False,
+            "write": write,
         }
+        self._attach_derived_fields(row, endpoint, result, ok, write)
+        return row
+
+    def _attach_derived_fields(
+        self, row: dict[str, Any], endpoint: tuple[str, str] | None, result: Any, ok: bool, write: bool
+    ) -> None:
+        """The endpoint line and the evidence column, both derived from the call."""
         if endpoint:
             row["endpoint"] = f"{endpoint[0]} {endpoint[1]}"
-        return row
+        evidence = _result_evidence(result, write) if ok else {}
+        if evidence:
+            row["evidence"] = evidence
 
     def _record_row_into(self, path: str, tool: str, args: Any, ok: bool, error: str, result: Any) -> None:
         """Build the row and append it; both off the event loop (``_record`` offloads here)."""
@@ -256,25 +275,96 @@ def _append_row(path: str, row: dict[str, Any]) -> None:
 
 
 def _open_log_file(path: str) -> Any:
-    """Open the log for append, creating it ``0600``.
+    """Open the log for append, creating it ``0600`` and refusing less.
 
     The rows carry profile ids, entry names and bounded result content -
     account data - so the file must not be group- or world-readable from the
     moment it exists. ``open(..., "a")`` applies the process umask (often
     ``0022``) at creation; ``os.open`` with an explicit mode does not.
+
+    Fail closed: the tightening ``fchmod`` covers a log that already exists
+    (a reused path, or an older run's file made under a permissive umask).
+    If it fails - an alien-owned file, a filesystem without chmod - this code
+    cannot know who can read the file, so it does not append to it at all;
+    ``_append_row``'s except path drops the row and warns, which is the
+    correct cost for a log that cannot be made private.
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        # The creation mode only covers a brand-new file; a log that already
-        # exists (a reused path, or an older run's file made under a
-        # permissive umask) is tightened through the fd we just took, so the
-        # contract holds for the file's whole life in this process.
-        # Best-effort: an alien-owned file must not fail the write it shares
-        # with nobody.
         os.fchmod(fd, 0o600)
     except OSError:
-        logger.debug("call log chmod failed for %s", path, exc_info=True)
+        os.close(fd)
+        raise
     return os.fdopen(fd, "a", encoding="utf-8")
+
+
+def _identity_entry(node: Any) -> tuple[str, dict[str, str]] | None:
+    """(full id, bounded entry) when this object carries an id; None otherwise."""
+    if not isinstance(node, dict):
+        return None
+    identifier = node.get("id")
+    if not isinstance(identifier, str) or not identifier:
+        return None
+    entry = {"id": identifier[:EVIDENCE_MAX_ID_CHARS]}
+    if isinstance(node.get("name"), str):
+        entry["name"] = node["name"][:EVIDENCE_MAX_ID_CHARS]
+    return identifier, entry
+
+
+def _walk_children(node: Any, out: list[dict[str, str]], seen: set[str]) -> None:
+    """Descend one container level looking for id-carrying objects."""
+    if isinstance(node, dict):
+        for value in node.values():
+            _walk_identities(value, out, seen)
+    elif isinstance(node, list):
+        for value in node:
+            _walk_identities(value, out, seen)
+
+
+def _walk_identities(node: Any, out: list[dict[str, str]], seen: set[str]) -> None:
+    """Collect (id, name) objects from a payload, bounded, without replacement."""
+    if len(out) >= EVIDENCE_MAX_ITEMS:
+        return
+    entry = _identity_entry(node)
+    if entry is not None and entry[0] not in seen:
+        seen.add(entry[0])
+        out.append(entry[1])
+    _walk_children(node, out, seen)
+
+
+def _created_id_of(data: Any) -> str:
+    """The id a create answer carries, bounded; empty when it does not."""
+    if isinstance(data, dict) and isinstance(data.get("id"), str):
+        return data["id"][:EVIDENCE_MAX_ID_CHARS]
+    return ""
+
+
+def _result_evidence(result: Any, write: bool) -> dict[str, Any]:
+    """Identity facts lifted out of the FULL result, before any bounding.
+
+    The ``result`` column is a deliberately lossy projection - a 10,000-entry
+    allowlist keeps five items - and the truncated envelope can cut anywhere;
+    a harness that matches created-ids or id/name pairs through that column
+    loses facts to where the cut landed, not to the truth of the call. This
+    field is the fix: the ids a write created (``created_id``, only for
+    state-changing calls, so a GET's data.id is never mislabelled as one) and
+    up to ``EVIDENCE_MAX_ITEMS`` (id, name) pairs a list answer carried,
+    bounded by construction and therefore never itself truncated.
+    """
+    structured = getattr(result, "structured_content", None)
+    if not isinstance(structured, dict):
+        return {}
+    data = structured.get("data")
+    evidence: dict[str, Any] = {}
+    if write:
+        created = _created_id_of(data)
+        if created:
+            evidence["created_id"] = created
+    ids: list[dict[str, str]] = []
+    _walk_identities(data, ids, set())
+    if ids:
+        evidence["ids"] = ids
+    return evidence
 
 
 def _result_text(result: Any) -> str:

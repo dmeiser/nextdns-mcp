@@ -41,7 +41,7 @@ from nextdns_mcp.server import published_tool_names
 # Events stream, and an MCP tool call is request/response, so the transport
 # cannot carry it). A second copy here could only drift from the one that
 # decides what is actually registered.
-from nextdns_mcp.spec_tools import SPEC_PATH, WITHHELD_OPERATIONS, spec_tool_names
+from nextdns_mcp.spec_tools import SPEC_PATH, WITHHELD_OPERATIONS, load_spec, spec_tool_names
 
 # Tools the server performs itself rather than proxying: no endpoint returns
 # their answer, so no operation schema describes them and they are excused from
@@ -106,9 +106,13 @@ TOOL_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
 
 
 def load_openapi_spec(spec_path: str) -> dict[str, Any]:
-    """Load and parse OpenAPI specification."""
-    with open(spec_path, "r") as f:
-        return yaml.safe_load(f)
+    """Load and parse the OpenAPI document.
+
+    Delegates to the package's single loader (``spec_tools.load_spec``): the
+    shipped document had a second ``yaml.safe_load`` per script, and copies of
+    a loader are copies that drift.
+    """
+    return load_spec(Path(spec_path))
 
 
 def _success_response_schema(operation: dict[str, Any]) -> dict[str, Any] | None:

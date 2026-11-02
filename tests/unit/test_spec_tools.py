@@ -592,6 +592,23 @@ class TestDelegationGuardsRunFirst:
         assert calls == [], "the delegation must not run when the resolver refused"
 
 
+class TestSchemaErrorTextIsBounded:
+    """An invalid value is named, not quoted back whole (and not kept whole)."""
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    async def test_a_giant_invalid_value_is_described_within_a_cap(self, monkeypatch, calls):
+        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
+        payload = (await tool.run({"profile_id": "abc123", "from": "-1d", "partials": "x" * 5000})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "x" * (spec_tools._SCHEMA_ERROR_MSG_CHARS + 1) not in payload["error"]
+        assert len(payload["error"]) < 1200
+        assert calls == []
+
+
 class TestGeneratedSeriesBudget:
     """The documented 2000-point budget guards the generated door too.
 
@@ -636,14 +653,64 @@ class TestGeneratedSeriesBudget:
         assert "2000" not in payload["error"], f"budget arithmetic treated to=0 as now: {payload['error']}"
         assert "end after" in payload["error"], "zero epoch span: range order is the honest refusal"
 
-    async def test_the_adaptive_default_needs_no_local_interval_floor(self, monkeypatch, calls):
-        """No-interval series pass: the endpoint's own default is already bounded.
+    async def test_a_wide_no_interval_range_is_bounded_at_the_adaptive_default(self, monkeypatch, calls):
+        """No interval is no longer a pass-through: the default has no self-cap.
 
-        Probed live 2026-11: -30d answers 30 points at interval 86400, -365d
-        answers 365 - the adaptive default never exceeds one point per day for
-        wide windows, so the pass-through cannot outpoint the 2000 cap that a
-        stated interval is checked against.
+        Probed live 2026-11: a 4000-day range with no interval answers at
+        interval 86400 with 4000 points - over the 2000-point cap. The call
+        is priced at the probed adaptive default (86400 above 7-day windows)
+        and refused before any request goes out.
         """
+        tool = self._tool(monkeypatch, calls)
+        payload = (await tool.run({"profile_id": "abc123", "from": "-4000d"})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "2000" in payload["error"]
+        assert calls == []
+
+    async def test_a_no_interval_window_inside_the_default_is_allowed(self, monkeypatch, calls):
+        """Pricing the default interval is a bound, not a ban: -365d answers
+        365 points at 86400 (probed), inside every budget, and goes out."""
         tool = self._tool(monkeypatch, calls)
         await tool.run({"profile_id": "abc123", "from": "-365d"})
         assert calls
+
+    async def test_an_oversized_series_answer_is_refused_not_dumped(self, monkeypatch, calls):
+        """Response-side backstop: the row count upstream returns is not ours
+        to price up front, so a payload over the byte ceiling comes back as a
+        typed refusal naming the size, never as a context flood."""
+
+        async def fat_api(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"data": [{"name": f"row{i}", "hits": ["x"] * 60} for i in range(2000)]}
+
+        monkeypatch.setattr(spec_tools, "_api_request_payload", fat_api)
+        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
+        payload = (await tool.run({"profile_id": "abc123", "from": "-30d", "interval": 86400})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "series response ceiling" in payload["error"]
+        assert payload["response_bytes"] > spec_tools.MAX_SERIES_RESPONSE_BYTES
+        assert calls, "the guard bounds what is returned, after the bounded fetch"
+
+    async def test_a_budgeted_series_answer_passes_the_ceiling(self, monkeypatch, calls):
+        """A small, budgeted answer goes through untouched."""
+        tool = self._tool(monkeypatch, calls)
+        result = await tool.run({"profile_id": "abc123", "from": "-365d", "interval": 86400})
+        assert result.structured_content == {"data": []}
+        assert calls
+
+
+class TestSeriesBudgetHelperEdges:
+    """The generated-door budget helper, called directly on its defensive edges."""
+
+    def _route(self):
+        return next(r for r in spec_tools.spec_routes() if r.path.endswith("/analytics/status;series"))
+
+    def test_a_call_naming_no_from_is_not_priced_here(self):
+        """The required SeriesFrom makes this defensive; the helper still says so."""
+        assert spec_tools._series_budget_for_generated_call(self._route(), {}) is None
+
+    def test_an_unresolvable_range_without_an_interval_is_left_to_the_endpoint(self):
+        """No interval means no local budget arithmetic; a garbage range is
+        the endpoint's 400 to give, not this helper's guess."""
+        query = {"from": "not-a-time", "to": "also-not-a-time"}
+        assert spec_tools._series_budget_for_generated_call(self._route(), query) is None

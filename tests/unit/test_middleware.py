@@ -603,3 +603,82 @@ class TestIgnoredArgumentsEdgePaths:
         )
         openapi._report_ignored_arguments(result, ["x"], "owner hint")
         assert result.structured_content["hint"] == "keep it | owner hint"
+
+
+class TestIgnoredArgumentsHintDedup:
+    """Both passes dropping the same name must attribute it once, not twice."""
+
+    def test_the_merged_hint_is_re_rendered_for_the_union_not_concatenated(self):
+        result = ToolResult(
+            structured_content={
+                "data": [],
+                "ignored_arguments": ["privacy"],
+                "ignored_arguments_hint": "privacy: updatePrivacy",
+            }
+        )
+        openapi._report_ignored_arguments(
+            result,
+            ["privacy", "name"],
+            "privacy, name: updatePrivacy",
+            hint_for=lambda names: "owners(" + ",".join(names) + ")",
+        )
+        structured = result.structured_content
+        assert structured["ignored_arguments"] == ["privacy", "name"]
+        # One rendering of the union - the shared name appears once, and the
+        # prior sentence does not ride along beside a text that already covers it.
+        assert structured["ignored_arguments_hint"] == "owners(privacy,name)"
+        assert structured["hint"] == "owners(privacy,name)"
+
+    def test_the_same_set_reannotated_still_renders_once(self):
+        result = ToolResult(
+            structured_content={"data": [], "ignored_arguments": ["x"], "ignored_arguments_hint": "x: T"}
+        )
+        openapi._report_ignored_arguments(
+            result, ["x"], "x: T", hint_for=lambda names: "owners(" + ",".join(names) + ")"
+        )
+        assert result.structured_content["ignored_arguments_hint"] == "owners(x)"
+
+
+class TestIgnoredArgumentsHintBaseSurvival:
+    """Re-rendering replaces only the annotation; the tool's own hint stays."""
+
+    def test_the_tools_own_hint_survives_the_re_render(self):
+        result = ToolResult(
+            structured_content={
+                "data": [],
+                "hint": "the profile id is 6 or 10 characters | from: getAnalyticsStatusSeries",
+                "ignored_arguments": ["from"],
+                "ignored_arguments_hint": "from: getAnalyticsStatusSeries",
+            }
+        )
+        openapi._report_ignored_arguments(
+            result,
+            ["from", "to"],
+            "from, to: getAnalyticsStatusSeries",
+            hint_for=lambda names: "owners(" + ",".join(names) + ")",
+        )
+        assert result.structured_content["hint"] == "the profile id is 6 or 10 characters | owners(from,to)"
+
+    def test_a_foreign_annotation_in_the_hint_is_not_stripped_by_re_render(self):
+        result = ToolResult(
+            structured_content={
+                "data": [],
+                "hint": "fix the range | someone else's note",
+                "ignored_arguments": ["from"],
+                "ignored_arguments_hint": "from: T",
+            }
+        )
+        openapi._report_ignored_arguments(
+            result, ["to"], "to: T", hint_for=lambda names: "owners(" + ",".join(names) + ")"
+        )
+        assert result.structured_content["hint"] == "fix the range | someone else's note | owners(from,to)"
+
+    def test_a_non_string_hint_and_a_missing_annotation_are_tolerated(self):
+        """Odd payload shapes get re-set, not crashed on."""
+        result = ToolResult(
+            structured_content={"data": [], "hint": 7, "ignored_arguments": ["x"], "ignored_arguments_hint": None}
+        )
+        openapi._report_ignored_arguments(
+            result, ["x"], "x: T", hint_for=lambda names: "owners(" + ",".join(names) + ")"
+        )
+        assert result.structured_content["hint"] == "owners(x)"

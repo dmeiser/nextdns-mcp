@@ -1131,6 +1131,29 @@ async def _ensure_plot_profile(m: MeasureClient, pid: str) -> str:
     )
 
 
+def _proven_created_id(found: dict[str, Any] | None, created_ids: set[str]) -> str:
+    """Use a found profile only if this run holds a create receipt for that id.
+
+    A name lookup answers "which profile answers to this name", never "which
+    profile did this run create". The run-unique suffix narrows collisions but
+    closes nothing: an operator pinning NEXTDNS_E2E_PROFILE_NAME, or the actor
+    itself calling createProfile with the run's name, both produce a profile
+    that answers the lookup with no receipt behind it. Only membership in
+    created_ids - ids taken from createProfile answers this run performed -
+    is proof, so an id that is not a member is refused here and never becomes
+    the run's pid, never gets written to, and never gets deleted.
+    """
+    if not found:
+        return ""
+    pid = str(found.get("id", ""))
+    return pid if pid in created_ids else ""
+
+
+def _deletable_by_this_run(pid: str, created_ids: set[str]) -> bool:
+    """Whether teardown may delete ``pid``: only ids with a this-run receipt."""
+    return bool(pid) and pid in created_ids
+
+
 def _created_ids_from_records(records: list[dict[str, Any]]) -> set[str]:
     """Profile ids this run's server records PROVE were created here.
 
@@ -1144,6 +1167,14 @@ def _created_ids_from_records(records: list[dict[str, Any]]) -> set[str]:
     ids: set[str] = set()
     for record in records:
         if str(record.get("endpoint", "")) != created_endpoint or not record.get("ok"):
+            continue
+        # The dedicated evidence column first: it is lifted from the full
+        # payload before any bounding, so a create receipt survives even when
+        # the result projection was truncated. The result parse is the
+        # fallback for rows written by older builds.
+        evidence = record.get("evidence")
+        if isinstance(evidence, dict) and evidence.get("created_id"):
+            ids.add(str(evidence["created_id"]))
             continue
         try:
             payload = json.loads(str(record.get("result") or ""))
@@ -1209,10 +1240,11 @@ async def _self_heal_profile(m: MeasureClient, pid: str, targets: TaskTargets) -
         data = body.get("data") if isinstance(body, dict) else None
         if isinstance(data, dict) and data.get("id"):
             new_id = str(data["id"])
-    if not new_id:
-        found = await m.find_profile(targets.renamed_name)
-        if found is not None:
-            new_id = str(found.get("id", ""))
+    # No adopt-by-name fallback: a create whose response carried no id has no
+    # proof of what (if anything) it produced, and a profile answering to the
+    # run's name could belong to anything. Failing the self-heal honestly is
+    # the fail-closed answer; the run reports the 404 cascade rather than
+    # writing to - and later deleting - a profile it never proved it made.
     if new_id:
         _progress(f"self-heal: test profile {pid} was deleted mid-run; recreated as {new_id}")
         return new_id
@@ -1557,6 +1589,24 @@ def _identifiers_from_answers(records: list[dict[str, Any]]) -> dict[str, list[s
     for record in records:
         if not record.get("ok"):
             continue
+        # Evidence pairs first: they survive result truncation (the projection
+        # keeps five list items; evidence keeps fifty identities). The result
+        # walk stays as the fallback and as coverage for identifiers the
+        # evidence lift does not name (non-``name`` label fields).
+        evidence = record.get("evidence")
+        if isinstance(evidence, dict):
+            for entry in evidence.get("ids", []):
+                if not isinstance(entry, dict):
+                    continue
+                ident, name = entry.get("id"), entry.get("name")
+                if (
+                    isinstance(ident, str)
+                    and isinstance(name, str)
+                    and len(name) >= 6
+                    and name != ident
+                    and ident not in out.setdefault(name, [])
+                ):
+                    out[name].append(ident)
         try:
             payload = json.loads(str(record.get("result") or ""))
         except (ValueError, TypeError):
@@ -2997,21 +3047,39 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             # this step's own verdict failed. Otherwise every later prompt
             # renders a literal "{profile_id}" and the report measures a
             # cascade of argument errors instead of the model's behaviour.
-            # Finding by name is proof of ownership here: the default name is
-            # run-unique (common._resolve_profile_name), so no other run or
-            # user can own a profile answering to this run's name - and the
-            # adopted id feeds the same created_ids set every later deletion
-            # must be a member of.
+            # A name lookup may only supply an id this run holds a create
+            # receipt for (_proven_created_id): when the actor created the
+            # profile, the server's call log carries the createProfile receipt
+            # and its id is a created_ids member; when nobody in this run
+            # created it, the lookup is ambiguity - it is not adopted, not
+            # written to, and never deleted.
             if not pid and step.verify in ("profile_exists", "profile_renamed"):
                 prof = await m.find_profile(targets.profile_name) or await m.find_profile(targets.renamed_name)
-                if prof is not None:
-                    pid = str(prof.get("id"))
+                pid = _proven_created_id(prof, created_ids)
+                if prof is not None and not pid:
+                    note = (
+                        f"a profile answering to {targets.profile_name!r} (id {prof.get('id')}) has no "
+                        "createProfile receipt from this run: not adopted, not written to, not deleted"
+                    )
+                    report.notes.append(note)
+                    _progress(f"  NOTE    : {note}")
+                if pid:
                     report.profile_id = pid
 
         # Safety net: if the model deleted the profile, verify; if not, the
         # harness owns cleanup. For a targeted range that excludes
         # profiles.delete the teardown is harness-owned from the start, so it
         # goes through the same MCP tool the actor would have used.
+        # Deletion requires the receipt: every path that set ``pid`` (harness
+        # provisioning via createProfile, self-heal from a create response, a
+        # receipt-backed adoption) put the id in created_ids; an id that got
+        # there any other way is not this run's to delete, and the run says
+        # so in its notes instead of destroying it.
+        if pid and not _deletable_by_this_run(pid, created_ids):
+            note = f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
+            report.notes.append(note)
+            _progress(f"  NOTE    : {note}")
+            pid = ""
         if pid:
             gone, _verdict = await _profile_gone(m, pid, targets)
             if not gone and needs_harness_teardown(selected):

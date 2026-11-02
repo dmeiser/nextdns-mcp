@@ -14,6 +14,7 @@ about the request the server makes next rather than the answer it gets back:
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
 import ipaddress
 import os
 import socket
@@ -787,3 +788,115 @@ class TestPreviewRespectsRecordBoundaries:
         payload = await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
         assert payload["row_count"] == 1
         assert payload["preview"]["line_count"] <= 1
+
+
+class TestPinnedWindowsSerialiseAcrossDownloads:
+    """The resolver swap is process-global, so vet-and-fetch is ONE critical section.
+
+    Without a shared lock two downloads interleave their swaps: when the
+    earlier one finishes first it restores the resolver under the later
+    one, leaving that fetch running unpinned, and the later one then
+    restores an earlier wrapper as "real" - stale residue for the whole
+    process. This test forces exactly that schedule: A's fetch stays open
+    50 ms; B starts inside that window, dials (flipping B's own host to
+    loopback at dial time, the rebinding race), and stays open 30 ms after
+    - so A finishes first. With the lock, B only vets and connects after A
+    released it, under B's own pin; without it, B's probe below resolves
+    through the real (flipped) resolver and sees loopback, and a stale
+    wrapper outlives both downloads.
+    """
+
+    async def test_out_of_order_overlaps_stay_pinned_and_restore_clean(self, tmp_path, monkeypatch):
+        a_url = "https://a.example/f.csv"
+        b_url = "https://b.example/f.csv"
+        state = {"flipped": False}
+
+        def fake_resolver(host: str, port: Any, **kwargs: Any) -> list[Any]:
+            if str(host) == "b.example" and state["flipped"]:
+                # B's host "rebinds" to loopback after B dialled: only B's
+                # own pin, still installed, can answer with the vetted address.
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+            ip = {"a.example": "93.184.216.34", "b.example": "93.184.216.99"}.get(str(host), "93.184.216.200")
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake_resolver)
+
+        seen: dict[str, Any] = {}
+        finished: list[str] = []
+
+        class _ProbingResponse(_FakeResponse):
+            def __init__(self, url: str, name: str, delay: float) -> None:
+                super().__init__(url, chunks=[f"{name},ok\n"])
+                self._name = name
+                self._delay = delay
+
+            async def __aenter__(self) -> Self:
+                await asyncio.sleep(self._delay)
+                seen[self._name] = {
+                    "own": socket.getaddrinfo(httpx.URL(self.request.url).host, None)[0][4][0],
+                    "other": socket.getaddrinfo("other.example", None)[0][4][0],
+                }
+                return self
+
+            async def __aexit__(self, *exc_info: object) -> None:
+                finished.append(self._name)
+
+        responses = {a_url: _ProbingResponse(a_url, "a", 0.05), b_url: _ProbingResponse(b_url, "b", 0.06)}
+
+        class _UrlClient:
+            def stream(self, method: str, url: str, **kwargs: Any) -> _FakeResponse:
+                if str(url) == b_url:
+                    # The flip arms when B dials: from here the real resolver
+                    # betrays b.example, and B outlives A's window either way.
+                    state["flipped"] = True
+                return responses[str(url)]
+
+            async def aclose(self) -> None:
+                pass
+
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _UrlClient())
+
+        async def start_b() -> dict[str, Any]:
+            # B enters the function while A is inside its window: overlap is
+            # proven at entry, whether the lock defers its fetch or not.
+            seen["overlap"] = "a" not in finished
+            return await logs_module._follow_redirects_to_tempfile(httpx.URL(b_url), str(tmp_path / "b.csv"))
+
+        task_a = asyncio.create_task(
+            logs_module._follow_redirects_to_tempfile(httpx.URL(a_url), str(tmp_path / "a.csv"))
+        )
+        await asyncio.sleep(0.01)  # A is inside its pinned fetch window when B starts
+        task_b = asyncio.create_task(start_b())
+        result_b = await task_b
+        result_a = await task_a
+
+        assert seen["overlap"] is True, "B never overlapped A's fetch: the schedule did not test concurrency"
+        assert seen["b"]["own"] == "93.184.216.99", "B continued unpinned after A restored the resolver"
+        assert seen["b"]["other"] == "93.184.216.200", "unrelated names must reach the real resolver"
+        assert socket.getaddrinfo is fake_resolver, "a stale pin wrapper was left installed"
+        assert result_a["row_count"] == result_b["row_count"] == 1
+
+
+class TestOversizedRecordsDropWhole:
+    """A record longer than the whole preview cap is dropped once, not reborn."""
+
+    async def test_a_dropped_records_tail_does_not_resurface_as_a_new_record(self, tmp_path, monkeypatch):
+        """The carry is dropped when one unterminated record crosses the byte
+        cap; later chunks still belong to THAT record. Appending their leading
+        text to the preview would show a fragment and imply a record that
+        never existed."""
+        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
+        payload = await logs_module._write_stream_to_tempfile(
+            _FakeResponse("https://x/file.csv", chunks=["A" * 30, "AAAA\nreal,row\n"]), str(tmp_path / "d.csv")
+        )
+        assert payload["preview"]["text"] == "real,row\n"
+        assert payload["row_count"] == 2
+        assert payload["size"] == 44
+
+    async def test_an_oversized_record_spanning_several_chunks_stays_dropped(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
+        payload = await logs_module._write_stream_to_tempfile(
+            _FakeResponse("https://x/file.csv", chunks=["A" * 30, "more", "tail\nx,y\n"]), str(tmp_path / "d.csv")
+        )
+        assert payload["preview"]["text"] == "x,y\n"
+        assert payload["row_count"] == 2

@@ -398,9 +398,14 @@ def _private_open(path: Path, mode: str):
     flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC)
     fd = os.open(str(path), flags, 0o600)
     try:
+        # Fail closed: if 0600 cannot be established - the file belongs to
+        # someone else, the filesystem has no chmod - the artifact is not
+        # written at all. Raising here aborts the run loudly rather than
+        # leaving profile ids and payloads in a file other users can read.
         os.fchmod(fd, 0o600)
     except OSError:
-        pass
+        os.close(fd)
+        raise
     fh = os.fdopen(fd, mode, encoding="utf-8")
     try:
         yield fh
@@ -1119,6 +1124,16 @@ class ContainerE2ERunner:
 
         if self.health_only:
             return await self._run_health_only()
+
+        # ARCH-3 gate, in the live runner itself and not only in the unit
+        # suite: the WRITE_CASES/UNEXERCISED_WRITE_OPERATIONS bookkeeping must
+        # account for every published write operation, or "Executed calls: N"
+        # quietly stops meaning "every write door was exercised". Fail before
+        # touching the account when it does not.
+        uncovered = uncovered_write_operations()
+        if uncovered:
+            log_error(f"ARCH-3 gate: published write operations with no coverage decision: {', '.join(uncovered)}")
+            return 1
 
         if not await self._preflight_runtime():
             return 1
