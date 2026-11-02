@@ -38,6 +38,7 @@ surprising tool is otherwise invisible to a caller:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
@@ -415,8 +416,10 @@ class SpecApiTool(Tool):
         A ``;series`` route runs under ``MAX_SERIES_RESPONSE_BYTES`` *inside
         the transport*: the response streams and the refusal fires while the
         body is still arriving, so an over-wide answer never fills transport
-        memory and is never JSON-decoded. ``_series_refusal`` renders either
-        ceiling layer as the typed series refusal.
+        memory and is never JSON-decoded. An injected transport predating the
+        cap keeps its legacy four-argument signature (see
+        :func:`_transport_accepts_cap`) and is called the old way; either way
+        ``_series_refusal`` renders the ceiling as the typed series refusal.
         """
         request = self._transport or _api_request_payload
         payload = await request(
@@ -424,7 +427,7 @@ class SpecApiTool(Tool):
             path,
             params=query or None,
             json_body=body,
-            **({"max_response_bytes": MAX_SERIES_RESPONSE_BYTES} if ";series" in self._route.path else {}),
+            **_capped_transport_kwargs(self._route, request),
         )
         refused = _series_refusal(self._route, payload)
         if refused is not None:
@@ -704,6 +707,37 @@ def _default_interval_estimate(from_time: Any, to_time_raw: Any) -> int | None:
     )
 
 
+def _capped_transport_kwargs(route: HTTPRoute, request: Callable[..., Any]) -> dict[str, Any]:
+    """The transport kwargs a call needs: the cap only for routes that want it and transports that take it."""
+    if ";series" in route.path and _transport_accepts_cap(request):
+        return {"max_response_bytes": MAX_SERIES_RESPONSE_BYTES}
+    return {}
+
+
+def _transport_accepts_cap(request: Callable[..., Any]) -> bool:
+    """Whether the resolved transport accepts a ``max_response_bytes`` keyword.
+
+    ``transport`` exists so a caller can inject a per-tool request function,
+    and a callable written before the cap existed has exactly the legacy
+    ``(method, url, params, json_body)`` signature. Passing the cap kwarg to
+    such a callable would raise ``TypeError`` before its first line runs, so
+    the capability is probed from the signature instead: a legacy transport
+    keeps the old call shape, and its oversized ``;series`` answers are still
+    refused by the serialized backstop in :func:`_series_refusal`. A callable
+    whose signature cannot be introspected is treated as legacy for the same
+    reason - the unpriced path still enforces the ceiling, the priced one
+    must not guess.
+    """
+    try:
+        parameters = inspect.signature(request).parameters
+    except (TypeError, ValueError):
+        return False
+    named = parameters.get("max_response_bytes")
+    if named is not None and named.kind in (named.KEYWORD_ONLY, named.POSITIONAL_OR_KEYWORD):
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
 def _series_refusal(route: HTTPRoute, payload: Any) -> dict[str, Any] | None:
     """The typed ceiling refusal for a ``;series`` result, from either layer.
 
@@ -711,9 +745,11 @@ def _series_refusal(route: HTTPRoute, payload: Any) -> dict[str, Any] | None:
     ``response_too_large`` payload; that gets the series wording with no
     measured size claimed (nothing was measured - the refusal came from the
     wire). The serialized check is the backstop for an injected transport
-    that honours no cap. Only ``;series`` routes get here (the caller gates).
+    that honours no cap. The ceiling is a ``;series`` policy only: aggregate
+    endpoints (a wide denylist, a big profile listing) legitimately answer
+    with larger documents and are not refused.
     """
-    if not isinstance(payload, dict):
+    if ";series" not in route.path or not isinstance(payload, dict):
         return None
     if payload.get("code") == ErrorCode.RESPONSE_TOO_LARGE:
         return _series_ceiling_payload(str(route.operation_id), None)

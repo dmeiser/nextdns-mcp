@@ -276,3 +276,24 @@ async def test_the_cap_counts_decoded_bytes_of_a_gzipped_body(stub_nextdns_api):
     _serve(200, gzip.compress(big))
     payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=10_000)
     assert payload["code"] == "response_too_large"
+
+
+@pytest.mark.asyncio
+async def test_the_cap_boundary_is_exact_a_single_chunk_exactly_at_the_cap_parses(stub_nextdns_api):
+    """Exactly the cap is not "exceeded": a one-chunk body of cap bytes parses."""
+    body = json.dumps({"data": [f"row-{i}" for i in range(300)]})
+    _serve(200, body)
+    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=len(body))
+    assert payload.get("code") != "response_too_large"
+    assert len(payload["data"]) == 300
+
+
+@pytest.mark.asyncio
+async def test_a_single_chunk_one_byte_over_the_cap_refuses_without_the_overshoot(stub_nextdns_api):
+    """The projected length is checked before the append: the refusal needs no
+    buffer beyond the cap, and the boundary is one byte, not one chunk."""
+    body = json.dumps({"data": [f"row-{i}" for i in range(300)]})
+    _serve(200, body)
+    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=len(body) - 1)
+    assert payload["code"] == "response_too_large"
+    assert payload["max_response_bytes"] == len(body) - 1

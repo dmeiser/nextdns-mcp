@@ -781,3 +781,56 @@ def test_series_refusal_ignores_a_non_mapping_answer():
     """A transport that answers with a bare list gets no annotation, no crash."""
     route = next(r for r in spec_tools.spec_routes() if r.path.endswith("/analytics/status;series"))
     assert spec_tools._series_refusal(route, ["data", "rows"]) is None
+
+
+class TestLegacyInjectedTransportCompatibility:
+    """A transport injected before the response cap existed keeps the legacy signature.
+
+    ``SpecApiTool(transport=...)`` is a published injection point; a callable
+    with exactly ``(method, url, params=None, json_body=None)`` was valid
+    until the capped ``;series`` call started passing ``max_response_bytes``.
+    Binding that kwarg to a legacy signature raises TypeError before its body
+    runs, so the capability must be probed - and the legacy path must still
+    have its oversized answers refused by the serialized backstop.
+    """
+
+    async def test_a_legacy_four_argument_transport_runs_and_is_still_capped(self):
+        seen: list[tuple[str, str]] = []
+
+        async def legacy_transport(method, url, params=None, json_body=None):
+            seen.append((method, url))
+            return {"data": [{"x": "over-cap-padding-for-a-real-refusal", "i": i} for i in range(30_000)]}
+
+        route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
+        tool = spec_tools.SpecApiTool(route, transport=legacy_transport)
+        payload = (await tool.run({"profile_id": "abc123", "from": "-1d"})).structured_content
+
+        assert seen, "the legacy transport must be called with the legacy signature, not killed by the cap kwarg"
+        assert payload["code"] == "invalid_argument"
+        assert "series response ceiling" in payload["error"]
+        assert payload["response_bytes"] > spec_tools.MAX_SERIES_RESPONSE_BYTES  # the backstop priced it
+
+    def test_the_probe_reads_named_and_variadic_signatures(self):
+        async def legacy(method, url, params=None, json_body=None): ...
+
+        async def modern(method, url, params=None, json_body=None, max_response_bytes=None): ...
+
+        async def star(method, url, **extra): ...
+
+        assert not spec_tools._transport_accepts_cap(legacy)
+        assert spec_tools._transport_accepts_cap(modern)
+        assert spec_tools._transport_accepts_cap(star)
+
+    def test_the_default_transport_supports_the_cap(self):
+        assert spec_tools._transport_accepts_cap(spec_tools._api_request_payload)
+
+    def test_a_callable_without_an_introspectable_signature_is_treated_as_legacy(self):
+        """The unpriced path still enforces the ceiling, so the guess is safe the only way."""
+        assert not spec_tools._transport_accepts_cap(iter)  # builtin whose signature() raises ValueError
+
+
+def test_a_big_non_series_payload_is_not_refused_by_the_series_backstop():
+    """The ceiling is a ;series policy: a wide aggregate answer is data, not an overrun."""
+    route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getDenylist")
+    big = {"data": [{"id": f"entry-{i}", "name": "x" * 40} for i in range(30_000)]}
+    assert spec_tools._series_refusal(route, big) is None

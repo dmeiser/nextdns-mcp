@@ -177,9 +177,12 @@ async def _request_capped(
 
     The cap counts *decoded* body bytes - the bytes that would be parsed and
     returned - which ``aiter_bytes`` yields after undoing any content
-    encoding. ``aiter_bytes`` already decompressed them, so the copied headers
-    must not keep ``content-encoding`` (or the now-wrong ``content-length``):
-    an :class:`httpx.Response` built with ``content=`` runs its decoder at
+    encoding, and the boundary is exact: a body of exactly
+    ``max_response_bytes`` passes, and a longer one is refused before the
+    chunk that crosses the cap is ever appended. ``aiter_bytes`` already
+    decompressed them, so the copied headers must not keep
+    ``content-encoding`` (or the now-wrong ``content-length``): an
+    :class:`httpx.Response` built with ``content=`` runs its decoder at
     construction, and leaving the header would decompress the plain body a
     second time and die with a zlib "incorrect header check" (real-world:
     the NextDNS edge gzips larger ``;series`` answers).
@@ -187,12 +190,15 @@ async def _request_capped(
     async with client.api_client.stream(method, url, params=params, json=json_body) as streamed:
         body = bytearray()
         async for chunk in streamed.aiter_bytes():
-            body += chunk
-            if len(body) > max_response_bytes:
+            if len(body) + len(chunk) > max_response_bytes:
+                # Checked *before* the append: a body that would cross the
+                # cap is refused with the overshoot never buffered, so the
+                # buffered amount never exceeds the cap by even one byte.
                 raise NextDNSResponseTooLargeError(
                     f"HTTP response to {method} {url} exceeded the {max_response_bytes}-byte response ceiling",
                     max_response_bytes=max_response_bytes,
                 )
+            body += chunk
         headers = httpx.Headers(streamed.headers)
         headers.pop("content-encoding", None)
         headers.pop("content-length", None)
