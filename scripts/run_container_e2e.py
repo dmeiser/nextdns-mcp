@@ -1077,6 +1077,12 @@ class ContainerE2ERunner:
         if self.failed_count > 0 or self.schema_errors > 0:
             log_error("E2E test failed")
             return 1
+        if self.skipped_count > 0:
+            # A skipped call verifies nothing: counting it as neither pass nor
+            # fail is how a suite of 100-odd calls "passes" while whole
+            # operations were never executed.
+            log_error(f"E2E test failed: {self.skipped_count} call(s) skipped")
+            return 1
 
         log_success("All executed E2E calls completed successfully")
         return 0
