@@ -848,17 +848,33 @@ class ContainerE2ERunner:
                 self.record_skip("plotAnalytics", f"metric={metric}: NEXTDNS_PLOT_PROFILE not set")
 
     @staticmethod
+    def _fill(value: Any, profile_id: str, ts: int) -> Any:
+        """Substitute the placeholders in one argument value, at any depth."""
+        if isinstance(value, str):
+            return value.format(profile=profile_id, ts=ts)
+        if isinstance(value, list):
+            return [ContainerE2ERunner._fill(item, profile_id, ts) for item in value]
+        if isinstance(value, dict):
+            return ContainerE2ERunner._fill_mapping(value, profile_id, ts)
+        return value
+
+    @staticmethod
+    def _fill_mapping(mapping: dict[str, Any], profile_id: str, ts: int) -> dict[str, Any]:
+        """Fill every value of a nested body object (its keys name fields, never placeholders)."""
+        return {key: ContainerE2ERunner._fill(item, profile_id, ts) for key, item in mapping.items()}
+
+    @staticmethod
     def _substitute(template: dict[str, Any], profile_id: str, ts: int) -> dict[str, Any]:
-        """Fill ``{profile}`` and ``{ts}`` in one write case's arguments.
+        """Fill ``{profile}`` and ``{ts}`` in one write case's arguments, at any depth.
 
         The timestamp makes an entry unique per run, which is what lets a repeated run
         exercise a real add instead of the answer to adding something that is already
-        there.
+        there. Whole-array replacements carry their entries inside a list of objects,
+        so the fill recurses: a top-level-only pass sent the literal
+        ``e2e-{ts}-replace.example.com`` upstream, and the API answered ``invalid``
+        for the braces (proven live by the first run that carried nested bodies).
         """
-        return {
-            name: value.format(profile=profile_id, ts=ts) if isinstance(value, str) else value
-            for name, value in template.items()
-        }
+        return ContainerE2ERunner._fill(template, profile_id, ts)
 
     async def _run_write_checks(self, session: ClientSession, profile_id: str) -> None:
         """Exercise every write this surface offers, and leave the profile as it was found.

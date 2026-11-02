@@ -274,7 +274,13 @@ async def test_run_preflight_fails_on_missing_tools(runner: ContainerE2ERunner):
 
 @pytest.mark.asyncio
 async def test_run_success_read_only(runner: ContainerE2ERunner):
-    """Test a complete read-only run with mocked session."""
+    """Test a complete read-only run with mocked session.
+
+    The plot sweep needs a data-bearing profile to target; without one the
+    nine plotAnalytics calls record skips, and skips fail the run (a call
+    that never executed certifies nothing), so this run gets one.
+    """
+    runner.plot_profile = "analytics-profile"
     tools_list = [Tool(name=t, description="", inputSchema={}) for t in EXPECTED_TOOLS]
     mock_tools_res = MagicMock()
     mock_tools_res.tools = tools_list
@@ -314,6 +320,10 @@ async def test_run_success_read_only(runner: ContainerE2ERunner):
                     '"status_description":"NOERROR"}}',
                 )
             ]
+        elif name == "plotAnalytics":
+            # The runner treats a plot answer with no image content as a failure,
+            # so the mocked sweep has to return the image the real tool returns.
+            mock_res.content = [ImageContent(type="image", data="AA", mimeType="image/png")]
         else:
             mock_res.content = [TextContent(type="text", text='{"data":[{"id":"test-profile-id"}]}')]
         return mock_res
@@ -1100,6 +1110,33 @@ class TestExecutionCoverageIsClosed:
             "replaceParentalControlServices",
         ):
             assert op in exercised
+
+
+class TestPlaceholderSubstitution:
+    """Placeholders fill at any depth: a literal ``{ts}`` upstream is a broken domain.
+
+    The first live run with nested replace bodies proved it: the whole-array
+    cases carry their entries inside a list of objects, a top-level-only fill
+    sent ``e2e-{ts}-replace.example.com`` verbatim, and NextDNS answered 200
+    with an ``invalid`` error document.
+    """
+
+    def test_nested_body_entries_are_substituted(self, runner):
+        filled = runner._substitute(
+            {"profile_id": "{profile}", "body": [{"id": "e2e-{ts}-replace.example.com", "active": True}]},
+            "abc123",
+            1700000000,
+        )
+        assert filled == {
+            "profile_id": "abc123",
+            "body": [{"id": "e2e-1700000000-replace.example.com", "active": True}],
+        }
+
+    def test_no_write_case_sends_an_unfilled_placeholder(self, runner):
+        for tool, template in WRITE_CASES:
+            filled = runner._substitute(template, "abc123", 1700000000)
+            blob = json.dumps(filled)
+            assert "{profile}" not in blob and "{ts}" not in blob, f"{tool} sent {blob}"
 
 
 class TestPrivateArtifacts:

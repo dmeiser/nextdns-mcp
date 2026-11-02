@@ -777,7 +777,9 @@ class TestPreviewRespectsRecordBoundaries:
         payload = await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
         assert payload["preview"]["text"] == "a\nb,c"
 
-    async def test_a_record_larger_than_the_preview_does_not_grow_the_carry(self, tmp_path, unauthenticated, monkeypatch):
+    async def test_a_record_larger_than_the_preview_does_not_grow_the_carry(
+        self, tmp_path, unauthenticated, monkeypatch
+    ):
         """One oversized record: the carry is dropped, not accumulated forever."""
         signed = "https://storage.example/file.csv"
         giant = "x" * (logs_module.DOWNLOAD_PREVIEW_MAX_BYTES * 2 + 1024)
