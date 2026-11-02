@@ -437,10 +437,15 @@ components:
     From:
       name: from
       in: query
-      # Optional upstream: an omitted `from` covers the last day (-1d), which
-      # is the window docs/usage.md documents and the E2E harness prompts for
-      # ("recent logs, no time window"). Publishing it required was a contract
-      # the API does not have.
+      # Optional upstream for the operations that use it (aggregates and
+      # logs): an omitted `from` covers the last day (-1d), which is the
+      # window docs/usage.md documents and the E2E harness prompts for
+      # ("recent logs, no time window"). Publishing it required was a
+      # contract the API does not have there. The `;series` endpoints DO
+      # demand it - probed live 2026-11-02, they answer
+      # 400 {"errors":[{"code":"required","source":{"parameter":"from"}}]} -
+      # so every series operation references the SeriesFrom sibling below
+      # instead of this component.
       required: false
       # The narrow wording ("Unix timestamp or ISO 8601") was not the contract
       # this API actually honours: a relative offset works, and it is the only
@@ -457,6 +462,32 @@ components:
         omitting `from` entirely covers exactly that - the last day. The
         Grafana spelling now-1d is rejected upstream (``from`` must be
         number); this server rewrites it to -1d before sending.
+      schema:
+        oneOf:
+          - type: string
+          - type: number
+      example: '-1d'
+
+    SeriesFrom:
+      name: from
+      in: query
+      # The `;series` endpoints demand a start time the aggregate endpoints
+      # do not: probed live 2026-11-02, a series request without `from`
+      # answers 400 naming the parameter, while the same request without it
+      # succeeds on the aggregate endpoint. Publishing `from` optional for
+      # series turned a working call into a guaranteed 400, so the series
+      # operations carry this required sibling; everything about its shape is
+      # the From component's.
+      required: true
+      x-mcp-normalizer: normalize_time_value
+      description: >-
+        Start of the time window; required here, because a series request
+        without it is refused upstream. Accepted spellings: epoch seconds
+        (1762000000, as a number or its string form), ISO 8601
+        (2026-10-30T00:00:00Z), a bare date (2026-10-30), the literal `now`,
+        or a relative offset from now (-1d, -12h, -30d). For the last day
+        write -1d. The Grafana spelling now-1d is rejected upstream (``from``
+        must be number); this server rewrites it to -1d before sending.
       schema:
         oneOf:
           - type: string
@@ -1040,7 +1071,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1119,7 +1150,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1171,7 +1202,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1223,7 +1254,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1274,7 +1305,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1325,7 +1356,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1376,7 +1407,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1427,7 +1458,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1486,7 +1517,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1545,7 +1576,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'

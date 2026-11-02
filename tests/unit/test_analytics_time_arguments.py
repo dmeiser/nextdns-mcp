@@ -107,20 +107,25 @@ class TestTheToolsSaySoThemselves:
             result = await client.call_tool(tool, arguments)
         return getattr(result, "structured_content", None) or {}
 
-    def test_the_series_endpoint_does_not_demand_a_start_time(self):
-        """``from`` is optional upstream: an unnamed window covers the last day.
+    def test_the_series_endpoint_demands_a_start_time_and_the_aggregate_does_not(self):
+        """``from`` is required upstream for series and optional for aggregates.
 
-        The document used to publish ``from`` as required, which demanded an
-        argument the API does not: the harness asks for recent logs with no
-        window, and docs/usage.md states the omitted window is ``-1d``. The
-        schema now says optional; the description still names the relative
-        spelling so a caller who wants a different window writes one.
+        The document once published one shared ``From`` component, so it could
+        state only one of these truths. Probed live 2026-11-02: an aggregate
+        without ``from`` answers 200 (the window defaults to the last day),
+        while ``;series`` answers 400 naming the parameter
+        (``{"code":"required","source":{"parameter":"from"}}``). Publishing
+        it optional for series turned a working call into a guaranteed 400,
+        so the series operations now carry a required ``SeriesFrom`` and the
+        aggregates keep the optional ``From``. The description still names
+        the relative spelling so a caller who wants the last day writes -1d.
         """
-        series = next(
-            route for route in spec_tools.spec_routes() if route.operation_id == "getAnalyticsEncryptionSeries"
-        )
-        assert "from" not in (series.flat_param_schema.get("required") or [])
-        window = series.flat_param_schema["properties"]["from"]["description"]
+        routes = {route.operation_id: route for route in spec_tools.spec_routes()}
+        series = routes["getAnalyticsEncryptionSeries"].flat_param_schema
+        aggregate = routes["getAnalyticsEncryption"].flat_param_schema
+        assert "from" in (series.get("required") or [])
+        assert "from" not in (aggregate.get("required") or [])
+        window = series["properties"]["from"]["description"]
         assert "last day" in window
 
     def test_the_window_argument_names_the_relative_spelling(self):

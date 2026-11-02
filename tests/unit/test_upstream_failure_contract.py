@@ -172,7 +172,7 @@ class TestToolsReportUpstreamFailuresAsPayloads:
         ("listRewrites", {"profile_id": "abc123"}),
         ("getLogs", {"profile_id": "abc123"}),
         ("clearLogs", {"profile_id": "abc123"}),
-        ("getAnalyticsStatusSeries", {"profile_id": "abc123"}),
+        ("getAnalyticsStatusSeries", {"profile_id": "abc123", "from": "-1d"}),
         ("plotAnalytics", {"metric": "status", "profile_id": "abc123"}),
     )
 

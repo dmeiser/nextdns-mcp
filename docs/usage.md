@@ -83,9 +83,11 @@ and a `…Series` twin for time-series data (everything except `domains`).
 #### Time window
 `from` and `to` accept epoch seconds as a number, or a string: ISO 8601
 (`2026-10-30T00:00:00Z`), a bare date (`2026-10-30`), `now`, or a relative
-offset from now (`-1d`, `-12h`, `-30d`). `from` is optional: a series that
-names none covers the last day (`-1d`), the window an aggregate request gets
-when it names none. `to` omitted ends at now. The Grafana spelling `now-1d` is
+offset from now (`-1d`, `-12h`, `-30d`). `from` is optional on the aggregate
+and logs endpoints: a request that names none covers the last day (`-1d`).
+The `…Series` endpoints require `from` — upstream refuses a series request
+that names none — so for the last day write `-1d`.
+`to` omitted ends at now. The Grafana spelling `now-1d` is
 not accepted upstream; write `-1d`.
 `interval` (the `…Series` and `plotAnalytics` window size) is bounded to
 60–86400 seconds, and `partials` accepts only `none` or `all`. The 2000-point
