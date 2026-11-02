@@ -153,27 +153,48 @@ def split_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> tuple[str, d
     rather than as an error the caller could correct.
     """
     parameter_map = route.parameter_map or {}
-    path = route.path
+    located = [(name, *_mapped_location(parameter_map, name)) for name in arguments]
+    path = _rendered_path(route.path, located, arguments)
+    query = _query_arguments(located, arguments)
+    body = _split_body_arguments(located, arguments)
+    return path, query, body
+
+
+def _rendered_path(template: str, located: list[tuple[str, str, str]], arguments: dict[str, Any]) -> str:
+    """Substitute this route's path arguments into its path template.
+
+    A blank path value is left as the placeholder rather than substituted:
+    an empty profile id in the middle of a URL answers with a 404 that
+    blames the wrong thing, and the caller is further from the mistake.
+    """
+    path = template
+    for name, openapi_name, location in located:
+        if location == "path" and str(arguments[name]).strip():
+            path = path.replace("{" + openapi_name + "}", str(arguments[name]))
+    return path
+
+
+def _query_arguments(located: list[tuple[str, str, str]], arguments: dict[str, Any]) -> dict[str, Any]:
+    """This route's query arguments, each rewritten into the form the API reads."""
     query: dict[str, Any] = {}
-    body_properties: dict[str, Any] = {}
+    for name, openapi_name, location in located:
+        if location == "query":
+            query[openapi_name] = _query_value(openapi_name, arguments[name])
+    return query
+
+
+def _split_body_arguments(located: list[tuple[str, str, str]], arguments: dict[str, Any]) -> Any:
+    """The request body: a whole-body argument wins over individual body properties."""
     whole_body: Any = None
-
-    for name, value in arguments.items():
-        openapi_name, location = _mapped_location(parameter_map, name)
-        if location == "path":
-            # A blank path value is left as the placeholder rather than substituted:
-            # an empty profile id in the middle of a URL answers with a 404 that
-            # blames the wrong thing, and the caller is further from the mistake.
-            if str(value).strip():
-                path = path.replace("{" + openapi_name + "}", str(value))
-        elif location == "query":
-            query[openapi_name] = _query_value(openapi_name, value)
-        elif location == "body" and openapi_name == WHOLE_BODY_ARG:
-            whole_body = value
-        elif location == "body":
-            body_properties[openapi_name] = value
-
-    return path, query, _request_body(whole_body, body_properties)
+    body_properties: dict[str, Any] = {}
+    for name, openapi_name, location in located:
+        if location != "body":
+            continue
+        if openapi_name == WHOLE_BODY_ARG:
+            whole_body = arguments[name]
+        else:
+            body_properties[openapi_name] = arguments[name]
+    return _request_body(whole_body, body_properties)
 
 
 def _mapped_location(parameter_map: dict[str, Any], name: str) -> tuple[str, Any]:
@@ -224,18 +245,22 @@ class SpecApiTool(Tool):
 
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
         """Call the endpoint and report the result as a typed payload."""
+        args = arguments or {}
         if self.name in DELEGATED_OPERATIONS:
-            return await self._run_delegated(arguments or {})
+            return await self._run_delegated(args)
 
-        unsafe = _unsafe_path_arguments(self._route, arguments or {})
+        unsafe = _unsafe_path_arguments(self._route, args)
         if unsafe:
             return ToolResult(structured_content=self._unsafe_path_payload(unsafe))
 
-        path, query, body = split_arguments(self._route, arguments or {})
+        path, query, body = split_arguments(self._route, args)
         unfilled = _UNFILLED_PATH_ARG.findall(path)
         if unfilled:
             return ToolResult(structured_content=self._missing_payload(unfilled))
+        return await self._call_endpoint(path, query, body)
 
+    async def _call_endpoint(self, path: str, query: dict[str, Any], body: Any) -> ToolResult:
+        """Send the request this route describes and wrap its payload."""
         payload = await _api_request_payload(self._route.method, path, params=query or None, json_body=body)
         return ToolResult(structured_content=payload)
 
@@ -277,6 +302,20 @@ class SpecApiTool(Tool):
         )
 
 
+def _mapped_path_name(name: str, mapped: dict[str, Any] | None) -> tuple[str, str] | None:
+    """(name, openapi name) when this argument's mapped location is a path segment."""
+    if not mapped or mapped.get("location") != "path":
+        return None
+    return name, str(mapped.get("openapi_name") or name)
+
+
+def _path_argument_names(route: HTTPRoute, arguments: dict[str, Any]) -> list[tuple[str, str]]:
+    """(name, openapi name) of the sent arguments this route places in the path."""
+    parameter_map = route.parameter_map or {}
+    pairs = (_mapped_path_name(name, parameter_map.get(name)) for name in arguments)
+    return list(filter(None, pairs))
+
+
 def _unsafe_path_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> list[str]:
     """Path arguments whose value could address something other than this tool's endpoint.
 
@@ -284,16 +323,11 @@ def _unsafe_path_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> list[
     :func:`split_arguments` and reported by :meth:`SpecApiTool.run` as a missing
     argument, which is the more useful thing to say about an empty ``profile_id``.
     """
-    parameter_map = route.parameter_map or {}
-    rejected: list[str] = []
-    for name, value in arguments.items():
-        mapped = parameter_map.get(name) or {}
-        if mapped.get("location") != "path":
-            continue
-        text = str(value)
-        if _UNSAFE_PATH_VALUE.search(text):
-            rejected.append(str(mapped.get("openapi_name") or name))
-    return rejected
+    return [
+        openapi_name
+        for name, openapi_name in _path_argument_names(route, arguments)
+        if _UNSAFE_PATH_VALUE.search(str(arguments[name]))
+    ]
 
 
 def _required(route: HTTPRoute) -> list[str]:

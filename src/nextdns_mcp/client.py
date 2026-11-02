@@ -181,7 +181,7 @@ class AccessDeniedError(Exception):
         self.message = message
 
 
-def _is_unclassifiable_profiles_path(path: str | None) -> bool:
+def _is_unclassifiable_profiles_path(path: str) -> bool:
     """Return True when a /profiles/... path names no safe, spec-shaped profile id.
 
     Classification is case-insensitive, so ``/PROFILES/def456/settings`` is
@@ -191,13 +191,28 @@ def _is_unclassifiable_profiles_path(path: str | None) -> bool:
     the global any_readable/any_writable gates and never per-profile
     membership, silently bypassing the profile ACL (issue #285).
 
-    Called from the single ``_authorize()`` decision point that both
-    ``request()`` and ``stream()`` go through, so the two entry points cannot
-    diverge again.
+    Called from ``_unmatchable_profile_url``, itself part of the single
+    ``_authorize()`` decision point that both ``request()`` and ``stream()``
+    go through, so the two entry points cannot diverge again. A missing path is
+    not classified here: ``_unmatchable_profile_url`` denies it before this is
+    reached, so ``path`` is always a real normalized path.
     """
-    if path is None:
-        return False
     return _PROFILE_ROOT.search(path.rstrip("/")) is not None
+
+
+def _unmatchable_profile_url(request_path: str | None) -> bool:
+    """True when a request cannot be classified against the profile ACL.
+
+    An absolute/authority-bearing URL (no normalized path), a traversal
+    payload, or a /profiles path that names something after the prefix but
+    carries no safe, extractable profile id (e.g. /profiles/abc.def/settings)
+    cannot be matched to a profile id, so _authorize denies it outright.
+    """
+    if request_path is None:
+        return True
+    if ".." in request_path:
+        return True
+    return _is_unclassifiable_profiles_path(request_path)
 
 
 class AccessControlledClient(httpx.AsyncClient):
@@ -343,11 +358,6 @@ class AccessControlledClient(httpx.AsyncClient):
 
         url_str = str(url)
         request_path = _normalized_request_path(url_str)
-        is_absolute_url = request_path is None
-        contains_traversal = request_path is not None and ".." in request_path
-        # /profiles paths that name something after the prefix but do not carry a
-        # safe, extractable profile id (e.g. /profiles/abc.def/settings).
-        unclassifiable_profiles_path = _is_unclassifiable_profiles_path(request_path)
         profile_id = _extract_profile_id_from_path(request_path)
 
         # One snapshot per request: every check below, and the decision to send
@@ -357,14 +367,11 @@ class AccessControlledClient(httpx.AsyncClient):
 
         if profile_id:
             self._check_access(profile_id, method, url_str, access)
-        elif is_absolute_url or contains_traversal or unclassifiable_profiles_path:
-            # Fail closed: absolute/authority-bearing URLs, traversal payloads, and
-            # unclassifiable /profiles paths cannot be matched against the profile
-            # ACL, so deny them instead of letting them bypass the check entirely.
+        elif _unmatchable_profile_url(request_path):
+            # Fail closed: a URL whose profile cannot be classified is denied
+            # instead of being allowed to bypass the profile ACL check.
             logger.warning(f"Forbidden URL: {_redacted(url_str)} (method={method})")
-            raise AccessDeniedError(
-                f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or ""
-            )
+            raise AccessDeniedError(f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id="")
         else:
             self._check_collection_access(method, url_str, access)
 

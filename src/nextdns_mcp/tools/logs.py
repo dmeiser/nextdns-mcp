@@ -150,6 +150,24 @@ class DownloadTooLargeError(Exception):
     """Raised when a download exceeds the total-size cap mid-stream."""
 
 
+def _append_preview(preview: list[str], preview_bytes: int, text: str) -> int:
+    """Add this chunk's leading lines to the preview, within the line and byte caps.
+
+    Returns the new preview byte count. A preview that already hit either cap
+    collects nothing: the first line trips the same break the per-chunk guard
+    used before the extraction.
+    """
+    for line in text.splitlines(keepends=True):
+        if len(preview) >= DOWNLOAD_PREVIEW_MAX_LINES:
+            break
+        line_bytes = len(line.encode("utf-8"))
+        if preview_bytes + line_bytes > DOWNLOAD_PREVIEW_MAX_BYTES:
+            break
+        preview.append(line)
+        preview_bytes += line_bytes
+    return preview_bytes
+
+
 async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict[str, Any]:
     """Write a streaming response body to ``path`` without double-buffering.
 
@@ -190,15 +208,7 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
             newlines = text.count("\n")
             row_count += newlines
             open_line = not text.endswith("\n")
-            if len(preview) < DOWNLOAD_PREVIEW_MAX_LINES and preview_bytes < DOWNLOAD_PREVIEW_MAX_BYTES:
-                for line in text.splitlines(keepends=True):
-                    if len(preview) >= DOWNLOAD_PREVIEW_MAX_LINES:
-                        break
-                    line_bytes = len(line.encode("utf-8"))
-                    if preview_bytes + line_bytes > DOWNLOAD_PREVIEW_MAX_BYTES:
-                        break
-                    preview.append(line)
-                    preview_bytes += line_bytes
+            preview_bytes = _append_preview(preview, preview_bytes, text)
     if open_line:
         row_count += 1
     size = os.path.getsize(path)
@@ -260,6 +270,44 @@ async def _stream_download_to_path(profile_id: str, path: str) -> dict[str, Any]
     return await _follow_redirects_to_tempfile(redirect_url, path)
 
 
+async def _download_logs_controlled(profile_id: str, path: str) -> tuple[dict[str, Any], bool]:
+    """Stream the CSV to ``path``, mapping typed failures to their payloads.
+
+    Returns a ``(payload, downloaded)`` pair; ``downloaded`` is True only when
+    the whole body was written, which is what tells the caller's cleanup guard
+    to keep the file. HTTP and unexpected errors are re-raised for the caller's
+    handlers, in the same order the single-function version caught them.
+    """
+    try:
+        payload = await _stream_download_to_path(profile_id, path)
+        return payload, True
+    except DownloadRedirectRefusedError as e:
+        # A redirect to a non-public or plaintext destination is refused
+        # before any request is made to the target, so no foreign body is ever
+        # written or returned. The message carries only scheme and host: the
+        # signed part of the URL never reaches the log or the payload. The
+        # temp file and its parent are removed by the caller's finally guard,
+        # which covers every non-successful exit.
+        logger.warning(f"Refusing log download redirect: {e}")
+        return (
+            error_payload(
+                ErrorCode.HTTP_ERROR, "Refusing log download redirect to a non-public or non-https destination"
+            ),
+            False,
+        )
+    except AccessDeniedError as e:
+        # Raised by the ACL layer (via stream()) before any network request;
+        # kept out of the httpx.HTTPError branch so a real upstream 403 keeps
+        # its existing http_error path.
+        logger.warning(f"Access denied downloading logs: {_log_safe_error(e)}")
+        return access_denied_payload(e), False
+    except DownloadTooLargeError as e:
+        # Raised mid-stream when the total-size cap is exceeded; the partially
+        # written CSV and its parent are removed by the caller's guard.
+        logger.warning(f"Download aborted, size cap exceeded: {e}")
+        return error_payload(ErrorCode.DOWNLOAD_TOO_LARGE, str(e)), False
+
+
 async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     """Stream a log CSV download to a temp file without double-buffering.
 
@@ -284,31 +332,8 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     path = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_"), "download.csv")
     downloaded = False
     try:
-        payload = await _stream_download_to_path(profile_id, path)
-        downloaded = True
+        payload, downloaded = await _download_logs_controlled(profile_id, path)
         return payload
-    except DownloadRedirectRefusedError as e:
-        # A redirect to a non-public or plaintext destination is refused
-        # before any request is made to the target, so no foreign body is ever
-        # written or returned. The message carries only scheme and host: the
-        # signed part of the URL never reaches the log or the payload. The
-        # temp file and its parent are removed by the finally guard below,
-        # which covers every non-successful exit.
-        logger.warning(f"Refusing log download redirect: {e}")
-        return error_payload(
-            ErrorCode.HTTP_ERROR, "Refusing log download redirect to a non-public or non-https destination"
-        )
-    except AccessDeniedError as e:
-        # Raised by the ACL layer (via stream()) before any network request;
-        # kept out of the httpx.HTTPError branch so a real upstream 403 keeps
-        # its existing http_error path.
-        logger.warning(f"Access denied downloading logs: {_log_safe_error(e)}")
-        return access_denied_payload(e)
-    except DownloadTooLargeError as e:
-        # Raised mid-stream when the total-size cap is exceeded; the partially
-        # written CSV and its parent are removed by the finally block below.
-        logger.warning(f"Download aborted, size cap exceeded: {e}")
-        return error_payload(ErrorCode.DOWNLOAD_TOO_LARGE, str(e))
     except httpx.HTTPError as e:
         logger.error(f"HTTP error downloading logs: {_log_safe_error(e)}")
         return http_error_payload(f"HTTP error while downloading logs: {e}", e, fallback_code=ErrorCode.HTTP_ERROR)
@@ -316,5 +341,8 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
         logger.error(f"Unexpected error downloading logs: {_log_safe_error(e)}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")
     finally:
+        # Every exit that is not a successful download — including a cancelled
+        # task, which reaches neither handler — removes the temp file and its
+        # mkdtemp parent, so an abandoned download leaves nothing behind.
         if not downloaded:
             _unlink_temp_file(path)

@@ -24,6 +24,32 @@ from collections.abc import Sequence
 ADVERTISE_CATALOG_MAX_TOOLS = 12
 
 
+def _catalog_advertisement(tool_names: Sequence[str]) -> list[str]:
+    """Instruction lines telling a disclosing client where tool names live.
+
+    A catalog of ``ADVERTISE_CATALOG_MAX_TOOLS`` or fewer gets its names stated
+    outright; above that the instructions point at ``search_tools``.
+    """
+    if tool_names and len(tool_names) <= ADVERTISE_CATALOG_MAX_TOOLS:
+        listed = textwrap.fill(
+            ", ".join(f"`{name}`" for name in tool_names),
+            width=72,
+            initial_indent="  ",
+            subsequent_indent="  ",
+        )
+        return [
+            "- Its tools, each by the exact name `call_tool` takes it:",
+            listed,
+            "- `search_tools` matches the words of a task to the tools that fit",
+            "  it and returns each one with its full schema.",
+        ]
+    return [
+        "- This server does not advertise tool names. `search_tools` matches the",
+        "  words of a task to the tools that fit it and returns their exact names",
+        "  and schemas; `call_tool` runs one of those by that exact name.",
+    ]
+
+
 def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = ()) -> str:
     """Short instructions sent in the MCP ``initialize`` handshake.
 
@@ -54,23 +80,5 @@ def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = ()) -
         "  whenever the server can say what to send instead.",
     ]
     if tool_search_mode and tool_search_mode != "off":
-        if tool_names and len(tool_names) <= ADVERTISE_CATALOG_MAX_TOOLS:
-            listed = textwrap.fill(
-                ", ".join(f"`{name}`" for name in tool_names),
-                width=72,
-                initial_indent="  ",
-                subsequent_indent="  ",
-            )
-            lines += [
-                "- Its tools, each by the exact name `call_tool` takes it:",
-                listed,
-                "- `search_tools` matches the words of a task to the tools that fit",
-                "  it and returns each one with its full schema.",
-            ]
-        else:
-            lines += [
-                "- This server does not advertise tool names. `search_tools` matches the",
-                "  words of a task to the tools that fit it and returns their exact names",
-                "  and schemas; `call_tool` runs one of those by that exact name.",
-            ]
+        lines += _catalog_advertisement(tool_names)
     return "\n".join(lines)

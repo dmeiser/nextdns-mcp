@@ -81,9 +81,7 @@ def resolve_profile_id(
         is a standardized error payload dict.
     """
     if allow_default:
-        target_profile: str | int | None = profile_id
-        if not target_profile:
-            target_profile = get_default_profile()
+        target_profile: str | int | None = profile_id or get_default_profile()
         if not target_profile:
             return None, error_payload(
                 ErrorCode.MISSING_PROFILE_ID,
@@ -97,6 +95,11 @@ def resolve_profile_id(
             )
         return str(target_profile), None
 
+    return _resolve_required_profile_id(profile_id)
+
+
+def _resolve_required_profile_id(profile_id: str | int | None) -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve a mandatory profile_id: no NEXTDNS_DEFAULT_PROFILE fallback."""
     if not profile_id:
         return None, error_payload(
             ErrorCode.MISSING_PROFILE_ID,
@@ -166,6 +169,11 @@ def normalize_time_value(value: Any) -> Any:
         return value
     if isinstance(value, (int, float)):
         return f"{value}s" if value < 0 else value
+    return _normalize_time_text(value)
+
+
+def _normalize_time_text(value: Any) -> Any:
+    """Rewrite the two text spellings the API reads wrongly (see normalize_time_value)."""
     text = str(value).strip()
     match = _NOW_OFFSET_RE.match(text)
     if match:
@@ -204,10 +212,16 @@ def normalize_partials(value: Any) -> Any:
     return _PARTIALS_ALIASES.get(text, text)
 
 
+def _query_bool(value: Any) -> Any:
+    """Render a bool the way the API reads it; every other value passes through."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return value
+
+
 def _build_query_params(**kwargs: Any) -> dict[str, Any]:
     """Build a query-param dict, dropping None values and normalizing booleans."""
-    params = {k: v for k, v in kwargs.items() if v is not None}
-    return {k: ("true" if v else "false") if isinstance(v, bool) else v for k, v in params.items()}
+    return {k: _query_bool(v) for k, v in kwargs.items() if v is not None}
 
 
 def access_denied_payload(exc: AccessDeniedError) -> dict[str, Any]:
@@ -257,13 +271,7 @@ async def _api_request(
     which applies this conversion.
     """
     try:
-        response = await client.api_client.request(method, url, params=params, json=json_body)
-        response.raise_for_status()
-        if _is_empty_success(response):
-            return {"success": True}
-        data = response.json()
-        _reject_error_document(method, url, response, data)
-        return data
+        return await _api_request_json(method, url, params=params, json_body=json_body)
     except AccessDeniedError as e:
         # Raised by the ACL layer before any network request. Kept out of the
         # httpx.HTTPError branch: a real upstream 403 (raise_for_status) must
@@ -271,17 +279,34 @@ async def _api_request(
         logger.warning(f"Access denied in {method} {_redacted(url)}: {_log_safe_error(e)}")
         return access_denied_payload(e)
     except NextDNSError:
-        # Already typed (including the 2xx-with-error-document case above);
-        # re-raised so the generic branch cannot strip its status/response.
+        # Already typed (including the 2xx-with-error-document case in
+        # _api_request_json); re-raised so the generic branch cannot strip its
+        # status/response.
         raise
     except httpx.HTTPError as e:
         logger.error(f"HTTP error in {method} {_redacted(url)}: {_log_safe_error(e)}")
-        message = f"HTTP error in {method} {url}: {e}"
-        status_code, response_body = _response_error_parts(getattr(e, "response", None))
-        raise _typed_http_error(message, status_code, response_body) from e
+        raise _typed_http_error(f"HTTP error in {method} {url}: {e}", *_http_error_parts(e)) from e
     except Exception as e:
         logger.error(f"Unexpected error in {method} {_redacted(url)}: {_log_safe_error(e)}")
         raise NextDNSError(f"Unexpected error in {method} {url}: {e}", status_code=None) from e
+
+
+async def _api_request_json(
+    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
+) -> dict[str, Any]:
+    """Send the request and return its JSON document, raising typed errors on failure."""
+    response = await client.api_client.request(method, url, params=params, json=json_body)
+    response.raise_for_status()
+    if _is_empty_success(response):
+        return {"success": True}
+    data = response.json()
+    _reject_error_document(method, url, response, data)
+    return data
+
+
+def _http_error_parts(error: Exception) -> tuple[int | None, Any]:
+    """The ``(status_code, response_body)`` carried by an httpx error, if any."""
+    return _response_error_parts(getattr(error, "response", None))
 
 
 def _is_empty_success(response: httpx.Response) -> bool:

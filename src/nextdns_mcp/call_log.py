@@ -58,27 +58,38 @@ def call_log_path() -> str:
     return os.environ.get(CALL_LOG_ENV, "").strip()
 
 
+def _parse_log_line(line: str) -> Any:
+    """The JSON object on one log line, or None when the line is blank or malformed."""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
+def _read_log_rows(target: str) -> list[dict[str, Any]]:
+    """The dict rows of a call-log file, skipping blank and malformed lines."""
+    rows: list[dict[str, Any]] = []
+    with open(target, encoding="utf-8") as fh:
+        for line in fh:
+            row = _parse_log_line(line)
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
+
+
 def get_call_log(path: str | None = None) -> list[dict[str, Any]]:
     """Read back the recorded calls (empty when unset, absent or malformed)."""
     target = call_log_path() if path is None else path
     if not target or not os.path.exists(target):
         return []
-    rows: list[dict[str, Any]] = []
     try:
-        with open(target, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
+        return _read_log_rows(target)
     except OSError as exc:  # pragma: no cover - unreadable file is not fatal
         logger.warning("call log read failed: %s", exc)
-    return rows
+        return []
 
 
 def result_error(res: Any) -> str:
@@ -132,9 +143,8 @@ class CallLogMiddleware(Middleware):
         self._record(name, args, ok=not error, error=error, result=result)
         return result
 
-    def _record(self, tool: str, args: Any, ok: bool, error: str, result: Any = None) -> None:
-        if not self._path:
-            return
+    def _record_row(self, tool: str, args: Any, ok: bool, error: str, result: Any) -> dict[str, Any]:
+        """The one JSON row describing this call."""
         arguments = args if isinstance(args, dict) else {}
         endpoint = resolve_endpoint(tool)
         row = {
@@ -160,6 +170,12 @@ class CallLogMiddleware(Middleware):
         }
         if endpoint:
             row["endpoint"] = f"{endpoint[0]} {endpoint[1]}"
+        return row
+
+    def _record(self, tool: str, args: Any, ok: bool, error: str, result: Any = None) -> None:
+        if not self._path:
+            return
+        row = self._record_row(tool, args, ok, error, result)
         try:
             with _write_lock, open(self._path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")

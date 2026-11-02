@@ -346,15 +346,18 @@ def _combine_readable(readable: set[str] | None, writable: set[str] | None) -> f
     if readable is None:
         return frozenset(writable)
 
-    # If readable is empty set (ALL), allow all
-    if not readable:
-        return frozenset(ALLOW_ALL_PROFILES)
+    return _combine_set_readable(readable, writable)
 
-    # Writable ALL implies readable ALL
-    if not writable:
-        return frozenset(ALLOW_ALL_PROFILES)
 
-    # Readable is set: combine with writable (write implies read)
+def _combine_set_readable(readable: set[str], writable: set[str]) -> frozenset[str]:
+    """Combine two explicitly configured sets.
+
+    An empty set means ALL on either side, and ALL on either side makes every
+    profile readable; otherwise the combination is readable plus writable
+    (write implies read).
+    """
+    if not readable or not writable:
+        return frozenset(ALLOW_ALL_PROFILES)
     return frozenset(readable | writable)
 
 

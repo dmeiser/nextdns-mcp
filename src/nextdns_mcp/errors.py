@@ -65,6 +65,29 @@ def error_payload(code: str, message: str, **extra: Any) -> dict[str, Any]:
     return payload
 
 
+def _bound_string(value: str) -> tuple[str, bool]:
+    """Cap one free-form string, flagging the cut with ``TRUNCATION_MARKER``."""
+    if len(value) > MAX_RESPONSE_BODY_CHARS:
+        return value[:MAX_RESPONSE_BODY_CHARS] + TRUNCATION_MARKER, True
+    return value, False
+
+
+def _bound_dict(value: dict[Any, Any]) -> tuple[dict[Any, Any], bool]:
+    """Rebuild a dict with every element bounded."""
+    bounded: dict[Any, Any] = {}
+    truncated = False
+    for key, item in value.items():
+        bounded[key], cut = _bound_value(item)
+        truncated = truncated or cut
+    return bounded, truncated
+
+
+def _bound_list(value: list[Any]) -> tuple[list[Any], bool]:
+    """Rebuild a list with every element bounded."""
+    bounded_items = [_bound_value(item) for item in value]
+    return [item for item, _ in bounded_items], any(cut for _, cut in bounded_items)
+
+
 def _bound_value(value: Any) -> tuple[Any, bool]:
     """Bound every free-form string in a JSON value, at any depth.
 
@@ -79,19 +102,11 @@ def _bound_value(value: Any) -> tuple[Any, bool]:
         A ``(bounded_value, truncated)`` pair.
     """
     if isinstance(value, str):
-        if len(value) > MAX_RESPONSE_BODY_CHARS:
-            return value[:MAX_RESPONSE_BODY_CHARS] + TRUNCATION_MARKER, True
-        return value, False
+        return _bound_string(value)
     if isinstance(value, dict):
-        bounded: dict[Any, Any] = {}
-        truncated = False
-        for key, item in value.items():
-            bounded[key], cut = _bound_value(item)
-            truncated = truncated or cut
-        return bounded, truncated
+        return _bound_dict(value)
     if isinstance(value, list):
-        bounded_items = [_bound_value(item) for item in value]
-        return [item for item, _ in bounded_items], any(cut for _, cut in bounded_items)
+        return _bound_list(value)
     return value, False
 
 
@@ -121,21 +136,30 @@ def _bound_structured_fields(payload: dict[str, Any]) -> bool:
     return truncated
 
 
-def upstream_error_codes(body: Any) -> list[str]:
-    """Extract the NextDNS upstream error codes from a decoded response body.
+def _upstream_error_items(body: Any) -> list[dict[str, Any]]:
+    """The ``errors`` documents of an upstream failure body, as dicts.
 
     The NextDNS API reports failures as ``{"errors": [{"code": "duplicate",
     "detail": ...}]}`` — a *plural* ``errors`` document, distinct from this
-    server's own singular ``error`` payload. Callers (tools, and the model
-    reading the tool result) need those upstream codes as values they can
-    branch on, instead of matching free-form message text.
+    server's own singular ``error`` payload. Anything that is not such a
+    document yields no items.
     """
     if not isinstance(body, dict):
         return []
     items = body.get("errors")
     if not isinstance(items, list):
         return []
-    return [str(item["code"]) for item in items if isinstance(item, dict) and isinstance(item.get("code"), str)]
+    return [item for item in items if isinstance(item, dict)]
+
+
+def upstream_error_codes(body: Any) -> list[str]:
+    """Extract the NextDNS upstream error codes from a decoded response body.
+
+    Callers (tools, and the model reading the tool result) need those upstream
+    codes as values they can branch on, instead of matching free-form message
+    text.
+    """
+    return [str(item["code"]) for item in _upstream_error_items(body) if isinstance(item.get("code"), str)]
 
 
 # httpx's boilerplate on every raise_for_status() message.
@@ -172,6 +196,16 @@ def upstream_error_summary(body: Any) -> str:
     return "upstream code: " + ", ".join(named)
 
 
+def _error_detail_sentence(item: dict[str, Any]) -> str:
+    """One upstream error entry's diagnosis sentence, '' when it carries no detail."""
+    detail = str(item.get("detail") or "").strip()
+    if not detail:
+        return ""
+    source = item.get("source")
+    parameter = source.get("parameter") if isinstance(source, dict) else None
+    return f"{detail} (parameter: {parameter})" if parameter else detail
+
+
 def upstream_error_details(body: Any) -> list[str]:
     """The upstream diagnosis as short sentences, naming the parameter at fault.
 
@@ -180,21 +214,11 @@ def upstream_error_details(body: Any) -> list[str]:
     reached callers inside ``response_body``, a JSON string, while the ``error``
     message they read first carried the transport's boilerplate.
     """
-    if not isinstance(body, dict):
-        return []
-    items = body.get("errors")
-    if not isinstance(items, list):
-        return []
     details: list[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        detail = str(item.get("detail") or "").strip()
-        if not detail:
-            continue
-        source = item.get("source")
-        parameter = source.get("parameter") if isinstance(source, dict) else None
-        details.append(f"{detail} (parameter: {parameter})" if parameter else detail)
+    for item in _upstream_error_items(body):
+        sentence = _error_detail_sentence(item)
+        if sentence:
+            details.append(sentence)
     return details
 
 

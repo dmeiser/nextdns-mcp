@@ -69,3 +69,8 @@ files = ["src"]
 # last 7 days so the community can vet them first. Matches the Dependabot
 # `cooldown` in .github/dependabot.yml.
 exclude-newer = "1 week"
+
+[dependency-groups]
+dev = [
+    "xenon>=0.9.3",
+]

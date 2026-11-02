@@ -10,6 +10,8 @@ import json
 import os
 import sys
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -51,6 +53,11 @@ def _assert_health_failure(body: dict[str, Any], health_url: str) -> tuple[bool,
     return True, f"GET {health_url} -> 503 class={failure_class} reason={reason!r}"
 
 
+def _leaks_key(body_text: str, api_key: str) -> bool:
+    """True when the configured key literally appears in a response body."""
+    return bool(api_key) and api_key in body_text
+
+
 def check_health_endpoint(health_url: str, api_key: str, expect_ok: bool, timeout: float = 15.0) -> tuple[bool, str]:
     """Validate the served ``/health`` readiness endpoint over real HTTP.
 
@@ -77,7 +84,7 @@ def check_health_endpoint(health_url: str, api_key: str, expect_ok: bool, timeou
     except httpx.HTTPError as exc:
         return False, f"GET {health_url} failed: {type(exc).__name__}"
 
-    if api_key and api_key in response.text:
+    if _leaks_key(response.text, api_key):
         return False, f"GET {health_url} leaked the API key in the response body"
 
     try:
@@ -86,10 +93,19 @@ def check_health_endpoint(health_url: str, api_key: str, expect_ok: bool, timeou
         return False, f"GET {health_url} returned a non-JSON body (HTTP {response.status_code})"
 
     if expect_ok:
-        if response.status_code != 200:
-            return False, f"expected HTTP 200 from {health_url}, got {response.status_code}: {body}"
-        return _assert_health_ok(body, health_url)
+        return _health_expect_ok(response, body, health_url)
+    return _health_expect_unavailable(response, body, health_url)
 
+
+def _health_expect_ok(response: httpx.Response, body: Any, health_url: str) -> tuple[bool, str]:
+    """The 200 side: exactly {"status": "ok"}, or a contract violation naming what was seen."""
+    if response.status_code != 200:
+        return False, f"expected HTTP 200 from {health_url}, got {response.status_code}: {body}"
+    return _assert_health_ok(body, health_url)
+
+
+def _health_expect_unavailable(response: httpx.Response, body: Any, health_url: str) -> tuple[bool, str]:
+    """The 503 side: a failure class and short reason, or a contract violation naming what was seen."""
     if response.status_code != 503:
         return False, f"expected HTTP 503 from {health_url}, got {response.status_code}: {body}"
     if not isinstance(body, dict) or body.get("status") != "error":
@@ -213,6 +229,69 @@ def _input_schema(tool: Any) -> dict[str, Any]:
     return getattr(tool, "inputSchema", None) or {}
 
 
+def _parse_json_text(text: str) -> Any:
+    """The decoded JSON payload, the raw text when it is not JSON, None when empty."""
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _content_block_text(block: Any) -> str | None:
+    """The text of a text content block; None for anything that is not one."""
+    if isinstance(block, TextContent) or getattr(block, "type", "") == "text":
+        return getattr(block, "text", "")
+    return None
+
+
+def _skips_schema_validation(spec: dict[str, Any], parsed_json: Any) -> bool:
+    """Nothing to validate: no spec loaded, no payload, or an empty-success answer."""
+    return not spec or parsed_json is None or parsed_json == {"success": True}
+
+
+def _catalog_drift(served: set[str]) -> list[str]:
+    """Error lines for tools the container failed to serve, and tools it should not."""
+    missing = sorted(set(EXPECTED_TOOLS) - served)
+    extra = sorted(served - set(EXPECTED_TOOLS))
+    drift = [f"Missing expected tools: {missing}"] if missing else []
+    drift += [f"Tools the shipped spec does not describe: {extra}"] if extra else []
+    return drift
+
+
+def _created_profile_id(res: Any) -> str:
+    """The id out of a createProfile answer, unwrapping `data` when the answer wraps."""
+    if not isinstance(res, dict):
+        return ""
+    data_obj = res.get("data") if isinstance(res.get("data"), dict) else res
+    return str(data_obj.get("id") or "") if isinstance(data_obj, dict) else ""
+
+
+def _first_profile_id(res: Any) -> str:
+    """The id of the first profile in a listProfiles answer, '' when there is none."""
+    if not isinstance(res, dict) or not res.get("data"):
+        return ""
+    return str(res["data"][0].get("id") or "")
+
+
+def _rewrite_id(res: Any) -> str:
+    """The id out of an addRewrite answer, unwrapping `data` when the answer wraps."""
+    if not isinstance(res, dict):
+        return ""
+    rw_data = res.get("data") if isinstance(res.get("data"), dict) else res
+    return str(rw_data.get("id") or "") if isinstance(rw_data, dict) else ""
+
+
+def _document_reads(operations: dict[str, str]) -> list[str]:
+    """The GET operations the document describes that the container must publish."""
+    return sorted(
+        name
+        for name, method in operations.items()
+        if method == "get" and name not in validate_schema.WITHHELD_OPERATIONS
+    )
+
+
 class ContainerE2ERunner:
     """Orchestrates E2E testing of the NextDNS MCP container over MCP."""
 
@@ -307,14 +386,13 @@ class ContainerE2ERunner:
         for content_block in getattr(result, "content", []):
             if isinstance(content_block, ImageContent) or getattr(content_block, "type", "") == "image":
                 has_image = True
-            elif isinstance(content_block, TextContent) or getattr(content_block, "type", "") == "text":
-                response_text = getattr(content_block, "text", "")
+                continue
+            block_text = _content_block_text(content_block)
+            if block_text is not None:
+                response_text = block_text
 
-        if response_text:
-            try:
-                parsed_json = json.loads(response_text)
-            except json.JSONDecodeError:
-                parsed_json = response_text
+        # Empty text parses to None on its own; no guard needed.
+        parsed_json = _parse_json_text(response_text)
 
         return response_text, has_image, parsed_json
 
@@ -341,16 +419,20 @@ class ContainerE2ERunner:
         Returns a (status, error) pair, where status is SKIPPED when no spec is
         loaded or the payload is not schema-validated.
         """
-        if not self.spec or parsed_json is None or parsed_json == {"success": True}:
+        if _skips_schema_validation(self.spec, parsed_json):
             return "SKIPPED", ""
         status, err_lines = validate_tool_response(tool_name, parsed_json, self.spec)
         if status == "INVALID":
-            log_warn(f"  Schema validation failed: {'; '.join(err_lines)}")
-            self.schema_errors += 1
-            return "INVALID", "; ".join(err_lines)
+            return self._record_invalid_schema(err_lines)
         if status == "VALID":
             return "VALID", ""
         return status, ""
+
+    def _record_invalid_schema(self, err_lines: list[str]) -> tuple[str, str]:
+        """Report and count a schema-invalid payload; returns its (status, error) pair."""
+        log_warn(f"  Schema validation failed: {'; '.join(err_lines)}")
+        self.schema_errors += 1
+        return "INVALID", "; ".join(err_lines)
 
     async def _call_with_retries(
         self,
@@ -402,46 +484,61 @@ class ContainerE2ERunner:
         duration, last_error, result = await self._call_with_retries(session, tool_name, args, max_retries, retry_delay)
 
         if last_error or result is None:
-            log_error(f"{tool_name}: FAILED (call failed: {last_error})")
-            self.record_result(
-                tool_name,
-                "FAILED",
-                args=args_str,
-                duration=duration,
-                error_msg=last_error or "No response",
-            )
-            self.failed_count += 1
-            return False, None
+            return self._fail_call(tool_name, args_str, duration, last_error)
 
-        # Check for error payload or result.is_error
+        failure = self._call_failure(result, tool_name)
+        if failure is not None:
+            return self._fail_payload(tool_name, args_str, duration, failure)
+
+        return self._succeeded(tool_name, args_str, duration, result)
+
+    def _fail_call(self, tool_name: str, args_str: str, duration: float, last_error: str) -> tuple[bool, None]:
+        """Record a call that never got a result back from the server."""
+        log_error(f"{tool_name}: FAILED (call failed: {last_error})")
+        self.record_result(tool_name, "FAILED", args=args_str, duration=duration, error_msg=last_error or "No response")
+        self.failed_count += 1
+        return False, None
+
+    def _fail_payload(
+        self, tool_name: str, args_str: str, duration: float, failure: tuple[str, str, Any]
+    ) -> tuple[bool, Any]:
+        """Record a result that _call_failure classified as errored."""
+        last_error, response_text, parsed_json = failure
+        log_error(f"{tool_name}: FAILED ({last_error or 'server returned error'})")
+        self.record_result(
+            tool_name, "FAILED", args=args_str, duration=duration, error_msg=last_error or response_text[:200]
+        )
+        self.failed_count += 1
+        return False, parsed_json
+
+    def _call_failure(self, result: Any, tool_name: str) -> tuple[str, str, Any] | None:
+        """Classify a returned result; None when it is a plain success.
+
+        Returns (last_error, response_text, parsed_json) for an errored result:
+        last_error is empty when the server flagged is_error without naming a
+        reason. A plotAnalytics answer carrying its image only in the text is a
+        success, so it yields None.
+        """
         is_error = getattr(result, "is_error", False)
         response_text, has_image, parsed_json = self._parse_response_content(result)
 
         payload_error = self._payload_error(parsed_json)
+        last_error = payload_error if payload_error is not None else ""
         if payload_error is not None:
             is_error = True
-            last_error = payload_error
 
-        # Validate plotAnalytics image output
         if self._plot_missing_image(tool_name, is_error, has_image, response_text):
             is_error = True
             last_error = "plotAnalytics did not return image content"
 
-        if is_error:
-            log_error(f"{tool_name}: FAILED ({last_error or 'server returned error'})")
-            self.record_result(
-                tool_name,
-                "FAILED",
-                args=args_str,
-                duration=duration,
-                error_msg=last_error or response_text[:200],
-            )
-            self.failed_count += 1
-            return False, parsed_json
+        if not is_error:
+            return None
+        return last_error, response_text, parsed_json
 
-        # Schema validation
+    def _succeeded(self, tool_name: str, args_str: str, duration: float, result: Any) -> tuple[bool, Any]:
+        """Validate a successful call's payload against the spec and record it."""
+        _response_text, _has_image, parsed_json = self._parse_response_content(result)
         schema_status, schema_error = self._validate_against_schema(tool_name, parsed_json)
-
         log_success(f"{tool_name}: OK")
         self.record_result(
             tool_name,
@@ -495,13 +592,10 @@ class ContainerE2ERunner:
         served = {tool.name for tool in tools_result.tools}
         self.tool_schemas = {tool.name: _input_schema(tool) for tool in tools_result.tools}
 
-        missing = sorted(set(EXPECTED_TOOLS) - served)
-        extra = sorted(served - set(EXPECTED_TOOLS))
-        if missing:
-            log_error(f"Missing expected tools: {missing}")
-        if extra:
-            log_error(f"Tools the shipped spec does not describe: {extra}")
-        if missing or extra:
+        drift = _catalog_drift(served)
+        if drift:
+            for message in drift:
+                log_error(message)
             return False
 
         log_success(f"Found {len(served)} tools; the served catalog matches the shipped spec")
@@ -513,14 +607,11 @@ class ContainerE2ERunner:
         ts = int(time.time())
         p_name = f"E2E Test Profile {ts}"
         ok, res = await self.execute_call(session, "createProfile", {"name": p_name})
-        created_profile_id = ""
-        if ok and isinstance(res, dict):
-            data_obj = res.get("data") if isinstance(res.get("data"), dict) else res
-            created_profile_id = str(data_obj.get("id") or "") if isinstance(data_obj, dict) else ""
-            if created_profile_id:
-                (self.artifacts_dir / "test_profile_id.txt").write_text(created_profile_id, encoding="utf-8")
-                log_success(f"Created test profile: {created_profile_id}")
-        if not created_profile_id:
+        created_profile_id = _created_profile_id(res) if ok else ""
+        if created_profile_id:
+            (self.artifacts_dir / "test_profile_id.txt").write_text(created_profile_id, encoding="utf-8")
+            log_success(f"Created test profile: {created_profile_id}")
+        else:
             log_error("Failed to create test profile")
         return created_profile_id
 
@@ -528,11 +619,10 @@ class ContainerE2ERunner:
         """Fetch an existing profile for read-only tests; empty when none is available."""
         log_info("Step 1: Fetching existing profile for read-only tests...")
         ok, res = await self.execute_call(session, "listProfiles", {})
-        if ok and isinstance(res, dict) and "data" in res and res["data"]:
-            profile_id = str(res["data"][0].get("id") or "")
+        profile_id = _first_profile_id(res) if ok else ""
+        if profile_id:
             log_success(f"Using existing profile: {profile_id}")
-            if profile_id:
-                return profile_id
+            return profile_id
         log_error("No existing profile available for read-only tests")
         return ""
 
@@ -593,24 +683,12 @@ class ContainerE2ERunner:
         like a working endpoint either way.
         """
         operations = validate_schema.spec_operations(self.spec)
-        reads = sorted(
-            name
-            for name, method in operations.items()
-            if method == "get" and name not in validate_schema.WITHHELD_OPERATIONS
-        )
+        reads = _document_reads(operations)
         log_info(f"Step 2: Testing {len(reads)} read operations against profile {profile_id}...")
 
         analytics_profile = plot_profile_id or profile_id
         for operation_id in reads:
-            if operation_id not in self.tool_schemas:
-                self.record_skip(operation_id, "not published by the served container")
-                continue
-            profile = analytics_profile if operation_id.startswith("getAnalytics") else profile_id
-            arguments, unfilled = self._read_arguments(operation_id, profile)
-            if unfilled:
-                self.record_skip(operation_id, f"required arguments with no value to send: {unfilled}")
-                continue
-            await self.execute_call(session, operation_id, arguments)
+            await self._run_one_read(session, operation_id, profile_id, analytics_profile)
 
         # A DoH lookup is not an API endpoint: it queries the profile's resolver, so
         # nothing in the document describes it and it is called here on its own.
@@ -619,6 +697,20 @@ class ContainerE2ERunner:
             "dohLookup",
             {"domain": "example.com", "profile_id": profile_id, "record_type": "A"},
         )
+
+    async def _run_one_read(
+        self, session: ClientSession, operation_id: str, profile_id: str, analytics_profile: str
+    ) -> None:
+        """Call one read, or record the reason this run cannot call it."""
+        if operation_id not in self.tool_schemas:
+            self.record_skip(operation_id, "not published by the served container")
+            return
+        profile = analytics_profile if operation_id.startswith("getAnalytics") else profile_id
+        arguments, unfilled = self._read_arguments(operation_id, profile)
+        if unfilled:
+            self.record_skip(operation_id, f"required arguments with no value to send: {unfilled}")
+            return
+        await self.execute_call(session, operation_id, arguments)
 
     async def _run_plot_sweep(self, session: ClientSession, plot_profile_id: str) -> None:
         """Exercise plotAnalytics for each metric, or record skips when no plot profile is set."""
@@ -675,21 +767,22 @@ class ContainerE2ERunner:
 
         # A rewrite's id comes back only from the call that adds it, so this pair lives
         # here rather than in the table: add it, read the id out of the answer, delete it.
+        await self._add_and_delete_rewrite(session, profile_id, ts)
+
+        await self.execute_call(session, "clearLogs", {"profile_id": profile_id})
+
+    async def _add_and_delete_rewrite(self, session: ClientSession, profile_id: str, ts: int) -> None:
+        """Add a rewrite, read its id out of the answer, delete it; skip the delete when no id came back."""
         ok, rw_res = await self.execute_call(
             session,
             "addRewrite",
             {"profile_id": profile_id, "name": f"e2e-{ts}.example.com", "content": "192.0.2.1"},
         )
-        rewrite_id = ""
-        if ok and isinstance(rw_res, dict):
-            rw_data = rw_res.get("data") if isinstance(rw_res.get("data"), dict) else rw_res
-            rewrite_id = str(rw_data.get("id") or "") if isinstance(rw_data, dict) else ""
+        rewrite_id = _rewrite_id(rw_res) if ok else ""
         if rewrite_id:
             await self.execute_call(session, "deleteRewrite", {"profile_id": profile_id, "entry_id": rewrite_id})
         else:
             self.record_skip("deleteRewrite", "the rewrite add returned no id to delete")
-
-        await self.execute_call(session, "clearLogs", {"profile_id": profile_id})
 
     async def _get_security_settings(self, session: ClientSession, profile_id: str) -> dict[str, Any] | None:
         """GET the security settings object; None on failure.
@@ -742,19 +835,28 @@ class ContainerE2ERunner:
             ok_patch, error_detail = await self._patch_security_key(session, profile_id, key, True)
             if not ok_patch:
                 return f"REJECTED ({error_detail})"
-
-            sec_after = await self._get_security_settings(session, profile_id)
-            if sec_after is None:
-                return "ERROR-RE-READ"
-
-            if sec_after.get(key) is True:
-                return "ACCEPTED"
-            absent_or_unchanged = "absent" if key not in sec_after else f"unchanged at {sec_after.get(key)!r}"
-            return f"REJECTED-SILENT (key {absent_or_unchanged} after re-GET)"
+            return await self._verdict_after_patch(session, profile_id, key)
         finally:
-            if key_was_present or original_value is not None:
-                restore_val = original_value if original_value is not None else False
-                await self._patch_security_key(session, profile_id, key, restore_val)
+            await self._restore_security_key(session, profile_id, key, key_was_present, original_value)
+
+    async def _verdict_after_patch(self, session: ClientSession, profile_id: str, key: str) -> str:
+        """Re-GET after the True-patch: ACCEPTED, or how the key failed to stick."""
+        sec_after = await self._get_security_settings(session, profile_id)
+        if sec_after is None:
+            return "ERROR-RE-READ"
+
+        if sec_after.get(key) is True:
+            return "ACCEPTED"
+        absent_or_unchanged = "absent" if key not in sec_after else f"unchanged at {sec_after.get(key)!r}"
+        return f"REJECTED-SILENT (key {absent_or_unchanged} after re-GET)"
+
+    async def _restore_security_key(
+        self, session: ClientSession, profile_id: str, key: str, key_was_present: bool, original_value: Any
+    ) -> None:
+        """Put a toggled key back as found; a key absent from the settings goes back to False."""
+        if key_was_present or original_value is not None:
+            restore_val = original_value if original_value is not None else False
+            await self._patch_security_key(session, profile_id, key, restore_val)
 
     async def _verify_security_toggles(self, session: ClientSession, profile_id: str) -> None:
         """Round-trip verify each early-access security toggle against the live API.
@@ -811,6 +913,64 @@ class ContainerE2ERunner:
         log_success("/health readiness probe validated over HTTP")
         return 0
 
+    @asynccontextmanager
+    async def _open_session(self) -> AsyncIterator[ClientSession]:
+        """Open an initialized MCP session against the served container."""
+        async with (
+            streamable_http_client(self.endpoint) as (read_stream, write_stream),
+            ClientSession(read_stream, write_stream) as session,
+        ):
+            await session.initialize()
+            log_success("Connected to MCP container and session initialized")
+            yield session
+
+    async def _preflight_runtime(self) -> bool:
+        """Wait for the endpoint, then validate /health; False when either fails.
+
+        The readiness wait comes first because the health probe is a single
+        un-retried request: it must only run once the server is actually
+        listening.
+        """
+        if not await self.check_endpoint_readiness():
+            return False
+        return self.check_health()
+
+    async def _run_suite(self, session: ClientSession) -> tuple[int, str]:
+        """Run the suite on an open session; returns (exit code, profile to clean up).
+
+        A non-zero code carries the profile created before it bailed, so the
+        caller's cleanup still deletes it.
+        """
+        if not await self._preflight(session):
+            return 1, ""
+
+        profile_id, created_profile_id = await self._provision_profile(session)
+        if not profile_id:
+            return 1, created_profile_id
+
+        plot_profile_id = self.plot_profile or profile_id
+
+        await self._run_read_checks(session, profile_id, plot_profile_id)
+        await self._run_plot_sweep(session, plot_profile_id)
+
+        if self.allow_live_writes:
+            await self._run_write_checks(session, profile_id)
+            await self._verify_security_toggles(session, profile_id)
+        else:
+            log_info("Skipping write operations (allow_live_writes=False)")
+        return 0, created_profile_id
+
+    def _finish(self) -> int:
+        """Print the summary; fail when any call or schema check failed."""
+        self._log_summary()
+
+        if self.failed_count > 0 or self.schema_errors > 0:
+            log_error("E2E test failed")
+            return 1
+
+        log_success("All executed E2E calls completed successfully")
+        return 0
+
     async def run(self) -> int:
         """Run the full container E2E suite."""
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -827,53 +987,19 @@ class ContainerE2ERunner:
         if self.health_only:
             return await self._run_health_only()
 
-        # Wait for the container to accept connections first: the health probe
-        # is a single un-retried request, so it must only run once the server
-        # is actually listening.
-        if not await self.check_endpoint_readiness():
-            return 1
-
-        if not self.check_health():
+        if not await self._preflight_runtime():
             return 1
 
         created_profile_id = ""
-
         try:
-            async with (
-                streamable_http_client(self.endpoint) as (read_stream, write_stream),
-                ClientSession(read_stream, write_stream) as session,
-            ):
-                await session.initialize()
-                log_success("Connected to MCP container and session initialized")
-
-                if not await self._preflight(session):
-                    return 1
-
-                profile_id, created_profile_id = await self._provision_profile(session)
-                if not profile_id:
-                    return 1
-
-                plot_profile_id = self.plot_profile or profile_id
-
-                await self._run_read_checks(session, profile_id, plot_profile_id)
-                await self._run_plot_sweep(session, plot_profile_id)
-
-                if self.allow_live_writes:
-                    await self._run_write_checks(session, profile_id)
-                    await self._verify_security_toggles(session, profile_id)
-                else:
-                    log_info("Skipping write operations (allow_live_writes=False)")
+            async with self._open_session() as session:
+                code, created_profile_id = await self._run_suite(session)
+            if code:
+                return code
         finally:
             await self._cleanup(created_profile_id)
 
-        self._log_summary()
-
-        if self.failed_count > 0 or self.schema_errors > 0:
-            log_error("E2E test failed")
-            return 1
-
-        log_success("All executed E2E calls completed successfully")
-        return 0
+        return self._finish()
 
     def _log_summary(self) -> None:
         """Log the execution summary."""

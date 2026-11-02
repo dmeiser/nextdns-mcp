@@ -68,15 +68,35 @@ FigureCanvasAgg: Any = None
 
 def _extract_series_label(series: dict[str, Any], index: int) -> str:
     """Return a human-readable label for a time-series data entry."""
-    for key in ("name", "status", "protocol", "version", "id"):
-        value = series.get(key)
+    for key, value in ((key, series.get(key)) for key in ("name", "status", "protocol", "version", "id")):
         if value is not None and value != "":
             return str(value)
+    return _series_boolean_label(series, index)
+
+
+def _series_boolean_label(series: dict[str, Any], index: int) -> str:
+    """Label a status-shaped entry by its boolean flag, or by position when it has neither."""
     if "validated" in series:
         return "validated" if series["validated"] else "not_validated"
     if "encrypted" in series:
         return "encrypted" if series["encrypted"] else "unencrypted"
     return f"series_{index}"
+
+
+def _strptime_fallback(value: str) -> datetime:
+    """Parse via the ordered strptime fallback list; re-raises the original ValueError."""
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+    ):
+        try:
+            # Anchored to UTC below, so the naive result is intentional.
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"unparsable timestamp: {value!r}")
 
 
 def _parse_series_timestamp(value: str) -> datetime:
@@ -98,20 +118,7 @@ def _parse_series_timestamp(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError:
-        for fmt in (
-            "%Y-%m-%dT%H:%M:%S%z",
-            "%Y-%m-%dT%H:%M:%S.%f%z",
-            "%Y-%m-%dT%H:%M:%S",
-            "%Y-%m-%dT%H:%M:%S.%f",
-        ):
-            try:
-                # Anchored to UTC below, so the naive result is intentional.
-                parsed = datetime.strptime(value, fmt)
-                break
-            except ValueError:
-                continue
-        else:
-            raise
+        parsed = _strptime_fallback(value)
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed
@@ -180,6 +187,29 @@ def _now() -> float:
     return time.time()
 
 
+def _relative_time_seconds(text: str, now: float) -> float | None:
+    """Resolve ``now`` and relative offsets (``-1d``, ``+2h``) to Unix seconds."""
+    if text.lower() == "now":
+        return now
+    match = _RELATIVE_TIME_RE.match(text)
+    if not match:
+        return None
+    sign = -1.0 if match.group(1) else 1.0
+    return now + sign * int(match.group(2)) * _RELATIVE_UNIT_SECONDS[match.group(3)]
+
+
+def _absolute_or_iso_seconds(text: str) -> float | None:
+    """A bare Unix-seconds number, else an ISO 8601 instant, else None."""
+    try:
+        return float(int(text))
+    except ValueError:
+        pass
+    try:
+        return _parse_series_timestamp(text).timestamp()
+    except ValueError:
+        return None
+
+
 def _resolve_time_point(value: str | int, now: float) -> float | None:
     """Resolve a ``from``/``to`` argument to Unix seconds, or None if unparseable.
 
@@ -195,20 +225,10 @@ def _resolve_time_point(value: str | int, now: float) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     text = str(value).strip()
-    if text.lower() == "now":
-        return now
-    match = _RELATIVE_TIME_RE.match(text)
-    if match:
-        sign = -1.0 if match.group(1) else 1.0
-        return now + sign * int(match.group(2)) * _RELATIVE_UNIT_SECONDS[match.group(3)]
-    try:
-        return float(int(text))
-    except ValueError:
-        pass
-    try:
-        return _parse_series_timestamp(text).timestamp()
-    except ValueError:
-        return None
+    relative = _relative_time_seconds(text, now)
+    if relative is not None:
+        return relative
+    return _absolute_or_iso_seconds(text)
 
 
 def _format_resolved(seconds: float | None) -> str:
@@ -222,6 +242,61 @@ def _format_resolved(seconds: float | None) -> str:
     if seconds is None:
         return "unresolved"
     return datetime.fromtimestamp(seconds, tz=UTC).isoformat(timespec="seconds")
+
+
+def _unresolved_range_error(from_time: str | int, to_time: str | int) -> dict[str, Any]:
+    """Typed error for a range whose endpoints do not resolve to instants."""
+    return error_payload(
+        ErrorCode.INVALID_ARGUMENT,
+        (
+            f"Could not interpret the requested time range ({from_time!r} to {to_time!r}); "
+            "use a Unix timestamp, an ISO 8601 timestamp, 'now', or a relative offset such as '-7d'"
+        ),
+        from_time=from_time,
+        to_time=to_time,
+    )
+
+
+def _empty_range_error(from_time: str | int, to_time: str | int) -> dict[str, Any]:
+    """Typed error for a range that does not end after it starts."""
+    return error_payload(
+        ErrorCode.INVALID_ARGUMENT,
+        f"Requested time range must end after it starts, got {from_time!r} to {to_time!r}",
+        from_time=from_time,
+        to_time=to_time,
+    )
+
+
+def _budget_exceeded_error(start: float, end: float, span: float, interval: int) -> dict[str, Any]:
+    """Typed error naming the point budget the resolved range blows and what to change."""
+    max_span = PLOT_MAX_POINTS * interval
+    return error_payload(
+        ErrorCode.INVALID_ARGUMENT,
+        (
+            f"Requested range spans {span:.0f}s "
+            f"({_format_resolved(start)} to {_format_resolved(end)}), more than the {PLOT_MAX_POINTS}-point "
+            f"series budget allows at interval={interval}s (max {max_span}s); use a larger interval or a "
+            "shorter range. A bare number is an absolute Unix timestamp in seconds - a relative range "
+            "needs a unit, such as '-1d'"
+        ),
+        max_points=PLOT_MAX_POINTS,
+        max_span_seconds=max_span,
+        interval=interval,
+        resolved_from=_format_resolved(start),
+        resolved_to=_format_resolved(end),
+    )
+
+
+def _span_budget_error(
+    start: float, end: float, from_time: str | int, to_time: str | int, interval: int
+) -> dict[str, Any] | None:
+    """Typed error for a resolved span that is empty or blows the point budget."""
+    span = end - start
+    if span <= 0:
+        return _empty_range_error(from_time, to_time)
+    if span <= PLOT_MAX_POINTS * interval:
+        return None
+    return _budget_exceeded_error(start, end, span, interval)
 
 
 def _series_budget_error(
@@ -244,44 +319,37 @@ def _series_budget_error(
     prevent.
     """
     resolved_now = _now() if now is None else now
-    start = _resolve_time_point(from_time, resolved_now)
-    end = _resolve_time_point(to_time, resolved_now)
-    span = None if start is None or end is None else end - start
-    if span is None:
+    start, end = _resolve_time_point(from_time, resolved_now), _resolve_time_point(to_time, resolved_now)
+    if start is None or end is None:
+        return _unresolved_range_error(from_time, to_time)
+    return _span_budget_error(start, end, from_time, to_time, interval)
+
+
+def _validate_interval_and_limit(interval: int, limit: int) -> dict[str, Any] | None:
+    """The two bounds a caller can overshoot the same way: interval and limit."""
+    if interval < 60:
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,
-            (
-                f"Could not interpret the requested time range ({from_time!r} to {to_time!r}); "
-                "use a Unix timestamp, an ISO 8601 timestamp, 'now', or a relative offset such as '-7d'"
-            ),
-            from_time=from_time,
-            to_time=to_time,
+            "interval must be at least 60 seconds",
+            minimum_interval=60,
         )
-    if span <= 0:
+
+    if interval > PLOT_INTERVAL_MAX:
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,
-            f"Requested time range must end after it starts, got {from_time!r} to {to_time!r}",
-            from_time=from_time,
-            to_time=to_time,
+            f"interval must not exceed {PLOT_INTERVAL_MAX} seconds, got {interval}",
+            max_interval=PLOT_INTERVAL_MAX,
+            interval=interval,
         )
-    max_span = PLOT_MAX_POINTS * interval
-    if span <= max_span:
-        return None
-    return error_payload(
-        ErrorCode.INVALID_ARGUMENT,
-        (
-            f"Requested range spans {span:.0f}s "
-            f"({_format_resolved(start)} to {_format_resolved(end)}), more than the {PLOT_MAX_POINTS}-point "
-            f"series budget allows at interval={interval}s (max {max_span}s); use a larger interval or a "
-            "shorter range. A bare number is an absolute Unix timestamp in seconds - a relative range "
-            "needs a unit, such as '-1d'"
-        ),
-        max_points=PLOT_MAX_POINTS,
-        max_span_seconds=max_span,
-        interval=interval,
-        resolved_from=_format_resolved(start),
-        resolved_to=_format_resolved(end),
-    )
+
+    if limit > PLOT_LIMIT_MAX:
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"limit must not exceed {PLOT_LIMIT_MAX}, got {limit}",
+            max_limit=PLOT_LIMIT_MAX,
+            limit=limit,
+        )
+    return None
 
 
 def _validate_plot_params(
@@ -300,28 +368,9 @@ def _validate_plot_params(
             supported_metrics=sorted(PLOT_METRICS),
         )
 
-    if interval < 60:
-        return None, error_payload(
-            ErrorCode.INVALID_ARGUMENT,
-            "interval must be at least 60 seconds",
-            minimum_interval=60,
-        )
-
-    if interval > PLOT_INTERVAL_MAX:
-        return None, error_payload(
-            ErrorCode.INVALID_ARGUMENT,
-            f"interval must not exceed {PLOT_INTERVAL_MAX} seconds, got {interval}",
-            max_interval=PLOT_INTERVAL_MAX,
-            interval=interval,
-        )
-
-    if limit > PLOT_LIMIT_MAX:
-        return None, error_payload(
-            ErrorCode.INVALID_ARGUMENT,
-            f"limit must not exceed {PLOT_LIMIT_MAX}, got {limit}",
-            max_limit=PLOT_LIMIT_MAX,
-            limit=limit,
-        )
+    bounds_error = _validate_interval_and_limit(interval, limit)
+    if bounds_error:
+        return None, bounds_error
 
     budget_error = _series_budget_error(from_time, to_time, interval)
     if budget_error:
@@ -388,14 +437,9 @@ async def _plot_analytics_series_impl(
     # an offset, not 1969 (see utils.normalize_time_value).
     from_time = normalize_time_value(from_time)
     to_time = normalize_time_value(to_time)
-    partials = normalize_partials(partials)
-    if partials is not None and partials not in PARTIALS_VALUES:
-        return error_payload(
-            ErrorCode.INVALID_ARGUMENT,
-            f"partials must be one of: {', '.join(PARTIALS_VALUES)}; got {partials!r}",
-            allowed=list(PARTIALS_VALUES),
-            partials=partials,
-        )
+    partials, partials_error = _validate_partials(partials)
+    if partials_error:
+        return partials_error
 
     target_profile, val_error = _validate_plot_params(metric, interval, profile_id, from_time, to_time, limit)
     if val_error:
@@ -412,6 +456,26 @@ async def _plot_analytics_series_impl(
         partials=partials,
     )
 
+    return await _fetch_plot_series(metric, target_profile, params)
+
+
+def _validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:
+    """Map ``partials`` through normalize_partials and check the endpoint accepts it."""
+    partials = normalize_partials(partials)
+    if partials is not None and partials not in PARTIALS_VALUES:
+        return partials, error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"partials must be one of: {', '.join(PARTIALS_VALUES)}; got {partials!r}",
+            allowed=list(PARTIALS_VALUES),
+            partials=partials,
+        )
+    return partials, None
+
+
+async def _fetch_plot_series(
+    metric: str, target_profile: str, params: dict[str, Any]
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Fetch the metric's series for the profile and plot it, or return the fetch error."""
     url = f"/profiles/{target_profile}/analytics/{metric};series"
     logger.info(f"Plotting analytics series: {metric} for profile {target_profile}")
 
@@ -419,7 +483,17 @@ async def _plot_analytics_series_impl(
     if fetch_error:
         return fetch_error
     assert payload is not None
+    return await _plot_rendered_series(metric, target_profile, payload)
 
+
+async def _plot_rendered_series(
+    metric: str, target_profile: str, payload: dict[str, Any]
+) -> dict[str, Any] | mcp.types.ImageContent:
+    """Validate the fetched payload has plottable data, and render the PNG off-loop.
+
+    The try mirrors the combined implementation's: a payload whose structure
+    cannot be unpacked is reported as INTERNAL_ERROR.
+    """
     try:
         times, series_data = _validate_series_payload(payload)
 

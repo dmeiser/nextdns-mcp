@@ -34,7 +34,7 @@ SPDX-License-Identifier: MIT
 
 import logging
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any, NamedTuple
@@ -100,15 +100,47 @@ _health_probe_cache: tuple[float, HealthFailure | None] | None = None
 
 
 @lru_cache(maxsize=1)
-def _argument_index() -> dict[str, tuple[str, ...]]:
-    """Each flattened argument name mapped to the spec tools that declare it."""
+def _argument_owner_sets() -> dict[str, set[str]]:
+    """Each flattened argument name mapped to the set of spec tools that declare it."""
     from .spec_tools import spec_routes
 
     index: dict[str, set[str]] = {}
     for route in spec_routes():
-        for prop in (route.flat_param_schema or {}).get("properties") or {}:
+        schema = route.flat_param_schema or {}
+        for prop in schema.get("properties") or {}:
             index.setdefault(str(prop), set()).add(str(route.operation_id))
-    return {name: tuple(sorted(ops)) for name, ops in index.items()}
+    return index
+
+
+def _argument_index() -> dict[str, tuple[str, ...]]:
+    """Each flattened argument name mapped to the spec tools that declare it."""
+    return {name: tuple(sorted(ops)) for name, ops in _argument_owner_sets().items()}
+
+
+def _group_owners(ignored: list[str], tool_name: str) -> tuple[dict[str, list[str]], list[str]]:
+    """Group dropped arguments by the single other tool that declares each.
+
+    Returns (grouped, unowned): an argument exactly one other tool declares is
+    grouped under it; one no single other tool declares goes to unowned.
+    """
+    grouped: dict[str, list[str]] = {}
+    unowned: list[str] = []
+    for arg in ignored:
+        owners = [op for op in _argument_index().get(arg, ()) if op != tool_name]
+        if len(owners) == 1:
+            grouped.setdefault(owners[0], []).append(arg)
+        else:
+            unowned.append(arg)
+    return grouped, unowned
+
+
+def _render_owner_hint(base: str, grouped: dict[str, list[str]], unowned: list[str]) -> str:
+    """The actionable half of the owner annotation: who owns what, and what to do."""
+    where = "; ".join(f"{', '.join(args)} are parameters of {tool}" for tool, args in sorted(grouped.items()))
+    tail = " — call it with them" if len(grouped) == 1 else ": call each named tool with its own arguments"
+    if unowned:
+        where += f"; {', '.join(unowned)} matched no single other tool and was dropped too"
+    return f"{base}. {where}{tail}"
 
 
 def _owner_hint(ignored: list[str], tool_name: str) -> str:
@@ -121,22 +153,11 @@ def _owner_hint(ignored: list[str], tool_name: str) -> str:
     tool turns the ignored-arguments annotation into a correction the caller
     can act on; arguments no single other tool declares stay a generic note.
     """
-    grouped: dict[str, list[str]] = {}
-    unowned: list[str] = []
-    for arg in ignored:
-        owners = [op for op in _argument_index().get(arg, ()) if op != tool_name]
-        if len(owners) == 1:
-            grouped.setdefault(owners[0], []).append(arg)
-        else:
-            unowned.append(arg)
+    grouped, unowned = _group_owners(ignored, tool_name)
     base = "these arguments are not parameters of this tool and were not applied"
     if not grouped:
         return base + "; check the tool's parameter list before assuming the change happened"
-    where = "; ".join(f"{', '.join(args)} are parameters of {tool}" for tool, args in sorted(grouped.items()))
-    tail = " — call it with them" if len(grouped) == 1 else ": call each named tool with its own arguments"
-    if unowned:
-        where += f"; {', '.join(unowned)} matched no single other tool and was dropped too"
-    return f"{base}. {where}{tail}"
+    return _render_owner_hint(base, grouped, unowned)
 
 
 def _report_ignored_arguments(result: ToolResult, ignored: list[str], tool_name: str = "") -> None:
@@ -155,6 +176,46 @@ def _report_ignored_arguments(result: ToolResult, ignored: list[str], tool_name:
         structured["hint"] = _owner_hint(ignored, tool_name)
 
 
+def _schema_declared_types(schema: dict[str, Any]) -> set[str]:
+    """The types a schema node declares directly: ``type`` as a string or list."""
+    type_value = schema.get("type")
+    if isinstance(type_value, str):
+        return {type_value}
+    if isinstance(type_value, list):
+        return set(type_value)
+    return set()
+
+
+def _cast_or_original(cast: Callable[[str], Any], s: str) -> Any:
+    """Apply a numeric cast; a ValueError leaves the original string unchanged."""
+    try:
+        return cast(s)
+    except ValueError:
+        return s
+
+
+def _coerce_bool_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
+    """(handled, value) for a schema that explicitly expects a boolean."""
+    lowered = s.lower()
+    if "boolean" in schema_types and lowered in ("true", "false"):
+        return True, lowered == "true"
+    return False, s
+
+
+def _coerce_int_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
+    """(handled, value) for a schema that explicitly expects an integer."""
+    if "integer" in schema_types and is_integer_shaped(s):
+        return True, _cast_or_original(int, s)
+    return False, s
+
+
+def _coerce_float_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
+    """(handled, value) for a schema that explicitly expects a number."""
+    if "number" in schema_types and is_float_shaped(s):
+        return True, _cast_or_original(float, s)
+    return False, s
+
+
 class StripExtraFieldsMiddleware(Middleware):
     """Middleware that strips unknown fields and coerces types in tool arguments.
 
@@ -170,30 +231,19 @@ class StripExtraFieldsMiddleware(Middleware):
         will have arguments filtered and coerced to {"domain": "example.com", "enabled": true}
     """
 
-    def _get_schema_property_types(self, prop_schema: dict[str, Any]) -> set[str]:
+    def _get_schema_property_types(self, prop_schema: Any) -> set[str]:
         """Extract JSON Schema type(s) from a property schema.
 
         Handles ``type`` (string or list) and ``anyOf``/``oneOf`` subschemas.
+        A value that is not a schema object (including None) declares nothing.
         """
-        types: set[str] = set()
         if not isinstance(prop_schema, dict):
-            return types
-
-        type_value = prop_schema.get("type")
-        if isinstance(type_value, str):
-            types.add(type_value)
-        elif isinstance(type_value, list):
-            types.update(type_value)
-
+            return set()
+        types = _schema_declared_types(prop_schema)
         for sub_key in ("anyOf", "oneOf"):
             for subschema in prop_schema.get(sub_key, []):
                 if isinstance(subschema, dict):
-                    sub_type = subschema.get("type")
-                    if isinstance(sub_type, str):
-                        types.add(sub_type)
-                    elif isinstance(sub_type, list):
-                        types.update(sub_type)
-
+                    types.update(_schema_declared_types(subschema))
         return types
 
     def _coerce_string_value(self, s: str, schema_types: set[str]) -> Any:
@@ -203,19 +253,10 @@ class StripExtraFieldsMiddleware(Middleware):
         that type. Identifier-like strings (e.g. profile IDs, entry IDs) declared
         as ``string`` are left untouched.
         """
-        sl = s.lower()
-        if "boolean" in schema_types and sl in ("true", "false"):
-            return sl == "true"
-        if "integer" in schema_types and is_integer_shaped(s):
-            try:
-                return int(s)
-            except ValueError:
-                return s
-        if "number" in schema_types and is_float_shaped(s):
-            try:
-                return float(s)
-            except ValueError:
-                return s
+        for coerce in (_coerce_bool_value, _coerce_int_value, _coerce_float_value):
+            handled, value = coerce(s, schema_types)
+            if handled:
+                return value
         return s
 
     def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
@@ -225,17 +266,18 @@ class StripExtraFieldsMiddleware(Middleware):
         dict/list values are recursed without schema context to avoid coercing
         identifier-like strings inside opaque objects.
         """
-        if prop_schema is None:
-            prop_schema = {}
         if isinstance(value, str):
-            schema_types = self._get_schema_property_types(prop_schema)
-            return self._coerce_string_value(value, schema_types)
+            return self._coerce_string_value(value, self._get_schema_property_types(prop_schema))
         if isinstance(value, list):
-            items_schema = prop_schema.get("items") if isinstance(prop_schema, dict) else None
-            return [self._coerce_value(item, items_schema) for item in value]
+            return self._coerce_list_value(value, prop_schema)
         if isinstance(value, dict):
             return {k: self._coerce_value(v, None) for k, v in value.items()}
         return value
+
+    def _coerce_list_value(self, value: list[Any], prop_schema: dict[str, Any] | None) -> list[Any]:
+        """Recurse into list items with the list's own item schema."""
+        items_schema = prop_schema.get("items") if isinstance(prop_schema, dict) else None
+        return [self._coerce_value(item, items_schema) for item in value]
 
     async def _prepare_arguments(
         self,
@@ -264,27 +306,7 @@ class StripExtraFieldsMiddleware(Middleware):
                 # only avoids masking FastMCP's own unknown-tool error.
                 return arguments, []
 
-            parameters = tool.parameters
-            known_params = set(parameters.get("properties", {}).keys())
-
-            # Filter arguments to only include known parameters
-            original_keys = set(arguments.keys())
-            filtered_args = {k: v for k, v in arguments.items() if k in known_params}
-
-            # Log if any fields were stripped (for debugging) and report them to
-            # the caller: silently dropping e.g. a `privacy` payload from a
-            # manageProfiles call leaves the model believing it acted.
-            stripped_keys = original_keys - known_params
-            if stripped_keys:
-                logger.debug(f"Tool '{tool_name}': Stripped unknown fields: {stripped_keys}")
-
-            # Coerce string values to proper types based on the parameter schema
-            properties = parameters.get("properties", {})
-            coerced_args = {k: self._coerce_value(v, properties.get(k)) for k, v in filtered_args.items()}
-            if coerced_args != filtered_args:
-                logger.debug(f"Tool '{tool_name}': Coerced types in arguments")
-
-            return coerced_args, sorted(stripped_keys)
+            return self._filter_and_coerce(tool_name, tool.parameters, arguments)
         except NotFoundError:
             raise
         except Exception as e:
@@ -295,6 +317,33 @@ class StripExtraFieldsMiddleware(Middleware):
                 f"Tool call for '{tool_name}' failed closed: could not fetch its parameter "
                 f"schema to validate arguments (root cause: {e})"
             ) from e
+
+    def _filter_and_coerce(
+        self, tool_name: str, parameters: dict[str, Any], arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Strip keys the tool's schema does not declare, then coerce what remains.
+
+        The stripped names are returned so the caller can report them instead of
+        losing them silently: silently dropping e.g. a `privacy` payload from a
+        manageProfiles call leaves the model believing it acted.
+        """
+        properties = parameters.get("properties", {})
+        known_params = set(properties.keys())
+        filtered_args = {k: v for k, v in arguments.items() if k in known_params}
+        stripped_keys = set(arguments) - known_params
+        if stripped_keys:
+            logger.debug(f"Tool '{tool_name}': Stripped unknown fields: {stripped_keys}")
+        coerced_args = self._coerce_arguments(tool_name, properties, filtered_args)
+        return coerced_args, sorted(stripped_keys)
+
+    def _coerce_arguments(
+        self, tool_name: str, properties: dict[str, Any], filtered_args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Coerce string values to the types the parameter schema declares."""
+        coerced_args = {k: self._coerce_value(v, properties.get(k)) for k, v in filtered_args.items()}
+        if coerced_args != filtered_args:
+            logger.debug(f"Tool '{tool_name}': Coerced types in arguments")
+        return coerced_args
 
     async def on_call_tool(
         self,
@@ -464,12 +513,7 @@ async def _run_health_probe() -> HealthFailure | None:
         client = get_api_client()
         response = await client.raw_request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
     except ConfigurationError:
-        if not get_api_key():
-            return HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
-        return HealthFailure(
-            HEALTH_FAILURE_UNREACHABLE,
-            "NextDNS client configuration is invalid (check NEXTDNS_HTTP_TIMEOUT)",
-        )
+        return _configuration_failure()
     except httpx.TimeoutException:
         return HealthFailure(
             HEALTH_FAILURE_UNREACHABLE,
@@ -483,6 +527,21 @@ async def _run_health_probe() -> HealthFailure | None:
 
     if response.is_success:
         return None
+    return _probe_status_failure(response)
+
+
+def _configuration_failure() -> HealthFailure:
+    """Classify a ConfigurationError from building the client: no key at all is auth."""
+    if not get_api_key():
+        return HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
+    return HealthFailure(
+        HEALTH_FAILURE_UNREACHABLE,
+        "NextDNS client configuration is invalid (check NEXTDNS_HTTP_TIMEOUT)",
+    )
+
+
+def _probe_status_failure(response: httpx.Response) -> HealthFailure:
+    """Classify a non-success probe answer: 401/403 is auth, anything else unreachable."""
     if response.status_code in (401, 403):
         return HealthFailure(
             HEALTH_FAILURE_AUTH,

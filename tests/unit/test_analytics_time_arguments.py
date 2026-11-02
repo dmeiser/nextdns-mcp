@@ -19,7 +19,7 @@ from fastmcp import Client
 
 from nextdns_mcp import spec_tools
 from nextdns_mcp.server import build_mcp_server
-from nextdns_mcp.utils import normalize_partials, normalize_time_value
+from nextdns_mcp.utils import _query_bool, normalize_partials, normalize_time_value
 
 
 class TestTimeValues:
@@ -58,6 +58,19 @@ class TestPartials:
     def test_anything_else_is_left_for_the_tool_to_name(self):
         assert normalize_partials("sometimes") == "sometimes"
         assert normalize_partials(None) is None
+
+
+class TestQueryBooleans:
+    """The analytics endpoints read `true`/`false`; a raw Python bool would go
+    out as True/False and be refused, so the query builder renders it first."""
+
+    @pytest.mark.parametrize(("given", "expected"), [(True, "true"), (False, "false")])
+    def test_a_boolean_is_sent_in_the_spelling_the_api_reads(self, given, expected):
+        assert _query_bool(given) == expected
+
+    @pytest.mark.parametrize("given", ["all", 3600, 3600.5, None])
+    def test_every_other_value_passes_through_unchanged(self, given):
+        assert _query_bool(given) is given
 
 
 class TestTheToolsSaySoThemselves:

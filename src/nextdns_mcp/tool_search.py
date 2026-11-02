@@ -27,7 +27,7 @@ import logging
 import math
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from fastmcp.exceptions import ToolError
@@ -60,6 +60,15 @@ SEARCH_ANSWER_MAX_BYTES = 8000
 _WORD_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|[_\W]+")
 
 
+def _fold_word(word: str) -> str:
+    """Fold a plural word to its singular stem ('categories' -> 'category', 'profiles' -> 'profile')."""
+    if len(word) > 3 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s"):
+        return word[:-1]
+    return word
+
+
 def _words(text: str) -> set[str]:
     """Split a tool name or query into comparable words.
 
@@ -71,16 +80,7 @@ def _words(text: str) -> set[str]:
     symmetric: it only needs to make a name and a short query comparable, not
     to parse language.
     """
-    words = set()
-    for raw in _WORD_SPLIT.split(text):
-        word = raw.casefold()
-        if len(word) > 3 and word.endswith("ies"):
-            word = word[:-3] + "y"
-        elif len(word) > 3 and word.endswith("s"):
-            word = word[:-1]
-        if word:
-            words.add(word)
-    return words
+    return {_fold_word(raw.casefold()) for raw in _WORD_SPLIT.split(text) if raw.casefold()}
 
 
 def _catalog_name_words(tools: Sequence[Tool]) -> set[str]:
@@ -110,6 +110,11 @@ def _morphological_partners(word: str) -> set[str]:
     return partners
 
 
+def _usable_partners(word: str, vocabulary: set[str]) -> set[str]:
+    """Partner spellings that are real catalog words and differ from the word itself."""
+    return {p for p in _morphological_partners(word) if len(p) > 2 and p in vocabulary and p != word}
+
+
 def _variant_words(query: str, vocabulary: set[str], exclude: set[str] | frozenset[str] = frozenset()) -> set[str]:
     """Plural/singular partners of the query's words that tool names do use.
 
@@ -129,7 +134,7 @@ def _variant_words(query: str, vocabulary: set[str], exclude: set[str] | frozens
         word = raw.casefold()
         if len(word) < 3 or any(folded in exclude for folded in _words(word)):
             continue
-        extra.update(c for c in _morphological_partners(word) if len(c) > 2 and c in vocabulary and c != word)
+        extra.update(_usable_partners(word, vocabulary))
     return extra
 
 
@@ -137,6 +142,14 @@ def _variant_words(query: str, vocabulary: set[str], exclude: set[str] | frozens
 # identifier: `profile 87c444`, `profile_id=87c444`. The identifier is what
 # makes it a scope reference rather than a subject.
 _SCOPE_MENTION = re.compile(r"""(?i)\b([a-z][a-z0-9_-]*)[\s :=/#'.\-]{0,3}(?:0x)?([0-9a-f]{5,}|\d{4,})['\"]?""")
+
+
+def _parameter_words(tool: Tool) -> set[str]:
+    """The words of one tool's parameter names."""
+    words: set[str] = set()
+    for parameter in (tool.parameters or {}).get("properties") or {}:
+        words.update(_words(parameter))
+    return words
 
 
 def _scope_words(tools: Sequence[Tool]) -> set[str]:
@@ -151,10 +164,7 @@ def _scope_words(tools: Sequence[Tool]) -> set[str]:
     threshold = max(2, (len(tools) + 1) // 2)
     counts: Counter[str] = Counter()
     for tool in tools:
-        words: set[str] = set()
-        for parameter in (tool.parameters or {}).get("properties") or {}:
-            words.update(_words(parameter))
-        counts.update(words)
+        counts.update(_parameter_words(tool))
     return {word for word, count in counts.items() if count >= threshold}
 
 
@@ -192,6 +202,14 @@ def _name_words(tools: Sequence[Tool]) -> dict[str, set[str]]:
     return {tool.name: set(_words(tool.name)) for tool in tools}
 
 
+def _accepted_value_words(schema: Any) -> set[str]:
+    """The words of a parameter's accepted enum values ('general' names manageSettings' category)."""
+    accepted = schema.get("enum") if isinstance(schema, dict) else None
+    if not isinstance(accepted, list):
+        return set()
+    return {word for value in accepted for word in _words(str(value))}
+
+
 def _vocabulary_words(tools: Sequence[Tool]) -> dict[str, set[str]]:
     """The words each tool's own contract uses: its parameters and accepted values.
 
@@ -204,10 +222,7 @@ def _vocabulary_words(tools: Sequence[Tool]) -> dict[str, set[str]]:
         words: set[str] = set()
         for parameter, schema in ((tool.parameters or {}).get("properties") or {}).items():
             words.update(_words(parameter))
-            accepted = schema.get("enum") if isinstance(schema, dict) else None
-            if isinstance(accepted, list):
-                for value in accepted:
-                    words.update(_words(str(value)))
+            words.update(_accepted_value_words(schema))
         out[tool.name] = words
     return out
 
@@ -287,6 +302,28 @@ def _words_score(
     )
 
 
+def _word_scorer(
+    query_words: set[str],
+    names: dict[str, set[str]],
+    vocabulary: dict[str, set[str]],
+) -> Callable[[str], int]:
+    """A scorer for how much of the query each tool's own words account for.
+
+    Binds the catalog-wide discounting (shared names/values) and the leading-verb
+    exception once, so ranking callers score by tool name alone.
+    """
+    name_shared, vocab_shared = _shared_word_sets(names, vocabulary)
+    leading = {name: _leading_word(name) for name in names}
+    return lambda name: _words_score(
+        query_words,
+        names.get(name),
+        vocabulary.get(name),
+        name_shared,
+        vocab_shared,
+        leading.get(name, ""),
+    )
+
+
 def _rank_by_name_overlap(
     tools: Sequence[Tool],
     query: str,
@@ -307,25 +344,11 @@ def _rank_by_name_overlap(
     """
     names = _name_words(tools) if names is None else names
     vocabulary = _vocabulary_words(tools) if vocabulary is None else vocabulary
-    name_shared, vocab_shared = _shared_word_sets(names, vocabulary)
-    leading = {name: _leading_word(name) for name in names}
     query_words = _words(query)
     if not query_words:
         return list(tools)
-    indexed = list(enumerate(tools))
-    indexed.sort(
-        key=lambda pair: (
-            -_words_score(
-                query_words,
-                names.get(pair[1].name),
-                vocabulary.get(pair[1].name),
-                name_shared,
-                vocab_shared,
-                leading.get(pair[1].name, ""),
-            ),
-            pair[0],
-        )
-    )
+    scorer = _word_scorer(query_words, names, vocabulary)
+    indexed = sorted(enumerate(tools), key=lambda pair: (-scorer(pair[1].name), pair[0]))
     return [tool for _, tool in indexed]
 
 
@@ -407,6 +430,15 @@ class _CatalogAwareSearchMixin:
         return tool
 
 
+def _partition_named(results: Sequence[Tool], named: set[str]) -> tuple[list[Tool], list[Tool]]:
+    """Split ranked results into the ones the caller named and the ones it didn't."""
+    picked: list[Tool] = []
+    rest: list[Tool] = []
+    for tool in results:
+        (picked if tool.name in named else rest).append(tool)
+    return picked, rest
+
+
 def _merge_named_results(results: Sequence[Tool], tools: Sequence[Tool], named: set[str]) -> list[Tool]:
     """Put every tool the caller named into the answer, keeping BM25's order.
 
@@ -416,10 +448,9 @@ def _merge_named_results(results: Sequence[Tool], tools: Sequence[Tool], named: 
     the tools happen to be registered in. So: named-and-ranked first, then
     named-but-unranked, then everything else in ranked order.
     """
+    picked, rest = _partition_named(results, named)
     ranked_names = {tool.name for tool in results}
-    picked = [tool for tool in results if tool.name in named]
     missing = [tool for tool in tools if tool.name in named and tool.name not in ranked_names]
-    rest = [tool for tool in results if tool.name not in named]
     return picked + missing + rest
 
 
@@ -455,6 +486,22 @@ class FallbackBM25SearchTransform(_CatalogAwareSearchMixin, BM25SearchTransform)
     """BM25 search with a full-catalog fallback and name-aware ranking."""
 
 
+def _truncate_description(dumped: dict[str, Any]) -> None:
+    """Cut one dumped tool definition's description to the per-result budget.
+
+    The cut lands on a line boundary, never mid-sentence; a description with no
+    usable early line boundary is cut at the budget itself. The input schema,
+    which decides whether a call is valid, is never touched.
+    """
+    description = str(dumped.get("description") or "")
+    if len(description) <= SEARCH_DESCRIPTION_CHARS:
+        return
+    cut = description.rfind("\n", 0, SEARCH_DESCRIPTION_CHARS)
+    if cut < SEARCH_DESCRIPTION_CHARS // 2:
+        cut = SEARCH_DESCRIPTION_CHARS
+    dumped["description"] = description[:cut].rstrip() + "\n[description truncated]"
+
+
 def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
     """FastMCP's search-result shape, with each description cut to a budget.
 
@@ -471,12 +518,7 @@ def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
     spent = 0
     for tool in tools:
         dumped = tool.to_mcp_tool().model_dump(mode="json", by_alias=True, exclude_none=True)
-        description = str(dumped.get("description") or "")
-        if len(description) > SEARCH_DESCRIPTION_CHARS:
-            cut = description.rfind("\n", 0, SEARCH_DESCRIPTION_CHARS)
-            if cut < SEARCH_DESCRIPTION_CHARS // 2:
-                cut = SEARCH_DESCRIPTION_CHARS
-            dumped["description"] = description[:cut].rstrip() + "\n[description truncated]"
+        _truncate_description(dumped)
         # The whole answer is bounded too: four fully-described tools is still
         # ~10 KB, and it is the lower-ranked ones that are least likely to be
         # the tool the caller wanted. At least one result is always returned.
@@ -498,27 +540,9 @@ def _closest_tools(name: str, tools: Sequence[Tool], limit: int = 3) -> list[Too
     """
     if not tools:
         return []
-    names = _name_words(tools)
-    vocabulary = _vocabulary_words(tools)
-    name_shared, vocab_shared = _shared_word_sets(names, vocabulary)
-    leading = {name: _leading_word(name) for name in names}
-    query_words = _words(name)
-    scored = [
-        (
-            _words_score(
-                query_words,
-                names.get(tool.name),
-                vocabulary.get(tool.name),
-                name_shared,
-                vocab_shared,
-                leading.get(tool.name, ""),
-            ),
-            tool,
-        )
-        for tool in tools
-    ]
-    scored.sort(key=lambda pair: -pair[0])
-    return [tool for score, tool in scored[:limit] if score > 0]
+    scorer = _word_scorer(_words(name), _name_words(tools), _vocabulary_words(tools))
+    ordered = sorted(tools, key=lambda tool: -scorer(tool.name))
+    return [tool for tool in ordered[:limit] if scorer(tool.name) > 0]
 
 
 def _required_arguments(tool: Tool) -> str:
@@ -547,6 +571,18 @@ def _unknown_tool_message(name: str, tools: Sequence[Tool]) -> str:
     )
 
 
+def _flat_equal_matches(name: str, names: Sequence[str]) -> list[str]:
+    """Catalog entries equal to the typed name once separators and case are gone."""
+    flat = _WORD_SPLIT.sub("", name.casefold())
+    return [candidate for candidate in names if _WORD_SPLIT.sub("", candidate.casefold()) == flat]
+
+
+def _word_equal_matches(name: str, names: Sequence[str]) -> list[str]:
+    """Catalog entries whose word set equals the typed name's word set."""
+    words = _words(name)
+    return [candidate for candidate in names if _words(candidate) == words]
+
+
 def _match_tool_name(name: str, names: Sequence[str]) -> str:
     """The catalog entry a mistyped name unambiguously means, or ''.
 
@@ -561,13 +597,26 @@ def _match_tool_name(name: str, names: Sequence[str]) -> str:
     """
     if not name or name in names:
         return ""
-    flat = _WORD_SPLIT.sub("", name.casefold())
-    flat_matches = [candidate for candidate in names if _WORD_SPLIT.sub("", candidate.casefold()) == flat]
+    flat_matches = _flat_equal_matches(name, names)
     if len(flat_matches) == 1:
         return flat_matches[0]
-    words = _words(name)
-    word_matches = [candidate for candidate in names if _words(candidate) == words]
+    word_matches = _word_equal_matches(name, names)
     return word_matches[0] if len(word_matches) == 1 else ""
+
+
+def _dict_entry_name(value: dict[str, Any]) -> str:
+    """The `name` of one search-answer entry, '' when it has none."""
+    name = value.get("name")
+    return name.strip() if isinstance(name, str) else ""
+
+
+def _first_named_entry(entries: Sequence[Any]) -> str:
+    """The name of the first entry carrying one; the answer is rank order."""
+    for entry in entries:
+        name = _name_from_search_answer(entry)
+        if name:
+            return name
+    return ""
 
 
 def _name_from_search_answer(value: Any) -> str:
@@ -589,13 +638,9 @@ def _name_from_search_answer(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, dict):
-        name = value.get("name")
-        return name.strip() if isinstance(name, str) else ""
+        return _dict_entry_name(value)
     if isinstance(value, list):
-        for entry in value:
-            name = _name_from_search_answer(entry)
-            if name:
-                return name
+        return _first_named_entry(value)
     return ""
 
 
@@ -619,6 +664,38 @@ def _moved_into_arguments(arguments: dict[str, Any], nested: dict[str, Any], mov
     shaped = {key: value for key, value in arguments.items() if key not in moved}
     shaped["arguments"] = {**nested, **{key: arguments[key] for key in moved}}
     return shaped
+
+
+def _note_search_answer_name(supplied: Any, resolved: str) -> None:
+    """Log once when the name arrived as a search answer rather than a bare string."""
+    if resolved and resolved != supplied:
+        logger.info("call_tool name given as %s; resolved to the top-ranked %r", type(supplied).__name__, resolved)
+
+
+def _passthrough_resolution(resolved: str, by_name: dict[str, Tool]) -> tuple[str | None, Tool | None] | None:
+    """The answer when there is nothing to match: no name given, or no catalog.
+
+    An empty catalog - no transform, or one that could not be read - leaves the
+    name exactly as the caller sent it rather than refusing it.
+    """
+    if not resolved or not by_name:
+        return resolved, by_name.get(resolved) if resolved else None
+    return None
+
+
+def _resolved_entry(resolved: str, by_name: dict[str, Tool]) -> tuple[str, Tool] | None:
+    """The (name, entry) the supplied name refers to in the catalog, or None if it matches nothing.
+
+    A name that is itself a tool is used as given; one that normalises to exactly
+    one entry is corrected to it.
+    """
+    if resolved in by_name:
+        return resolved, by_name[resolved]
+    matched = _match_tool_name(resolved, list(by_name))
+    if matched:
+        logger.info("call_tool name %r is not a tool; it matches %r once normalised", resolved, matched)
+        return matched, by_name[matched]
+    return None
 
 
 class CallToolShapeMiddleware(Middleware):
@@ -653,19 +730,23 @@ class CallToolShapeMiddleware(Middleware):
 
         tools = await self._catalog(context)
         resolved, target = await self._resolve_tool_name(arguments.get("name"), tools)
-
-        shaped = dict(arguments)
-        if resolved:
-            shaped["name"] = resolved
-        if target is not None:
-            lifted = self._lift_flat_arguments(shaped, target)
-            if lifted is not shaped:
-                logger.info("call_tool arguments for %r were sent beside name, not inside arguments", resolved)
-                shaped = lifted
-
+        shaped = self._shape_arguments(arguments, resolved, target)
         if shaped != arguments:
             context.message.arguments = shaped
         return await call_next(context)
+
+    def _shape_arguments(self, arguments: dict[str, Any], resolved: str | None, target: Tool | None) -> dict[str, Any]:
+        """Rewrite the wrapper: the resolved name, and any parameters lifted into it."""
+        shaped = dict(arguments)
+        if resolved:
+            shaped["name"] = resolved
+        if target is None:
+            return shaped
+        lifted = self._lift_flat_arguments(shaped, target)
+        if lifted is not shaped:
+            logger.info("call_tool arguments for %r were sent beside name, not inside arguments", resolved)
+            return lifted
+        return shaped
 
     async def _resolve_tool_name(self, supplied: Any, tools: Sequence[Tool]) -> tuple[str | None, Tool | None]:
         """The tool a call names, and the catalog entry it matches - or None, None.
@@ -678,18 +759,16 @@ class CallToolShapeMiddleware(Middleware):
         could not be read - leaves the name as given rather than refusing it.
         """
         resolved = _name_from_search_answer(supplied)
-        if resolved and resolved != supplied:
-            logger.info("call_tool name given as %s; resolved to the top-ranked %r", type(supplied).__name__, resolved)
+        _note_search_answer_name(supplied, resolved)
 
         by_name = {tool.name: tool for tool in tools}
-        if not resolved or not by_name or resolved in by_name:
-            return resolved, by_name.get(resolved) if resolved else None
-
-        matched = _match_tool_name(resolved, list(by_name))
-        if matched:
-            logger.info("call_tool name %r is not a tool; it matches %r once normalised", resolved, matched)
-            return matched, by_name[matched]
-        raise ToolError(_unknown_tool_message(resolved, tools))
+        passthrough = _passthrough_resolution(resolved, by_name)
+        if passthrough is not None:
+            return passthrough
+        entry = _resolved_entry(resolved, by_name)
+        if entry is None:
+            raise ToolError(_unknown_tool_message(resolved, tools))
+        return entry
 
     @staticmethod
     def _lift_flat_arguments(arguments: dict[str, Any], tool: Tool) -> dict[str, Any]:
