@@ -152,7 +152,6 @@ _OFFERABLE_ROUTES: list[HTTPRoute] | None = None
 
 
 def _is_offerable(route: HTTPRoute) -> bool:
-    """An operation this server offers: it is named, and it is not withheld."""
     return bool(route.operation_id) and route.operation_id not in WITHHELD_OPERATIONS
 
 
@@ -385,7 +384,6 @@ class SpecApiTool(Tool):
         return _malformed_profile_id_payload(self._route, args)
 
     async def _dispatch_rendered(self, path: str, query: dict[str, Any], body: Any, args: dict[str, Any]) -> ToolResult:
-        """Refuse an incomplete, invalid or over-budget call; otherwise send it."""
         unfilled = _PATH_PLACEHOLDER.findall(path)
         if unfilled:
             return ToolResult(structured_content=self._missing_payload(unfilled))
@@ -517,7 +515,6 @@ def _schema_error_where(error: jsonschema.ValidationError) -> str:
 
 
 def _describe_schema_errors(problems: list[jsonschema.ValidationError]) -> str:
-    """Name up to ``_SCHEMA_ERROR_LIMIT`` violations; count the rest."""
     named = [f"{_schema_error_where(error)}: {error.message}" for error in problems[:_SCHEMA_ERROR_LIMIT]]
     extra = len(problems) - _SCHEMA_ERROR_LIMIT
     return "; ".join(named) + (f"; and {extra} more" if extra > 0 else "")
@@ -583,7 +580,6 @@ def _schema_validation_payload(
 
 
 def _interval_seconds(value: Any) -> int | None:
-    """A usable positive interval, or None when the argument is absent or unusable."""
     try:
         seconds = int(value)
     except (TypeError, ValueError):

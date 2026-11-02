@@ -75,12 +75,7 @@ def access_denied_payload_for(exc: AccessDeniedError) -> dict[str, Any]:
 
 
 def _handle_api_error(e: NextDNSError) -> dict[str, Any]:
-    """Convert a NextDNSError into a standardized error payload.
-
-    If the exception wraps an httpx.HTTPError, use http_error_payload to
-    preserve the original error structure. For any other case, fall back to a
-    generic internal error.
-    """
+    """The standardized error payload for a raised :class:`NextDNSError`."""
     cause = getattr(e, "__cause__", None)
     if cause is not None and isinstance(cause, httpx.HTTPError):
         return http_error_payload(str(e), cause)

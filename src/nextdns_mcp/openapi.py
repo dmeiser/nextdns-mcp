@@ -113,7 +113,6 @@ _health_probe_lock = asyncio.Lock()
 
 
 def _tool_property_names(tool: Any) -> list[str]:
-    """The argument names one registered tool's published schema declares."""
     return [str(prop) for prop in (tool.parameters or {}).get("properties") or {}]
 
 

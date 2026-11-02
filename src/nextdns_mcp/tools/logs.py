@@ -165,7 +165,6 @@ class DownloadTooLargeError(Exception):
 
 
 def _preview_full(preview: list[str], preview_bytes: int) -> bool:
-    """True once the preview has hit its line or byte cap."""
     return len(preview) >= DOWNLOAD_PREVIEW_MAX_LINES or preview_bytes >= DOWNLOAD_PREVIEW_MAX_BYTES
 
 
@@ -200,7 +199,6 @@ _ERROR_BODY_READ_BYTES = BODY_SLICE_BYTES
 
 
 async def _bounded_error_body(response: httpx.Response) -> bytes:
-    """Read a bounded prefix of a streaming response's body."""
     parts: list[bytes] = []
     total = 0
     async for chunk in response.aiter_bytes():

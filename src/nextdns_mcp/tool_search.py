@@ -533,7 +533,6 @@ class _CatalogWords:
 
 
 def _catalog_words_for(tools: Sequence[Tool]) -> _CatalogWords:
-    """Compute every catalog-derived word structure once (see _CatalogWords)."""
     names = _name_words(tools)
     vocabulary = _vocabulary_words(tools)
     name_shared, vocab_shared = _shared_word_sets(names, vocabulary)

@@ -39,12 +39,5 @@ SYNTHETIC_TOOL_NAMES = frozenset({"search_tools", "call_tool"})
 
 
 def is_write_operation(method: str) -> bool:
-    """Check if an HTTP method is a write operation.
-
-    Args:
-        method: HTTP method (GET, POST, PUT, PATCH, DELETE)
-
-    Returns:
-        True if it's a write operation, False otherwise
-    """
+    """True when a request with this method changes server state."""
     return method.upper() in WRITE_METHODS
