@@ -9,6 +9,7 @@ circuit-break on 5xx), and every registered tool still reports a standardized
 error payload rather than success.
 """
 
+import gzip
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,8 +25,9 @@ from nextdns_mcp.errors import NextDNSAuthError, NextDNSError, NextDNSRateLimitE
 from nextdns_mcp.server import build_mcp_server
 
 # Path served by the stub -> (status, body). The plot series path carries a
-# query string; the stub matches on path only.
-_UPSTREAM: dict[str, tuple[int, str]] = {}
+# query string; the stub matches on path only. A bytes body is served with
+# Content-Encoding: gzip (the body must be a real gzip payload).
+_UPSTREAM: dict[str, tuple[int, str | bytes]] = {}
 
 
 class _StubUpstream(BaseHTTPRequestHandler):
@@ -42,9 +44,14 @@ class _StubUpstream(BaseHTTPRequestHandler):
         if length:
             self.rfile.read(length)
         status, body = _UPSTREAM[path]
-        raw = body.encode()
+        raw = body if isinstance(body, bytes) else body.encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        if isinstance(body, bytes):
+            # A bytes entry is served pre-encoded (gzip): the shape the real
+            # NextDNS edge uses for larger answers, which the capped stream
+            # must decode exactly once.
+            self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
@@ -103,7 +110,7 @@ async def stub_nextdns_api(monkeypatch):
         _UPSTREAM.clear()
 
 
-def _serve(status: int, body: str) -> None:
+def _serve(status: int, body: str | bytes) -> None:
     """Point every stubbed upstream path at the same canned failure."""
     for path in list(_UPSTREAM):
         _UPSTREAM[path] = (status, body)
@@ -246,3 +253,26 @@ async def test_an_error_status_under_the_cap_keeps_its_typed_error(stub_nextdns_
     payload = await transport._api_request_payload("GET", "/upstream/unavailable", max_response_bytes=10_000)
     assert payload["code"] == "http_error"
     assert payload["status_code"] == 503
+
+
+@pytest.mark.asyncio
+async def test_a_gzipped_response_under_the_cap_is_decoded_exactly_once(stub_nextdns_api):
+    """Regression (CI E2E, round 4): the real NextDNS edge gzips larger answers.
+
+    ``aiter_bytes`` already decompresses, so the re-exposed response must not
+    keep ``content-encoding``: re-decoding plain JSON dies with a zlib
+    "incorrect header check", turning every capped ``;series`` call into a
+    transport failure.
+    """
+    _serve(200, gzip.compress(json.dumps({"data": [{"x": i} for i in range(2000)]}).encode()))
+    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=5_000_000)
+    assert len(payload["data"]) == 2000
+
+
+@pytest.mark.asyncio
+async def test_the_cap_counts_decoded_bytes_of_a_gzipped_body(stub_nextdns_api):
+    """The ceiling bounds what would be parsed, not what the wire compressed."""
+    big = json.dumps({"data": [{"x": i} for i in range(50_000)]}).encode()
+    _serve(200, gzip.compress(big))
+    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=10_000)
+    assert payload["code"] == "response_too_large"
