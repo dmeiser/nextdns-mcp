@@ -102,13 +102,16 @@ The test profile is named `TEST_PROFILE_YYYYMMDD` by default (overridable via
 placeholders). The model can be chosen with `--model`, `NEXTDNS_E2E_MODEL`, or
 left to opencode's own configured default.
 
-To exercise progressive tool disclosure, add `--tool-search regex|bm25` (or set
-`NEXTDNS_TOOL_SEARCH` in the env file). This makes the MCP server hide the real
-tool catalog behind FastMCP's `search_tools` + `call_tool` pair, so the actor
-must discover tools on demand instead of seeing them listed up front.
+Progressive disclosure is on by default (`bm25`), so the MCP server hides the real tool
+catalog behind FastMCP's `search_tools` + `call_tool` pair and the actor has to discover
+tools on demand instead of seeing them listed up front. `--tool-search off` (or
+`NEXTDNS_TOOL_SEARCH=off` in the env file) restores the full listing, which is what the
+container E2E job pins so its steps can name tools directly; `--tool-search bm25` sets
+the default explicitly.
 
 ```bash
 NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --tool-search bm25
+NEXTDNS_API_KEY=... uv run python scripts/ai_e2e_harness.py --tool-search off
 ```
 
 To run only part of the ~89-step checklist, print the step catalog and pass a
@@ -161,7 +164,10 @@ A step passes when three things hold:
    answered with. The step must match that record, and the call must have
    answered with a payload. `--print-steps` shows each step's resolved endpoint.
    `plotAnalytics` and `dohLookup` have no endpoint; their rule is their own
-   record plus the payload (image content, the DNS answer).
+   record plus the payload (image content, the DNS answer). The log is created
+   mode 0600 and holds real account data — queried domains, device names,
+   query-log rows — so a report written from it inherits that sensitivity; see
+   "Call log" in `docs/safety.md`.
 2. **No state-changing call came after it.** Confirming reads afterwards are
    normal and allowed; a later write is not, because it can undo the step's own
    work (observed live: a rewrite added and then deleted in one attempt).

@@ -17,6 +17,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "python-dotenv>=1.2.2",
     "matplotlib>=3.10.0",
+    "jsonschema>=4.23",
 ]
 
 [project.optional-dependencies]
@@ -72,5 +73,6 @@ exclude-newer = "1 week"
 
 [dependency-groups]
 dev = [
+    "types-jsonschema>=4.26.0.20261006",
     "xenon>=0.9.3",
 ]

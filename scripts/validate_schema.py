@@ -27,16 +27,28 @@ from typing import Any
 
 import yaml
 
-# Operations the server does not publish, with the reason recorded in
-# nextdns_mcp.spec_tools: ``streamLogs`` is a Server-Sent Events stream, and an MCP
-# tool call is request/response, so the transport cannot carry it. Anything else the
-# spec describes has to be published, which is what assert_operation_coverage checks.
-WITHHELD_OPERATIONS = frozenset({"streamLogs"})
+# Same bootstrap the harness uses: the catalog's source of truth lives in the
+# package, so it is importable whether this script is run directly
+# (``python scripts/validate_schema.py``) or imported as ``scripts.validate_schema``.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-# Tools the server performs itself rather than proxying: no endpoint returns their
-# answer, so no operation schema describes them and they are excused from the
-# naming check below.
-LOCAL_TOOLS = frozenset({"plotAnalytics", "dohLookup"})
+from nextdns_mcp.server import published_tool_names
+
+# Operations the server does not publish, read from the server itself: the
+# reason is recorded in nextdns_mcp.spec_tools (``streamLogs`` is a Server-Sent
+# Events stream, and an MCP tool call is request/response, so the transport
+# cannot carry it). A second copy here could only drift from the one that
+# decides what is actually registered.
+from nextdns_mcp.spec_tools import SPEC_PATH, WITHHELD_OPERATIONS, spec_tool_names
+
+# Tools the server performs itself rather than proxying: no endpoint returns
+# their answer, so no operation schema describes them and they are excused from
+# the naming check below. Derived from the server's own catalog — anything it
+# publishes that the document's operations do not name is local by definition —
+# so this cannot drift from the surface it excuses.
+LOCAL_TOOLS = frozenset(name for name in published_tool_names() if name not in set(spec_tool_names()))
 
 # Of those, the ones that answer with content instead of a JSON document. A chart is a
 # PNG, so there is no payload for a schema to describe; the runner's assertion for it
@@ -99,33 +111,60 @@ def load_openapi_spec(spec_path: str) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> dict[str, Any] | None:
-    """
-    Extract the 200 response schema for a given operationId.
+def _success_response_schema(operation: dict[str, Any]) -> dict[str, Any] | None:
+    """The 200 (or 201) response schema one operation declares, JSON or CSV.
 
     Both ``application/json`` and ``text/csv`` content are considered: some
     operations (e.g. downloadLogs) declare only a CSV body, and their schema
     is just as much part of the API contract as a JSON one.
+    """
+    responses = operation.get("responses", {})
+    # Some operations return 200, others 201 (created)
+    for success_code in ("200", "201"):
+        content = responses.get(success_code, {}).get("content", {})
+        for media_type in ("application/json", "text/csv"):
+            schema = content.get(media_type, {}).get("schema")
+            if schema:
+                return schema
+    return None
+
+
+# operation_id -> 2xx response schema, walked once per spec object. The old
+# per-call search over every path made assert_operation_coverage() quadratic in
+# the document (~70 full walks for the published reads), and every E2E response
+# validation paid a walk too. One entry keyed by object identity: callers pass
+# whatever dict they hold — the shipped spec, or a test fixture — and a swapped
+# spec must not be served a stale index.
+_response_index_memo: tuple[dict[str, Any], dict[str, dict[str, Any]]] | None = None
+
+
+def _response_index(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Every operationId's 2xx response schema in one pass (memoized per spec)."""
+    global _response_index_memo
+    if _response_index_memo is not None and _response_index_memo[0] is spec:
+        return _response_index_memo[1]
+    index: dict[str, dict[str, Any]] = {}
+    for path_item in spec.get("paths", {}).values():
+        for method, operation in path_item.items():
+            if method not in ("get", "post", "put", "patch", "delete"):
+                continue
+            operation_id = operation.get("operationId")
+            if not operation_id or operation_id in index:
+                continue
+            schema = _success_response_schema(operation)
+            if schema:
+                index[operation_id] = schema
+    _response_index_memo = (spec, index)
+    return index
+
+
+def get_operation_response_schema(spec: dict[str, Any], operation_id: str) -> dict[str, Any] | None:
+    """
+    Extract the 200 response schema for a given operationId.
 
     Returns the schema object or None if not found.
     """
-    # Search through all paths and operations
-    paths = spec.get("paths", {})
-    for path_item in paths.values():
-        for method, operation in path_item.items():
-            if method in ["get", "post", "put", "patch", "delete"] and operation.get("operationId") == operation_id:
-                # Found the operation, extract 200 response schema
-                responses = operation.get("responses", {})
-                # Some operations return 200, others 201 (created)
-                for success_code in ("200", "201"):
-                    success_response = responses.get(success_code, {})
-                    content = success_response.get("content", {})
-                    for media_type in ("application/json", "text/csv"):
-                        schema = content.get(media_type, {}).get("schema")
-                        if schema:
-                            return schema
-
-    return None
+    return _response_index(spec).get(operation_id)
 
 
 def spec_operations(spec: dict[str, Any]) -> dict[str, str]:
@@ -143,6 +182,45 @@ def spec_operations(spec: dict[str, Any]) -> dict[str, str]:
                 if operation_id:
                     operations[operation_id] = method
     return operations
+
+
+def _request_body_json_schema(operation: dict[str, Any]) -> dict[str, Any] | None:
+    """The operation's request-body JSON schema, if it declares one."""
+    body = operation.get("requestBody")
+    if not isinstance(body, dict):
+        return None
+    schema = body.get("content", {}).get("application/json", {}).get("schema")
+    return schema if isinstance(schema, dict) else None
+
+
+def titled_non_object_bodies(spec: dict[str, Any]) -> list[str]:
+    """operationIds whose request body is a non-object schema carrying a ``title``.
+
+    FastMCP names a titled non-object request body's tool argument after the
+    title, while the spec-generated executor recognizes a whole-body argument
+    only under the literal name ``body`` — a titled array body would therefore
+    arrive wrapped as ``{"<title>": [...]}`` and send the wrong shape upstream,
+    the same silent mis-request this branch's other guards exist to prevent.
+    The shipped document carries no titles today; asserting it here is what
+    keeps it from gaining one that breaks the executor.
+    """
+    offenders: list[str] = []
+    for path_item in spec.get("paths", {}).values():
+        for method, operation in path_item.items():
+            if method not in ("get", "post", "put", "patch", "delete"):
+                continue
+            body_schema = _request_body_json_schema(operation)
+            if body_schema is None:
+                continue
+            # $ref'd bodies resolve to their target; only a non-object effective
+            # type mis-names the argument (an undecidable type is not "object"
+            # either, and FastMCP's namer reads the title from the raw schema).
+            if _extract_schema_type(spec, body_schema) == "object":
+                continue
+            resolved = resolve_schema(spec, body_schema)
+            if isinstance(resolved, dict) and resolved.get("title") and operation.get("operationId"):
+                offenders.append(str(operation["operationId"]))
+    return sorted(set(offenders))
 
 
 def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str]) -> None:
@@ -188,6 +266,13 @@ def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str
     )
     if unvalidated:
         raise ValueError(f"published reads that resolve to no response schema: {unvalidated}")
+
+    titled = titled_non_object_bodies(spec)
+    if titled:
+        raise ValueError(
+            "request bodies that are titled non-object schemas — FastMCP would name the tool "
+            f"argument after the title while the executor wraps whole bodies as 'body': {titled}"
+        )
 
 
 def validate_field_type(value: Any, expected_type: str) -> bool:
@@ -450,9 +535,8 @@ def main():
     tool_name = sys.argv[1]
     json_response = sys.argv[2]
 
-    # Find OpenAPI spec
-    script_dir = Path(__file__).parent
-    spec_path = script_dir.parent / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
+    # Find OpenAPI spec (the same path the server reads; imported from the package)
+    spec_path = SPEC_PATH
 
     if not spec_path.exists():
         print(f"ERROR: OpenAPI spec not found at {spec_path}", file=sys.stderr)

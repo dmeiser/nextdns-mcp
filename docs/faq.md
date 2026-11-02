@@ -4,7 +4,13 @@
 Run the `listProfiles` tool (or check your NextDNS dashboard URL: `https://my.nextdns.io/<profile_id>`) and copy the `id` of the desired profile.
 
 ## Can I use the tools without specifying profile_id?
-Set `NEXTDNS_DEFAULT_PROFILE` to a profile ID; tools that accept `profile_id` will use it when omitted. Tools that require a `profile_id` ignore the default and return `missing_profile_id` when it is omitted (see [troubleshooting.md](troubleshooting.md)).
+Only the two composite tools fall back to `NEXTDNS_DEFAULT_PROFILE`: `dohLookup` and `plotAnalytics` use it when you omit `profile_id`. Every generated operation tool (`getProfile`, `getDenylist`, `getAnalyticsStatus`, …) requires `profile_id` and ignores the default — omit it and the answer is `missing_required_argument`, naming what the endpoint needs (the two composite tools say `missing_profile_id` for the same omission). See [troubleshooting.md](troubleshooting.md).
+
+## Why does my client only see two tools?
+That is the default. `NEXTDNS_TOOL_SEARCH` defaults to `bm25`, so `tools/list` advertises the synthetic `search_tools` + `call_tool` pair and the operation tools are discovered by searching: ask `search_tools` for what you want, then call the returned name through `call_tool`. The hidden tools stay callable. Set `NEXTDNS_TOOL_SEARCH=off` to advertise the whole catalog (see [configuration.md](configuration.md)).
+
+## How do I stop an agent from writing to profiles I care about?
+List them in `NEXTDNS_PROTECTED_PROFILES`: writes to a listed profile are refused even when `NEXTDNS_WRITABLE_PROFILES=ALL`, while reads keep working (protection is writes-only by design). A profile created during the run is not covered — a new id is unprotected — so keep writes scoped with `NEXTDNS_WRITABLE_PROFILES` as well. See [safety.md](safety.md).
 
 ## How do I disable all write operations?
 Set `NEXTDNS_READ_ONLY=true`.

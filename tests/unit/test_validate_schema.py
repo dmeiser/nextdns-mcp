@@ -337,6 +337,132 @@ def test_get_operation_response_schema_resolves_text_csv():
     assert get_operation_response_schema(spec, "downloadLogs") == {"type": "string", "format": "binary"}
 
 
+def test_response_index_is_built_once_per_spec_object():
+    """The path walk runs once per spec object, not once per lookup.
+
+    assert_operation_coverage looks up every published read, and the E2E run
+    validates every response it sees; walking all paths per call made the
+    coverage check quadratic in the document. The cache is keyed by object
+    identity so a swapped-in spec (a fixture, a monkeypatched path) is never
+    served the previous spec's index.
+    """
+    from scripts.validate_schema import _response_index, get_operation_response_schema
+
+    spec = {
+        "paths": {
+            "/profiles": {
+                "get": {
+                    "operationId": "listProfiles",
+                    "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                }
+            }
+        }
+    }
+    assert _response_index(spec) is _response_index(spec)  # memo hit: the walk ran once
+    assert get_operation_response_schema(spec, "listProfiles") == {"type": "object"}
+    other = {
+        "paths": {
+            "/x": {
+                "get": {
+                    "operationId": "getX",
+                    "responses": {"200": {"content": {"application/json": {"schema": {"type": "array"}}}}},
+                }
+            }
+        }
+    }
+    assert get_operation_response_schema(other, "listProfiles") is None
+    assert get_operation_response_schema(other, "getX") == {"type": "array"}
+    assert get_operation_response_schema(spec, "listProfiles") == {"type": "object"}
+
+
+def test_catalog_constants_are_imported_not_restated():
+    """The withheld set, the spec path, and the local tools are the server's own.
+
+    The script used to keep its own copies of WITHHELD_OPERATIONS and LOCAL_TOOLS;
+    drift between them and the module that actually decides what is registered is
+    invisible until a container and the validator disagree about the catalog.
+    """
+    from nextdns_mcp import spec_tools
+    from nextdns_mcp.server import _COMPOSITE_TOOLS, published_tool_names
+    from scripts import validate_schema
+
+    assert validate_schema.WITHHELD_OPERATIONS is spec_tools.WITHHELD_OPERATIONS
+    assert validate_schema.SPEC_PATH == spec_tools.SPEC_PATH
+    published = set(published_tool_names())
+    assert validate_schema.LOCAL_TOOLS == published - set(spec_tools.spec_tool_names())
+    assert {tool.__name__ for tool in _COMPOSITE_TOOLS} == set(validate_schema.LOCAL_TOOLS)
+
+
+def _spec_with_request_body(operation_id: str, body_schema: dict) -> dict:
+    """A one-operation spec whose POST body is ``body_schema``."""
+    return {
+        "paths": {
+            "/things": {
+                "post": {
+                    "operationId": operation_id,
+                    "requestBody": {"content": {"application/json": {"schema": body_schema}}},
+                    "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                }
+            }
+        }
+    }
+
+
+def test_coverage_rejects_a_titled_non_object_request_body():
+    """A titled non-object body is a silent wrong-request shape waiting to happen.
+
+    FastMCP names the tool argument for a titled non-object request body after
+    the title, while the generated executor recognizes a whole-body argument
+    only under the literal name ``body`` — the body would be wrapped under the
+    wrong name and the wrong shape sent upstream. The shipped document carries
+    no titles; the guard is what keeps one from being added unnoticed.
+    """
+    from scripts.validate_schema import assert_operation_coverage, titled_non_object_bodies
+
+    spec = _spec_with_request_body("replaceThing", {"type": "array", "title": "Things", "items": {"type": "string"}})
+    assert titled_non_object_bodies(spec) == ["replaceThing"]
+    with pytest.raises(ValueError, match="titled non-object schemas.*replaceThing"):
+        assert_operation_coverage(spec, ["replaceThing"])
+
+    # The title behind a $ref counts the same as an inline one.
+    ref_spec = {
+        "paths": {
+            "/things": {
+                "post": {
+                    "operationId": "replaceThing",
+                    "requestBody": {
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ThingList"}}}
+                    },
+                    "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                }
+            }
+        },
+        "components": {"schemas": {"ThingList": {"type": "array", "title": "ThingList", "items": {"type": "string"}}}},
+    }
+    assert titled_non_object_bodies(ref_spec) == ["replaceThing"]
+
+
+def test_coverage_accepts_titled_objects_and_untitled_non_object_bodies():
+    """The guard fires only for the combination that mis-names the argument."""
+    from scripts.validate_schema import assert_operation_coverage, titled_non_object_bodies
+
+    titled_object = _spec_with_request_body(
+        "updateThing", {"type": "object", "title": "Thing", "properties": {"a": {"type": "string"}}}
+    )
+    assert titled_non_object_bodies(titled_object) == []
+    assert_operation_coverage(titled_object, ["updateThing"])
+
+    untitled_array = _spec_with_request_body("replaceThing", {"type": "array", "items": {"type": "string"}})
+    assert titled_non_object_bodies(untitled_array) == []
+    assert_operation_coverage(untitled_array, ["replaceThing"])
+
+    # The shipped document — 12 object bodies, 7 arrays, 9 $ref-to-object — passes.
+    from scripts.validate_schema import load_openapi_spec
+
+    spec = load_openapi_spec(str(REAL_SPEC_PATH))
+    assert titled_non_object_bodies(spec) == []
+
+
 def test_a_tool_with_a_pinned_shape_does_not_fall_back_to_its_endpoint():
     """A pinned answer is checked against its own shape, never the endpoint's document.
 

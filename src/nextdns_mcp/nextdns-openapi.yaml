@@ -23,6 +23,35 @@ servers:
 security:
   - ApiKeyAuth: []
 
+# Where this server's behaviour is not a pure proxy of this document, recorded
+# here so the YAML stays the single place to learn what the tool surface does
+# (docs/architecture/0001-openapi-spec-generated-tools.md, "parser, not
+# transport"). Each entry names the implementing module; the keys are
+# informational to OpenAPI consumers.
+x-mcp-divergences:
+  query-normalizers:
+    # Rewritten on the way out rather than sent as given - two spellings
+    # callers reach for fail silently upstream; see _QUERY_NORMALIZERS in
+    # nextdns_mcp/spec_tools.py and the normalizers in nextdns_mcp/utils.py.
+    from: normalize_time_value
+    to: normalize_time_value
+    partials: normalize_partials
+  withheld-operations:
+    # Server-Sent Events; an MCP tool call is request/response, so the
+    # transport cannot carry it (nextdns_mcp.spec_tools.WITHHELD_OPERATIONS).
+    streamLogs: SSE transport
+  delegated-operations:
+    # Served by a guarded implementation instead of the raw redirect: signed
+    # URL chain, unauthenticated follow-up fetch, size cap, SSRF checks
+    # (nextdns_mcp.tools.logs; spec_tools.DELEGATED_HANDLERS).
+    downloadLogs: nextdns_mcp.tools.logs
+  composite-tools:
+    # Hand-written operations with no API endpoint to describe - the declared
+    # exceptions to full derivability from this document
+    # (nextdns_mcp/server.py _COMPOSITE_TOOLS).
+    plotAnalytics: renders a chart from an analytics series
+    dohLookup: resolves a name through the profile's DoH resolver
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -49,7 +78,7 @@ components:
       properties:
         id:
           type: string
-          description: Unique profile identifier (6 characters, alphanumeric)
+          description: Unique profile identifier (6 or 10 lowercase alphanumeric characters)
           example: abc123
         name:
           type: string
@@ -383,16 +412,18 @@ components:
       required: true
       # No example: a concrete id here gets copied. Live runs showed a model
       # sending the example value verbatim, and because a NextDNS profile id is
-      # six hexadecimal characters, `abc123` reads as a real one - the request
-      # then 404s and the caller has to work out that the id was never a profile.
-      # The pattern says the shape; the profile-listing endpoint gives the values.
+      # six or ten short alphanumeric characters, `abc123` reads as a real one -
+      # the request then 404s and the caller has to work out that the id was
+      # never a profile. The pattern says the shape; the profile-listing
+      # endpoint gives the values.
       description: >-
-        Profile ID (6-character alphanumeric identifier). Not the profile's name
-        and not derived from it; the profile-listing endpoint returns the
-        identifiers this API key can reach.
+        Profile ID (6 or 10 lowercase alphanumeric characters - legacy profiles
+        use 6, current ones 10). Not the profile's name and not derived from
+        it; the profile-listing endpoint returns the identifiers this API key
+        can reach.
       schema:
         type: string
-        pattern: '^[a-z0-9]{6}$'
+        pattern: '^(?:[a-z0-9]{6}|[a-z0-9]{10})$'
 
     EntryId:
       name: entry_id
@@ -406,32 +437,43 @@ components:
     From:
       name: from
       in: query
-      required: true
+      # Optional upstream: an omitted `from` covers the last day (-1d), which
+      # is the window docs/usage.md documents and the E2E harness prompts for
+      # ("recent logs, no time window"). Publishing it required was a contract
+      # the API does not have.
+      required: false
       # The narrow wording ("Unix timestamp or ISO 8601") was not the contract
       # this API actually honours: a relative offset works, and it is the only
       # spelling that expresses a window measured from now. Verified against the
       # live API, and already what the grouped analytics tool sends
       # (tools/analytics.py SERIES_DEFAULT_FROM = "-1d").
+      x-mcp-normalizer: normalize_time_value
       description: >-
         Start of the time window. Accepted spellings: epoch seconds
-        (1762000000), ISO 8601 (2026-10-30T00:00:00Z), a bare date
-        (2026-10-30), or a relative offset from now (-1d, -12h, -30d),
-        where now means now. For a window measured from now use the
-        relative offset - the last day is -1d, and that is what this
-        server sends when it asks for recent data. The Grafana spelling
-        now-1d is rejected upstream (``from`` must be number).
+        (1762000000, as a number or its string form), ISO 8601
+        (2026-10-30T00:00:00Z), a bare date (2026-10-30), the literal `now`,
+        or a relative offset from now (-1d, -12h, -30d). For a window
+        measured from now use the relative offset: the last day is -1d, and
+        omitting `from` entirely covers exactly that - the last day. The
+        Grafana spelling now-1d is rejected upstream (``from`` must be
+        number); this server rewrites it to -1d before sending.
       schema:
-        type: string
+        oneOf:
+          - type: string
+          - type: number
       example: '-1d'
 
     To:
       name: to
       in: query
+      x-mcp-normalizer: normalize_time_value
       description: >-
-        End of the time window, in any spelling `from` accepts; omit it to end
-        at now.
+        End of the time window, in any spelling `from` accepts (`now` is a
+        value, not a default); omit it to end at now.
       schema:
-        type: string
+        oneOf:
+          - type: string
+          - type: number
       example: now
 
     Cursor:
@@ -474,9 +516,15 @@ components:
     Interval:
       name: interval
       in: query
-      description: Time-series window size in seconds
+      # The same 60-86400 band the plot path validates (PLOT_INTERVAL_MAX and
+      # the minimum in _validate_interval_and_limit); publishing it lets
+      # schema-aware callers, and this server's own schema check, refuse an
+      # out-of-band window before a request goes out.
+      description: Time-series window size in seconds (60-86400)
       schema:
         type: integer
+        minimum: 60
+        maximum: 86400
 
     Alignment:
       name: alignment
@@ -496,10 +544,17 @@ components:
     Partials:
       name: partials
       in: query
-      description: Whether to include partial tumbling windows at the start/end of the range
+      # Probed live: `none` and `all` answer 200; anything else (including
+      # `start`/`end`, which the document used to advertise) answers a 400
+      # enum that names no allowed values. Boolean-ish input is mapped to
+      # these two before sending (utils.normalize_partials).
+      x-mcp-normalizer: normalize_partials
+      description: >-
+        Whether to include partial tumbling windows at the edges of the
+        range: `none` excludes them, `all` includes them.
       schema:
         type: string
-        enum: [none, start, end, all]
+        enum: [none, all]
 
     AnalyticsLimit:
       name: limit

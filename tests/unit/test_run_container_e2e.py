@@ -1,5 +1,6 @@
 """Unit tests for the container E2E runner script."""
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -379,6 +380,122 @@ def test_write_cases_are_the_documented_sequence():
     assert [name for name, _ in WRITE_CASES] == [name for name, _, _ in WRITE_ORACLE]
 
 
+class TestE2EWorkflowSecretHandling:
+    """Guards on .github/workflows/e2e-container.yml (SEC-5 and SEC-7).
+
+    The live run must not put the real credential on a command line (it is
+    readable through /proc/<pid>/cmdline; the script reads the environment
+    already), and the live container must run with the data-bearing plot
+    profile on the write denylist, the way the actor harness protects it.
+    """
+
+    WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "e2e-container.yml"
+
+    def _steps(self) -> dict:
+        import yaml
+
+        doc = yaml.safe_load(self.WORKFLOW.read_text(encoding="utf-8"))
+        return {step.get("name", ""): step for step in doc["jobs"]["e2e"]["steps"]}
+
+    def test_the_live_run_never_puts_the_real_key_on_the_command_line(self):
+        step = next(s for name, s in self._steps().items() if name.startswith("Run E2E validation"))
+        assert '--api-key "${NEXTDNS_API_KEY}"' not in step["run"]
+        # The env it needs is still there: the script's --api-key default reads it.
+        assert "NEXTDNS_API_KEY" in step["env"]
+
+    def test_the_health_run_may_still_pass_its_fake_key(self):
+        """The health-only probe uses a fake literal credential, not the secret."""
+        step = next(s for name, s in self._steps().items() if name.startswith("Validate /health"))
+        assert "--api-key" in step["run"]
+        assert "NEXTDNS_API_KEY" not in step.get("env", {})
+
+    def test_the_live_container_denies_writes_to_the_plot_profile(self):
+        step = next(s for name, s in self._steps().items() if name.startswith("Start MCP Server Container"))
+        assert "NEXTDNS_PLOT_PROFILE" in step["env"]
+        # Conditional on the secret: an empty denylist would protect nothing but
+        # an id literally named "", so the flag is added only when set.
+        assert 'NEXTDNS_PROTECTED_PROFILES="${NEXTDNS_PLOT_PROFILE}"' in step["run"]
+        assert 'if [ -n "${NEXTDNS_PLOT_PROFILE}" ]' in step["run"]
+
+
+def test_settings_write_payloads_are_the_shared_table():
+    """The seven settings payloads are SETTINGS_CATEGORIES' `set` payloads verbatim.
+
+    This script used to restate them with its own values and had already drifted
+    (logs retention 86400 vs the table's 604800, blockpage enabled True vs the
+    table's False). The writer-tool mapping is this script's own (the category is
+    the endpoint), but the payload is imported, so the two suites drive the same
+    writes from one table.
+    """
+    from scripts import ai_e2e_common
+
+    by_tool = dict(WRITE_CASES)
+    for cat, tool in (
+        ("general", "updateSettings"),
+        ("logs", "updateLogsSettings"),
+        ("blockpage", "updateBlockPageSettings"),
+        ("performance", "updatePerformanceSettings"),
+        ("privacy", "updatePrivacySettings"),
+        ("security", "updateSecuritySettings"),
+        ("parental", "updateParentalControlSettings"),
+    ):
+        expected = {"profile_id": "{profile}", **ai_e2e_common.SETTINGS_CATEGORIES[cat]["set"]}
+        assert by_tool[tool] == expected, f"{cat}: the {tool} payload drifted from SETTINGS_CATEGORIES"
+
+
+def test_plot_sweep_walks_the_server_metric_table(tmp_path: Path):
+    """The plot sweep iterates the server's own nine chartable metrics, not a copy."""
+    from scripts import ai_e2e_common
+
+    session = AsyncMock()
+    mock_call_res = MagicMock()
+    mock_call_res.is_error = False
+    mock_call_res.content = [TextContent(type="text", text='{"data": []}')]
+    session.call_tool.return_value = mock_call_res
+
+    runner = ContainerE2ERunner(
+        endpoint="http://127.0.0.1:8000/mcp",
+        variant="slim",
+        allow_live_writes=True,
+        plot_profile="plotpid",
+        artifacts_dir=tmp_path,
+    )
+    asyncio.run(runner._run_plot_sweep(session, "plotpid"))
+    metrics = [call.kwargs["arguments"]["metric"] for call in session.call_tool.call_args_list]
+    assert metrics == list(ai_e2e_common.PLOT_METRICS)
+    assert len(metrics) == 9
+
+
+def test_load_spec_once_parses_each_path_once(tmp_path: Path, monkeypatch):
+    """The shipped document is parsed once per path, not once per consumer.
+
+    The catalog and the runner both used to load it at their own turn (~160 ms
+    each); the memo keeps one parse while a monkeypatched SPEC_PATH still gets
+    its own fresh parse rather than a stale memo.
+    """
+    from scripts import run_container_e2e as rce
+
+    calls = {"n": 0}
+    real_load = rce.load_openapi_spec
+
+    def counting_load(path: str):
+        calls["n"] += 1
+        return real_load(path)
+
+    monkeypatch.setattr(rce, "load_openapi_spec", counting_load)
+    spec_a = tmp_path / "a.yaml"
+    spec_a.write_text("paths: {}\n", encoding="utf-8")
+    spec_b = tmp_path / "b.yaml"
+    spec_b.write_text("paths: {}\n", encoding="utf-8")
+
+    first = rce._load_spec_once(spec_a)
+    second = rce._load_spec_once(spec_a)
+    assert first is second  # memo hit, no second parse
+    other = rce._load_spec_once(spec_b)
+    assert other is not first  # a different path reparses instead of serving a stale memo
+    assert calls["n"] == 2
+
+
 @pytest.mark.asyncio
 async def test_run_write_checks_issues_the_documented_sequence(runner: ContainerE2ERunner):
     """Each entry is added, changed where it has its own endpoint, and removed again.
@@ -405,10 +522,14 @@ async def test_run_write_checks_issues_the_documented_sequence(runner: Container
         value = arguments[entry_name]
         assert re.fullmatch(pattern, value), f"{name}: {value!r} does not match {pattern}"
 
-    # The settings writes carry their own fields rather than a wrapped settings object.
+    # The settings writes carry their own fields rather than a wrapped settings
+    # object. Their payloads come from the shared SETTINGS_CATEGORIES table now —
+    # this pinned the drift the table prevents (retention 86400 here vs 604800
+    # there, blockpage enabled True vs False), so the values are the table's.
     settings = dict(calls[1:8])
     assert settings["updateSettings"] == {"profile_id": "profile-123", "web3": True}
-    assert settings["updateLogsSettings"]["retention"] == 86400
+    assert settings["updateLogsSettings"]["retention"] == 604800
+    assert settings["updateBlockPageSettings"] == {"profile_id": "profile-123", "enabled": False}
     assert settings["updatePerformanceSettings"] == {
         "profile_id": "profile-123",
         "ecs": True,

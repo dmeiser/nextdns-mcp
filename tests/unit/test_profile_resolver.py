@@ -248,15 +248,17 @@ class TestGeneratedToolProfileGuard:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("operation_id", ["getDenylist", "clearLogs"])
-    async def test_a_whitespace_only_profile_id_is_refused_as_invalid(self, operation_id, routes, recorder):
+    async def test_a_whitespace_only_profile_id_is_refused_as_missing(self, operation_id, routes, recorder):
         """Blank is not the only shape that means "no id".
 
-        Spaces would be substituted into the path segment, and the ACL layer
-        reads the profile id back out of that path — so a whitespace id is
-        refused as invalid, not treated as absent.
+        A whitespace id is not a value to reject as unsafe - it is an id the
+        caller never filled in, and "this endpoint needs profile_id" is the
+        actionable thing to say about it (the old contract called it invalid,
+        which sent the caller hunting for a malformed id it never typed).
+        Nothing is substituted into the path and nothing is sent either way.
         """
         payload = (await spec_tools.SpecApiTool(routes[operation_id]).run({"profile_id": "   "})).structured_content
-        assert payload["code"] == ErrorCode.INVALID_PROFILE_ID
+        assert payload["code"] == ErrorCode.MISSING_REQUIRED_ARGUMENT
         assert recorder == []
 
     @pytest.mark.asyncio

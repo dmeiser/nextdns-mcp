@@ -11,7 +11,7 @@ are the endpoint's path, query and request-body fields with their descriptions,
 enums, defaults and examples intact. Tuning what a caller sees means editing the
 YAML, which is the only place that information lives.
 
-Only the transport is ours. Every call goes through ``utils._api_request_payload``,
+Only the transport is ours. Every call goes through ``transport._api_request_payload``,
 which is the access-controlled client: profile read/write allowlists, read-only
 mode and the protected-profile denylist are enforced there, and failures come back
 as the typed error payloads the server documents (``{"error", "code", "hint", ...}``)
@@ -40,18 +40,22 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import yaml
 from fastmcp import FastMCP
 from fastmcp.tools.base import Tool, ToolResult
 from fastmcp.utilities.openapi import HTTPRoute, parse_openapi_to_http_routes
 
-from .call_log import register_endpoint
+from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
-from .utils import _api_request_payload, normalize_partials, normalize_time_value
+from .tools import logs as _logs
+from .tools.plots import _series_budget_error
+from .transport import _api_request_payload
+from .utils import is_safe_profile_id, normalize_partials, normalize_time_value, resolve_profile_id, schema_required
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +63,28 @@ SPEC_PATH = Path(__file__).with_name("nextdns-openapi.yaml")
 
 # See the module docstring.
 WITHHELD_OPERATIONS = frozenset({"streamLogs"})
-DELEGATED_OPERATIONS = frozenset({"downloadLogs"})
+
+
+def _delegate_download_logs(profile_id: str) -> Awaitable[dict[str, Any]]:
+    """Forward to the guarded downloader, resolved on its module at call time.
+
+    The indirection is deliberate: capturing ``_download_logs_to_tempfile`` at
+    import time would freeze the original function into the registry, and the
+    tests that replace it on ``tools.logs`` would then be patching a name
+    nobody calls.
+    """
+    return _logs._download_logs_to_tempfile(profile_id)
+
+
+# The operations this server performs itself, and the handler that performs
+# each one. Mapping operation id -> handler is the whole special case: adding
+# a delegated operation means one dict entry here and a guarded implementation
+# in ``tools``, and nothing in ``SpecApiTool`` changes. The name set is derived
+# from the mapping so the two can never disagree.
+DELEGATED_HANDLERS: dict[str, Callable[[str], Awaitable[dict[str, Any]]]] = {
+    "downloadLogs": _delegate_download_logs,
+}
+DELEGATED_OPERATIONS = frozenset(DELEGATED_HANDLERS)
 
 # Bound on a published description. The spec's longest is 545 characters; the cap
 # exists so a future spec edit cannot silently make one tool dominate every search
@@ -73,7 +98,9 @@ DESCRIPTION_MAX_CHARS = 1200
 WHOLE_BODY_ARG = "body"
 
 # A path parameter the caller did not fill in leaves its placeholder behind.
-_UNFILLED_PATH_ARG = re.compile(r"\{(\w+)\}")
+# The one pattern for a placeholder: substitution and the leftover check are
+# the same question ("what occupies {name} in this path now").
+_PATH_PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
 # The analytics/log window arguments are rewritten on the way out rather than sent
 # exactly as given, which is the one place this generator is not a plain proxy.
@@ -102,7 +129,16 @@ _QUERY_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
 # can move the call somewhere the caller was not authorized for. Nothing upstream can
 # be assumed to reject it. A domain is a legal entry id, so a lone dot is not refused
 # — only ``..``, which no domain contains.
-_UNSAFE_PATH_VALUE = re.compile(r"[\s/?#\\]|\.\.|[^\x21-\x7e]")
+#
+# ``%`` is refused outright, not just when followed by a recognizable escape: it is
+# the one character whose *meaning* depends on what decodes the URL. ``%2e%2e`` is
+# ``..`` to anything that percent-decodes, and a double-encoded ``%252e%252e`` is
+# invisible to a single decode pass — rejecting the character kills both this and
+# any future encoding variant in one stroke, and no legal NextDNS id contains it.
+# ``{``/``}`` are refused for the same reason in the other direction: they are the
+# shape of a path placeholder, and an id carrying one must not be able to name a
+# different parameter.
+_UNSAFE_PATH_VALUE = re.compile(r"[\s/?#\\{}%]|\.\.|[^\x21-\x7e]")
 
 
 def load_spec(path: Path = SPEC_PATH) -> dict[str, Any]:
@@ -112,15 +148,49 @@ def load_spec(path: Path = SPEC_PATH) -> dict[str, Any]:
     return spec
 
 
+_OFFERABLE_ROUTES: list[HTTPRoute] | None = None
+
+
+def _is_offerable(route: HTTPRoute) -> bool:
+    """An operation this server offers: it is named, and it is not withheld."""
+    return bool(route.operation_id) and route.operation_id not in WITHHELD_OPERATIONS
+
+
 def spec_routes(spec: dict[str, Any] | None = None) -> list[HTTPRoute]:
     """Every offerable operation, in stable order.
 
     Ordered by ``operationId`` rather than by the spec's path order so the tool
     list a client sees does not shift when an unrelated path is added to the spec.
+
+    The shipped document parses once per process and the result is reused: the
+    server surface, the call-log endpoint map, the health probe, the harness
+    and the coverage check all ask the same question about the same file, and
+    re-reading and re-parsing it for each was the cold-start cost. A caller
+    that hands in a spec (tests do, with modified documents) always gets a
+    fresh parse - the cache is for the shipped one only. The cached list is
+    shared; callers must treat it as read-only.
     """
+    global _OFFERABLE_ROUTES
+    if spec is None and _OFFERABLE_ROUTES is not None:
+        return _OFFERABLE_ROUTES
     parsed = parse_openapi_to_http_routes(load_spec() if spec is None else spec)
-    offerable = [route for route in parsed if route.operation_id and route.operation_id not in WITHHELD_OPERATIONS]
-    return sorted(offerable, key=lambda route: str(route.operation_id))
+    offerable = sorted(filter(_is_offerable, parsed), key=lambda route: str(route.operation_id))
+    if spec is None:
+        _OFFERABLE_ROUTES = offerable
+    return offerable
+
+
+def endpoints_for_routes(routes: list[HTTPRoute] | None = None) -> dict[str, tuple[str, str]]:
+    """``operationId -> (method, path template)``, for the call log.
+
+    Derived from the same parsed routes the tools are registered from, so the
+    log's endpoint column and the published surface come from one parse of one
+    document.
+    """
+    return {
+        str(route.operation_id): (str(route.method), str(route.path))
+        for route in (spec_routes() if routes is None else routes)
+    }
 
 
 def describe(route: HTTPRoute) -> str:
@@ -161,24 +231,52 @@ def split_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> tuple[str, d
 
 
 def _rendered_path(template: str, located: list[tuple[str, str, str]], arguments: dict[str, Any]) -> str:
-    """Substitute this route's path arguments into its path template.
+    """Substitute this route's path arguments into its path template, in one pass.
 
     A blank path value is left as the placeholder rather than substituted:
     an empty profile id in the middle of a URL answers with a 404 that
     blames the wrong thing, and the caller is further from the mistake.
+
+    The substitution is a single regex pass over the *template*, not a chain of
+    ``str.replace`` calls: with sequential replacement, a value containing
+    another parameter's placeholder (``profile_id="{entry_id}"``) gets
+    re-substituted on a later pass, so the path that leaves carries a second
+    argument where the first was authorized - the authorized profile id and the
+    path actually sent drift apart. A value inserted by ``sub`` is never
+    rescanned, so a placeholder can only ever come from the template itself.
     """
-    path = template
-    for name, openapi_name, location in located:
-        if location == "path" and str(arguments[name]).strip():
-            path = path.replace("{" + openapi_name + "}", str(arguments[name]))
-    return path
+    values = {openapi_name: arguments[name] for name, openapi_name, location in located if location == "path"}
+
+    def substitute(match: re.Match[str]) -> str:
+        value = values.get(match.group(1))
+        return match.group(0) if not _path_value_present(value) else str(value)
+
+    return _PATH_PLACEHOLDER.sub(substitute, template)
+
+
+def _path_value_present(value: Any) -> bool:
+    """True when a path argument carries something to substitute.
+
+    ``None`` and blank strings count as absent, not as the text ``"None"``:
+    a client sending an explicit null for a path parameter means "I did not
+    fill this in", and rendering that as the literal ``None`` would send a
+    request for a profile literally named None.
+    """
+    return value is not None and str(value).strip() != ""
 
 
 def _query_arguments(located: list[tuple[str, str, str]], arguments: dict[str, Any]) -> dict[str, Any]:
-    """This route's query arguments, each rewritten into the form the API reads."""
+    """This route's query arguments, each rewritten into the form the API reads.
+
+    An argument sent as an explicit null is dropped rather than sent: httpx
+    would serialize it as an empty value (``?to=&cursor=``), which upstream
+    answers with a validation error that names the empty string, not the
+    client's stray null. A null query argument means "not given" - the same
+    thing the argument's absence means.
+    """
     query: dict[str, Any] = {}
     for name, openapi_name, location in located:
-        if location == "query":
+        if location == "query" and arguments[name] is not None:
             query[openapi_name] = _query_value(openapi_name, arguments[name])
     return query
 
@@ -229,9 +327,19 @@ def _request_body(whole_body: Any, body_properties: dict[str, Any]) -> Any:
 
 
 class SpecApiTool(Tool):
-    """One NextDNS API endpoint, published from the spec and executed through the ACL client."""
+    """One NextDNS API endpoint, published from the spec and executed through the ACL client.
 
-    def __init__(self, route: HTTPRoute) -> None:
+    ``transport`` overrides the request function (the default, resolved as a
+    module global at call time, is ``_api_request_payload``); it exists so a
+    caller can inject a transport per tool instead of patching module state,
+    while tests that do patch the module keep working.
+    """
+
+    def __init__(
+        self,
+        route: HTTPRoute,
+        transport: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+    ) -> None:
         super().__init__(
             name=str(route.operation_id),
             description=describe(route),
@@ -239,59 +347,98 @@ class SpecApiTool(Tool):
             tags={"nextdns", "spec"},
         )
         self._route = route
+        self._transport = transport
+        # The published schema is the contract this tool accepts, so it is also
+        # what the call is checked against before anything goes out; compiling
+        # the validator once per route makes per-call validation cheap.
+        self._validator = jsonschema.Draft202012Validator(route.flat_param_schema or {})
 
     def __repr__(self) -> str:
         return f"SpecApiTool(name={self.name!r}, method={self._route.method}, path={self._route.path})"
 
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
-        """Call the endpoint and report the result as a typed payload."""
+        """Call the endpoint and report the result as a typed payload.
+
+        Refusal comes before dispatch in two halves: what may not be *shaped*
+        into this endpoint at all (path-unsafe values, an impossible profile
+        id) is refused for every operation, delegated ones included - the
+        delegation used to run ahead of these checks, which let a crafted
+        ``profile_id`` steer the guarded downloader's URL. What this endpoint
+        still needs or rejects (an unfilled placeholder, arguments that
+        violate the published schema, a series request beyond the point
+        budget) is checked on the generated path, after the call is split.
+        """
         args = arguments or {}
+        refused = self._request_refusal(args)
+        if refused is not None:
+            return ToolResult(structured_content=refused)
         if self.name in DELEGATED_OPERATIONS:
             return await self._run_delegated(args)
+        path, query, body = split_arguments(self._route, args)
+        return await self._dispatch_rendered(path, query, body, args)
 
+    def _request_refusal(self, args: dict[str, Any]) -> dict[str, Any] | None:
+        """The payload when this call's path arguments must not be sent at all."""
         unsafe = _unsafe_path_arguments(self._route, args)
         if unsafe:
-            return ToolResult(structured_content=self._unsafe_path_payload(unsafe))
+            return self._unsafe_path_payload(unsafe)
+        return _malformed_profile_id_payload(self._route, args)
 
-        path, query, body = split_arguments(self._route, args)
-        unfilled = _UNFILLED_PATH_ARG.findall(path)
+    async def _dispatch_rendered(self, path: str, query: dict[str, Any], body: Any, args: dict[str, Any]) -> ToolResult:
+        """Refuse an incomplete, invalid or over-budget call; otherwise send it."""
+        unfilled = _PATH_PLACEHOLDER.findall(path)
         if unfilled:
             return ToolResult(structured_content=self._missing_payload(unfilled))
+        invalid = _schema_validation_payload(self._validator, self.name, _normalized_for_validation(self._route, args))
+        if invalid is not None:
+            return ToolResult(structured_content=invalid)
+        budget = _series_budget_for_generated_call(self._route, query)
+        if budget is not None:
+            return ToolResult(structured_content=budget)
         return await self._call_endpoint(path, query, body)
 
     async def _call_endpoint(self, path: str, query: dict[str, Any], body: Any) -> ToolResult:
         """Send the request this route describes and wrap its payload."""
-        payload = await _api_request_payload(self._route.method, path, params=query or None, json_body=body)
+        request = self._transport or _api_request_payload
+        payload = await request(self._route.method, path, params=query or None, json_body=body)
         return ToolResult(structured_content=payload)
 
     async def _run_delegated(self, arguments: dict[str, Any]) -> ToolResult:
-        """Serve ``downloadLogs`` with the guarded downloader instead of the raw redirect."""
-        from .tools.logs import _download_logs_to_tempfile
+        """Serve a delegated operation with its own guarded handler.
 
-        profile_id = str(arguments.get("profile_id", "")).strip()
-        if not profile_id:
+        The profile id gets the same shape check the generated path gets (and
+        the check the pre-migration ``manageLogs`` tool enforced): a malformed
+        id must fail as ``invalid_profile_id`` here rather than being smuggled
+        into a path the downloader builds from it. Unsafe path characters are
+        already refused by the guard ``run`` applies before dispatch.
+        """
+        profile_id = arguments.get("profile_id")
+        resolved, error = resolve_profile_id("" if profile_id is None else str(profile_id).strip(), allow_default=False)
+        if error is not None and error.get("code") == ErrorCode.MISSING_PROFILE_ID:
             return ToolResult(structured_content=self._missing_payload(["profile_id"]))
-        return ToolResult(structured_content=await _download_logs_to_tempfile(profile_id))
+        if error is not None:
+            return ToolResult(structured_content=error)
+        return ToolResult(structured_content=await DELEGATED_HANDLERS[self.name](str(resolved)))
 
     def _unsafe_path_payload(self, names: list[str]) -> dict[str, Any]:
         """A typed error refusing to put an id-shaped argument anywhere but a path segment."""
         code = ErrorCode.INVALID_PROFILE_ID if "profile_id" in names else ErrorCode.INVALID_ENTRY_ID
         hint = (
-            "the profile id is 6 or 10 characters; listProfiles() returns the ids this API key can access"
+            PROFILE_ID_HINT
             if "profile_id" in names
             else "the id is the `id` field of the entry in this endpoint's list response"
         )
         return error_payload(
             code,
             f"{self.name} cannot send {', '.join(names)} as a path segment: it must not contain a slash, "
-            "a query or fragment separator, whitespace, or '..'",
+            "a query or fragment separator, whitespace, '..' or '%', or a brace",
             hint=hint,
         )
 
     def _missing_payload(self, missing: list[str]) -> dict[str, Any]:
         """A typed error naming what the endpoint still needs and where it comes from."""
         hints = {
-            "profile_id": "the profile id is 6 characters; listProfiles() returns the ids this API key can access",
+            "profile_id": PROFILE_ID_HINT,
             "entry_id": "the entry id is the `id` field of the entry in this endpoint's list response",
             "id": "the id is the identifier of the entry in this endpoint's list response",
         }
@@ -319,20 +466,154 @@ def _path_argument_names(route: HTTPRoute, arguments: dict[str, Any]) -> list[tu
 def _unsafe_path_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> list[str]:
     """Path arguments whose value could address something other than this tool's endpoint.
 
-    A blank value is not listed here: it is left as the placeholder by
-    :func:`split_arguments` and reported by :meth:`SpecApiTool.run` as a missing
-    argument, which is the more useful thing to say about an empty ``profile_id``.
+    A blank or null value is not listed here: it is not unsafe, it is missing.
+    It is left as the placeholder by :func:`split_arguments` and reported by
+    :meth:`SpecApiTool.run` as a missing argument, which is the more useful
+    thing to say about an empty ``profile_id`` - and it keeps ``None`` from
+    being stringified into the text ``"None"``, which contains none of the
+    refused characters and would sail through this guard into the path.
     """
     return [
         openapi_name
         for name, openapi_name in _path_argument_names(route, arguments)
-        if _UNSAFE_PATH_VALUE.search(str(arguments[name]))
+        if _path_value_present(arguments[name]) and _UNSAFE_PATH_VALUE.search(str(arguments[name]))
     ]
+
+
+def _malformed_profile_id_payload(route: HTTPRoute, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    """A typed refusal when a sent ``profile_id`` cannot be a NextDNS profile id.
+
+    A printable-but-impossible id (13 characters, uppercase, punctuation) used
+    to be substituted into the path and refused by the access-control layer as
+    an unclassifiable URL - a 403 about the *request*, when the honest answer
+    is that the id is not shaped like one. Catching it here returns the typed
+    ``invalid_profile_id`` and the shape hint before a request is built.
+    """
+    for name, openapi_name in _path_argument_names(route, arguments):
+        if openapi_name != "profile_id":
+            continue
+        value = arguments[name]
+        if _path_value_present(value) and not is_safe_profile_id(value):
+            return error_payload(
+                ErrorCode.INVALID_PROFILE_ID,
+                f"{route.operation_id} was given a profile id that is not shaped like one: {value!r}",
+                hint=PROFILE_ID_HINT,
+            )
+    return None
+
+
+# How many schema violations one payload names before saying "and N more".
+_SCHEMA_ERROR_LIMIT = 5
+
+
+def _without_nulls(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Drop explicitly-null arguments: null means "not provided" (see _query_arguments)."""
+    return {name: value for name, value in arguments.items() if value is not None}
+
+
+def _schema_error_where(error: jsonschema.ValidationError) -> str:
+    """Where in the arguments a schema violation sits, in the caller's terms."""
+    return ".".join(str(part) for part in error.absolute_path) or "<arguments>"
+
+
+def _describe_schema_errors(problems: list[jsonschema.ValidationError]) -> str:
+    """Name up to ``_SCHEMA_ERROR_LIMIT`` violations; count the rest."""
+    named = [f"{_schema_error_where(error)}: {error.message}" for error in problems[:_SCHEMA_ERROR_LIMIT]]
+    extra = len(problems) - _SCHEMA_ERROR_LIMIT
+    return "; ".join(named) + (f"; and {extra} more" if extra > 0 else "")
+
+
+def _normalized_for_validation(route: HTTPRoute, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Arguments with the query normalizers applied, for schema validation.
+
+    The published schema describes what the API accepts; the normalizers
+    (``_QUERY_NORMALIZERS``, recorded in the document's ``x-mcp-divergences``)
+    rewrite caller input into exactly that form on the way out. Validating
+    the raw arguments would reject the boolean ``partials=false`` the
+    normalizer exists to serve - the deviation would become a refusal. So the
+    schema check runs against what the server would actually send.
+    """
+    parameter_map = route.parameter_map or {}
+    merged = dict(arguments)
+    for name, value in arguments.items():
+        openapi_name, location = _mapped_location(parameter_map, name)
+        if location == "query":
+            merged[name] = _query_value(openapi_name, value)
+    return merged
+
+
+def _iter_top_level_errors(
+    validator: jsonschema.Draft202012Validator, arguments: dict[str, Any]
+) -> list[jsonschema.ValidationError]:
+    """The schema violations at the level this server interprets.
+
+    Each top-level argument is checked against its published schema (type,
+    enum, range, required). A container argument's *contents* are not: an
+    object or array body is forwarded opaquely, the same schema-less boundary
+    ``StripExtraFieldsMiddleware`` coerces it with (issue #273 - a nested
+    password ``"0012"`` must reach the API exactly as written, not be
+    reinterpreted by anything in the middle). Validation that descended into
+    nested contents would reject shapes the pipeline deliberately preserves,
+    turning the opacity contract into a refusal; the endpoint itself validates
+    those contents, which is the layer that owns them.
+    """
+    return [error for error in validator.iter_errors(arguments) if len(error.absolute_path) <= 1]
+
+
+def _schema_validation_payload(
+    validator: jsonschema.Draft202012Validator, tool_name: str, arguments: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Refuse arguments that do not match the published schema; None when they do.
+
+    The published ``inputSchema`` is the contract this server tells callers
+    they are held to (docs/troubleshooting.md says a malformed value is
+    "rejected without reaching the API"), so the check runs here, before any
+    request is constructed: a wrong-typed body, an unknown enum value or an
+    out-of-range query parameter answers with the typed ``invalid_argument``
+    naming every violation, and nothing goes upstream.
+    """
+    problems = _iter_top_level_errors(validator, _without_nulls(arguments))
+    if not problems:
+        return None
+    return error_payload(
+        ErrorCode.INVALID_ARGUMENT,
+        f"{tool_name} arguments do not match the published schema: {_describe_schema_errors(problems)}",
+        hint="the tool's inputSchema is the accepted shape: fix the named values, or omit optional arguments entirely",
+    )
+
+
+def _interval_seconds(value: Any) -> int | None:
+    """A usable positive interval, or None when the argument is absent or unusable."""
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _series_budget_for_generated_call(route: HTTPRoute, query: dict[str, Any]) -> dict[str, Any] | None:
+    """Refuse a generated ``;series`` call whose stated range and interval outpoint the budget.
+
+    ``plotAnalytics`` refuses a range that would return more than
+    ``PLOT_MAX_POINTS`` points; the generated ``getAnalytics*Series`` tools
+    read the same endpoint with the same per-interval cost, so they get the
+    same refusal (issue #267 applies to both doors). It fires only when the
+    caller stated both a ``from`` and an ``interval``: a call naming neither
+    takes the endpoint's own defaults, which this server did not choose and
+    cannot bound.
+    """
+    if ";series" not in route.path:
+        return None
+    interval = _interval_seconds(query.get("interval"))
+    from_time = query.get("from")
+    if interval is None or from_time is None:
+        return None
+    return _series_budget_error(from_time, query.get("to") or "now", interval)
 
 
 def _required(route: HTTPRoute) -> list[str]:
     """The arguments the published schema marks required, in the caller's terms."""
-    return [str(name) for name in ((route.flat_param_schema or {}).get("required") or [])]
+    return schema_required(route.flat_param_schema)
 
 
 def spec_tool_names() -> list[str]:
@@ -343,18 +624,17 @@ def spec_tool_names() -> list[str]:
     return [str(route.operation_id) for route in spec_routes()]
 
 
-def register_spec_tools(server: FastMCP) -> list[str]:
+def register_spec_tools(server: FastMCP, routes: list[HTTPRoute] | None = None) -> list[str]:
     """Register one tool per offerable operation and return their names.
 
-    Each registration records the endpoint the name is bound to, so the server's
-    call log can say which API call a tool call executed. That record is what an
-    end-to-end run checks a step against: the tool name alone says what the caller
-    asked for, not what the server sent upstream.
+    ``routes`` is the already-parsed list the server passes in; the tool
+    surface, the call-log endpoint map and the published-name list are then
+    three views of a single parse of the shipped document, not three parses of
+    it.
     """
     names: list[str] = []
-    for route in spec_routes():
+    for route in spec_routes() if routes is None else routes:
         operation_id = str(route.operation_id)
-        register_endpoint(operation_id, route.method, route.path)
         server.add_tool(SpecApiTool(route))
         names.append(operation_id)
     logger.info("Spec tool surface: %d tools registered from %s", len(names), SPEC_PATH.name)

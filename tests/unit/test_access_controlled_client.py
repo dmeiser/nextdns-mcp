@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import os
+import socket
 from collections.abc import Callable, Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from nextdns_mcp import utils
+from nextdns_mcp import transport
 from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
 from nextdns_mcp.config import configure_logging
 from nextdns_mcp.tools import logs as logs_module
@@ -535,12 +536,12 @@ class TestAccessControlledClientRequestLogging:
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
         monkeypatch.setattr(AccessControlledClient, "request", AsyncMock(side_effect=raised))
 
-        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"):
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.transport"):
             if isinstance(raised, AccessDeniedError):
-                await utils._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
+                await transport._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
             else:
-                with pytest.raises(utils.NextDNSError):
-                    await utils._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
+                with pytest.raises(transport.NextDNSError):
+                    await transport._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
 
         log_messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
         assert log_messages
@@ -557,8 +558,8 @@ class TestAccessControlledClientRequestLogging:
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
         request_url = "/profiles/abc.def/logs?search=secret-search-term"
 
-        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"):
-            payload = await utils._api_request("GET", request_url)
+        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.transport"):
+            payload = await transport._api_request("GET", request_url)
 
         assert payload["code"] == "access_denied"
         assert payload["error"] == f"Forbidden URL: {request_url}"
@@ -595,13 +596,16 @@ class TestAccessControlledClientRequestLogging:
             pytest.fail(f"{status_code} did not raise")
 
         expected_error = {
-            401: utils.NextDNSAuthError,
-            429: utils.NextDNSRateLimitError,
-            503: utils.NextDNSServerError,
+            401: transport.NextDNSAuthError,
+            429: transport.NextDNSRateLimitError,
+            503: transport.NextDNSServerError,
         }[status_code]
 
-        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.utils"), pytest.raises(expected_error) as raised_info:
-            await utils._api_request("GET", "/profiles/abc123/logs", params=params)
+        with (
+            caplog.at_level(logging.DEBUG, logger="nextdns_mcp.transport"),
+            pytest.raises(expected_error) as raised_info,
+        ):
+            await transport._api_request("GET", "/profiles/abc123/logs", params=params)
 
         assert raised_info.value.status_code == status_code
         log_messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
@@ -759,6 +763,14 @@ class TestLibraryLoggerRedaction:
             "AsyncClient",
             lambda *args, **kwargs: real_async_client(transport=httpx.MockTransport(handler)),
         )
+
+        # The SSRF guard now fails closed on resolution failure, and
+        # ``cdn.example.com`` is not a resolvable name; stub the lookup to the
+        # public address the URL names so the guard vets it as a real hop.
+        def fake_getaddrinfo(host: str, port: Any, **kwargs: Any) -> list[Any]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
         path = str(tmp_path / "download.csv")
         with caplog.at_level(logging.INFO):

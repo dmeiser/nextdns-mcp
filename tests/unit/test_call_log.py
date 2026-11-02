@@ -13,6 +13,7 @@ SPDX-License-Identifier: MIT
 """
 
 import json
+from typing import ClassVar
 
 import pytest
 from fastmcp import Client
@@ -281,3 +282,132 @@ class TestCallLogMiddleware:
         """An explicitly empty path must not attempt to write."""
         mw = CallLogMiddleware(path="")
         assert mw._path == ""
+
+
+class TestFileIsSensitiveByDefault:
+    """The rows carry account data, so the file is private from creation.
+
+    ``open(..., "a")`` applies the process umask at creation - often ``0022``,
+    which makes a brand-new log group-readable. The rows carry profile ids,
+    entry names and a bounded projection of results, so the log is created
+    ``0600`` explicitly and the mode is a contract, not a side effect.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_new_log_is_created_owner_only(self, tmp_path):
+        from nextdns_mcp.call_log import CallLogMiddleware
+
+        path = tmp_path / "calls.jsonl"
+        middleware = CallLogMiddleware(path=str(path), endpoints={})
+        await middleware._record("getProfile", {"profile_id": "abc123"}, ok=True, error="")
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+class TestBoundedProjection:
+    """Rows are bounded *before* serialization, and the bound is observable.
+
+    A 10,000-entry list never reaches ``json.dumps`` whole: the projection
+    keeps a few leading entries and names the omission, so the row stays
+    small enough for a harness to read and the serializer never pays for the
+    payload the log cannot carry.
+    """
+
+    def test_a_large_list_keeps_leading_entries_and_names_the_omission(self):
+        from nextdns_mcp.call_log import PROJECT_MAX_ITEMS, _project_value
+
+        projected = _project_value([f"entry-{i}" for i in range(10_000)])
+        assert len(projected) == PROJECT_MAX_ITEMS + 1
+        assert projected[0] == "entry-0"
+        assert projected[-1] == {"_omitted_items": 10_000 - PROJECT_MAX_ITEMS}
+
+    def test_a_small_list_is_kept_whole_without_an_omission_marker(self):
+        """The bound names omissions; inside the bound nothing is touched.
+
+        The omission marker exists so a reader knows rows were dropped; adding
+        it to a list that fit whole would make every small result lie.
+        """
+        from nextdns_mcp.call_log import PROJECT_MAX_ITEMS, _project_value
+
+        small = [f"entry-{i}" for i in range(PROJECT_MAX_ITEMS)]
+        assert _project_value(small) == small
+
+        from nextdns_mcp.call_log import PROJECT_MAX_STRING_CHARS, _project_value
+
+        assert len(_project_value("x" * 5000)) == PROJECT_MAX_STRING_CHARS
+
+    @pytest.mark.asyncio
+    async def test_the_written_row_stays_inside_the_result_budget(self, tmp_path):
+        from nextdns_mcp.call_log import RESULT_CHARS, CallLogMiddleware
+
+        class _BigResult:
+            is_error = False
+            structured_content: ClassVar[dict[str, object]] = {
+                "domains": [{"domain": f"d{i}.example.com", "count": i} for i in range(20_000)]
+            }
+
+        path = tmp_path / "calls.jsonl"
+        middleware = CallLogMiddleware(path=str(path), endpoints={})
+        await middleware._record(
+            "getAnalyticsDomains", {"profile_id": "abc123"}, ok=True, error="", result=_BigResult()
+        )
+        row = json.loads(path.read_text(encoding="utf-8"))
+        assert len(row["result"]) <= RESULT_CHARS
+        assert "_omitted_items" in row["result"]
+
+
+class TestOffsetReader:
+    """``read_call_log_rows`` reads from an offset, the shared row contract.
+
+    A harness that captured the file's end before a step reads only what the
+    step appended; the offset reader is the one place that decides what a row
+    is, so a partial trailing line is skipped identically everywhere.
+    """
+
+    def test_rows_after_the_offset_are_the_only_ones_returned(self, tmp_path):
+        from nextdns_mcp.call_log import read_call_log_rows
+
+        path = tmp_path / "calls.jsonl"
+        first = json.dumps({"tool": "first"}) + "\n"
+        path.write_text(first + json.dumps({"tool": "second"}) + "\n", encoding="utf-8")
+        rows = read_call_log_rows(str(path), offset=len(first.encode("utf-8")))
+        assert rows == [{"tool": "second"}]
+
+    def test_a_partial_trailing_line_is_skipped_not_raised(self, tmp_path):
+        from nextdns_mcp.call_log import read_call_log_rows
+
+        path = tmp_path / "calls.jsonl"
+        path.write_text('{"tool": "ok"}\n{"tool": "cut', encoding="utf-8")
+        assert read_call_log_rows(str(path)) == [{"tool": "ok"}]
+
+
+class TestLoggingCannotBreakACall:
+    """A log that cannot be written must not fail the call it records.
+
+    Both directions of the failure - the file cannot be opened for append, and
+    the file cannot be read back - are operator-visible (a warning), never
+    caller-visible. The exclusions these tests replace hid real failure
+    behavior behind coverage pragmas.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_failed_log_write_warns_and_the_call_proceeds(self, tmp_path, monkeypatch, caplog):
+        from nextdns_mcp.call_log import CallLogMiddleware
+
+        middleware = CallLogMiddleware(path=str(tmp_path / "calls.jsonl"), endpoints={})
+        # A directory where the log file should open: real OSError, no mocks of
+        # our own functions.
+        monkeypatch.setattr(
+            "nextdns_mcp.call_log._open_log_file",
+            lambda path: (_ for _ in ()).throw(PermissionError("read-only filesystem")),
+        )
+        with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
+            await middleware._record("getProfile", {}, ok=True, error="")
+        assert any("call log write failed" in record.getMessage() for record in caplog.records)
+
+    def test_an_unreadable_log_reads_as_empty_not_raised(self, tmp_path, monkeypatch, caplog):
+        from nextdns_mcp.call_log import CALL_LOG_ENV, get_call_log
+
+        monkeypatch.setenv(CALL_LOG_ENV, str(tmp_path))  # a directory, not a file
+        with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
+            assert get_call_log() == []
+        assert any("call log read failed" in record.getMessage() for record in caplog.records)

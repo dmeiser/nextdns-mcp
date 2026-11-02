@@ -1,6 +1,20 @@
 """DNS-over-HTTPS lookup tool for NextDNS MCP Server.
 
 SPDX-License-Identifier: MIT
+
+This is one of the two tools the server performs itself (the other is
+``plotAnalytics``). It deliberately does *not* go through the
+access-controlled API client: the DoH endpoint is a different host
+(``dns.nextdns.io``, allow-listed in ``client.ALLOWED_DESTINATION_HOSTS``), it
+answers DNS questions rather than REST resources, and its URL carries the
+profile id as the path, so the ACL layer's "extract the profile id from a
+``/profiles/...`` path" authorization has nothing to authorize. The read gate
+is instead enforced here, twice against one environment snapshot (issue #179):
+once before deciding to query and once on the function that sends. That
+substitution of gate-for-transport is the one place the server sends an
+authorized request without ``AccessControlledClient`` holding the door, and it
+is the reason this module builds its own denial payload through the shared
+transport helper rather than depending on the ACL's ``AccessDeniedError``.
 """
 
 import logging
@@ -18,6 +32,7 @@ from ..config import (
     load_profile_access_control,
 )
 from ..errors import ErrorCode, error_payload, http_error_payload
+from ..transport import access_denied_payload
 from ..utils import resolve_profile_id
 
 logger = logging.getLogger(__name__)
@@ -78,9 +93,18 @@ def _build_doh_metadata(
 
 
 def _read_denied(target_profile: str) -> dict[str, Any]:
-    """Build the read-access-denied payload for a profile."""
+    """Build the read-access-denied payload for a profile.
+
+    Goes through the transport's shared denial builder, so a DoH-gate denial
+    has the same shape (typed code, reason, profile id, nominal 403) as a
+    denial from the ACL layer - the caller branches on one contract, not two.
+    """
     logger.warning(f"Read access denied for profile: {target_profile}")
-    return error_payload(ErrorCode.READ_ACCESS_DENIED, f"Read access denied for profile: {target_profile}")
+    return access_denied_payload(
+        ErrorCode.READ_ACCESS_DENIED,
+        f"Read access denied for profile: {target_profile}",
+        target_profile,
+    )
 
 
 async def doh_lookup(
@@ -110,12 +134,16 @@ async def doh_lookup(
             logger.debug(f"DoH lookup result: {domain} -> {metadata['status_description']}")
         return {"data": result, "_metadata": metadata}
     except httpx.HTTPError as e:
-        logger.error(f"HTTP error during DoH lookup for {domain}: {_log_safe_error(e)}")
+        # The domain names what was being looked up; it stays at DEBUG. The
+        # payload returned to the caller still carries it for diagnosis.
+        logger.error(f"HTTP error during DoH lookup: {_log_safe_error(e)}")
+        logger.debug("HTTP error during DoH lookup for %s", domain)
         payload = http_error_payload(f"HTTP error during DoH lookup: {e!s}", e, fallback_code=ErrorCode.HTTP_ERROR)
         payload.update(profile_id=target_profile, domain=domain, type=record_type)
         return payload
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Unexpected error during DoH lookup for {domain}: {_log_safe_error(e)}")
+        logger.error(f"Unexpected error during DoH lookup: {_log_safe_error(e)}")
+        logger.debug("Unexpected error during DoH lookup for %s", domain)
         return error_payload(
             ErrorCode.INTERNAL_ERROR,
             f"Unexpected error during DoH lookup: {e!s}",
@@ -152,7 +180,11 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
         )
 
     doh_url = f"https://dns.nextdns.io/{target_profile}/dns-query"
-    logger.info(f"DoH lookup: {domain} ({record_type_upper}) via profile {target_profile}")
+    # The queried domain is what the caller is asking *about* - query names are
+    # browsing-shaped sensitive data - so it belongs at DEBUG, while the
+    # routine "a lookup ran" fact stays at INFO without it.
+    logger.info("DoH lookup (%s) via profile %s", record_type_upper, target_profile)
+    logger.debug("DoH lookup: %s (%s) via profile %s", domain, record_type_upper, target_profile)
     return await doh_lookup(doh_url, domain, record_type_upper, target_profile, access)
 
 

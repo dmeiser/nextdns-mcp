@@ -201,8 +201,9 @@ class TestDohLookup:
     async def test_doh_lookup_http_error(self, mock_profile_id, mock_doh_client):
         """Test error handling for HTTP errors surfaces a typed http_error payload."""
         http_exc = httpx.HTTPError("Connection failed")
-        # ``text`` is a str on a real httpx.Response, so the mock stays faithful.
-        http_exc.response = Mock(status_code=500, text="")
+        # ``content`` is bytes on a real httpx.Response (the bounded body read
+        # slices it), so the mock stays faithful to that shape.
+        http_exc.response = Mock(status_code=500, text="", content=b"")
         mock_doh_client.get.side_effect = http_exc
 
         result = await dohLookup("example.com", mock_profile_id, "A")

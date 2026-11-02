@@ -1,29 +1,21 @@
-"""Shared validation and API request utilities for NextDNS MCP Server.
+"""Shared validation and normalization helpers for NextDNS MCP Server.
 
 SPDX-License-Identifier: MIT
+
+This module validates and normalizes values - profile ids, time ranges,
+``partials`` spellings, query-param shapes - and nothing else. It imports no
+network layer: the request path lives in ``transport``, the access control in
+``client``, and the names those layers share (the profile-id shape, the hint
+its failures repeat) live in ``constants`` so no module here has to import a
+transport to describe an id.
 """
 
-import logging
 import re
 from typing import Any
 
-import httpx
-
-from . import client
-from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError, _log_safe_error, _redacted
 from .config import get_default_profile
-from .errors import (
-    ErrorCode,
-    NextDNSAuthError,
-    NextDNSError,
-    NextDNSRateLimitError,
-    NextDNSServerError,
-    error_payload,
-    http_error_payload,
-    upstream_error_codes,
-)
-
-logger = logging.getLogger(__name__)
+from .constants import PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
+from .errors import ErrorCode, error_payload
 
 
 def is_safe_profile_id(value: str | int) -> bool:
@@ -61,6 +53,15 @@ def is_float_shaped(value: str) -> bool:
     return value.replace(".", "", 1).replace("-", "", 1).isdecimal()
 
 
+def _missing_profile_payload() -> dict[str, Any]:
+    """The payload for a call that named no profile id at all."""
+    return error_payload(
+        ErrorCode.MISSING_PROFILE_ID,
+        "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
+        hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
+    )
+
+
 def resolve_profile_id(
     profile_id: str | int | None = None,
     *,
@@ -83,15 +84,12 @@ def resolve_profile_id(
     if allow_default:
         target_profile: str | int | None = profile_id or get_default_profile()
         if not target_profile:
-            return None, error_payload(
-                ErrorCode.MISSING_PROFILE_ID,
-                "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
-                hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
-            )
+            return None, _missing_profile_payload()
         if not is_safe_profile_id(target_profile):
             return None, error_payload(
                 ErrorCode.INVALID_PROFILE_ID,
                 f"Invalid profile_id format: {target_profile}",
+                hint=PROFILE_ID_HINT,
             )
         return str(target_profile), None
 
@@ -109,6 +107,7 @@ def _resolve_required_profile_id(profile_id: str | int | None) -> tuple[str | No
         return None, error_payload(
             ErrorCode.INVALID_PROFILE_ID,
             f"Invalid profile_id format: {profile_id}",
+            hint=PROFILE_ID_HINT,
         )
     return str(profile_id), None
 
@@ -224,181 +223,12 @@ def _build_query_params(**kwargs: Any) -> dict[str, Any]:
     return {k: _query_bool(v) for k, v in kwargs.items() if v is not None}
 
 
-def access_denied_payload(exc: AccessDeniedError) -> dict[str, Any]:
-    """Build the standardized error payload for an ACL denial (issue #178).
+def schema_required(schema: dict[str, Any] | None) -> list[str]:
+    """The ``required`` list of a JSON-Schema object, as strings ([] if absent).
 
-    Carries the typed denial ``code`` (``read_access_denied`` /
-    ``write_access_denied`` / ``access_denied``) and the full denial reason in
-    ``error``, with a nominal ``status_code`` of 403 for caller compatibility.
+    One reading of the one contract: the tools publish their parameter schema
+    with a ``required`` list, and both the generated-tool layer and the
+    disclosure layer name those arguments to callers. Two hand-rolled reads
+    of the same field would be two chances to read it differently.
     """
-    payload = error_payload(exc.code, exc.message, status_code=403)
-    payload["profile_id"] = exc.profile_id
-    return payload
-
-
-def _handle_api_error(e: NextDNSError) -> dict[str, Any]:
-    """Convert a NextDNSError into a standardized error payload.
-
-    If the exception wraps an httpx.HTTPError, use http_error_payload to
-    preserve the original error structure. For any other case, fall back to a
-    generic internal error.
-    """
-    cause = getattr(e, "__cause__", None)
-    if cause is not None and isinstance(cause, httpx.HTTPError):
-        return http_error_payload(str(e), cause)
-    if getattr(e, "response", None) is not None:
-        # Typed error built directly around a response (e.g. an upstream 2xx
-        # that carried an error document); keep its structured body instead of
-        # flattening to an internal error.
-        return http_error_payload(str(e), e)
-    return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
-
-
-async def _api_request(
-    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
-) -> dict[str, Any]:
-    """Make an HTTP request through the access-controlled client and return JSON.
-
-    Access-control denials raised by the ACL layer are reported as standardized
-    error payloads (see ``errors.py``) rather than raised exceptions, so callers
-    get a consistent, typed failure shape:
-    ``{"error": ..., "code": "read_access_denied" | "write_access_denied" | "access_denied", "status_code": 403, ...}``.
-
-    All other failures are raised as typed exceptions with status_code and response_body attributes, so callers can implement retry-with-backoff for 429 or circuit-breaking for 5xx.
-    ``NextDNSError`` is the base exception, with subclasses ``NextDNSAuthError`` (401/403), ``NextDNSRateLimitError`` (429), and ``NextDNSServerError`` (5xx).
-    For non-HTTP failures, a ``NextDNSError`` is raised with status_code=None.
-    Tools that report failures as payloads should await ``_api_request_payload``,
-    which applies this conversion.
-    """
-    try:
-        return await _api_request_json(method, url, params=params, json_body=json_body)
-    except AccessDeniedError as e:
-        # Raised by the ACL layer before any network request. Kept out of the
-        # httpx.HTTPError branch: a real upstream 403 (raise_for_status) must
-        # keep its existing http_error path.
-        logger.warning(f"Access denied in {method} {_redacted(url)}: {_log_safe_error(e)}")
-        return access_denied_payload(e)
-    except NextDNSError:
-        # Already typed (including the 2xx-with-error-document case in
-        # _api_request_json); re-raised so the generic branch cannot strip its
-        # status/response.
-        raise
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error in {method} {_redacted(url)}: {_log_safe_error(e)}")
-        raise _typed_http_error(f"HTTP error in {method} {url}: {e}", *_http_error_parts(e)) from e
-    except Exception as e:
-        logger.error(f"Unexpected error in {method} {_redacted(url)}: {_log_safe_error(e)}")
-        raise NextDNSError(f"Unexpected error in {method} {url}: {e}", status_code=None) from e
-
-
-async def _api_request_json(
-    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
-) -> dict[str, Any]:
-    """Send the request and return its JSON document, raising typed errors on failure."""
-    response = await client.api_client.request(method, url, params=params, json=json_body)
-    response.raise_for_status()
-    if _is_empty_success(response):
-        return {"success": True}
-    data = response.json()
-    _reject_error_document(method, url, response, data)
-    return data
-
-
-def _http_error_parts(error: Exception) -> tuple[int | None, Any]:
-    """The ``(status_code, response_body)`` carried by an httpx error, if any."""
-    return _response_error_parts(getattr(error, "response", None))
-
-
-def _is_empty_success(response: httpx.Response) -> bool:
-    """A 204, or a 2xx with no body, is a successful write with nothing to return."""
-    return response.status_code == 204 or not response.content
-
-
-def _reject_error_document(method: str, url: str, response: httpx.Response, data: Any) -> None:
-    """Raise when a 2xx answer is actually an error document; return when it is data.
-
-    Observed: POST /allowlist on an existing entry returns 200
-    ``{"errors":[{"code":"duplicate"}]}``, while the same condition on
-    /privacy/blocklists returns 400. Returning that body as if it were data
-    makes an error look like a success; it is normalized into the same typed
-    failure every other upstream error produces. The code is named by
-    ``http_error_payload`` from the body, so this message only has to say that
-    the status lied.
-    """
-    if not (upstream_error_codes(data) and "data" not in data):
-        return
-    error = NextDNSError(
-        f"HTTP error in {method} {url}: upstream answered {response.status_code} "
-        "with an error document instead of a payload",
-        status_code=response.status_code,
-        response_body=response.text,
-    )
-    error.response = response  # type: ignore[attr-defined]
-    raise error
-
-
-def _response_error_parts(response: Any) -> tuple[Any, Any]:
-    """The (status code, body text) an httpx exception carried, or (None, None).
-
-    A transport failure (connection refused, timeout) has no response at all;
-    the typed exception still wants the two attributes, as None.
-    """
-    if response is None:
-        return None, None
-    return getattr(response, "status_code", None), getattr(response, "text", None)
-
-
-def _typed_http_error(message: str, status_code: int | None, response_body: str | None) -> NextDNSError:
-    """Build the NextDNSError subclass matching an upstream HTTP status."""
-    if status_code in (401, 403):
-        return NextDNSAuthError(message, status_code=status_code, response_body=response_body)
-    if status_code == 429:
-        return NextDNSRateLimitError(message, status_code=status_code, response_body=response_body)
-    if status_code is not None and 500 <= status_code < 600:
-        return NextDNSServerError(message, status_code=status_code, response_body=response_body)
-    return NextDNSError(message, status_code=status_code, response_body=response_body)
-
-
-async def _api_request_payload(
-    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
-) -> dict[str, Any]:
-    """Perform an API request, reporting typed upstream failures as error payloads.
-
-    Equivalent to awaiting ``_api_request`` and passing any raised
-    ``NextDNSError`` through ``_handle_api_error``, so every tool reports the
-    same standardized failure shape.
-    """
-    try:
-        return await _api_request(method, url, params=params, json_body=json_body)
-    except NextDNSError as e:
-        return _note_404_on_a_profile_path(_handle_api_error(e), url)
-
-
-# The first path segment every profile-scoped endpoint shares.
-_PROFILE_PATH_RE = re.compile(r"^/profiles/([^/?#]+)")
-
-
-def _note_404_on_a_profile_path(payload: dict[str, Any], url: str) -> dict[str, Any]:
-    """Say which id a 404 under ``/profiles/<id>`` could be blaming.
-
-    A 404 on that path has two possible causes and the upstream answer does not
-    say which: the profile id is wrong, or the entry within the profile is.
-    Live runs show the first happening because the tool description shows a
-    ``profile_id="abc123"`` example and the caller sends exactly that - a
-    six-character hex string, which is the shape of a real NextDNS profile id,
-    so nothing about it reads as a placeholder.
-
-    The hint names both possibilities rather than guessing one, and where to get a
-    real profile id: ``listProfiles()``, the tool that lists them.
-    """
-    if not isinstance(payload, dict) or payload.get("upstream_code") != "notFound":
-        return payload
-    if not _PROFILE_PATH_RE.match(url):
-        return payload
-    return {
-        **payload,
-        "hint": (
-            "a 404 here means the profile id or the entry id in this request does not exist. "
-            "listProfiles() returns the profile ids this API key can access"
-        ),
-    }
+    return [str(name) for name in ((schema or {}).get("required") or [])]

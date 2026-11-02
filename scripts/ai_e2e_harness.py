@@ -155,7 +155,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from pathlib import Path
@@ -181,12 +181,15 @@ import ai_e2e_common as common
 
 # Re-export the pure model, constants, and helpers so existing imports and the
 # README keep working against this module (they now live in ``ai_e2e_common``).
-API_BASE = common.API_BASE
+# ``api_base`` is a function on purpose: the API base has to be read after main()
+# has loaded the dotenv file, not when this module was imported.
+api_base = common.api_base
 SECTIONS = common.SECTIONS
 SETTINGS_CATEGORIES = common.SETTINGS_CATEGORIES
 AGGREGATE_METRICS = common.AGGREGATE_METRICS
 SERIES_METRICS = common.SERIES_METRICS
 PLOT_METRICS = common.PLOT_METRICS
+LIST_ENTRIES = common.LIST_ENTRIES
 _LIST_SPECS = common._LIST_SPECS
 CheckResult = common.CheckResult
 Report = common.Report
@@ -207,7 +210,15 @@ _verify_settings_assert = common._verify_settings_assert
 _list_values = common._list_values
 _list_added = common._list_added
 _list_contains = common._list_contains
-_list_absent = common._list_absent
+_list_absent = common._list_absent  # (absent, verdict) — a failed read is not absence
+_rewrites_absent = common._rewrites_absent
+_entry_active = common._entry_active
+_unwrap_id = common._unwrap_id
+ABSENT = common.ABSENT
+PRESENT = common.PRESENT
+INDETERMINATE = common.INDETERMINATE
+ENTRY_FOUND = common.ENTRY_FOUND
+ENTRY_MISSING = common.ENTRY_MISSING
 _entry_ids = common._entry_ids
 _rewrites_contains = common._rewrites_contains
 _analytics_has_data = common._analytics_has_data
@@ -281,6 +292,40 @@ PLACEHOLDER_WORKDIR = "{workdir}"
 PLACEHOLDER_CONFIG_FILE = "{config_file}"
 PLACEHOLDER_SERVER_COMMAND = "{server_command}"
 PLACEHOLDER_SERVER_ENV = "{server_env}"
+
+# How the API key reaches the MCP server: as a reference the actor's own config
+# loader expands, never as the value. The key is in the actor process's environment
+# already (the harness starts it from this process's environment), so inlining it
+# into the server env — which is serialized into the ``{server_env}`` placeholder,
+# the actor's argv, and the run report — only ever added a way for it to be read off
+# ``ps`` or a logged command line.
+ENV_REF_API_KEY = "{env:NEXTDNS_API_KEY}"
+_ENV_REF = re.compile(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env_refs(env: dict[str, Any]) -> dict[str, str]:
+    """Expand ``{env:NAME}`` references against this process's environment.
+
+    The config deliberately holds references (see ``ENV_REF_API_KEY``), but the
+    lifecycle MCP server the harness launches for its own profile bookkeeping has
+    no config loader in front of it to expand them, so it gets the values here.
+    """
+    expanded = {str(k): str(v) for k, v in (env or {}).items()}
+    return {name: _ENV_REF.sub(lambda m: os.environ.get(m.group(1), ""), value) for name, value in expanded.items()}
+
+
+def _redacted_server_env(server: dict[str, Any]) -> dict[str, str]:
+    """The server's environment with the API key reduced to its ``{env:...}`` reference.
+
+    Anything built from the server env that can leave this process — the generated
+    client config, the ``{server_env}`` placeholder, the report's command line — goes
+    through here, so an ``--config`` file that inlines a real key cannot smuggle it
+    into the actor's argv either.
+    """
+    env = {str(k): str(v) for k, v in (server.get("env") or {}).items()}
+    if env.get("NEXTDNS_API_KEY"):
+        env["NEXTDNS_API_KEY"] = ENV_REF_API_KEY
+    return env
 
 
 @dataclass
@@ -375,11 +420,15 @@ class HarnessConfig:
         if srv_cwd := os.environ.get("NEXTDNS_MCP_CWD"):
             cfg.server["cwd"] = str(srv_cwd)
         # The API key (and its base) are handed to the MCP server via its env;
-        # the actor itself never needs the key (the server uses it).
+        # the actor itself never needs the key (the server uses it). The key
+        # goes in as a `{env:...}` reference, never the value: this env dict is
+        # serialized into the actor's `{server_env}` placeholder and the run
+        # report, and the actor's own config loader (and the harness's
+        # `_expand_env_refs`) resolve the reference at launch time.
         cfg.server["env"] = dict(cfg.server["env"])
-        if key := os.environ.get("NEXTDNS_API_KEY"):
-            cfg.server["env"].setdefault("NEXTDNS_API_KEY", key)
-        cfg.server["env"].setdefault("NEXTDNS_API_BASE", common.API_BASE)
+        if os.environ.get("NEXTDNS_API_KEY"):
+            cfg.server["env"].setdefault("NEXTDNS_API_KEY", ENV_REF_API_KEY)
+        cfg.server["env"].setdefault("NEXTDNS_API_BASE", common.api_base())
         # The MCP server applies its own read/write ACLs from these; without
         # them every tool call is denied ("no profiles are readable").
         for var in (
@@ -425,13 +474,16 @@ def render_argv(template: list[str], values: dict[str, str]) -> list[str]:
     (a token starting with ``-``) whose value token rendered empty is dropped
     along with it — so e.g. ``["--model", "{model}"]`` vanishes entirely when
     no model is configured, instead of leaving a dangling ``--model``.
+
+    One pass, never one pass per placeholder: a substituted value (the prompt
+    is model-authored text) that happens to contain a placeholder token must
+    not be re-scanned as a template, or a prompt spelling ``{server_env}``
+    would smuggle the server environment into the rendered argv.
     """
     rendered: list[str] = []
+    pattern = re.compile("|".join(re.escape(key) for key in values)) if values else None
     for tok in template:
-        out = tok
-        for key, val in values.items():
-            out = out.replace(key, val)
-        rendered.append(out)
+        rendered.append(pattern.sub(lambda m: values[m.group(0)], tok) if pattern else tok)
     argv: list[str] = []
     for i, tok in enumerate(rendered):
         if tok == "":
@@ -461,15 +513,15 @@ def write_mcp_config(config: HarnessConfig, dest_dir: str | Path) -> Path:
     Returns the written path (exposed to templates as ``{config_file}``).
     """
     srv = config.server
-    srv_env = {str(k): str(v) for k, v in srv.get("env", {}).items()}
     # Never write the API key into the file. A live run showed the model can
     # browse the workdir with opencode's `read` tool, and this file is what it
     # reads first; an inlined key would then reach the model endpoint. The
     # harness launches the actor with NEXTDNS_API_KEY in its environment, and
     # opencode expands `{env:...}` when it loads the config, so the server
-    # still receives the key while the file carries only a reference.
-    if "NEXTDNS_API_KEY" in srv_env:
-        srv_env["NEXTDNS_API_KEY"] = "{env:NEXTDNS_API_KEY}"
+    # still receives the key while the file carries only a reference. The
+    # redaction also covers a `--config` file that inlined a real key: it is
+    # reduced to the reference before it reaches this document too.
+    srv_env = _redacted_server_env(srv)
     # The server records here every tool call it actually executes. A read
     # leaves no trace in the NextDNS API, so this is the only evidence that a
     # step's operation really happened — the harness reads it back per step.
@@ -558,16 +610,13 @@ class TaskTargets:
 
     @property
     def list_entries(self) -> dict[str, str]:
-        """The entry the actor must leave present in each list type."""
-        return {
-            "allowlist": f"ai-e2e-allow-{self.tag}.example.com",
-            "denylist": f"ai-e2e-deny-{self.tag}.example.com",
-            "privacy_blocklists": "nextdns-recommended",
-            "privacy_natives": "alexa",
-            "security_tlds": "zip",
-            "parental_categories": "gambling",
-            "parental_services": "tiktok",
-        }
+        """The entry the actor must leave present in each list type.
+
+        Derived from ``common.LIST_ENTRIES`` — the same table the REST
+        read-back resolves — so the prompt the actor is given and the check
+        that judges it cannot name different entries after either is edited.
+        """
+        return {name: template.format(tag=self.tag) for name, template in common.LIST_ENTRIES.items()}
 
     @property
     def rewrite_name(self) -> str:
@@ -811,7 +860,10 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
         PLACEHOLDER_WORKDIR: str(workdir),
         PLACEHOLDER_CONFIG_FILE: str(workdir / "opencode.json"),
         PLACEHOLDER_SERVER_COMMAND: config.server["command"] + " " + " ".join(config.server["args"]),
-        PLACEHOLDER_SERVER_ENV: json.dumps(config.server.get("env", {})),
+        # Redacted, like the config file: a template that places {server_env}
+        # into the actor's argv must never render the real key into it (SEC-4) —
+        # the reference expands inside the child, from the child's environment.
+        PLACEHOLDER_SERVER_ENV: json.dumps(_redacted_server_env(config.server)),
     }
     argv = config.render_argv(values)
     env = dict(os.environ)
@@ -922,7 +974,7 @@ class MeasureClient:
         import httpx
 
         self.http = httpx.AsyncClient(
-            base_url=common.API_BASE,
+            base_url=common.api_base(),
             headers={"X-Api-Key": self.api_key},
             timeout=30.0,
         )
@@ -970,27 +1022,53 @@ class MeasureClient:
 # =========================================================================== #
 
 
-async def _profile_gone(m: MeasureClient, pid: str, targets: TaskTargets) -> bool:
-    """The profile is gone when neither name (original or renamed) resolves."""
+async def _profile_gone(m: MeasureClient, pid: str, targets: TaskTargets) -> tuple[bool, str]:
+    """Is the profile confirmed gone? Returns ``(gone, verdict)``.
+
+    Absence needs proof, not a missing answer: only a 404 on the id, plus a
+    readable listing that names neither the original nor the renamed name,
+    says the profile is gone. A failed lookup (5xx, transport error) answers
+    nothing about whether the profile exists, so it returns an indeterminate
+    verdict instead of the ``True`` a failed read used to produce — which made
+    a 503 read as a verified deletion.
+    """
     by_id = await m.rest_get(f"/profiles/{pid}")
     if isinstance(by_id, dict) and by_id.get("ok"):
         body = by_id.get("body")
         data = body.get("data") if isinstance(body, dict) else None
         if isinstance(data, dict) and data.get("id"):
-            return False
-    if await m.find_profile(targets.profile_name) is not None:
-        return False
-    return await m.find_profile(targets.renamed_name) is None
+            return False, PRESENT
+    elif not (isinstance(by_id, dict) and by_id.get("status") == 404):
+        status = by_id.get("status") if isinstance(by_id, dict) else by_id
+        return False, f"{INDETERMINATE}: GET /profiles/{pid} answered HTTP {status!r}, which proves nothing"
+    listing = await m.rest_get("/profiles")
+    rows = common._readable_rows(listing)
+    if rows is None:
+        return False, (
+            f"{INDETERMINATE}: the profile listing answered HTTP "
+            f"{common._resp_status(listing)!r} without a list, so neither name could be checked"
+        )
+    names = {str(p.get("name", "")) for p in rows if isinstance(p, dict)}
+    if targets.profile_name in names or targets.renamed_name in names:
+        return False, PRESENT
+    return True, ABSENT
 
 
-async def _all_profile_ids(m: MeasureClient) -> dict[str, str]:
-    """Map every profile id currently on the account to its name."""
+async def _all_profile_ids(m: MeasureClient) -> dict[str, str] | None:
+    """Map every profile id currently on the account to its name.
+
+    ``None`` when the listing failed: an empty mapping from a failed read used
+    to look like an empty account, which handed the stray sweep every profile on
+    it. Callers must treat ``None`` as "account state uncertain".
+    """
     resp = await m.rest_get("/profiles")
+    rows = common._readable_rows(resp)
+    if rows is None:
+        return None
     out: dict[str, str] = {}
-    if isinstance(resp, dict) and resp.get("ok"):
-        for p in (resp.get("body") or {}).get("data", []):
-            if isinstance(p, dict) and p.get("id"):
-                out[str(p["id"])] = str(p.get("name", ""))
+    for p in rows:
+        if isinstance(p, dict) and p.get("id"):
+            out[str(p["id"])] = str(p.get("name", ""))
     return out
 
 
@@ -1002,20 +1080,95 @@ def _never_delete_ids() -> set[str]:
     return ids
 
 
-async def _sweep_stray_profiles(m: MeasureClient, pre_existing: set[str], keep: set[str]) -> None:
-    """Delete profiles the run created beyond the test profile.
+async def _ensure_plot_profile(m: MeasureClient, pid: str) -> str:
+    """Resolve the profile the read-only plot/log steps target; returns a note.
+
+    With NEXTDNS_PLOT_PROFILE unset those steps target the freshly created test
+    profile, which by definition has no query history: every plot step skips as
+    data-starved and the run silently measures nothing. So resolve the first
+    readable profile that has data — the listing and probes go through the
+    server, whose ACLs apply — and record it in the env every reader consults
+    (prompt routing, REST evidence, `_never_delete_ids`). The test profile and
+    the protected ids are never candidates: one is the write target of the run
+    and the others are explicitly off-limits. Returns "" when there is nothing
+    to resolve (already configured) or when resolution changed nothing, and a
+    note in every other case so the report says what the plot steps read.
+    """
+    if os.environ.get("NEXTDNS_PLOT_PROFILE", "").strip():
+        return ""
+    listing = await _all_profile_ids(m)
+    if listing is None:
+        return (
+            "NEXTDNS_PLOT_PROFILE is unset and the profile listing failed, so no fallback "
+            "could be resolved; plot/log steps fall back to the empty test profile"
+        )
+    never = {pid} | _never_delete_ids()
+    for candidate in listing:
+        if candidate in never:
+            continue
+        probe = await m.rest_get(f"/profiles/{candidate}/analytics/status")
+        if common._analytics_has_data(probe):
+            os.environ["NEXTDNS_PLOT_PROFILE"] = candidate
+            return (
+                f"NEXTDNS_PLOT_PROFILE was unset; plot/log steps use profile {candidate} "
+                f"({listing[candidate] or 'unnamed'}), the first readable profile with query data"
+            )
+    return (
+        "NEXTDNS_PLOT_PROFILE is unset and no readable profile other than the test profile "
+        "has query data; plot steps will skip as data-starved"
+    )
+
+
+def _created_ids_from_records(records: list[dict[str, Any]]) -> set[str]:
+    """Profile ids this run's server records PROVE were created here.
+
+    A successful ``createProfile`` (POST /profiles) row carries the new id in
+    its answer — the server's own receipt, not a guess from a before/after
+    diff of the account. A diff-based sweep deleted anything that appeared
+    during the run, which made a concurrent user's or another run's profile a
+    deletion target; a receipt only exists for a create this run performed.
+    """
+    created_endpoint = _endpoint("createProfile")
+    ids: set[str] = set()
+    for record in records:
+        if str(record.get("endpoint", "")) != created_endpoint or not record.get("ok"):
+            continue
+        try:
+            payload = json.loads(str(record.get("result") or ""))
+        except (ValueError, TypeError):
+            continue
+        if pid := _unwrap_id(payload):
+            ids.add(pid)
+    return ids
+
+
+async def _sweep_stray_profiles(m: MeasureClient, created: set[str], keep: set[str]) -> str:
+    """Delete profiles this run created beyond the test profile; returns a note.
 
     A model asked to create a profile sometimes creates several (a failed
     run left a stray 'new-profile' behind), and strays accumulate in a real
-    account across runs. Anything that appeared during the run and is
-    neither the test profile nor a protected/plot profile is removed.
+    account across runs. Only ids with a createProfile receipt from THIS run
+    are candidates — never anything that merely appeared during it, which an
+    unrelated user or a parallel run could have created — and the sweep reads
+    the account first: if the listing itself fails, account state is uncertain
+    and nothing is deleted, with the reason surfaced in the report.
     """
     protected = _never_delete_ids()
-    for stray, name in (await _all_profile_ids(m)).items():
-        if stray in pre_existing or stray in keep or stray in protected:
-            continue
-        _progress(f"stray sweep: removing profile {stray} ({name!r}) created during the run")
+    doomed = sorted(pid for pid in created if pid and pid not in keep and pid not in protected)
+    if not doomed:
+        return ""
+    current = await _all_profile_ids(m)
+    if current is None:
+        return (
+            "stray sweep skipped: the profile listing failed, so account state is uncertain and "
+            f"nothing was deleted (run-created profiles still present: {', '.join(doomed)})"
+        )
+    for stray in doomed:
+        if stray not in current:
+            continue  # already gone (deleted mid-run, or by the run's own teardown)
+        _progress(f"stray sweep: removing profile {stray} ({current[stray]!r}) created during the run")
         await m.rest_delete(f"/profiles/{stray}")
+    return ""
 
 
 async def _self_heal_profile(m: MeasureClient, pid: str, targets: TaskTargets) -> str:
@@ -1077,7 +1230,10 @@ async def _mcp_call(server: dict[str, Any], tool: str, arguments: dict[str, Any]
     transport = StdioTransport(
         command=str(server["command"]),
         args=[str(a) for a in server.get("args", [])],
-        env={str(k): str(v) for k, v in (server.get("env") or {}).items()},
+        # The config's env carries `{env:...}` references (SEC-4); this
+        # harness-launched server has no client config loader in front of it,
+        # so the references are expanded here, against this process's env.
+        env=_expand_env_refs(server.get("env") or {}),
         cwd=str(server["cwd"]) if server.get("cwd") else None,
     )
     async with Client(transport) as client:
@@ -1175,6 +1331,7 @@ def _expect(
     args: tuple[str, ...] = (),
     result: tuple[str, ...] = (),
     data: bool = True,
+    profile: str = "",
 ) -> dict[str, Any]:
     """The endpoint call this step must produce (see Step.expect).
 
@@ -1182,9 +1339,14 @@ def _expect(
     the API call the step is about no matter which tool the actor found to make
     it. ``{profile_id}`` stays literal: the log records the spec's own path
     template, so a step pointed at a different profile (the plot profile, the
-    log-download profile) still matches its endpoint.
+    log-download profile) still matches its endpoint. ``profile`` scopes which
+    profile the call's recorded ``profile_id`` must name (see ANY_PROFILE and
+    PLOT_PROFILE); unset means the test profile under test.
     """
-    return {"endpoints": [endpoint], "args": list(args), "result": list(result), "data": data}
+    expect = {"endpoints": [endpoint], "args": list(args), "result": list(result), "data": data}
+    if profile:
+        expect["profile"] = profile
+    return expect
 
 
 def _expect_local(
@@ -1192,6 +1354,7 @@ def _expect_local(
     args: tuple[str, ...] = (),
     result: tuple[str, ...] = (),
     data: bool = True,
+    profile: str = "",
 ) -> dict[str, Any]:
     """A call to an operation the server performs itself: no endpoint, its own record.
 
@@ -1199,7 +1362,20 @@ def _expect_local(
     chart image, a DNS answer - so they are recorded by tool name, and the
     payload they answered with is the proof the operation ran.
     """
-    return {"tool": tool, "args": list(args), "result": list(result), "data": data}
+    expect = {"tool": tool, "args": list(args), "result": list(result), "data": data}
+    if profile:
+        expect["profile"] = profile
+    return expect
+
+
+# The profile an expected call must name (Step.expect["profile"]):
+# ANY_PROFILE for operations that take no profile (create, list), PLOT_PROFILE
+# for the read-only data profile the plots and log-download steps run against.
+# Anything else must name the test profile itself. Without this scope, an
+# actor working on some other readable profile while the harness verified the
+# intended one by REST could pass a step on the wrong profile's call.
+ANY_PROFILE = "*"
+PLOT_PROFILE = "{plot_profile}"
 
 
 # ---------------------------------------------------------------------------
@@ -1408,7 +1584,12 @@ def _walk_identifiers(node: Any) -> list[tuple[str, list[str]]]:
     return found
 
 
-def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid: str) -> tuple[bool, str]:
+def _expected_call_ok(
+    records: list[dict[str, Any]],
+    expect: dict[str, Any],
+    pid: str,
+    alt_pid: str = "",
+) -> tuple[bool, str]:
     """The two transcript conditions of the pass rule.
 
     1. the server recorded a SUCCESSFUL call matching this step's expected call,
@@ -1417,11 +1598,16 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
        (``POST /profiles/{profile_id}/denylist``), which the server knows
        because every generated tool is bound to one; the two operations the
        server performs itself are named by their tool instead (see
-       ``_expect_local``).
+       ``_expect_local``). The call's recorded ``profile_id`` must name the
+       profile the step targets: matching the endpoint template alone would
+       score a call against ANY readable profile as this step's answer, while
+       REST verification of the intended profile made the step pass around it.
     2. no state-changing call came AFTER it in the same attempt. Confirming
        reads afterwards are normal and allowed; undoing the step's own write is
        not.
 
+    ``alt_pid`` is the profile a plot/download step runs against (the
+    ``PLOT_PROFILE`` token); unset, those steps fall back to the test profile.
     Returns (ok, reason_when_not).
     """
     if not expect:
@@ -1433,6 +1619,13 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
     endpoints = [str(item) for item in expect.get("endpoints", [])]
     want_args = [s.replace("{profile_id}", pid) for s in expect.get("args", [])]
     want_result = [s.replace("{profile_id}", pid) for s in expect.get("result", [])]
+    profile_token = str(expect.get("profile", ""))
+    if profile_token == ANY_PROFILE:
+        want_profile = ""
+    elif profile_token == PLOT_PROFILE:
+        want_profile = alt_pid or pid
+    else:
+        want_profile = pid
     # An identifier the server handed back in this same attempt names the thing
     # it names. The checklist asks for the record called
     # `ai-e2e-a-…example.com`; the server's own list answer is what tells a
@@ -1456,6 +1649,11 @@ def _expected_call_ok(records: list[dict[str, Any]], expect: dict[str, Any], pid
         record = records[index]
         if not matches(record) or not record.get("ok"):
             continue
+        if want_profile:
+            recorded = str(record.get("profile_id", ""))
+            if recorded != want_profile:
+                why = f"{label} ran against profile {recorded or '(none recorded)'}, not the {want_profile} under test"
+                continue
         args_text = str(record.get("args", ""))
         missing_args = [
             s for s in want_args if s not in args_text and not any(i in args_text for i in ids_by_name.get(s, ()))
@@ -1534,47 +1732,49 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     # ---- profiles -------------------------------------------------------
     steps.append(
         Step(
-            "profiles.create",
-            "profiles",
-            "createProfile",
-            f"create the test profile {pn!r}",
-            _step_prompt(f"Create a new NextDNS profile named exactly '{pn}'."),
-            "profile_exists",
-            expect=_expect(_endpoint("createProfile"), args=(pn,)),
+            id="profiles.create",
+            section="profiles",
+            tool="createProfile",
+            description=f"create the test profile {pn!r}",
+            prompt=_step_prompt(f"Create a new NextDNS profile named exactly '{pn}'."),
+            verify="profile_exists",
+            # createProfile names no profile: nothing exists yet, so the call
+            # cannot be scoped to one.
+            expect=_expect(_endpoint("createProfile"), args=(pn,), profile=ANY_PROFILE),
         )
     )
     steps.append(
         Step(
-            "profiles.list",
-            "profiles",
-            "listProfiles",
-            "list all profiles and find the new one",
-            _step_prompt(f"List all profiles and confirm '{pn}' is present."),
-            "profile_exists",
+            id="profiles.list",
+            section="profiles",
+            tool="listProfiles",
+            description="list all profiles and find the new one",
+            prompt=_step_prompt(f"List all profiles and confirm '{pn}' is present."),
+            verify="profile_exists",
             # The answer has to name the profile: a list call that never mentions it
-            # did not find it.
-            expect=_expect(_endpoint("listProfiles"), result=(pn,)),
+            # did not find it. listProfiles itself carries no profile_id.
+            expect=_expect(_endpoint("listProfiles"), result=(pn,), profile=ANY_PROFILE),
         )
     )
     steps.append(
         Step(
-            "profiles.get",
-            "profiles",
-            "getProfile",
-            "get the test profile by id",
-            _step_prompt("Get the profile '{profile_id}' and report its details."),
-            "profile_exists",
+            id="profiles.get",
+            section="profiles",
+            tool="getProfile",
+            description="get the test profile by id",
+            prompt=_step_prompt("Get the profile '{profile_id}' and report its details."),
+            verify="profile_exists",
             expect=_expect(_endpoint("getProfile"), args=("{profile_id}",), result=("{profile_id}",)),
         )
     )
     steps.append(
         Step(
-            "profiles.update",
-            "profiles",
-            "updateProfile",
-            f"rename the test profile to {rn!r}",
-            _step_prompt(f"Rename the profile '{{profile_id}}' to exactly '{rn}'."),
-            "profile_renamed",
+            id="profiles.update",
+            section="profiles",
+            tool="updateProfile",
+            description=f"rename the test profile to {rn!r}",
+            prompt=_step_prompt(f"Rename the profile '{{profile_id}}' to exactly '{rn}'."),
+            verify="profile_renamed",
             expect=_expect(_endpoint("updateProfile"), args=(rn,)),
         )
     )
@@ -1584,25 +1784,27 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         read_tool, write_tool = _SETTINGS_OPS[cat]
         steps.append(
             Step(
-                f"settings.{cat}.read",
-                "settings",
-                read_tool,
-                f"{cat}: read current settings",
-                _step_prompt(f"Read the current {cat} settings for profile '{{profile_id}}' and report them."),
-                "settings_read",
-                {"cat": cat, "spec": spec},
+                id=f"settings.{cat}.read",
+                section="settings",
+                tool=read_tool,
+                description=f"{cat}: read current settings",
+                prompt=_step_prompt(f"Read the current {cat} settings for profile '{{profile_id}}' and report them."),
+                verify="settings_read",
+                vdata={"cat": cat, "spec": spec},
                 expect=_expect(_endpoint(read_tool)),
             )
         )
         steps.append(
             Step(
-                f"settings.{cat}.update",
-                "settings",
-                write_tool,
-                f"{cat}: update to {json.dumps(spec['set'])}",
-                _step_prompt(f"Update the {cat} settings for profile '{{profile_id}}' to {json.dumps(spec['set'])}."),
-                "settings_update",
-                {"cat": cat, "spec": spec},
+                id=f"settings.{cat}.update",
+                section="settings",
+                tool=write_tool,
+                description=f"{cat}: update to {json.dumps(spec['set'])}",
+                prompt=_step_prompt(
+                    f"Update the {cat} settings for profile '{{profile_id}}' to {json.dumps(spec['set'])}."
+                ),
+                verify="settings_update",
+                vdata={"cat": cat, "spec": spec},
                 # Pin the payload, not just the endpoint: the step is about these fields.
                 expect=_expect(_endpoint(write_tool), args=tuple(spec["set"].keys())),
             )
@@ -1616,81 +1818,90 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         added = common._list_added(name, tag)
         steps.append(
             Step(
-                f"lists.{name}.read",
-                "lists",
-                tools["get"],
-                f"{name}: read current list",
-                _step_prompt(f"Read the current {name} for profile '{{profile_id}}'."),
-                "list_read",
-                {"name": name, "spec": lt},
+                id=f"lists.{name}.read",
+                section="lists",
+                tool=tools["get"],
+                description=f"{name}: read current list",
+                prompt=_step_prompt(f"Read the current {name} for profile '{{profile_id}}'."),
+                verify="list_read",
+                vdata={"name": name, "spec": lt},
                 expect=_expect(_endpoint(tools["get"])),
             )
         )
         steps.append(
             Step(
-                f"lists.{name}.replace",
-                "lists",
-                tools["replace"],
-                f"{name}: replace with {values}",
-                _step_prompt(f"Replace the {name} for profile '{{profile_id}}' with exactly {json.dumps(values)}."),
-                "list_replace",
-                {"name": name, "spec": lt, "values": values},
+                id=f"lists.{name}.replace",
+                section="lists",
+                tool=tools["replace"],
+                description=f"{name}: replace with {values}",
+                prompt=_step_prompt(
+                    f"Replace the {name} for profile '{{profile_id}}' with exactly {json.dumps(values)}."
+                ),
+                verify="list_replace",
+                vdata={"name": name, "spec": lt, "values": values},
                 expect=_expect(_endpoint(tools["replace"]), args=(values[0],)),
             )
         )
         if added is not None:
             steps.append(
                 Step(
-                    f"lists.{name}.add",
-                    "lists",
-                    tools["add"],
-                    f"{name}: add {added!r}",
-                    _step_prompt(f"Add '{added}' to the {name} for profile '{{profile_id}}'."),
-                    "list_add",
-                    {"name": name, "spec": lt, "values": values, "added": added},
+                    id=f"lists.{name}.add",
+                    section="lists",
+                    tool=tools["add"],
+                    description=f"{name}: add {added!r}",
+                    prompt=_step_prompt(f"Add '{added}' to the {name} for profile '{{profile_id}}'."),
+                    verify="list_add",
+                    vdata={"name": name, "spec": lt, "values": values, "added": added},
                     expect=_expect(_endpoint(tools["add"]), args=(added,)),
                 )
             )
         if lt["updatable"]:
             steps.append(
                 Step(
-                    f"lists.{name}.update",
-                    "lists",
-                    tools["update"],
-                    f"{name}: update {values[0]!r} (active=false)",
-                    _step_prompt(
+                    id=f"lists.{name}.update",
+                    section="lists",
+                    tool=tools["update"],
+                    description=f"{name}: update {values[0]!r} (active=false)",
+                    prompt=_step_prompt(
                         f"Update the entry '{values[0]}' in the {name} for profile '{{profile_id}}' "
                         f"with {json.dumps({'active': False})}."
                     ),
-                    "list_update",
-                    {"name": name, "spec": lt, "values": values},
-                    # entry_id is only knowable from a prior read, so pin the
-                    # field the step asks to change.
-                    expect=_expect(_endpoint(tools["update"]), args=("active",)),
+                    verify="list_update",
+                    vdata={"name": name, "spec": lt, "values": values},
+                    # Pin the payload, not just the endpoint: the step is about
+                    # this entry going inactive. `entry_id` is only knowable
+                    # from a prior read (and equals the entry value for these
+                    # lists), and the recorded args are the coerced JSON the
+                    # server sent upstream, so the false value is matched in
+                    # its serialized spelling.
+                    expect=_expect(
+                        _endpoint(tools["update"]),
+                        args=(values[0], '"active": false'),
+                    ),
                 )
             )
         steps.append(
             Step(
-                f"lists.{name}.remove",
-                "lists",
-                tools["remove"],
-                f"{name}: remove {values[0]!r}",
-                _step_prompt(f"Remove '{values[0]}' from the {name} for profile '{{profile_id}}'."),
-                "list_remove",
-                {"name": name, "spec": lt, "values": values},
+                id=f"lists.{name}.remove",
+                section="lists",
+                tool=tools["remove"],
+                description=f"{name}: remove {values[0]!r}",
+                prompt=_step_prompt(f"Remove '{values[0]}' from the {name} for profile '{{profile_id}}'."),
+                verify="list_remove",
+                vdata={"name": name, "spec": lt, "values": values},
                 expect=_expect(_endpoint(tools["remove"])),
             )
         )
         if added is not None:
             steps.append(
                 Step(
-                    f"lists.{name}.remove_added",
-                    "lists",
-                    tools["remove"],
-                    f"{name}: remove the added entry {added!r}",
-                    _step_prompt(f"Remove '{added}' from the {name} for profile '{{profile_id}}'."),
-                    "list_remove_added",
-                    {"name": name, "spec": lt, "values": values, "added": added},
+                    id=f"lists.{name}.remove_added",
+                    section="lists",
+                    tool=tools["remove"],
+                    description=f"{name}: remove the added entry {added!r}",
+                    prompt=_step_prompt(f"Remove '{added}' from the {name} for profile '{{profile_id}}'."),
+                    verify="list_remove_added",
+                    vdata={"name": name, "spec": lt, "values": values, "added": added},
                     expect=_expect(_endpoint(tools["remove"])),
                 )
             )
@@ -1698,12 +1909,12 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     # ---- rewrites: list, add each of 3, delete each ---------------------
     steps.append(
         Step(
-            "rewrites.list",
-            "rewrites",
-            "listRewrites",
-            "list existing rewrites",
-            _step_prompt("List the DNS rewrite records for profile '{profile_id}'."),
-            "rewrite_list",
+            id="rewrites.list",
+            section="rewrites",
+            tool="listRewrites",
+            description="list existing rewrites",
+            prompt=_step_prompt("List the DNS rewrite records for profile '{profile_id}'."),
+            verify="rewrite_list",
             expect=_expect(_endpoint("listRewrites")),
         )
     )
@@ -1715,32 +1926,32 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     for rec in rewrite_records:
         steps.append(
             Step(
-                f"rewrites.add.{rec['name'].split('-')[2]}",
-                "rewrites",
-                "addRewrite",
-                f"add rewrite {rec['name']!r} -> {rec['content']!r}",
+                id=f"rewrites.add.{rec['name'].split('-')[2]}",
+                section="rewrites",
+                tool="addRewrite",
+                description=f"add rewrite {rec['name']!r} -> {rec['content']!r}",
                 # Phrased as a mapping, not "A -> B": the small model read the arrow
                 # as a sequence of two actions and reported having "added and then
                 # deleted" the record - it undid its own successful write.
-                _step_prompt(
+                prompt=_step_prompt(
                     f"Add a DNS rewrite record for profile '{{profile_id}}' so that the hostname "
                     f"'{rec['name']}' resolves to '{rec['content']}'."
                 ),
-                "rewrite_add",
-                {"record": rec},
+                verify="rewrite_add",
+                vdata={"record": rec},
                 expect=_expect(_endpoint("addRewrite"), args=(rec["name"], rec["content"])),
             )
         )
     for rec in rewrite_records:
         steps.append(
             Step(
-                f"rewrites.delete.{rec['name'].split('-')[2]}",
-                "rewrites",
-                "deleteRewrite",
-                f"delete rewrite {rec['name']!r}",
-                _step_prompt(f"Delete the DNS rewrite record '{rec['name']}' from profile '{{profile_id}}'."),
-                "rewrite_delete",
-                {"record": rec},
+                id=f"rewrites.delete.{rec['name'].split('-')[2]}",
+                section="rewrites",
+                tool="deleteRewrite",
+                description=f"delete rewrite {rec['name']!r}",
+                prompt=_step_prompt(f"Delete the DNS rewrite record '{rec['name']}' from profile '{{profile_id}}'."),
+                verify="rewrite_delete",
+                vdata={"record": rec},
                 # The entry id is only knowable from a prior list, so the step
                 # pins the record by name; the id the server answered with for
                 # that name counts as the same identifier (_identifiers_from_answers).
@@ -1758,13 +1969,13 @@ def build_steps(targets: TaskTargets) -> list[Step]:
             args = ("countries",)
         steps.append(
             Step(
-                f"analytics.aggregate.{m}",
-                "analytics",
-                _ANALYTICS_TOOLS[m],
-                f"aggregate analytics for metric {m!r}",
-                _step_prompt(instr + "."),
-                "analytics",
-                vdata,
+                id=f"analytics.aggregate.{m}",
+                section="analytics",
+                tool=_ANALYTICS_TOOLS[m],
+                description=f"aggregate analytics for metric {m!r}",
+                prompt=_step_prompt(instr + "."),
+                verify="analytics",
+                vdata=vdata,
                 expect=_expect(_endpoint(_ANALYTICS_TOOLS[m]), args=args),
             )
         )
@@ -1781,13 +1992,13 @@ def build_steps(targets: TaskTargets) -> list[Step]:
             args_s = ("countries",)
         steps.append(
             Step(
-                f"analytics.series.{m}",
-                "analytics",
-                series_tool,
-                f"time-series analytics for metric {m!r}",
-                _step_prompt(instr + "."),
-                "analytics",
-                vdata_s,
+                id=f"analytics.series.{m}",
+                section="analytics",
+                tool=series_tool,
+                description=f"time-series analytics for metric {m!r}",
+                prompt=_step_prompt(instr + "."),
+                verify="analytics",
+                vdata=vdata_s,
                 expect=_expect(_endpoint(series_tool), args=args_s),
             )
         )
@@ -1795,12 +2006,14 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     # ---- doh -------------------------------------------------------------
     steps.append(
         Step(
-            "doh.lookup",
-            "doh",
-            "dohLookup",
-            "dohLookup example.com through the test profile",
-            _step_prompt("Perform a DNS-over-HTTPS lookup for example.com (A record) through profile '{profile_id}'."),
-            "tool_ok",
+            id="doh.lookup",
+            section="doh",
+            tool="dohLookup",
+            description="dohLookup example.com through the test profile",
+            prompt=_step_prompt(
+                "Perform a DNS-over-HTTPS lookup for example.com (A record) through profile '{profile_id}'."
+            ),
+            verify="tool_ok",
             # No account state to read back; the server's own record that the
             # lookup ran and answered with example.com is the whole verdict.
             expect=_expect_local("dohLookup", args=("example.com",), result=("example.com",)),
@@ -1811,54 +2024,57 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     for m in PLOT_METRICS:
         steps.append(
             Step(
-                f"plots.{m}",
-                "plots",
-                "plotAnalytics",
-                f"plotAnalytics {m} (PNG)",
-                _step_prompt(
+                id=f"plots.{m}",
+                section="plots",
+                tool="plotAnalytics",
+                description=f"plotAnalytics {m} (PNG)",
+                prompt=_step_prompt(
                     f"Generate an analytics plot for profile '{{profile_id}}' for metric '{m}' over the last day (PNG image)."
                 ),
-                "plots",
-                {"metric": m},
+                verify="plots",
+                vdata={"metric": m},
                 # The chart is the payload: the record has to say it answered
-                # with image content, not just that the tool ran.
-                expect=_expect_local("plotAnalytics", args=(m,), result=("image",)),
+                # with image content, not just that the tool ran. The step runs
+                # against the read-only data profile (falls back to the test
+                # profile when no plot profile is configured).
+                expect=_expect_local("plotAnalytics", args=(m,), result=("image",), profile=PLOT_PROFILE),
             )
         )
 
     # ---- logs ------------------------------------------------------------
     steps.append(
         Step(
-            "logs.get",
-            "logs",
-            "getLogs",
-            "get recent query logs",
-            _step_prompt("Retrieve the 10 most recent query logs for profile '{profile_id}'."),
-            "logs_get",
+            id="logs.get",
+            section="logs",
+            tool="getLogs",
+            description="get recent query logs",
+            prompt=_step_prompt("Retrieve the 10 most recent query logs for profile '{profile_id}'."),
+            verify="logs_get",
             expect=_expect(_endpoint("getLogs")),
         )
     )
     steps.append(
         Step(
-            "logs.download",
-            "logs",
-            "downloadLogs",
-            "download retained logs (CSV)",
-            _step_prompt("Download the retained query logs for profile '{profile_id}' as CSV."),
-            "logs_download",
+            id="logs.download",
+            section="logs",
+            tool="downloadLogs",
+            description="download retained logs (CSV)",
+            prompt=_step_prompt("Download the retained query logs for profile '{profile_id}' as CSV."),
+            verify="logs_download",
             # The tool saves the CSV and answers with its local path; naming
             # that key proves the download itself ran, not just the redirect.
-            expect=_expect(_endpoint("downloadLogs"), result=("file_path",)),
+            # The step reads the data-bearing profile, same as the plot steps.
+            expect=_expect(_endpoint("downloadLogs"), result=("file_path",), profile=PLOT_PROFILE),
         )
     )
     steps.append(
         Step(
-            "logs.clear",
-            "logs",
-            "clearLogs",
-            "clear query logs",
-            _step_prompt("Clear the query logs for profile '{profile_id}'."),
-            "logs_clear",
+            id="logs.clear",
+            section="logs",
+            tool="clearLogs",
+            description="clear query logs",
+            prompt=_step_prompt("Clear the query logs for profile '{profile_id}'."),
+            verify="logs_clear",
             expect=_expect(_endpoint("clearLogs")),
         )
     )
@@ -1866,12 +2082,12 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     # ---- delete the profile (model performs the delete) -----------------
     steps.append(
         Step(
-            "profiles.delete",
-            "profiles",
-            "deleteProfile",
-            f"delete the test profile {pn!r}",
-            _step_prompt("Delete the profile '{profile_id}'."),
-            "profile_gone",
+            id="profiles.delete",
+            section="profiles",
+            tool="deleteProfile",
+            description=f"delete the test profile {pn!r}",
+            prompt=_step_prompt("Delete the profile '{profile_id}'."),
+            verify="profile_gone",
             expect=_expect(_endpoint("deleteProfile"), args=("{profile_id}",)),
         )
     )
@@ -1981,6 +2197,7 @@ def _expect_label(step: Step) -> str:
     label = " or ".join(str(e) for e in exp.get("endpoints", [])) or str(exp.get("tool", ""))
     bits = [f"args~{exp['args']}"] if exp.get("args") else []
     bits += [f"result~{exp['result']}"] if exp.get("result") else []
+    bits += [f"profile={exp['profile']}"] if exp.get("profile") else []
     return f"{label} {' '.join(bits)}".strip()
 
 
@@ -1991,10 +2208,11 @@ async def _verify_step(
     vd = step.vdata
     base_profile = f"/profiles/{pid}" if pid else None
 
-    async def _req(method: str, path: str, **kw: Any) -> Any:
-        if method == "GET":
-            return await m.rest_get(path, **kw)
-        return await m.rest_delete(path)
+    async def _get(path: str, **kw: Any) -> Any:
+        # Read-only by construction: an earlier `_req(method, ...)` helper took a
+        # method and DELETEd for anything that was not GET — a future call site
+        # passing a write method would have issued a destructive read-back.
+        return await m.rest_get(path, **kw)
 
     if step.verify == "profile_exists":
         prof = await m.find_profile(targets.profile_name)
@@ -2017,15 +2235,15 @@ async def _verify_step(
             {"endpoint": "GET /profiles", "verified_renamed": ok},
         )
     if step.verify == "profile_gone":
-        gone = (not pid) or await _profile_gone(m, pid, targets)
+        gone, verdict = (True, ABSENT) if not pid else await _profile_gone(m, pid, targets)
         return (
             "passed" if gone else "failed",
-            "" if gone else f"profile {pid} is still present after delete",
+            "" if gone else f"profile {pid} not confirmed deleted ({verdict})",
             "",
-            {"endpoint": f"GET /profiles/{pid}", "verified_gone": gone},
+            {"endpoint": f"GET /profiles/{pid}", "verified_gone": gone, "verdict": verdict},
         )
     if step.verify == "settings_read":
-        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        rest = await _get(f"{base_profile}{vd['spec']['path']}")
         ok = bool(isinstance(rest, dict) and rest.get("ok"))
         return (
             "passed" if ok else "failed",
@@ -2034,7 +2252,7 @@ async def _verify_step(
             {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "rest_status": common._resp_status(rest)},
         )
     if step.verify == "settings_update":
-        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        rest = await _get(f"{base_profile}{vd['spec']['path']}")
         ok = common._verify_settings_assert(rest, vd["spec"]["assert"])
         return (
             "passed" if ok else "failed",
@@ -2043,7 +2261,7 @@ async def _verify_step(
             {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified": ok},
         )
     if step.verify in ("list_read",):
-        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        rest = await _get(f"{base_profile}{vd['spec']['path']}")
         ok = bool(isinstance(rest, dict) and rest.get("ok"))
         return (
             "passed" if ok else "failed",
@@ -2052,7 +2270,7 @@ async def _verify_step(
             {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "rest_status": common._resp_status(rest)},
         )
     if step.verify == "list_replace":
-        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        rest = await _get(f"{base_profile}{vd['spec']['path']}")
         ok = common._list_contains(rest, vd["values"])
         return (
             "passed" if ok else "failed",
@@ -2061,7 +2279,7 @@ async def _verify_step(
             {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified": ok},
         )
     if step.verify == "list_add":
-        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
+        rest = await _get(f"{base_profile}{vd['spec']['path']}")
         # Only this step's own effect: the entry it asked to add. Checking the
         # earlier step's entries as well let a failed `replace` cascade into the
         # `add` verdict and blame the wrong entry.
@@ -2073,34 +2291,49 @@ async def _verify_step(
             {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified": ok},
         )
     if step.verify == "list_update":
-        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
-        ok = common._list_contains(rest, vd["values"])
+        rest = await _get(f"{base_profile}{vd['spec']['path']}")
+        # Read the exact entry this step asked to change, not just that the
+        # list still holds something: an update that set active=true (or
+        # touched another entry) used to pass this check.
+        flag, verdict = common._entry_active(rest, vd["values"][0])
+        ok = verdict == common.ENTRY_FOUND and flag is False
         return (
             "passed" if ok else "failed",
-            "" if ok else f"list {vd['name']} lost entry {vd['values']} after update",
+            ""
+            if ok
+            else f"list {vd['name']} entry {vd['values'][0]!r} did not read back inactive ({verdict}: active={flag!r})",
             "",
-            {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified": ok},
+            {
+                "endpoint": f"GET {base_profile}{vd['spec']['path']}",
+                "verified_inactive": ok,
+                "verdict": verdict,
+                "active": flag,
+            },
         )
     if step.verify == "list_remove":
-        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
-        ok = common._list_absent(rest, vd["values"])
+        rest = await _get(f"{base_profile}{vd['spec']['path']}")
+        absent, verdict = common._list_absent(rest, vd["values"])
         return (
-            "passed" if ok else "failed",
-            "" if ok else f"list {vd['name']} still contains {vd['values']}",
+            "passed" if absent else "failed",
+            "" if absent else f"list {vd['name']} removal of {vd['values']} not confirmed ({verdict})",
             "",
-            {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified_absent": ok},
+            {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified_absent": absent, "verdict": verdict},
         )
     if step.verify == "list_remove_added":
-        rest = await _req("GET", f"{base_profile}{vd['spec']['path']}")
-        ok = common._list_absent(rest, [vd["added"]])
+        rest = await _get(f"{base_profile}{vd['spec']['path']}")
+        absent, verdict = common._list_absent(rest, [vd["added"]])
         return (
-            "passed" if ok else "failed",
-            "" if ok else f"list {vd['name']} still contains added entry {vd['added']!r}",
+            "passed" if absent else "failed",
+            "" if absent else f"list {vd['name']} removal of added entry {vd['added']!r} not confirmed ({verdict})",
             "",
-            {"endpoint": f"GET {base_profile}{vd['spec']['path']}", "verified_absent": ok},
+            {
+                "endpoint": f"GET {base_profile}{vd['spec']['path']}",
+                "verified_absent": absent,
+                "verdict": verdict,
+            },
         )
     if step.verify == "rewrite_list":
-        rest = await _req("GET", f"{base_profile}/rewrites")
+        rest = await _get(f"{base_profile}/rewrites")
         ok = bool(isinstance(rest, dict) and rest.get("ok"))
         return (
             "passed" if ok else "failed",
@@ -2110,7 +2343,7 @@ async def _verify_step(
         )
     if step.verify == "rewrite_add":
         rec = vd["record"]
-        rest = await _req("GET", f"{base_profile}/rewrites")
+        rest = await _get(f"{base_profile}/rewrites")
         ok = common._rewrites_contains(rest, [rec["name"]])
         return (
             "passed" if ok else "failed",
@@ -2120,13 +2353,16 @@ async def _verify_step(
         )
     if step.verify == "rewrite_delete":
         rec = vd["record"]
-        rest = await _req("GET", f"{base_profile}/rewrites")
-        ok = not common._rewrites_contains(rest, [rec["name"]])
+        rest = await _get(f"{base_profile}/rewrites")
+        # `not _rewrites_contains(...)` used to make a failed or malformed read
+        # of the rewrites a proof the record was gone; only a 404 or a readable
+        # list without it says so.
+        absent, verdict = common._rewrites_absent(rest, [rec["name"]])
         return (
-            "passed" if ok else "failed",
-            "" if ok else f"rewrite {rec['name']!r} still present after delete",
+            "passed" if absent else "failed",
+            "" if absent else f"rewrite {rec['name']!r} deletion not confirmed ({verdict})",
             "",
-            {"endpoint": f"GET {base_profile}/rewrites", "verified_absent": ok},
+            {"endpoint": f"GET {base_profile}/rewrites", "verified_absent": absent, "verdict": verdict},
         )
     if step.verify == "analytics":
         metric = vd["metric"]
@@ -2137,7 +2373,7 @@ async def _verify_step(
             params["interval"] = 3600
         if metric == "destinations":
             params["type"] = "countries"
-        rest = await _req("GET", f"{base_profile}/analytics/{metric}{suffix}", params=params)
+        rest = await _get(f"{base_profile}/analytics/{metric}{suffix}", params=params)
         ok = bool(isinstance(rest, dict) and rest.get("ok"))
         return (
             "passed" if ok else "failed",
@@ -2156,14 +2392,15 @@ async def _verify_step(
         return ("passed", "", "", {"note": "read-only DoH lookup; verdict from the server call log"})
     if step.verify == "plots":
         plot_pid = os.environ.get("NEXTDNS_PLOT_PROFILE") or pid
-        rest = await _req("GET", f"/profiles/{plot_pid}/analytics/status")
+        rest = await _get(f"/profiles/{plot_pid}/analytics/status")
         has_data = common._analytics_has_data(rest)
         if not has_data:
             return (
                 "skipped",
                 "",
                 "no query history on the fresh profile; plot checks need data",
-                {"endpoint": f"GET {base_profile}/analytics/status", "has_data": False},
+                # The path actually read: the data profile, not the test profile.
+                {"endpoint": f"GET /profiles/{plot_pid}/analytics/status", "has_data": False},
             )
         return (
             "passed",
@@ -2176,7 +2413,7 @@ async def _verify_step(
             },
         )
     if step.verify == "logs_get":
-        rest = await _req("GET", f"{base_profile}/logs", params={"limit": 10})
+        rest = await _get(f"{base_profile}/logs", params={"limit": 10})
         ok = bool(isinstance(rest, dict) and rest.get("ok"))
         return (
             "passed" if ok else "failed",
@@ -2186,7 +2423,7 @@ async def _verify_step(
         )
     if step.verify == "logs_download":
         log_pid = os.environ.get("NEXTDNS_PLOT_PROFILE") or pid
-        rest = await _req("GET", f"/profiles/{log_pid}/logs", params={"limit": 10})
+        rest = await _get(f"/profiles/{log_pid}/logs", params={"limit": 10})
         # Log entries are mostly strings (domain, status, timestamps), so an
         # analytics-style numeric-data check would wrongly report "no logs".
         body = rest.get("body") if isinstance(rest, dict) else None
@@ -2196,7 +2433,8 @@ async def _verify_step(
                 "skipped",
                 "",
                 "no retained logs yet (NextDNS log delay on a fresh profile)",
-                {"endpoint": f"GET {base_profile}/logs"},
+                # The path actually read: the data profile, not the test profile.
+                {"endpoint": f"GET /profiles/{log_pid}/logs"},
             )
         return (
             "passed",
@@ -2446,24 +2684,6 @@ def _feedback_block(
     return out
 
 
-def _sweep_stale_download_dirs(base: Path) -> int:
-    """Delete leftover download-scratch dirs from previous harness runs.
-
-    ``downloadLogs`` deliberately keeps the CSV it downloads (the caller gets
-    the path back), and a retained-logs CSV is ~500 MB. Weeks of live runs
-    left ~6 GB of ``nextdns_logs_*`` dirs on /tmp — a tmpfs with a per-user
-    quota — until the quota failed a live download with EDQUOT and degraded
-    four later actor sessions. The harness sweeps what its own server leaves
-    behind, in the default temp location it used before scratch moved.
-    """
-    removed = 0
-    for entry in base.glob("nextdns_logs_*"):
-        if entry.is_dir():
-            shutil.rmtree(entry, ignore_errors=True)
-            removed += 1
-    return removed
-
-
 def _prepare_scratch_dir() -> Path:
     """Give the run a TMPDIR off the tmpfs quota, removed when the process ends.
 
@@ -2472,8 +2692,14 @@ def _prepare_scratch_dir() -> Path:
     downloadLogs CSV lands here, on the root filesystem, instead of filling
     the /tmp user quota. atexit removes the directory so runs do not
     accumulate.
+
+    This used to also sweep every ``nextdns_logs_*`` directory in the system
+    temp at startup. That was removed: a downloadLogs in flight from ANOTHER
+    server instance (the product keeps the CSV by design, and hands the path
+    to its caller) had its directory deleted mid-download. The sweep would
+    have destroyed files the harness never created, to reclaim space a
+    per-run scratch dir already reclaims at exit.
     """
-    _sweep_stale_download_dirs(Path(tempfile.gettempdir()))
     scratch = Path.home() / ".cache" / "nextdns-mcp-e2e" / f"run-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     scratch.mkdir(parents=True, exist_ok=True)
     os.environ["TMPDIR"] = str(scratch)
@@ -2521,7 +2747,9 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     total_events = 0
     tools_used: list[str] = []
     last_stderr = ""
-    all_raw: list[str] = []
+    # Only the last 500 lines are ever reported; a whole 89-step raw event
+    # stream accumulated in a list for nothing.
+    all_raw: deque[str] = deque(maxlen=500)
 
     async with MeasureClient(api_key) as m:
         # Remove stale same-name profiles left by earlier interrupted runs so
@@ -2532,9 +2760,12 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 _progress(f"removing stale profile {stale.get('id')} ({nm}) from an earlier run")
                 await m.rest_delete(f"/profiles/{stale['id']}")
 
-        # Snapshot the account so profiles the ACTOR creates (it sometimes
-        # creates extras beyond the test profile) can be swept at the end.
-        pre_existing = set(await _all_profile_ids(m))
+        # Profiles this run PROVED it created (successful createProfile
+        # receipts in the server's call log, plus harness provisioning and
+        # self-heal). The stray sweep at teardown deletes only these — never
+        # anything that merely appeared during the run, which a concurrent
+        # user or another run may have created.
+        created_ids: set[str] = set()
 
         # Targeted run: when the range does not include profiles.create the
         # harness provisions the test profile itself, through the MCP tool so
@@ -2544,7 +2775,18 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
             pid, note = await _harness_provision_profile(config, targets)
             report.setup = note
             report.profile_id = pid
+            if pid:
+                created_ids.add(pid)
             _progress(f"targeted setup: {note}")
+
+        # Read-only plot/log steps target NEXTDNS_PLOT_PROFILE; when it is unset
+        # they would all read the empty test profile and skip as data-starved,
+        # so resolve a data-bearing one up front and say so in the report.
+        if any(step.section == "plots" or step.id == "logs.download" for _, step in selected) and (
+            plot_note := await _ensure_plot_profile(m, pid)
+        ):
+            report.notes.append(plot_note)
+            _progress(f"plot profile: {plot_note}")
 
         aborted_reason = ""
         outage_streak = 0
@@ -2594,6 +2836,8 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 if healed != pid:
                     pid = healed
                     report.profile_id = pid
+                    if pid:
+                        created_ids.add(pid)
                     # The profile vanished between steps. This harness deleted
                     # it zero times in the run this happened in, so something
                     # else is using the account and every step around it is
@@ -2638,13 +2882,18 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                     last_stderr = run.stderr
                 all_raw.extend(run.raw_lines)
                 server_calls = _read_new_calls(call_log, log_offset)
+                # A successful createProfile row is this run's receipt that a
+                # profile is its own to clean up (the model sometimes creates
+                # extras beyond the test profile).
+                created_ids |= _created_ids_from_records(server_calls)
 
                 status, error, reason, rest_v = await _verify_step(m, targets, pid, step, run)
                 # REST says what the state is, not who produced it, and for a
                 # read it cannot see the call at all. So the server's own record
                 # decides the transcript half of the verdict: the exact expected
-                # call succeeded, and nothing wrote over it afterwards.
-                call_ok, call_why = _expected_call_ok(server_calls, expect, pid)
+                # call succeeded, on the profile the step targets, and nothing
+                # wrote over it afterwards.
+                call_ok, call_why = _expected_call_ok(server_calls, expect, pid, alt_pid=prompt_pid)
                 if status == "passed" and not call_ok:
                     status = "failed"
                     error = call_why
@@ -2748,10 +2997,10 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
         # profiles.delete the teardown is harness-owned from the start, so it
         # goes through the same MCP tool the actor would have used.
         if pid:
-            gone = await _profile_gone(m, pid, targets)
+            gone, _verdict = await _profile_gone(m, pid, targets)
             if not gone and needs_harness_teardown(selected):
                 err = await _harness_delete_profile(config, pid)
-                gone = await _profile_gone(m, pid, targets)
+                gone, _verdict = await _profile_gone(m, pid, targets)
                 if gone:
                     _progress("targeted teardown: test profile deleted via deleteProfile")
                 else:
@@ -2763,7 +3012,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                     if isinstance(resp, dict) and resp.get("ok"):
                         break
                     await asyncio.sleep(5 * (attempt + 1))
-                gone = await _profile_gone(m, pid, targets)
+                gone, _verdict = await _profile_gone(m, pid, targets)
             report.cleanup = (
                 "clean: profile deleted and verified gone via REST" if gone else "FAILED (profile still present)"
             )
@@ -2771,14 +3020,19 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
         else:
             report.cleanup = "skipped (test profile not found on the server)"
 
-        # Remove any extra profiles the actor created during the run so they
-        # do not accumulate in the account between runs.
-        await _sweep_stray_profiles(m, pre_existing, {pid} if pid else set())
+        # Remove any extra profiles THIS run created beyond the test profile,
+        # so they do not accumulate in the account between runs. Only ids with
+        # a createProfile receipt are candidates; if the account listing fails
+        # the sweep stands down and says so in the report.
+        sweep_note = await _sweep_stray_profiles(m, created_ids, {pid} if pid else set())
+        if sweep_note:
+            _progress(f"  NOTE    : {sweep_note}")
+            report.notes.append(sweep_note)
 
     report.actor_tool_calls = total_events
     report.actor_tools_used = tools_used
     report.actor_stderr = last_stderr[:4000]
-    report.actor_raw_lines = all_raw[-500:]
+    report.actor_raw_lines = list(all_raw)
     report.actor_duration_ms = int((time.monotonic() - started) * 1000)
     report.finished_at = time.time()
     return report

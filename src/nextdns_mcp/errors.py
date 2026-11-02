@@ -251,7 +251,12 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
     if response is not None:
         try:
             parsed = response.json()
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RuntimeError):
+            # RuntimeError covers httpx.ResponseNotRead: a streaming failure
+            # (mid-download 503) reaches here with the body unread, and the
+            # payload builder must describe the failure, not raise on it. An
+            # unread body parses as no body at all; the bounded text read below
+            # answers the same way.
             parsed = None
         structured = _structured_error_payload(parsed, fallback_code, status_code)
         if structured is not None:
@@ -285,18 +290,72 @@ def _structured_error_payload(parsed: Any, fallback_code: str, status_code: Any)
     return payload
 
 
+# A UTF-8 codepoint spans at most four bytes; this is the slack kept past the
+# character cap so a decode slice ends near a whole codepoint (a trailing
+# partial sequence is dropped by the decoder), and the slice is sized so that
+# any body longer than it always decodes to more than the cap's worth of
+# characters - the truncation flag therefore sees every body it must name.
+_UTF8_MAX_CODEPOINT_BYTES = 4
+BODY_SLICE_BYTES = MAX_RESPONSE_BODY_CHARS * _UTF8_MAX_CODEPOINT_BYTES + _UTF8_MAX_CODEPOINT_BYTES
+
+
+def _read_response_body_prefix(response: Any) -> tuple[str | None, bool]:
+    """A leading slice of the response body as text, and whether more follows it.
+
+    ``(text, more)``; ``text`` is None when the body cannot be read at all.
+    Two failures of the obvious ``response.text`` are handled here:
+
+    - A streaming response whose body was never read raises
+      ``httpx.ResponseNotRead`` (a ``RuntimeError``) from ``.text`` and
+      ``.json()``. An error payload exists to describe a failed request; it
+      must not turn the failure handler into a second crash because the
+      failure happened mid-stream (reproduced on a streaming 503). The body is
+      then reported as absent.
+    - A large unparseable body (a multi-hundred-KB HTML error page) used to be
+      decoded whole just so the first 2 KB could be sliced off it. The bytes
+      are sliced first, with a multibyte margin, and only the slice is
+      decoded; whatever came after it is never paid for.
+    """
+    try:
+        raw = getattr(response, "content", None)
+    except RuntimeError:  # httpx.ResponseNotRead: the stream was never read
+        return None, False
+    if raw is None:
+        # Not an httpx response (a test stub with only .text): treat the text
+        # it offers as the whole body.
+        try:
+            return getattr(response, "text", None), False
+        except RuntimeError:
+            return None, False
+    return raw[:BODY_SLICE_BYTES].decode("utf-8", errors="ignore"), len(raw) > BODY_SLICE_BYTES
+
+
+def response_body_text(response: Any) -> str | None:
+    """The response body as text, or None when it cannot be read.
+
+    Safe on every shape a failure arrives in: a streaming response that was
+    never read (``ResponseNotRead`` from ``.text``) and a very large body
+    (sliced with a multibyte margin rather than decoded whole). See
+    ``_read_response_body_prefix``.
+    """
+    text, _ = _read_response_body_prefix(response)
+    return text
+
+
 def _attach_error_body(payload: dict[str, Any], response: Any) -> None:
     """Include the raw body as a bounded prefix, flagged when it had to be cut.
 
     An unparseable body is the only case where the text stands in for a
     diagnosis, so it is included - but bounded, because the payload goes into
-    an LLM context and a 2 MB HTML error page does not (issue #297).
+    an LLM context and a 2 MB HTML error page does not (issue #297). The
+    ``response_body_truncated`` flag covers both ways content was dropped: a
+    character cut at the cap, and a byte slice that stopped short of the body.
     """
-    body = getattr(response, "text", None) if response is not None else None
-    if not body:
+    text, more = _read_response_body_prefix(response)
+    if not text:
         return
-    truncated = len(body) > MAX_RESPONSE_BODY_CHARS
-    payload["response_body"] = body[:MAX_RESPONSE_BODY_CHARS] + (TRUNCATION_MARKER if truncated else "")
+    truncated = more or len(text) > MAX_RESPONSE_BODY_CHARS
+    payload["response_body"] = text[:MAX_RESPONSE_BODY_CHARS] + (TRUNCATION_MARKER if truncated else "")
     payload["response_body_truncated"] = truncated
 
 
@@ -320,17 +379,27 @@ def _add_upstream_diagnosis(payload: dict[str, Any], parsed: Any) -> None:
 
 
 class NextDNSError(RuntimeError):
-    """Base exception for NextDNS API errors."""
+    """Base exception for NextDNS API errors.
+
+    ``response`` carries the originating :class:`httpx.Response` when there is
+    one - including the upstream 2xx that answered with an error document,
+    where the status line says success and only the body says otherwise. It is
+    a declared constructor argument rather than an attribute attached after
+    construction so the error's contract (and a reader of this class) states
+    everything a typed failure can carry.
+    """
 
     def __init__(
         self,
         message: str,
         status_code: int | None = None,
         response_body: str | None = None,
+        response: Any = None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.response_body = response_body
+        self.response = response
 
 
 class NextDNSAuthError(NextDNSError):

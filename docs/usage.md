@@ -78,9 +78,20 @@ One aggregate tool per metric — `getAnalyticsStatus`, `getAnalyticsDomains`,
 `getAnalyticsDNSSEC`, `getAnalyticsEncryption`, `getAnalyticsIPVersions`,
 `getAnalyticsProtocols`, `getAnalyticsDevices`, `getAnalyticsDestinations` —
 and a `…Series` twin for time-series data (everything except `domains`).
-`getAnalyticsDestinations` requires `destination_type` (e.g. `countries`).
-A series that names no `from` covers the last day (`-1d`), the window an
-aggregate request gets when it names none.
+`getAnalyticsDestinations` requires `type`, one of `countries` or `gafam`.
+
+#### Time window
+`from` and `to` accept epoch seconds as a number, or a string: ISO 8601
+(`2026-10-30T00:00:00Z`), a bare date (`2026-10-30`), `now`, or a relative
+offset from now (`-1d`, `-12h`, `-30d`). `from` is optional: a series that
+names none covers the last day (`-1d`), the window an aggregate request gets
+when it names none. `to` omitted ends at now. The Grafana spelling `now-1d` is
+not accepted upstream; write `-1d`.
+`interval` (the `…Series` and `plotAnalytics` window size) is bounded to
+60–86400 seconds, and `partials` accepts only `none` or `all`. The 2000-point
+budget described under `plotAnalytics` guards the generated `…Series` tools as
+well: a range that would return more points than that is refused with
+`invalid_argument` rather than answered with a truncated series.
 
 ### plotAnalytics
 Generate a PNG line chart for supported metrics. Use a profile with query

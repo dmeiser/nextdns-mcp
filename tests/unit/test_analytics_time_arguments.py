@@ -107,15 +107,21 @@ class TestTheToolsSaySoThemselves:
             result = await client.call_tool(tool, arguments)
         return getattr(result, "structured_content", None) or {}
 
-    def test_the_series_endpoint_asks_for_a_start_time(self):
-        """A series request without a start time answers nothing, so the schema asks.
+    def test_the_series_endpoint_does_not_demand_a_start_time(self):
+        """``from`` is optional upstream: an unnamed window covers the last day.
 
-        Replacing that with a tool-invented default hid the requirement from the
-        caller; the spec states it, and FastMCP publishes it as ``required``.
+        The document used to publish ``from`` as required, which demanded an
+        argument the API does not: the harness asks for recent logs with no
+        window, and docs/usage.md states the omitted window is ``-1d``. The
+        schema now says optional; the description still names the relative
+        spelling so a caller who wants a different window writes one.
         """
-        schema = spec_tools.spec_routes()
-        series = next(route for route in schema if route.operation_id == "getAnalyticsEncryptionSeries")
-        assert "from" in series.flat_param_schema["required"]
+        series = next(
+            route for route in spec_tools.spec_routes() if route.operation_id == "getAnalyticsEncryptionSeries"
+        )
+        assert "from" not in (series.flat_param_schema.get("required") or [])
+        window = series.flat_param_schema["properties"]["from"]["description"]
+        assert "last day" in window
 
     def test_the_window_argument_names_the_relative_spelling(self):
         """ "Last day" has no absolute spelling, so the offset has to be written down.

@@ -11,6 +11,8 @@ import math
 import os
 from dataclasses import dataclass
 
+from .constants import SAFE_PROFILE_ID_PATTERN
+
 logger = logging.getLogger(__name__)
 
 
@@ -226,6 +228,16 @@ def _is_allow_all(profile_str: str) -> bool:
     return profile_str.strip().upper() == "ALL"
 
 
+def _normalized_profile_ids(raw: str) -> set[str]:
+    """The comma-separated profile ids in ``raw``, stripped and lowercased.
+
+    The one parsing rule every profile list in the environment goes through,
+    so the writable/readable lists and the protected denylist cannot parse
+    the same string differently.
+    """
+    return {p.strip().lower() for p in raw.split(",") if p.strip()}
+
+
 def parse_profile_list(profile_str: str) -> set[str] | None:
     """Parse a comma-separated list of profile IDs.
 
@@ -241,7 +253,7 @@ def parse_profile_list(profile_str: str) -> set[str] | None:
         return None  # Empty/unset = deny all
     if _is_allow_all(profile_str):
         return set()  # Empty set = allow all
-    return {p.strip().lower() for p in profile_str.split(",") if p.strip()}
+    return _normalized_profile_ids(profile_str)
 
 
 @dataclass(frozen=True)
@@ -297,14 +309,32 @@ def get_protected_profiles() -> frozenset[str]:
     """Get the protected-profile denylist from ``NEXTDNS_PROTECTED_PROFILES``.
 
     Protected profiles are never writable, even when ``NEXTDNS_WRITABLE_PROFILES``
-    is ``ALL``; reads are unaffected. Intended for data-bearing or production
-    profiles that a test agent must not modify or delete.
+    is ``ALL``; reads are unaffected (writes-only by design, documented in
+    docs/safety.md). Intended for data-bearing or production profiles that a
+    test agent must not modify or delete.
+
+    A denylist entry that cannot match any profile id is a configuration
+    error, not an ignored entry: a typo in a *protection* list silently
+    protects nothing, which is the worst possible failure mode for a
+    denylist. The check runs at startup (``validate_configuration`` reads the
+    access-control snapshot) and on each snapshot load, and says what the
+    valid shape is.
 
     Returns:
         frozenset[str]: Lowercased profile IDs (empty when unset/empty).
+
+    Raises:
+        ConfigurationError: If any entry is not a valid profile-id shape.
     """
     raw = os.getenv("NEXTDNS_PROTECTED_PROFILES", "")
-    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+    ids = _normalized_profile_ids(raw)
+    invalid = sorted(pid for pid in ids if not SAFE_PROFILE_ID_PATTERN.match(pid))
+    if invalid:
+        raise ConfigurationError(
+            f"NEXTDNS_PROTECTED_PROFILES contains entries that cannot match any profile id: {', '.join(invalid)}. "
+            "Profile ids are 6 or 10 lowercase alphanumeric characters."
+        )
+    return frozenset(ids)
 
 
 def load_profile_access_control() -> ProfileAccessControl:
@@ -441,6 +471,19 @@ def _log_profile_access(profile_set: set[str] | None, access_type: str) -> None:
         logger.info(f"{access_type.capitalize()} profiles restricted to: {sorted(profile_set)}")
 
 
+def _log_protected_profiles(access: ProfileAccessControl) -> None:
+    """Say at startup which profiles the write denylist actually holds.
+
+    The denylist is the operator's safety net for ``WRITABLE=ALL`` with a
+    production profile on the same key; naming its members means a typo
+    cannot sit silently unprotected. The entries are shape-validated by
+    ``get_protected_profiles`` before this line is ever reached (see
+    ``validate_configuration``).
+    """
+    if access.protected:
+        logger.info(f"Protected profiles (writes denied even under ALL): {', '.join(sorted(access.protected))}")
+
+
 def _log_access_control_settings() -> None:
     """Log current access control configuration."""
     access = load_profile_access_control()
@@ -454,6 +497,7 @@ def _log_access_control_settings() -> None:
     _log_profile_access(readable, "readable")
     if not read_only:
         _log_profile_access(writable, "writable")
+    _log_protected_profiles(access)
 
 
 def validate_configuration() -> None:

@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import io
 import logging
+import math
 import re
 import time
 from datetime import UTC, datetime
@@ -15,13 +16,11 @@ import mcp.types
 from fastmcp.utilities.types import Image
 
 from ..coercion import OptionalProfileId
-from ..errors import ErrorCode, error_payload
+from ..errors import ErrorCode, NextDNSError, error_payload
+from ..transport import _api_request, _handle_api_error
 from ..utils import (
     PARTIALS_VALUES,
-    NextDNSError,
-    _api_request,
     _build_series_params,
-    _handle_api_error,
     normalize_partials,
     normalize_time_value,
     resolve_profile_id,
@@ -199,14 +198,23 @@ def _relative_time_seconds(text: str, now: float) -> float | None:
 
 
 def _absolute_or_iso_seconds(text: str) -> float | None:
-    """A bare Unix-seconds number, else an ISO 8601 instant, else None."""
+    """A bare Unix-seconds number, else an ISO 8601 instant, else None.
+
+    Total over the caller's input domain, not just the well-formed part of it:
+    ``float()`` on an integer past the float range and ``datetime.timestamp()``
+    on an unrepresentable instant raise ``OverflowError`` (or ``OSError`` on
+    some platforms), and an unresolvable value is exactly what the None means
+    here - the caller reports an unresolved range through the typed error, so
+    an extreme value must not escape as a crash. (Reproduced: a 400-digit
+    numeric ``from``.)
+    """
     try:
         return float(int(text))
-    except ValueError:
+    except (ValueError, OverflowError):
         pass
     try:
         return _parse_series_timestamp(text).timestamp()
-    except ValueError:
+    except (ValueError, OverflowError, OSError):
         return None
 
 
@@ -223,7 +231,11 @@ def _resolve_time_point(value: str | int, now: float) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        # Non-finite floats (JSON `Infinity`/`NaN` survive Python's json
+        # decoder) resolve to nothing: they bound no range, and letting them
+        # through would put them in the budget arithmetic and the error text.
+        seconds = float(value)
+        return seconds if math.isfinite(seconds) else None
     text = str(value).strip()
     relative = _relative_time_seconds(text, now)
     if relative is not None:
@@ -238,10 +250,18 @@ def _format_resolved(seconds: float | None) -> str:
     two arguments was wrong: a model that passed from_time=-86400 (a bare
     number, so an absolute Unix timestamp in seconds, i.e. 1969) retried three
     different intervals before anything said so.
+
+    Total: ``fromtimestamp`` refuses values outside the platform's range with
+    OverflowError/OSError, and this runs *while reporting* such a refusal - a
+    reporter that crashes on its own subject replaces one bad timestamp with
+    an internal error. Out-of-range values are named as what they are.
     """
     if seconds is None:
         return "unresolved"
-    return datetime.fromtimestamp(seconds, tz=UTC).isoformat(timespec="seconds")
+    try:
+        return datetime.fromtimestamp(seconds, tz=UTC).isoformat(timespec="seconds")
+    except (OverflowError, OSError, ValueError):
+        return f"out of range ({seconds!r})"
 
 
 def _unresolved_range_error(from_time: str | int, to_time: str | int) -> dict[str, Any]:
@@ -275,7 +295,8 @@ def _budget_exceeded_error(start: float, end: float, span: float, interval: int)
         (
             f"Requested range spans {span:.0f}s "
             f"({_format_resolved(start)} to {_format_resolved(end)}), more than the {PLOT_MAX_POINTS}-point "
-            f"series budget allows at interval={interval}s (max {max_span}s); use a larger interval or a "
+            f"series budget allows at interval={interval}s (at this interval the span must stay under "
+            f"{max_span}s to answer at most {PLOT_MAX_POINTS} points); use a larger interval or a "
             "shorter range. A bare number is an absolute Unix timestamp in seconds - a relative range "
             "needs a unit, such as '-1d'"
         ),
@@ -290,11 +311,19 @@ def _budget_exceeded_error(start: float, end: float, span: float, interval: int)
 def _span_budget_error(
     start: float, end: float, from_time: str | int, to_time: str | int, interval: int
 ) -> dict[str, Any] | None:
-    """Typed error for a resolved span that is empty or blows the point budget."""
+    """Typed error for a resolved span that is empty or blows the point budget.
+
+    The budget boundary is exact, not approximate: a series answers one point
+    per interval *including both endpoints*, so a span of ``n * interval`` is
+    ``n + 1`` points. A span must stay strictly under
+    ``PLOT_MAX_POINTS * interval`` for the answer to fit inside the
+    ``PLOT_MAX_POINTS`` cap - the old ``<=`` admitted exactly the span that
+    answers 2001 points while naming a 2000-point budget.
+    """
     span = end - start
     if span <= 0:
         return _empty_range_error(from_time, to_time)
-    if span <= PLOT_MAX_POINTS * interval:
+    if span < PLOT_MAX_POINTS * interval:
         return None
     return _budget_exceeded_error(start, end, span, interval)
 
@@ -382,7 +411,6 @@ def _validate_plot_params(
 async def _fetch_series_payload(
     url: str,
     params: dict[str, Any],
-    metric: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Fetch time-series payload from the API through the shared wrapper.
 
@@ -479,10 +507,15 @@ async def _fetch_plot_series(
     url = f"/profiles/{target_profile}/analytics/{metric};series"
     logger.info(f"Plotting analytics series: {metric} for profile {target_profile}")
 
-    payload, fetch_error = await _fetch_series_payload(url, params, metric)
+    payload, fetch_error = await _fetch_series_payload(url, params)
     if fetch_error:
         return fetch_error
-    assert payload is not None
+    if payload is None:
+        # The fetcher promises a payload whenever it reports no error; if that
+        # ever breaks, say so as the typed internal error rather than asserting
+        # (python -O strips asserts; a stripped assert turns into a TypeError
+        # on None several frames later, far from the truth).
+        return error_payload(ErrorCode.INTERNAL_ERROR, f"{metric} series fetch returned no payload or error")
     return await _plot_rendered_series(metric, target_profile, payload)
 
 

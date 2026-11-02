@@ -20,18 +20,10 @@ from .config import (
     get_http_timeout,
     load_profile_access_control,
 )
+from .constants import SAFE_PROFILE_ID_PATTERN, is_write_operation
 from .errors import ErrorCode
 
 logger = logging.getLogger(__name__)
-
-# Safe identifier patterns to prevent path traversal and ACL bypass.
-# Profile IDs must match what api.nextdns.io actually issues, not the stale
-# nextdns-openapi.yaml ProfileId parameter (which still claims 6 characters).
-# The live API returns 10-character IDs for newly created profiles (observed
-# 2026-10-03 in CI run 37139687479) while legacy profiles keep 6-character IDs,
-# so both shapes are accepted and everything else still fails fast locally
-# instead of 404ing upstream.
-SAFE_PROFILE_ID_PATTERN = re.compile(r"^(?:[a-z0-9]{6}|[a-z0-9]{10})$")
 
 # Hosts this client is allowed to send a request to. Every request carries the
 # X-Api-Key client header, so without a destination allow-list the account's API
@@ -149,18 +141,6 @@ def extract_profile_id_from_url(url: str) -> str | None:
         closed instead of silently skipping the access check.
     """
     return _extract_profile_id_from_path(_normalized_request_path(url))
-
-
-def is_write_operation(method: str) -> bool:
-    """Check if an HTTP method is a write operation.
-
-    Args:
-        method: HTTP method (GET, POST, PUT, PATCH, DELETE)
-
-    Returns:
-        True if it's a write operation, False otherwise
-    """
-    return method.upper() in ("POST", "PUT", "PATCH", "DELETE")
 
 
 class AccessDeniedError(Exception):

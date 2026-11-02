@@ -72,9 +72,16 @@ class DummyToolManager:
         return DummyTool()
 
 
+async def _no_tools() -> list:
+    """The catalog a minimal dummy server lists: nothing, so the owner hint stays generic."""
+    return []
+
+
 class DummyFastMCPContext:
     def __init__(self, raise_exc=False):
-        self.fastmcp = SimpleNamespace(get_tool=DummyToolManager(raise_exc=raise_exc).get_tool)
+        # A real FastMCP server answers get_tool and list_tools; the owner hint
+        # builds its index from list_tools, so the dummy must carry both.
+        self.fastmcp = SimpleNamespace(get_tool=DummyToolManager(raise_exc=raise_exc).get_tool, list_tools=_no_tools)
 
 
 class DummyMessage:
@@ -112,7 +119,9 @@ async def test_strip_extra_fields_middleware_basic_and_exception():
             return StringDummyTool()
 
     string_context = DummyContext("tool", {})
-    string_context.fastmcp_context.fastmcp = SimpleNamespace(get_tool=StringToolManager().get_tool)
+    string_context.fastmcp_context.fastmcp = SimpleNamespace(
+        get_tool=StringToolManager().get_tool, list_tools=_no_tools
+    )
     string_context.message.arguments = {"profile_id": "315244"}
     result = await mw.on_call_tool(string_context, _dummy_call_next)
     assert result == {"profile_id": "315244"}

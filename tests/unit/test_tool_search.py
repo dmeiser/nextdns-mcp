@@ -503,10 +503,26 @@ class TestSearchFallback:
         assert len(names) <= ts.CATALOG_MAX_RESULTS
 
     def test_build_transform_types(self):
+        from fastmcp.server.transforms.search import BM25SearchTransform
+
         from nextdns_mcp.tool_search import FallbackBM25SearchTransform, build_search_transform
 
         assert isinstance(build_search_transform("bm25"), FallbackBM25SearchTransform)
+        # The fold is direct: FallbackBM25SearchTransform subclasses FastMCP's
+        # transform itself (no untyped mixin in between, PRIN-1/ARCH-3).
+        assert isinstance(build_search_transform("bm25"), BM25SearchTransform)
+        assert FallbackBM25SearchTransform.__mro__[1] is BM25SearchTransform
         assert build_search_transform("off") is None
+
+    def test_an_unimplemented_mode_raises_rather_than_silencing_disclosure(self):
+        """A mode the factory has not implemented must fail, not mean 'off' (PRIN-9).
+
+        config.TOOL_SEARCH_MODES and this factory are two lists; returning None
+        for anything unknown meant a mode added to config would silently turn
+        discovery off. The raise is the seam where they cannot drift quietly.
+        """
+        with pytest.raises(ValueError, match="tool-search"):
+            ts.build_search_transform("regex")
 
 
 class TestSearchAnswerAsName:
@@ -678,6 +694,11 @@ class TestRankingOnTheWordsTheCatalogOwns:
             ("delete profile", "delete profile"),
             ("delete profile TEST_PROFILE_20261029", "delete profile TEST_PROFILE_20261029"),
             ("plot aa11aa", "plot aa11aa"),
+            # `profile_id=87c444` is the shape the strip's comment cites and the
+            # one the old exact-token match never stripped: the regex holds the
+            # compound token while the scope set holds the split words.
+            ("delete profile_id=87c444", "delete"),
+            ("update profile_id 87c444 now", "update now"),
         ],
     )
     def test_a_scope_reference_comes_out_and_a_subject_stays(self, query, kept):
@@ -734,6 +755,17 @@ class TestRankingOnTheWordsTheCatalogOwns:
             ("replace privacy_natives with alexa profile 87c444", "replacePrivacyNatives"),
             ("update performance settings for profile 51c8a4", "updatePerformanceSettings"),
             ("delete profile TEST_PROFILE_20261029", "deleteProfile"),
+            # The bare form of the flagship query: the shared-word discount ties
+            # deleteProfile and deleteRewrite on the verb, and only the
+            # undiscounted name-overlap tie-break puts the name the caller
+            # actually spelled first (qwen FUNC-3; the scope-referenced form
+            # above was pinned, the bare one - the live mis-call path - now is).
+            ("delete profile", "deleteProfile"),
+            # A generic leading verb no longer carries a tool into the top on
+            # its own: "get profile" reaches getProfile because the query also
+            # carries its object word, not to whichever get* tool has the
+            # friendlier prose (gemini ARCH-2).
+            ("get profile", "getProfile"),
         ],
     )
     async def test_a_query_in_the_shape_the_actor_writes_answers_the_right_tool(self, monkeypatch, query, first):
@@ -743,6 +775,26 @@ class TestRankingOnTheWordsTheCatalogOwns:
         async with Client(build_mcp_server()) as client:
             found = await client.call_tool("search_tools", {"query": query})
         assert next(tool["name"] for tool in found.data) == first
+
+    async def test_a_bare_verb_query_ranks_on_its_object_word_not_the_verb(self, monkeypatch):
+        """'get rewrites' answers listRewrites, not a get* tool reached through `get`.
+
+        The verb bonus used to be unconditional, and `get` (thirty-odd names)
+        dragged every ``get*`` tool in: getPrivacySettings scored above
+        listRewrites on "get" alone while "rewrites" - the word the query
+        actually contributed - went to the tool the caller meant (gemini
+        ARCH-2). listRewrites must rank above every tool reached only through
+        the generic verb.
+        """
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        from fastmcp import Client
+
+        async with Client(build_mcp_server()) as client:
+            found = await client.call_tool("search_tools", {"query": "get rewrites"})
+        names = [tool["name"] for tool in found.data]
+        assert "listRewrites" in names
+        if "getPrivacySettings" in names:
+            assert names.index("listRewrites") < names.index("getPrivacySettings")
 
 
 class TestATypedNameSaysWhichNamesThereAre:
@@ -808,3 +860,324 @@ class TestATypedNameSaysWhichNamesThereAre:
             with pytest.raises(Exception, match="is not a tool of this server") as raised:
                 await client.call_tool("call_tool", {"name": "zzzqqqTool", "arguments": {}})
         assert "search_tools(query)" in str(raised.value)
+
+
+class TestTheGenericVerbGate:
+    """A verb shared by a dozen names says what to do, not which tool (gemini ARCH-2).
+
+    The leading-verb exemption used to be unconditional: "get rewrites" scored
+    getPrivacySettings on `get` alone and outranked listRewrites, and "get
+    profile" ranked getPrivacySettings above getProfile. A verb that leads more
+    than one name now counts - hit, bonus, and inclusion in the answer - only
+    when a second query word also reaches that tool.
+    """
+
+    def test_a_generic_verb_alone_scores_nothing(self):
+        from nextdns_mcp.tool_search import _words_score
+
+        args = (
+            {"get", "rewrite"},
+            {"get", "privacy", "settings"},
+            {"profile", "id"},
+            {"profile"},
+            {"profile", "id"},
+            "get",
+        )
+        gated = _words_score(*args, frozenset({"get"}))
+        assert gated == 0
+        # Without the gate (the module-level default) the old full exemption is
+        # intact, so callers that pass no generic set keep the old arithmetic.
+        assert _words_score(*args) == 3
+
+    def test_a_second_word_the_tool_carries_restores_the_verb(self):
+        from nextdns_mcp.tool_search import _words_score
+
+        score = _words_score(
+            {"get", "privacy"},
+            {"get", "privacy", "settings"},
+            {"profile", "id"},
+            {"profile"},
+            {"profile", "id"},
+            "get",
+            frozenset({"get"}),
+        )
+        assert score == 5  # name hits {get, privacy} * 2 + the verb's extra
+
+    def test_a_verb_unique_to_one_name_is_that_tool_word_not_a_generic(self):
+        """dohLookup leads with `doh`; no other name does - the gate never fires."""
+        from nextdns_mcp.tool_search import _generic_leading_words
+
+        names = {"dohLookup": {"doh", "lookup"}, "getProfile": {"get", "profile"}, "getLogs": {"get", "log"}}
+        assert _generic_leading_words(names) == {"get"}
+
+    def test_a_tool_with_no_name_words_scores_nothing(self):
+        from nextdns_mcp.tool_search import _words_score
+
+        assert _words_score({"x"}, None, None, set(), set(), "") == 0
+
+
+class TestTieBreakOnUndiscountedNameOverlap:
+    """Score ties break on how many query words the NAME simply contains (qwen FUNC-3).
+
+    The shared-word discount ties deleteProfile and deleteRewrite for "delete
+    profile" - both match on the verb, "profile" is discounted - and the
+    fallback to BM25/registration order answered deleteRewrite. The raw name
+    overlap says the caller spelled deleteProfile itself.
+    """
+
+    def test_a_tie_breaks_for_the_tool_whose_name_holds_more_query_words(self):
+        from fastmcp.tools.base import Tool
+
+        from nextdns_mcp.tool_search import _rank_by_name_overlap
+
+        tools = [
+            Tool.from_function(lambda: None, name="deleteRewrite"),
+            Tool.from_function(lambda: None, name="deleteProfile"),
+        ]
+        # deleteRewrite is listed first and ties on the weighted score; the
+        # tie-break must not let registration order answer for the name itself.
+        assert _rank_by_name_overlap(tools, "delete profile")[0].name == "deleteProfile"
+
+
+class TestMemoizedCatalogStructures:
+    """Catalog constants are computed once per catalog identity, not per query (PERF-2/3/5, L).
+
+    The word memo keys on the sorted tool NAMES (the identity these structures
+    are keyed by); the compaction cache keys on the Tool instance and holds a
+    strong reference so an id cannot be recycled under it. A replaced catalog
+    is a new name-set / a new instance and rebuilds.
+    """
+
+    def test_catalog_words_are_memoized_by_tool_names(self):
+        from fastmcp.tools.base import Tool
+
+        transform = ts.FallbackBM25SearchTransform()
+        tools = [
+            Tool.from_function(lambda: None, name="aTool"),
+            Tool.from_function(lambda: None, name="bTool"),
+        ]
+        first = transform._catalog_words(tools)
+        # Same names, any order: the same memo object, not a recompute.
+        assert transform._catalog_words(list(reversed(tools))) is first
+        # A different catalog (different name set) is a different memo.
+        assert transform._catalog_words(tools[:1]) is not first
+
+    async def test_compacted_results_are_cached_but_handed_out_as_copies(self):
+        """The cache is never handed out by reference; a caller cannot mutate it."""
+        from fastmcp.tools.base import Tool
+
+        transform = ts.FallbackBM25SearchTransform()
+        tool = Tool.from_function(lambda: None, name="aTool", description="does a thing")
+        first = await transform._render_results([tool])
+        first[0]["name"] = "mutated-through-the-answer"
+        second = await transform._render_results([tool])
+        assert [t["name"] for t in second] == ["aTool"]
+        assert second[0] is not first[0]
+
+    def test_synthetic_tools_are_built_once(self):
+        """FastMCP rebuilds them per listing; they are constants of the transform."""
+        transform = ts.FallbackBM25SearchTransform()
+        assert transform._make_search_tool() is transform._make_search_tool()
+        assert transform._make_call_tool() is transform._make_call_tool()
+        assert transform._make_search_tool() is not transform._make_call_tool()
+
+
+class TestAnswerByteBudget:
+    """The whole-answer budget counts BYTES and skips rather than breaks (PRIN-11/PERF-8)."""
+
+    def test_the_budget_measures_bytes_not_characters(self):
+        from fastmcp.tools.base import Tool
+
+        tool = Tool.from_function(lambda: None, name="accentedTool", description="café " * 400)
+        dumped, cost = ts._compact_entry(tool)
+        # The cost is the UTF-8 byte length of the wire JSON (unescaped, as the
+        # MCP payload carries it), not the character count its dumps reported:
+        # each é is one character and two bytes.
+        wire = json.dumps(dumped, sort_keys=True, ensure_ascii=False)
+        assert cost == len(wire.encode("utf-8"))
+        assert cost > len(wire)
+
+    def test_an_oversized_middle_result_does_not_suppress_the_smaller_ones(self, monkeypatch):
+        """Skip-and-continue: breaking at the first overflow hid the small results after it."""
+        from fastmcp.tools.base import Tool
+
+        small_one = Tool.from_function(lambda: None, name="smallOne", description="a")
+        huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
+        small_two = Tool.from_function(lambda: None, name="smallTwo", description="b")
+        cost_one = ts._compact_entry(small_one)[1]
+        cost_huge = ts._compact_entry(huge)[1]
+        cost_two = ts._compact_entry(small_two)[1]
+        assert cost_huge > cost_one and cost_huge > cost_two
+        # The budget fits exactly the two small results, framing comma counted.
+        monkeypatch.setattr(ts, "SEARCH_ANSWER_MAX_BYTES", cost_one + len(",") + cost_two)
+        names = [result["name"] for result in ts._compact_search_results([small_one, huge, small_two])]
+        assert names == ["smallOne", "smallTwo"]
+
+    def test_the_first_result_is_kept_even_when_it_alone_overflows(self, monkeypatch):
+        """An empty answer is worse than a big one: the head stays no matter its size."""
+        from fastmcp.tools.base import Tool
+
+        monkeypatch.setattr(ts, "SEARCH_ANSWER_MAX_BYTES", 1)
+        huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
+        small = Tool.from_function(lambda: None, name="smallOne", description="b")
+        assert [result["name"] for result in ts._compact_search_results([huge, small])] == ["hugeOne"]
+
+
+class TestMultiEntryAnswerWriteGate:
+    """A multi-result answer whose head is a write is refused, not executed (SEC-6).
+
+    Piping the whole search answer into ``name`` used to run whatever ranked
+    first, including ``deleteProfile``. A single-entry answer still resolves
+    (the caller had one reading); a read at the head still resolves; the write
+    head is refused with the candidates named so the caller picks. Read-only
+    comes from the endpoint map, and a name the map does not carry (the local
+    operations) reads.
+    """
+
+    @staticmethod
+    def _tool(name: str):
+        from fastmcp.tools.base import Tool
+
+        return Tool.from_function(lambda: None, name=name)
+
+    async def test_a_multi_entry_answer_headed_by_a_write_is_refused_with_the_candidates(self):
+        from fastmcp.exceptions import ToolError
+
+        middleware = ts.CallToolShapeMiddleware(endpoints={"deleteProfile": ("DELETE", "/profiles/{profile_id}")})
+        answer = [{"name": "deleteProfile"}, {"name": "listProfiles"}, {"name": "getProfile"}]
+        with pytest.raises(ToolError, match="deleteProfile") as raised:
+            await middleware._resolve_tool_name(answer, [])
+        message = str(raised.value)
+        for candidate in ("listProfiles", "getProfile"):
+            assert candidate in message
+        assert "write" in message
+
+    async def test_a_multi_entry_answer_headed_by_a_read_resolves_to_the_head(self):
+        middleware = ts.CallToolShapeMiddleware(
+            endpoints={"deleteProfile": ("DELETE", "/p"), "listProfiles": ("GET", "/profiles")}
+        )
+        lister = self._tool("listProfiles")
+        resolved, target = await middleware._resolve_tool_name(
+            [{"name": "listProfiles"}, {"name": "deleteProfile"}], [lister, self._tool("deleteProfile")]
+        )
+        assert resolved == "listProfiles"
+        assert target is lister
+
+    async def test_a_single_entry_answer_resolves_even_when_the_tool_writes(self):
+        """One reading is not a guess: the caller chose that entry."""
+        middleware = ts.CallToolShapeMiddleware(endpoints={"deleteProfile": ("DELETE", "/p")})
+        deleter = self._tool("deleteProfile")
+        resolved, target = await middleware._resolve_tool_name([{"name": "deleteProfile"}], [deleter])
+        assert resolved == "deleteProfile"
+        assert target is deleter
+
+    async def test_a_name_absent_from_the_endpoint_map_reads(self):
+        """plotAnalytics/dohLookup are not spec routes; the gate must not treat them as writes."""
+        middleware = ts.CallToolShapeMiddleware(endpoints={"deleteProfile": ("DELETE", "/p")})
+        plot = self._tool("plotAnalytics")
+        resolved, target = await middleware._resolve_tool_name(
+            [{"name": "plotAnalytics"}, {"name": "getProfile"}], [plot]
+        )
+        assert resolved == "plotAnalytics"
+        assert target is plot
+
+
+class TestShapeRepairAnnouncesItself:
+    """A re-targeted call says so on the payload and in the log (nemotron PRIN-5, qwen ARCH-5).
+
+    Silent repair removes the caller's ability to notice a wrong discovery on a
+    server that mutates NextDNS state: the executed name differs from the name
+    sent, so the structured content carries `resolved_from` (what the caller
+    actually sent, short) and the correction logs at WARNING, not INFO.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _server_env(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+
+    async def test_a_normalised_name_is_annotated_on_the_payload_and_warned(self, caplog):
+        import logging
+
+        from fastmcp import Client
+
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
+            async with Client(build_mcp_server()) as client:
+                result = await client.call_tool(
+                    "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}
+                )
+        content = json.dumps(getattr(result, "structured_content", None) or {})
+        assert "/profiles/abc123/denylist" in content, content
+        assert (getattr(result, "structured_content", None) or {}).get("resolved_from") == "get_denylist"
+        assert any(r.levelno == logging.WARNING and "once normalised" in r.getMessage() for r in caplog.records)
+
+    async def test_a_plain_name_carries_no_annotation_and_no_warning(self, caplog):
+        import logging
+
+        from fastmcp import Client
+
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
+            async with Client(build_mcp_server()) as client:
+                result = await client.call_tool(
+                    "call_tool", {"name": "getDenylist", "arguments": {"profile_id": "abc123"}}
+                )
+        assert "resolved_from" not in (getattr(result, "structured_content", None) or {})
+        assert not [r for r in caplog.records if r.name == "nextdns_mcp.tool_search" and r.levelno >= logging.WARNING]
+
+    async def test_a_lifted_argument_repair_logs_at_warning(self, caplog):
+        import logging
+
+        from fastmcp import Client
+
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
+            async with Client(build_mcp_server()) as client:
+                await client.call_tool("call_tool", {"name": "getDenylist", "profile_id": "abc123"})
+        assert any(r.levelno == logging.WARNING and "beside name" in r.getMessage() for r in caplog.records)
+
+    async def test_a_search_answer_name_repair_logs_at_warning(self, caplog):
+        import logging
+
+        from fastmcp import Client
+
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
+            async with Client(build_mcp_server()) as client:
+                found = await client.call_tool("search_tools", {"query": "list profiles"})
+                await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}})
+        assert any(r.levelno == logging.WARNING and "top-ranked" in r.getMessage() for r in caplog.records)
+
+    def test_a_non_dict_payload_passes_the_annotation_through_unchanged(self):
+        from types import SimpleNamespace
+
+        from nextdns_mcp.tool_search import _annotate_resolved_from
+
+        result = SimpleNamespace(structured_content=None)
+        assert _annotate_resolved_from(result, "other", "realTool") is result
+        assert _annotate_resolved_from(result, "realTool", "realTool") is result
+        assert _annotate_resolved_from(result, "other", None) is result
+        shaped = _annotate_resolved_from(SimpleNamespace(structured_content={"ok": True}), ["x"], "realTool")
+        assert shaped.structured_content["resolved_from"] == '["x"]'
+
+    async def test_the_description_says_a_write_headed_answer_is_refused_not_run(self, monkeypatch):
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        async with Client(build_mcp_server()) as client:
+            described = {t.name: (t.description or "") for t in await client.list_tools()}
+        call = " ".join(described["call_tool"].split()).casefold()
+        assert "refused rather than executed" in call
+
+
+class TestCatalogReadFailure:
+    """A catalog that cannot be read must not break the call it was read to shape (MAINT-5)."""
+
+    async def test_a_failing_catalog_read_still_lets_the_call_proceed(self):
+        from types import SimpleNamespace
+
+        def exploding_catalog(context):
+            raise RuntimeError("catalog unavailable")
+
+        transform = SimpleNamespace(get_tool_catalog=exploding_catalog)
+        context = SimpleNamespace(fastmcp_context=object())
+        assert await ts.CallToolShapeMiddleware(transform)._catalog(context) == ()

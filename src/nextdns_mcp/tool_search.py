@@ -19,6 +19,10 @@ and both are client-agnostic (they live in the MCP server, not in a prompt):
 2. Name-aware re-rank: a tool whose own NAME contains the caller's words ranks
    first, with BM25's order preserved on ties.
 
+The two synthetic entry points keep FastMCP's fixed names: ``search_tools`` is
+plural and ``call_tool`` singular — the asymmetry is FastMCP's contract, not a
+local inconsistency to rename.
+
 SPDX-License-Identifier: MIT
 """
 
@@ -27,13 +31,18 @@ import logging
 import math
 import re
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms.search import BM25SearchTransform
 from fastmcp.tools.base import Tool
+
+from .config import ConfigurationError
+from .constants import is_write_operation
+from .utils import schema_required
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +82,9 @@ def _words(text: str) -> set[str]:
     """Split a tool name or query into comparable words.
 
     Trailing 's' is stripped from longer words so the plural of a tool's name
-    ('manageProfiles' -> 'profile') matches the caller's wording ('delete
-    profile'), and '-ies' folds the same way ('categories' -> 'category') so a
-    plural query reaches a tool whose name and prose spell it singular. Both
+    ('profiles' -> 'profile') matches the caller's wording ('delete profile'),
+    and '-ies' folds the same way ('categories' -> 'category') so a plural
+    query reaches a tool whose name and prose spell it singular. Both
     sides go through this function, so a crude fold is fine as long as it is
     symmetric: it only needs to make a name and a short query comparable, not
     to parse language.
@@ -139,15 +148,17 @@ def _variant_words(query: str, vocabulary: set[str], exclude: set[str] | frozens
 
 
 # A word that names what every tool is scoped to, written straight before an
-# identifier: `profile 87c444`, `profile_id=87c444`. The identifier is what
-# makes it a scope reference rather than a subject.
-_SCOPE_MENTION = re.compile(r"""(?i)\b([a-z][a-z0-9_-]*)[\s :=/#'.\-]{0,3}(?:0x)?([0-9a-f]{5,}|\d{4,})['\"]?""")
+# identifier with a real separator between them: `profile 87c444`,
+# `profile_id=87c444`. The separator is what makes the pair a reference; an
+# identifier with the word fused into one token (`TEST_PROFILE_20261029`) is a
+# name, not a scope mention, and the empty separator keeps it.
+_SCOPE_MENTION = re.compile(r"""(?i)\b([a-z][a-z0-9_-]*)([\s :=/#'.\-]{0,3})(?:0x)?([0-9a-f]{5,}|\d{4,})['\"]?""")
 
 
 def _parameter_words(tool: Tool) -> set[str]:
     """The words of one tool's parameter names."""
     words: set[str] = set()
-    for parameter in (tool.parameters or {}).get("properties") or {}:
+    for parameter in _tool_properties(tool):
         words.update(_words(parameter))
     return words
 
@@ -155,9 +166,9 @@ def _parameter_words(tool: Tool) -> set[str]:
 def _scope_words(tools: Sequence[Tool]) -> set[str]:
     """Words naming the object every tool takes, so they single out no tool.
 
-    `profile_id` is a parameter of all eight tools in this catalog, and every
-    task states the profile it acts on, so `profile` in a query says which
-    account the work is on - not that the caller wants manageProfiles.
+    `profile_id` is a parameter of nearly every tool in this 78-operation
+    catalog, and every task states the profile it acts on, so `profile` in a
+    query says which account the work is on - not which tool the caller wants.
     """
     if len(tools) < 2:
         return set()
@@ -174,10 +185,17 @@ def _strip_scope_mentions(query: str, scope_words: set[str]) -> str:
     Only the pair counts: `profile` on its own is a subject ("delete profile"),
     and stays. A word that is not a scope noun stays too, even before an
     identifier, because then the identifier is the thing being asked about.
+    The captured token is compared through :func:`_words` because the regex
+    keeps a compound spelling whole (`profile_id`) while the scope set holds
+    the split folded words (`profile`, `id`); without the split the `=`-mention
+    the comment above cites never matched, measured live.
     """
 
     def _replace(match: re.Match[str]) -> str:
-        return match.group(0) if match.group(1).casefold() not in scope_words else " "
+        separator = match.group(2)
+        if separator and _words(match.group(1)) & scope_words:
+            return " "
+        return match.group(0)
 
     return _SCOPE_MENTION.sub(_replace, query)
 
@@ -188,12 +206,14 @@ def _leading_word(name: str) -> str:
     Every ``operationId`` in this document is verb-first (``getX``, ``addX``,
     ``removeX``, ``updateX``, ``plotAnalytics``), so the leading word is the one
     thing that separates two tools over the same object: ``addToDenylist`` and
-    ``updateDenylistEntry`` differ in nothing else their name says.
+    ``updateDenylistEntry`` differ in nothing else their name says. It folds
+    through :func:`_fold_word` like every other word, so a verb spelled plural
+    compares equal to the query's singular.
     """
     for raw in _WORD_SPLIT.split(name):
         word = raw.casefold()
         if word:
-            return word[:-1] if len(word) > 3 and word.endswith("s") else word
+            return _fold_word(word)
     return ""
 
 
@@ -203,7 +223,7 @@ def _name_words(tools: Sequence[Tool]) -> dict[str, set[str]]:
 
 
 def _accepted_value_words(schema: Any) -> set[str]:
-    """The words of a parameter's accepted enum values ('general' names manageSettings' category)."""
+    """The words of a parameter's accepted enum values ('countries' names the analytics `type`)."""
     accepted = schema.get("enum") if isinstance(schema, dict) else None
     if not isinstance(accepted, list):
         return set()
@@ -213,14 +233,14 @@ def _accepted_value_words(schema: Any) -> set[str]:
 def _vocabulary_words(tools: Sequence[Tool]) -> dict[str, set[str]]:
     """The words each tool's own contract uses: its parameters and accepted values.
 
-    `general` is a value of manageSettings' `category` and of nothing else, so a
-    caller that writes "general settings" has named that tool even when it never
-    writes the word "settings" the way its name spells it.
+    `countries` is an accepted value of the analytics-destination tools' `type`
+    and of nothing else, so a caller that writes "countries" has named that
+    family even when it never writes the words the tool's name spells.
     """
     out: dict[str, set[str]] = {}
     for tool in tools:
         words: set[str] = set()
-        for parameter, schema in ((tool.parameters or {}).get("properties") or {}).items():
+        for parameter, schema in _tool_properties(tool).items():
             words.update(_words(parameter))
             words.update(_accepted_value_words(schema))
         out[tool.name] = words
@@ -261,9 +281,9 @@ def _shared_word_sets(names: dict[str, set[str]], vocabulary: dict[str, set[str]
     Two sides are discounted separately on purpose. A word carried by much of the
     catalog's *prose* ("domain", "settings", "profile") describes what tools talk
     about, not what they do, so it cancels on both sides — unless exactly one tool
-    carries it in its NAME, which is a signal no vocabulary can override: `settings`
-    belongs to one name here, and a caller writing "read the current settings" means
-    that tool.
+    carries it in its NAME, which is a signal no vocabulary can override: `clear`
+    belongs to one name here (clearLogs), and a caller writing "clear the logs"
+    means that tool whatever the rest of the catalog's prose says.
 
     The exception on the name side is the leading word. Every ``operationId`` in this
     document is verb-first, so within a family of tools over one object the verb is
@@ -279,6 +299,57 @@ def _shared_word_sets(names: dict[str, set[str]], vocabulary: dict[str, set[str]
     return name_shared, vocab_shared
 
 
+def _generic_leading_words(names: dict[str, set[str]]) -> set[str]:
+    """Leading words that lead more than one name - verbs, not identities.
+
+    A leading word unique to one name (`doh` in dohLookup, `plot` in
+    plotAnalytics) IS that tool's word, and a query saying it names the tool.
+    A word leading a dozen names (`get`, `update`, `delete`) says what to do,
+    not which tool, so it carries weight only beside a second word the tool
+    itself matches - otherwise "get rewrites" reaches getPrivacySettings on
+    `get` alone and outranks listRewrites, measured live.
+    """
+    counts = Counter(_leading_word(name) for name in names)
+    return {word for word, count in counts.items() if count > 1}
+
+
+def _matches_beyond_verb(
+    query_words: set[str],
+    name_words: set[str] | None,
+    vocabulary_words: set[str] | None,
+    leading_word: str,
+    name_shared: set[str],
+    vocab_shared: set[str],
+) -> bool:
+    """Whether the query reaches a tool on an INFORMATIVE word that is not its verb.
+
+    The second word must single the tool out, not just describe every tool:
+    "get profile" rides on `profile`, a word every tool's contract carries, and
+    says nothing about which tool the caller wants - that is the scope-word rule
+    again, so a shared word does not open the gate. A word in the tool's name or
+    accepted values that the rest of the catalog does not carry ("privacy" for
+    the privacy tools' updater, "performance" for updatePerformanceSettings) is
+    the query naming a subject.
+    """
+    informative = ((name_words or set()) - name_shared) | ((vocabulary_words or set()) - vocab_shared)
+    return bool((query_words - {leading_word}) & informative)
+
+
+def _verb_counts(
+    query_words: set[str],
+    name_words: set[str] | None,
+    vocabulary_words: set[str] | None,
+    leading_word: str,
+    generic_verbs: set[str] | frozenset[str],
+    name_shared: set[str],
+    vocab_shared: set[str],
+) -> bool:
+    """Whether a name's leading word carries weight for this query."""
+    if leading_word not in generic_verbs:
+        return True
+    return _matches_beyond_verb(query_words, name_words, vocabulary_words, leading_word, name_shared, vocab_shared)
+
+
 def _words_score(
     query_words: set[str],
     name_words: set[str] | None,
@@ -286,6 +357,7 @@ def _words_score(
     name_shared: set[str],
     vocab_shared: set[str],
     leading_word: str,
+    generic_verbs: set[str] | frozenset[str] = frozenset(),
 ) -> int:
     """How much of the caller's wording one tool's own words account for.
 
@@ -293,27 +365,92 @@ def _words_score(
     while prose is what it talks about. The name's leading word counts once more
     again: it is the verb, and the verb is the only thing two tools over the same
     object differ on, so "add entry to denylist" has to answer ``addToDenylist``
-    rather than ``updateDenylistEntry`` on the strength of the word "add".
+    rather than ``updateDenylistEntry`` on the strength of the word "add". A verb
+    generic to the catalog (`get`, `update`) earns that weight - its name hit and
+    its bonus - only when an informative second word also reaches the tool; a
+    query of verb plus shared scope word ("update profile") says what to do and
+    where, not to what, and must not lift every ``update*`` tool at once.
     """
-    return (
-        _overlap(query_words, name_words, name_shared) * 2
-        + (1 if leading_word and leading_word in query_words else 0)
-        + _overlap(query_words, vocabulary_words, vocab_shared)
+    name_hits = query_words & (name_words - name_shared) if name_words else set()
+    verb_hit = leading_word in query_words
+    gate = _verb_counts(
+        query_words, name_words, vocabulary_words, leading_word, generic_verbs, name_shared, vocab_shared
     )
+    if verb_hit and not gate:
+        name_hits -= {leading_word}
+        verb_hit = False
+    return len(name_hits) * 2 + int(verb_hit) + _overlap(query_words, vocabulary_words, vocab_shared)
+
+
+def _tool_named_by(
+    query_words: set[str],
+    name_words: set[str],
+    vocabulary_words: set[str] | None,
+    leading_word: str,
+    generic_verbs: set[str] | frozenset[str],
+    name_shared: set[str],
+    vocab_shared: set[str],
+) -> bool:
+    """Whether the caller's own words name this tool (see _named_tools)."""
+    if (query_words & name_words) - {leading_word}:
+        return True
+    verb_match = leading_word in query_words and leading_word in name_words
+    return verb_match and _verb_counts(
+        query_words, name_words, vocabulary_words, leading_word, generic_verbs, name_shared, vocab_shared
+    )
+
+
+def _named_tools(
+    query_words: set[str],
+    names: dict[str, set[str]],
+    vocabulary: dict[str, set[str]],
+    name_shared: set[str],
+    vocab_shared: set[str],
+    leading: Mapping[str, str],
+    generic_verbs: set[str] | frozenset[str],
+) -> set[str]:
+    """Tools the caller's own words reach by name, with the generic-verb gate.
+
+    Inclusion rides on the UNDISCOUNTED name overlap minus the leading verb:
+    a tool the caller worded, even with a catalog-shared word ("profile" in
+    deleteProfile), is never left out of the answer. A tool reached ONLY by a
+    verb generic to the catalog is, unless an informative second word also
+    reaches it - that verb reaches a dozen tools at once, and it used to drag
+    every ``get*`` tool into the answer for "get rewrites" while listRewrites,
+    the tool the query actually named, fought for its place.
+    """
+    return {
+        name
+        for name, name_words in names.items()
+        if _tool_named_by(
+            query_words,
+            name_words,
+            vocabulary.get(name),
+            leading.get(name, ""),
+            generic_verbs,
+            name_shared,
+            vocab_shared,
+        )
+    }
 
 
 def _word_scorer(
     query_words: set[str],
     names: dict[str, set[str]],
     vocabulary: dict[str, set[str]],
+    shared: tuple[set[str], set[str]] | None = None,
 ) -> Callable[[str], int]:
     """A scorer for how much of the query each tool's own words account for.
 
     Binds the catalog-wide discounting (shared names/values) and the leading-verb
-    exception once, so ranking callers score by tool name alone.
+    exception once, so ranking callers score by tool name alone. `shared` carries
+    the precomputed ``(name_shared, vocab_shared)`` when the caller already has
+    them (the transform memoizes them per catalog); without it they are derived
+    here, which is what direct callers of this function expect.
     """
-    name_shared, vocab_shared = _shared_word_sets(names, vocabulary)
+    name_shared, vocab_shared = _shared_word_sets(names, vocabulary) if shared is None else shared
     leading = {name: _leading_word(name) for name in names}
+    generic = frozenset(_generic_leading_words(names))
     return lambda name: _words_score(
         query_words,
         names.get(name),
@@ -321,6 +458,7 @@ def _word_scorer(
         name_shared,
         vocab_shared,
         leading.get(name, ""),
+        generic,
     )
 
 
@@ -329,6 +467,7 @@ def _rank_by_name_overlap(
     query: str,
     names: dict[str, set[str]] | None = None,
     vocabulary: dict[str, set[str]] | None = None,
+    shared: tuple[set[str], set[str]] | None = None,
 ) -> list[Tool]:
     """Order matched tools by how much of the query their own words account for.
 
@@ -341,14 +480,28 @@ def _rank_by_name_overlap(
     a parameter or an accepted value; see :func:`_shared_word_sets` for which words
     those are, and for the verb-first exception that keeps a family of tools over one
     object sortable by what the caller asked to *do* to it.
+
+    A tie on the weighted score breaks on the UNDISCOUNTED name overlap - how many
+    of the caller's words the tool's name simply contains - before falling through
+    to the underlying rank: the shared-word discount made "delete profile" score
+    equal for deleteProfile and deleteRewrite (both match on the verb "delete",
+    "profile" is discounted), and only the raw name overlap says the caller also
+    spelled deleteProfile itself. `names`/`vocabulary`/`shared` let the transform
+    hand in its memoized catalog structures instead of rebuilding them.
     """
     names = _name_words(tools) if names is None else names
     vocabulary = _vocabulary_words(tools) if vocabulary is None else vocabulary
     query_words = _words(query)
     if not query_words:
         return list(tools)
-    scorer = _word_scorer(query_words, names, vocabulary)
-    indexed = sorted(enumerate(tools), key=lambda pair: (-scorer(pair[1].name), pair[0]))
+    scorer = _word_scorer(query_words, names, vocabulary, shared)
+
+    def _key(pair: tuple[int, Tool]) -> tuple[int, int, int]:
+        index, tool = pair
+        raw_overlap = len(query_words & names.get(tool.name, set()))
+        return (-scorer(tool.name), -raw_overlap, index)
+
+    indexed = sorted(enumerate(tools), key=_key)
     return [tool for _, tool in indexed]
 
 
@@ -357,15 +510,93 @@ def _overlap(query_words: set[str], words: set[str] | None, shared: set[str]) ->
     return len(query_words & (words - shared)) if words else 0
 
 
-class _CatalogAwareSearchMixin:
-    """Full-catalog fallback for empty results, plus the name-aware re-rank.
+@dataclass
+class _CatalogWords:
+    """One catalog's word structures, computed once and reused on every query.
 
-    Mixin for the FastMCP search transforms. Keeps the disclosure flow intact
-    (tools/list still hides the real tools; the model must still search then
-    call_tool) but makes discovery robust to unhelpful queries.
+    The catalog is registered at startup and static while the server runs, so
+    every structure here is a constant of its tool NAMES; the transform's memo
+    keys on the sorted names, and a catalog under a different set of names
+    rebuilds them. FastMCP's own content hash still detects re-registered
+    descriptions for the BM25 index; this memo deliberately keys on names only,
+    because names are what these structures are keyed by.
     """
 
-    _max_results: int
+    names: dict[str, set[str]]
+    vocabulary: dict[str, set[str]]
+    leading: dict[str, str]
+    generic_verbs: frozenset[str]
+    scope: set[str]
+    raw_names: set[str]
+    name_shared: set[str]
+    vocab_shared: set[str]
+
+
+def _catalog_words_for(tools: Sequence[Tool]) -> _CatalogWords:
+    """Compute every catalog-derived word structure once (see _CatalogWords)."""
+    names = _name_words(tools)
+    vocabulary = _vocabulary_words(tools)
+    name_shared, vocab_shared = _shared_word_sets(names, vocabulary)
+    return _CatalogWords(
+        names=names,
+        vocabulary=vocabulary,
+        leading={name: _leading_word(name) for name in names},
+        generic_verbs=frozenset(_generic_leading_words(names)),
+        scope=_scope_words(tools),
+        raw_names=_catalog_name_words(tools),
+        name_shared=name_shared,
+        vocab_shared=vocab_shared,
+    )
+
+
+class FallbackBM25SearchTransform(BM25SearchTransform):
+    """BM25 search with a full-catalog fallback and name-aware ranking.
+
+    Keeps the disclosure flow intact (tools/list still hides the real tools;
+    the model must still search then call_tool) but makes discovery robust to
+    unhelpful queries. FastMCP keeps ``_search``, ``_make_search_tool``,
+    ``_make_call_tool`` and ``_render_results`` private, and
+    ``BaseSearchTransform.__init__`` sets ``_max_results`` privately too; this
+    subclass borrows exactly that surface, on the only subclass there is, and
+    pins ``fastmcp==4.1.2`` with it - the annotations below name the borrowed
+    attributes so a FastMCP bump finds them instead of failing at request time.
+
+    The catalog-derived word structures, the compacted per-tool payloads, and
+    the two synthetic Tools are memoized on the instance: all of them are
+    constants of a static catalog, and rebuilding them per query was the
+    measured hot path.
+    """
+
+    _max_results: int  # private attribute set by BaseSearchTransform.__init__
+
+    def __init__(
+        self,
+        *,
+        max_results: int = 5,
+        always_visible: list[str] | None = None,
+        search_tool_name: str = "search_tools",
+        call_tool_name: str = "call_tool",
+        search_result_serializer: Any = None,
+    ) -> None:
+        super().__init__(
+            max_results=max_results,
+            always_visible=always_visible,
+            search_tool_name=search_tool_name,
+            call_tool_name=call_tool_name,
+            search_result_serializer=search_result_serializer,
+        )
+        self._word_memos: dict[tuple[str, ...], _CatalogWords] = {}
+        self._compacted_cache: dict[int, tuple[Tool, dict[str, Any], int]] = {}
+        self._synthetic_tools: dict[str, Tool] = {}
+
+    def _catalog_words(self, tools: Sequence[Tool]) -> _CatalogWords:
+        """The catalog's word structures, memoized by its sorted tool names."""
+        key = tuple(sorted(tool.name for tool in tools))
+        memo = self._word_memos.get(key)
+        if memo is None:
+            memo = _catalog_words_for(tools)
+            self._word_memos[key] = memo
+        return memo
 
     def _augment_query(self, query: str, variants: set[str]) -> str:
         """Widen a lexical query with the catalog's own other spellings.
@@ -379,38 +610,49 @@ class _CatalogAwareSearchMixin:
         return " ".join([query, *sorted(variants)])
 
     async def _search(self, tools: Sequence[Tool], query: str) -> Sequence[Tool]:
+        """BM25 with named-tool rescue and fallback, then the name re-rank.
+
+        The re-rank runs over the FULL merged list and the slice comes last:
+        slicing to max_results first cut tools that belonged in the answer
+        before the name scorer ever saw them, worst on the fallback path where
+        the ranking is the only signal left.
+        """
         # A scope reference is scored out before anything else, because it is
         # the one phrase every task in this API contains and the one that most
         # often points the ranking at the wrong tool.
-        stripped = _strip_scope_mentions(query, _scope_words(tools))
-        names = _name_words(tools)
-        vocabulary = _vocabulary_words(tools)
-        # The same discounting the re-rank uses, so a tool the caller named with a
-        # verb ("add ... to the denylist") is kept in the answer rather than dropped
-        # because the verb is common: within a family of tools the verb is the only
-        # thing their names differ on.
-        name_shared, vocab_shared = _shared_word_sets(names, vocabulary)
+        catalog = self._catalog_words(tools)
+        stripped = _strip_scope_mentions(query, catalog.scope)
         # Only the scoring query widens; the name-inclusion below stays on the
         # caller's own words, which is what "named" has always meant. Shared
         # scope words are never widened - they name every tool at once.
         scored = self._augment_query(
             stripped,
-            _variant_words(stripped, _catalog_name_words(tools), exclude=name_shared | vocab_shared),
+            _variant_words(stripped, catalog.raw_names, exclude=catalog.name_shared | catalog.vocab_shared),
         )
-        results = list(await super()._search(tools, scored) or [])  # type: ignore[misc]
+        results = list(await super()._search(tools, scored) or [])
         # A tool whose own name carries the caller's word is never left out of
         # the answer. BM25 ranks prose, so which prose wins changes when a
-        # description gets longer: publishing the full docstrings took `doh`
-        # from dohLookup to queryAnalytics, and the tool named for the request
-        # dropped out of the result set entirely.
-        words = _words(stripped) - name_shared
-        named = {name for name, words_in_name in names.items() if words & words_in_name}
+        # description gets longer: publishing the full docstrings once moved
+        # the `doh` match off the tool named for it, and that tool dropped out
+        # of the result set entirely.
+        words = _words(stripped)
+        named = _named_tools(
+            words,
+            catalog.names,
+            catalog.vocabulary,
+            catalog.name_shared,
+            catalog.vocab_shared,
+            catalog.leading,
+            catalog.generic_verbs,
+        )
         if not results:
             # Nothing matched at all: the caller's words are the only signal
             # left, so answer with the catalog and let the name order sort it.
             results = list(tools)
         merged = _merge_named_results(results, tools, named)
-        return _rank_by_name_overlap(merged[: self._max_results], stripped, names, vocabulary)
+        shared = (catalog.name_shared, catalog.vocab_shared)
+        ranked = _rank_by_name_overlap(merged, stripped, catalog.names, catalog.vocabulary, shared)
+        return ranked[: self._max_results]
 
     def _make_search_tool(self) -> Tool:
         """FastMCP's search tool, with this server's discovery contract on it.
@@ -419,15 +661,52 @@ class _CatalogAwareSearchMixin:
         ``tools/list``, so their descriptions are the always-visible place to
         state how the server is meant to be used. FastMCP's own wording is a
         one-liner that never says the catalog is hidden or that guessing fails.
+        FastMCP rebuilds a Tool on every listing; these two are constants of
+        this transform, so the first build is the one kept.
         """
-        tool = super()._make_search_tool()  # type: ignore[misc]
-        tool.description = _SEARCH_TOOL_DESCRIPTION
+        tool = self._synthetic_tools.get("search")
+        if tool is None:
+            tool = super()._make_search_tool()
+            tool.description = _SEARCH_TOOL_DESCRIPTION
+            self._synthetic_tools["search"] = tool
         return tool
 
     def _make_call_tool(self) -> Tool:
-        tool = super()._make_call_tool()  # type: ignore[misc]
-        tool.description = _CALL_TOOL_DESCRIPTION
+        """FastMCP's call_tool proxy, with this server's contract on it (cached)."""
+        tool = self._synthetic_tools.get("call")
+        if tool is None:
+            tool = super()._make_call_tool()
+            tool.description = _CALL_TOOL_DESCRIPTION
+            self._synthetic_tools["call"] = tool
         return tool
+
+    async def _render_results(self, tools: Sequence[Tool]) -> Any:
+        """The search answer, rendered from the cached compaction (see _serialize_results)."""
+        return self._serialize_results(tools)
+
+    def _serialize_results(self, tools: Sequence[Tool]) -> list[dict[str, Any]]:
+        """FastMCP's search shape, from the cache, under the whole-answer budget.
+
+        Each kept entry is a shallow copy: the cached dict is never handed to a
+        caller, so nothing downstream can mutate the cache through an answer.
+        """
+        return [dict(dumped) for dumped in _budget_results([self._cached_compaction(tool) for tool in tools])]
+
+    def _cached_compaction(self, tool: Tool) -> tuple[dict[str, Any], int]:
+        """One tool's compacted payload and byte cost, cached per Tool instance.
+
+        Keyed on the instance's id, with a strong reference to the Tool kept in
+        the entry so an id cannot be recycled under it. The catalog is
+        registered once at startup; a re-registered tool is a fresh instance
+        with a fresh entry, and the old entry - never hit again - lives until
+        the process does. Same static-catalog assumption as the word memo.
+        """
+        cached = self._compacted_cache.get(id(tool))
+        if cached is None:
+            dumped, cost = _compact_entry(tool)
+            cached = (tool, dumped, cost)
+            self._compacted_cache[id(tool)] = cached
+        return cached[1], cached[2]
 
 
 def _partition_named(results: Sequence[Tool], named: set[str]) -> tuple[list[Tool], list[Tool]]:
@@ -476,14 +755,13 @@ Takes exactly one argument object, {"name": "<tool>", "arguments": {<that tool's
 parameters>}}; the name and the arguments are not two separate inputs. `name`
 selects one tool: one search result's `name` field. If the search answer itself
 is passed instead - the array of results, or one result object - it resolves to
-the highest-ranked tool in it, because the answer is in rank order. Anything
-search_tools did not return is not a tool of this server. A failed call returns
-a JSON payload with an error `code` and, when available, a `hint`.
+the highest-ranked tool in it, because the answer is in rank order; a
+multi-result answer whose highest-ranked tool is a write is refused rather than
+executed, and the refusal names the candidates so the call can be re-sent with
+one name. Anything search_tools did not return is not a tool of this server. A
+failed call returns a JSON payload with an error `code` and, when available, a
+`hint`.
 """
-
-
-class FallbackBM25SearchTransform(_CatalogAwareSearchMixin, BM25SearchTransform):
-    """BM25 search with a full-catalog fallback and name-aware ranking."""
 
 
 def _truncate_description(dumped: dict[str, Any]) -> None:
@@ -502,6 +780,41 @@ def _truncate_description(dumped: dict[str, Any]) -> None:
     dumped["description"] = description[:cut].rstrip() + "\n[description truncated]"
 
 
+def _compact_entry(tool: Tool) -> tuple[dict[str, Any], int]:
+    """FastMCP's dump of one tool, description cut, with its whole-answer byte cost.
+
+    The cost is measured on UTF-8 BYTES, not characters: the budget bounds what
+    crosses the wire, and a non-ASCII description costs more bytes than the
+    ``len(json.dumps(...))`` character count reported.
+    """
+    dumped = tool.to_mcp_tool().model_dump(mode="json", by_alias=True, exclude_none=True)
+    _truncate_description(dumped)
+    return dumped, len(json.dumps(dumped, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+
+
+def _budget_results(entries: Sequence[tuple[dict[str, Any], int]]) -> list[dict[str, Any]]:
+    """Assemble a search answer under SEARCH_ANSWER_MAX_BYTES.
+
+    The accounting is skip-and-continue, not break: a result that does not fit
+    is skipped and the scan goes on, so one oversized early result cannot
+    suppress every smaller one after it (breaking at the first overflow was
+    what it did, and the smaller later candidates were the ones the caller
+    still needed). The FIRST result is always kept, even when it alone
+    overflows the budget - an empty answer is worse than a big one. Framing is
+    counted too: every result after the first rides in the JSON array behind a
+    comma, so it carries that ``len(",")`` byte of overhead.
+    """
+    results: list[dict[str, Any]] = []
+    spent = 0
+    for dumped, cost in entries:
+        framing = len(",") if results else 0
+        if results and spent + framing + cost > SEARCH_ANSWER_MAX_BYTES:
+            continue
+        spent += framing + cost
+        results.append(dumped)
+    return results
+
+
 def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
     """FastMCP's search-result shape, with each description cut to a budget.
 
@@ -512,22 +825,10 @@ def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
     did that stalled 27 times across 29 steps. So the search payload carries a
     bounded excerpt - cut at a line boundary, never mid-sentence - and the
     input schema, which is the part that decides whether the call is valid, is
-    never cut.
+    never cut. The transform's cached serializer (see _cached_compaction) is
+    the mounted one; this module-level form is the uncached reference version.
     """
-    results: list[dict[str, Any]] = []
-    spent = 0
-    for tool in tools:
-        dumped = tool.to_mcp_tool().model_dump(mode="json", by_alias=True, exclude_none=True)
-        _truncate_description(dumped)
-        # The whole answer is bounded too: four fully-described tools is still
-        # ~10 KB, and it is the lower-ranked ones that are least likely to be
-        # the tool the caller wanted. At least one result is always returned.
-        cost = len(json.dumps(dumped, sort_keys=True))
-        if results and spent + cost > SEARCH_ANSWER_MAX_BYTES:
-            break
-        spent += cost
-        results.append(dumped)
-    return results
+    return _budget_results([_compact_entry(tool) for tool in tools])
 
 
 def _closest_tools(name: str, tools: Sequence[Tool], limit: int = 3) -> list[Tool]:
@@ -547,7 +848,7 @@ def _closest_tools(name: str, tools: Sequence[Tool], limit: int = 3) -> list[Too
 
 def _required_arguments(tool: Tool) -> str:
     """The arguments a tool cannot be called without, read from its own schema."""
-    required = [str(item) for item in ((tool.parameters or {}).get("required") or [])]
+    required = schema_required(tool.parameters)
     return ", ".join(required) if required else "no arguments"
 
 
@@ -587,7 +888,7 @@ def _match_tool_name(name: str, names: Sequence[str]) -> str:
     """The catalog entry a mistyped name unambiguously means, or ''.
 
     Two readings only, both exact. The same name with separators and case
-    removed: ``manage_profiles`` and ``manageprofiles`` are manageProfiles. The
+    removed: ``get_denylist`` and ``getdenylist`` are getDenylist. The
     same words in another order: ``analytics/plot`` is plotAnalytics, because
     the caller used that tool's own words and nothing else. A near miss that is
     neither is left alone - the caller gets the diagnosis, not a guess.
@@ -610,13 +911,19 @@ def _dict_entry_name(value: dict[str, Any]) -> str:
     return name.strip() if isinstance(name, str) else ""
 
 
-def _first_named_entry(entries: Sequence[Any]) -> str:
-    """The name of the first entry carrying one; the answer is rank order."""
+def _named_entries(entries: Sequence[Any]) -> list[str]:
+    """The names a search answer carries, in rank order (rank order = candidate order).
+
+    Entries that carry no name are not candidates: they cannot be re-sent as a
+    call, so they neither resolve nor count toward the multi-result write gate
+    in CallToolShapeMiddleware.
+    """
+    names: list[str] = []
     for entry in entries:
         name = _name_from_search_answer(entry)
         if name:
-            return name
-    return ""
+            names.append(name)
+    return names
 
 
 def _name_from_search_answer(value: Any) -> str:
@@ -630,7 +937,11 @@ def _name_from_search_answer(value: Any) -> str:
     `result.result` is the answer - an array of tool objects - and FastMCP
     rejects it against call_tool's own `name: str`, so nothing runs. The answer
     is in rank order and the caller passed all of it, so the top-ranked entry is
-    the only defensible reading; taking it is not a guess about intent.
+    the only defensible reading; taking it is not a guess about intent. When the
+    answer holds several named entries and the top-ranked one is a write, the
+    middleware refuses the call instead of executing the guess (see
+    CallToolShapeMiddleware._refuse_ambiguous_write) - reading the head here is
+    not permission to run it.
 
     Returns '' when the value cannot be read as a name, leaving the schema
     error to fire unchanged.
@@ -640,7 +951,8 @@ def _name_from_search_answer(value: Any) -> str:
     if isinstance(value, dict):
         return _dict_entry_name(value)
     if isinstance(value, list):
-        return _first_named_entry(value)
+        names = _named_entries(value)
+        return names[0] if names else ""
     return ""
 
 
@@ -667,9 +979,46 @@ def _moved_into_arguments(arguments: dict[str, Any], nested: dict[str, Any], mov
 
 
 def _note_search_answer_name(supplied: Any, resolved: str) -> None:
-    """Log once when the name arrived as a search answer rather than a bare string."""
+    """Log once when the name arrived as a search answer rather than a bare string.
+
+    A fallback correction, not normal traffic: the caller's client assembled a
+    call shape this server had to repair, and production logs should show how
+    often that happens (WARNING, beside the payload's `resolved_from`).
+    """
     if resolved and resolved != supplied:
-        logger.info("call_tool name given as %s; resolved to the top-ranked %r", type(supplied).__name__, resolved)
+        logger.warning("call_tool name given as %s; resolved to the top-ranked %r", type(supplied).__name__, resolved)
+
+
+def _ambiguous_write_message(candidates: Sequence[str]) -> str:
+    """Say what the answer offered and that its head is a write, so the caller picks one."""
+    listed = ", ".join(repr(name) for name in candidates)
+    return (
+        f"The search answer names {len(candidates)} tools and its highest-ranked {candidates[0]!r} "
+        f"is a write, so nothing ran. Send one name exactly - call_tool takes {listed}."
+    )
+
+
+def _supplied_name_label(supplied: Any) -> str:
+    """A short readable form of whatever the caller sent as `name`."""
+    if isinstance(supplied, str):
+        return supplied
+    return json.dumps(supplied, default=str)[:120]
+
+
+def _annotate_resolved_from(result: Any, supplied: Any, resolved: str | None) -> Any:
+    """Say on the payload when the executed call is not the call the caller named.
+
+    A re-target the caller cannot see is a wrong discovery it cannot notice:
+    the shape repair is a fallback, so it announces itself in the structured
+    content, beside `ignored_arguments`, with what the caller actually sent.
+    Only a dict payload can carry the note; anything else passes through.
+    """
+    if not resolved or resolved == supplied:
+        return result
+    structured = getattr(result, "structured_content", None)
+    if isinstance(structured, dict):
+        structured["resolved_from"] = _supplied_name_label(supplied)
+    return result
 
 
 def _passthrough_resolution(resolved: str, by_name: dict[str, Tool]) -> tuple[str | None, Tool | None] | None:
@@ -693,7 +1042,7 @@ def _resolved_entry(resolved: str, by_name: dict[str, Tool]) -> tuple[str, Tool]
         return resolved, by_name[resolved]
     matched = _match_tool_name(resolved, list(by_name))
     if matched:
-        logger.info("call_tool name %r is not a tool; it matches %r once normalised", resolved, matched)
+        logger.warning("call_tool name %r is not a tool; it matches %r once normalised", resolved, matched)
         return matched, by_name[matched]
     return None
 
@@ -709,18 +1058,37 @@ class CallToolShapeMiddleware(Middleware):
 
     Nothing here guesses at intent: the name is taken from the answer the
     caller itself supplied (in rank order), from the caller's own words, or the
-    parameters it already named are moved to where they belong.
+    parameters it already named are moved to where they belong. A re-target
+    says so on the payload (`resolved_from`) and in the log (WARNING), and an
+    answer whose head is a write is refused rather than run.
+
+    A `name` that re-targets is the one repair with consequences: executing a
+    tool the caller did not name, on a server that mutates NextDNS state, is
+    kept inside the reads. A multi-entry answer resolving to a WRITE is the
+    case where rank order is a guess, and the endpoint map is what makes
+    "write" a fact rather than a name-shape heuristic.
     """
 
-    def __init__(self, transform: Any = None, call_tool_name: str = "call_tool") -> None:
+    def __init__(
+        self,
+        transform: Any = None,
+        call_tool_name: str = "call_tool",
+        endpoints: Mapping[str, tuple[str, str]] | None = None,
+    ) -> None:
         """`transform` supplies the real catalog under disclosure.
 
         ``tools/list`` shows only the synthetic pair there, so the names a
         caller may use are not visible to it; the transform's catalog is the
         same list FastMCP's own call_tool proxy dispatches against.
+
+        `endpoints` is the ``tool name -> (method, path template)`` map from
+        the server's route parse: the sound read of whether a name executes a
+        write. A name the map does not carry - the two local operations,
+        plotAnalytics and dohLookup - reads.
         """
         self._call_tool_name = call_tool_name
         self._transform = transform
+        self._endpoints = endpoints
 
     async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> Any:
         message = getattr(context, "message", None)
@@ -729,11 +1097,12 @@ class CallToolShapeMiddleware(Middleware):
             return await call_next(context)
 
         tools = await self._catalog(context)
-        resolved, target = await self._resolve_tool_name(arguments.get("name"), tools)
+        supplied = arguments.get("name")
+        resolved, target = await self._resolve_tool_name(supplied, tools)
         shaped = self._shape_arguments(arguments, resolved, target)
         if shaped != arguments:
             context.message.arguments = shaped
-        return await call_next(context)
+        return _annotate_resolved_from(await call_next(context), supplied, resolved)
 
     def _shape_arguments(self, arguments: dict[str, Any], resolved: str | None, target: Tool | None) -> dict[str, Any]:
         """Rewrite the wrapper: the resolved name, and any parameters lifted into it."""
@@ -744,7 +1113,7 @@ class CallToolShapeMiddleware(Middleware):
             return shaped
         lifted = self._lift_flat_arguments(shaped, target)
         if lifted is not shaped:
-            logger.info("call_tool arguments for %r were sent beside name, not inside arguments", resolved)
+            logger.warning("call_tool arguments for %r were sent beside name, not inside arguments", resolved)
             return lifted
         return shaped
 
@@ -752,14 +1121,18 @@ class CallToolShapeMiddleware(Middleware):
         """The tool a call names, and the catalog entry it matches - or None, None.
 
         A name given as a search answer (a list or dict, not a bare string) is
-        read out of it; a name that is not itself a tool but matches one once
-        normalised is corrected to it; a name that matches nothing is refused
-        with the catalog's own suggestions, because the caller has to see what
-        exists to pick again. An empty catalog - no transform, or one that
-        could not be read - leaves the name as given rather than refusing it.
+        read out of it - unless the answer holds several named entries and the
+        top-ranked one is a write, which is refused (see
+        _refuse_ambiguous_write); a name that is not itself a tool but matches
+        one once normalised is corrected to it; a name that matches nothing is
+        refused with the catalog's own suggestions, because the caller has to
+        see what exists to pick again. An empty catalog - no transform, or one
+        that could not be read - leaves the name as given rather than refusing
+        it.
         """
         resolved = _name_from_search_answer(supplied)
         _note_search_answer_name(supplied, resolved)
+        self._refuse_ambiguous_write(supplied)
 
         by_name = {tool.name: tool for tool in tools}
         passthrough = _passthrough_resolution(resolved, by_name)
@@ -769,6 +1142,26 @@ class CallToolShapeMiddleware(Middleware):
         if entry is None:
             raise ToolError(_unknown_tool_message(resolved, tools))
         return entry
+
+    def _refuse_ambiguous_write(self, supplied: Any) -> None:
+        """Refuse a multi-entry answer whose head is a write; resolve everything else.
+
+        A single-entry answer has one reading, and the caller chose it; a
+        multi-entry answer resolved to a write executes a mutation the caller
+        never singled out - live, a piped "delete profile" answer would run
+        whatever BM25 ranked first. The refusal names the candidates so the
+        caller re-sends one name explicitly.
+        """
+        if not isinstance(supplied, list):
+            return
+        candidates = _named_entries(supplied)
+        if len(candidates) > 1 and is_write_operation(self._endpoint_method(candidates[0])):
+            raise ToolError(_ambiguous_write_message(candidates))
+
+    def _endpoint_method(self, name: str) -> str:
+        """The HTTP method the named tool executes; names off the map read."""
+        endpoint = (self._endpoints or {}).get(name)
+        return endpoint[0] if endpoint else "GET"
 
     @staticmethod
     def _lift_flat_arguments(arguments: dict[str, Any], tool: Tool) -> dict[str, Any]:
@@ -805,15 +1198,24 @@ class CallToolShapeMiddleware(Middleware):
             return ()
         try:
             return list(await self._transform.get_tool_catalog(fastmcp_context))
-        except Exception:  # pragma: no cover - a shape check must never break the call
+        except Exception:
+            # A shape check must never break the call: no catalog read, no
+            # repair; the call proceeds with the name exactly as sent.
             logger.debug("could not read the tool catalog to shape a call_tool call", exc_info=True)
             return ()
 
 
 def build_search_transform(mode: str) -> BM25SearchTransform | None:
-    """Return the configured search transform for ``mode`` (``off`` -> None)."""
+    """Return the configured search transform for ``mode`` (``off`` -> None).
+
+    Any other mode raises: ``config`` validates NEXTDNS_TOOL_SEARCH against
+    its own accepted list, and the factory must not turn a mode added there
+    into silent "no disclosure" - this raise is the seam where the two lists
+    meet, so a mode this module has not implemented fails loudly at startup
+    instead of quietly disabling discovery.
+    """
     if mode == "bm25":
-        return FallbackBM25SearchTransform(
-            max_results=CATALOG_MAX_RESULTS, search_result_serializer=_compact_search_results
-        )
-    return None
+        return FallbackBM25SearchTransform(max_results=CATALOG_MAX_RESULTS)
+    if mode == "off":
+        return None
+    raise ConfigurationError(f"Unknown tool-search mode {mode!r}; expected 'bm25' or 'off'.")

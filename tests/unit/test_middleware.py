@@ -1,9 +1,11 @@
 """Tests for StripExtraFieldsMiddleware."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp.exceptions import NotFoundError, ToolError
+from fastmcp.tools import ToolResult
 
 from nextdns_mcp.openapi import StripExtraFieldsMiddleware
 
@@ -43,6 +45,9 @@ class TestStripExtraFieldsMiddleware:
         # Mock fastmcp_context and get_tool method (fastmcp 3.0.1 API, async)
         context.fastmcp_context = MagicMock()
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=mock_tool)
+        # The ignored-argument hint builds its owner index from the registered
+        # catalog; this fixture's catalog is empty, so the hint stays generic.
+        context.fastmcp_context.fastmcp.list_tools = AsyncMock(return_value=[])
 
         return context
 
@@ -357,10 +362,16 @@ class TestStripExtraFieldsMiddleware:
             "nested_obj": {"power": "²"},
         }
 
-    def test_coerce_string_value_int_value_error_fallback(self, middleware, monkeypatch):
-        """Test fallback to original string if int() raises ValueError."""
-        monkeypatch.setattr("nextdns_mcp.openapi.is_integer_shaped", lambda _s: True)
-        assert middleware._coerce_string_value("invalid", {"integer"}) == "invalid"
+    def test_coerce_string_value_float_value_error_fallback(self, middleware, monkeypatch):
+        """The guarded cast is where a parse failure can still land.
+
+        ``is_integer_shaped`` runs ``int()`` itself, so the int path cannot
+        disagree with its own cast; the float shape check is a shape test, and
+        a value that passes the shape but fails ``float()`` must come back
+        unchanged rather than raise out of the coercion layer.
+        """
+        monkeypatch.setattr("nextdns_mcp.openapi.is_float_shaped", lambda _s: True)
+        assert middleware._coerce_string_value("not a float", {"number"}) == "not a float"
 
 
 class TestIgnoredArgumentOwnerHint:
@@ -375,7 +386,11 @@ class TestIgnoredArgumentOwnerHint:
     def test_single_owner_is_named(self):
         from nextdns_mcp.openapi import _owner_hint
 
-        hint = _owner_hint(["googleSafeBrowsing", "threatIntelligenceFeeds"], "updateSettings")
+        index = {
+            "googleSafeBrowsing": ("updateSecuritySettings",),
+            "threatIntelligenceFeeds": ("updateSecuritySettings",),
+        }
+        hint = _owner_hint(["googleSafeBrowsing", "threatIntelligenceFeeds"], "updateSettings", index)
         assert "not parameters" in hint
         assert "updateSecuritySettings" in hint
         assert "call it with them" in hint
@@ -383,7 +398,8 @@ class TestIgnoredArgumentOwnerHint:
     def test_multiple_owners_are_split(self):
         from nextdns_mcp.openapi import _owner_hint
 
-        hint = _owner_hint(["googleSafeBrowsing", "allowAffiliate"], "updateSettings")
+        index = {"googleSafeBrowsing": ("updateSecuritySettings",), "allowAffiliate": ("updatePrivacySettings",)}
+        hint = _owner_hint(["googleSafeBrowsing", "allowAffiliate"], "updateSettings", index)
         assert "updateSecuritySettings" in hint
         assert "updatePrivacySettings" in hint
         assert "each named tool" in hint
@@ -391,7 +407,8 @@ class TestIgnoredArgumentOwnerHint:
     def test_unowned_arguments_note_alongside_an_owner(self):
         from nextdns_mcp.openapi import _owner_hint
 
-        hint = _owner_hint(["googleSafeBrowsing", "extra_field"], "updateSettings")
+        index = {"googleSafeBrowsing": ("updateSecuritySettings",)}
+        hint = _owner_hint(["googleSafeBrowsing", "extra_field"], "updateSettings", index)
         assert "updateSecuritySettings" in hint
         assert "extra_field" in hint
         assert "dropped too" in hint
@@ -399,5 +416,120 @@ class TestIgnoredArgumentOwnerHint:
     def test_generic_hint_when_nothing_has_an_owner(self):
         from nextdns_mcp.openapi import _owner_hint
 
-        hint = _owner_hint(["extra_field", "unknown"], "updateSettings")
+        hint = _owner_hint(["extra_field", "unknown"], "updateSettings", {})
         assert "check the tool's parameter list" in hint
+
+
+class TestOwnerIndexIsTheRegisteredCatalog:
+    """The owner index comes from the server's registered tools, not the spec.
+
+    The composite operations (plotAnalytics, dohLookup) declare arguments too
+    and live outside the spec surface; a spec-derived index would blame the
+    wrong owner - or none - for an argument they own. The disclosure
+    transform's synthetic entries are excluded: nobody should be told a name
+    is "a parameter of call_tool".
+    """
+
+    @staticmethod
+    def _server_with(tools: list) -> SimpleNamespace:
+        server = SimpleNamespace()
+        server.list_tools = AsyncMock(return_value=tools)
+        return server
+
+    @staticmethod
+    def _tool(name: str, props: list[str]) -> SimpleNamespace:
+        return SimpleNamespace(name=name, parameters={"properties": {p: {} for p in props}})
+
+    @pytest.mark.asyncio
+    async def test_composite_tools_own_their_arguments(self):
+        from nextdns_mcp.openapi import _catalog_argument_index
+
+        server = self._server_with(
+            [self._tool("plotAnalytics", ["metric", "profile_id"]), self._tool("getProfile", ["profile_id"])]
+        )
+        index = await _catalog_argument_index(server)
+        assert index["metric"] == ("plotAnalytics",)
+        assert set(index["profile_id"]) == {"plotAnalytics", "getProfile"}
+
+    @pytest.mark.asyncio
+    async def test_synthetic_entries_are_excluded(self):
+        from nextdns_mcp.constants import SYNTHETIC_TOOL_NAMES
+        from nextdns_mcp.openapi import _catalog_argument_index
+
+        tools = [self._tool(name, ["name", "arguments"]) for name in sorted(SYNTHETIC_TOOL_NAMES)]
+        tools.append(self._tool("getProfile", ["profile_id"]))
+        index = await _catalog_argument_index(self._server_with(tools))
+        assert all(name not in index for name in SYNTHETIC_TOOL_NAMES)
+        assert index == {"profile_id": ("getProfile",)}
+
+    @pytest.mark.asyncio
+    async def test_the_index_is_built_once_per_server_not_per_call(self):
+        mw = StripExtraFieldsMiddleware()
+        server = self._server_with([self._tool("getProfile", ["profile_id"])])
+        first = await mw._owner_index(server)
+        second = await mw._owner_index(server)
+        assert first is second
+        server.list_tools.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_second_server_does_not_read_the_firsts_cache(self):
+        mw = StripExtraFieldsMiddleware()
+        server_a = self._server_with([self._tool("plotAnalytics", ["metric"])])
+        server_b = self._server_with([self._tool("getProfile", ["profile_id"])])
+        index_a = await mw._owner_index(server_a)
+        index_b = await mw._owner_index(server_b)
+        assert "metric" in index_a and "metric" not in index_b
+        server_b.list_tools.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_tool_schemas_are_memoized_after_the_first_fetch(self):
+        mw = StripExtraFieldsMiddleware()
+        tool = self._tool("getProfile", ["profile_id"])
+        server = SimpleNamespace()
+        server.get_tool = AsyncMock(return_value=tool)
+        first = await mw._tool_parameters(server, "getProfile")
+        second = await mw._tool_parameters(server, "getProfile")
+        assert first is second
+        server.get_tool.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unknown_tools_are_not_cached_as_misses(self):
+        """A tool registered after a miss must not be shadowed by it."""
+        mw = StripExtraFieldsMiddleware()
+        tool = self._tool("lateTool", ["x"])
+        responses = iter([None, tool])
+        server = SimpleNamespace()
+        server.get_tool = AsyncMock(side_effect=lambda name: next(responses))
+        assert await mw._tool_parameters(server, "lateTool") is None
+        assert await mw._tool_parameters(server, "lateTool") == tool.parameters
+
+
+class TestIgnoredArgumentsNeverClobberTheToolHint:
+    """The tool's own hint answers what was applied; the annotation is appended.
+
+    A payload carrying the profile-id shape hint or a 404 diagnosis is the
+    tool's answer to the call the server did make; overwriting it with the
+    dropped-arguments note would delete the more important information. Both
+    survive: the hint merges, and the full owner text stays under
+    ``ignored_arguments_hint``.
+    """
+
+    def test_an_existing_hint_survives_the_merge(self):
+        from nextdns_mcp.openapi import _report_ignored_arguments
+
+        result = ToolResult(structured_content={"data": [], "hint": "the profile id is 6 or 10 characters"})
+        _report_ignored_arguments(result, ["privacy"], "privacy are parameters of updatePrivacySettings")
+        structured = result.structured_content
+        assert structured["ignored_arguments"] == ["privacy"]
+        assert structured["ignored_arguments_hint"].startswith("privacy are parameters")
+        assert (
+            structured["hint"]
+            == "the profile id is 6 or 10 characters | privacy are parameters of updatePrivacySettings"
+        )
+
+    def test_no_prior_hint_uses_the_annotation_alone(self):
+        from nextdns_mcp.openapi import _report_ignored_arguments
+
+        result = ToolResult(structured_content={"data": []})
+        _report_ignored_arguments(result, ["x"], "the note")
+        assert result.structured_content["hint"] == "the note"

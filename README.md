@@ -6,11 +6,19 @@ A Model Context Protocol (MCP) server for the NextDNS API, built with FastMCP an
 
 This project provides an MCP server that exposes NextDNS API operations as tools that can be used by AI assistants and other MCP clients. The bundled OpenAPI document is the tool contract: the server generates one tool per operation in it, named for the operation itself (`getAllowlist`, `addToDenylist`, `getAnalyticsDevices`) and taking that endpoint's own arguments, plus the two operations no endpoint describes — `plotAnalytics` and `dohLookup`.
 
+By default the server discloses those tools progressively: `tools/list` returns only
+the synthetic `search_tools` + `call_tool` pair, and a client discovers the catalog by
+searching it and calls what the search returned. The operation tools stay callable
+either way — the listing is what changes, not the access. Set
+`NEXTDNS_TOOL_SEARCH=off` to advertise all 80 tools in `tools/list` instead (see
+[configuration](docs/configuration.md)).
+
 ## Features
 
 - **One tool per API operation** — 78 tools named for the operation itself, each taking that endpoint's own arguments, so the name says what the call does and there is no operation argument to choose
+- **Progressive tool disclosure** — by default `tools/list` exposes only `search_tools` + `call_tool` and the model finds the operation tools by searching; `NEXTDNS_TOOL_SEARCH=off` advertises the full catalog
 - **Profile Management**: Full CRUD operations - create, read, update, and delete profiles
-- **Profile Access Control**: Fine-grained read/write restrictions per profile, with read-only mode support
+- **Profile Access Control**: Fine-grained read/write restrictions per profile, read-only mode, and a protected-profile denylist that refuses writes to named profiles even under `ALL`
 - **DNS-over-HTTPS Testing**: Perform DoH lookups to test DNS resolution through profiles
 - **Settings Configuration**: Comprehensive settings management including logs, block page, and performance
 - **Logs**: Query log retrieval, download, and clearing
@@ -26,6 +34,27 @@ This project provides an MCP server that exposes NextDNS API operations as tools
 ## Documentation
 
 Complete documentation can be found in [docs/index.md](docs/index.md).
+
+## 4.0.0 upgrade notes
+
+- **One tool per operation.** The grouped tools of 3.x are gone. Every published tool is
+  one operation of the bundled document, named for its `operationId`, taking that
+  endpoint's own arguments; there is no operation to choose, and the two composite
+  operations (`plotAnalytics`, `dohLookup`) are named for what they do.
+- **Disclosure is on by default.** `NEXTDNS_TOOL_SEARCH` defaults to `bm25`, so
+  `tools/list` answers with only `search_tools` + `call_tool`. A client that expects to
+  see every tool in the listing needs `NEXTDNS_TOOL_SEARCH=off`.
+- **Two error codes are gone.** `UNSUPPORTED_OPERATION` and `UNSUPPORTED_PARAMETER` were
+  removed with the surface that produced them. Nothing the server can no longer do is
+  addressable as a tool any more, and a rejected argument value answers
+  `invalid_argument` (or `missing_required_argument` when a required one is absent) while
+  an upstream refusal answers `http_error` with the upstream error document. Extra
+  top-level arguments are not an error at all: they are dropped and named back in
+  `ignored_arguments`. Client code branching on the removed names should branch on these.
+- **Write scope has three independent knobs.** `NEXTDNS_READ_ONLY` denies every write,
+  `NEXTDNS_WRITABLE_PROFILES` scopes which profiles are writable (`ALL` drops the
+  scoping), and `NEXTDNS_PROTECTED_PROFILES` denies writes to the profiles it lists even
+  under `ALL` — reads of them are unaffected. See [safety.md](docs/safety.md).
 
 ## Quick Start
 

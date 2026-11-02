@@ -62,6 +62,9 @@ class _FakeResponse:
             {"location": location} if location else {} | ({"content-type": content_type} if content_type else {})
         )
         self._chunks = chunks or []
+        # Tracks the fake's own consumption so is_stream_consumed matches a
+        # real httpx stream: unconsumed until every chunk has been iterated.
+        self._consumed = False
 
     @property
     def has_redirect_location(self) -> bool:
@@ -71,14 +74,26 @@ class _FakeResponse:
     def is_error(self) -> bool:
         return self.status_code >= 400
 
+    @property
+    def is_stream_consumed(self) -> bool:
+        return self._consumed
+
     def raise_for_status(self) -> None:
         if self.is_error:
-            response = httpx.Response(self.status_code, request=self.request)
-            raise httpx.HTTPStatusError(f"upstream said {self.status_code}", request=self.request, response=response)
+            # Faithful to streaming httpx: the error carries the *streaming*
+            # response (body still unread), which is the shape that used to
+            # crash the payload builder with ResponseNotRead.
+            raise httpx.HTTPStatusError(f"upstream said {self.status_code}", request=self.request, response=self)
+
+    async def aiter_bytes(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            yield chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+        self._consumed = True
 
     async def aiter_text(self) -> AsyncIterator[str]:
         for chunk in self._chunks:
             yield chunk
+        self._consumed = True
 
     async def __aenter__(self) -> Self:
         return self
@@ -185,18 +200,30 @@ class TestAddressVetting:
         monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
         assert await logs_module._host_resolves_to_public_address("mixed.example") is False
 
-    async def test_an_unresolvable_host_is_not_a_refusal(self, monkeypatch):
-        """Name-resolution failure is not a security decision.
+    async def test_an_unresolvable_host_is_refused(self, monkeypatch):
+        """Name-resolution failure fails the vetting closed (issue #266 review).
 
-        Nothing can be dialed in that case anyway, and refusing it would replace an
-        HTTP error the caller can act on with a refusal that says something else.
+        The old fail-open reading argued an unresolvable host cannot be dialed
+        anyway - but that holds only while the guard's resolver and httpx's
+        agree, so the guard must not switch itself off when DNS misbehaves. A
+        host whose addresses cannot be enumerated is not proven public, and an
+        unproven hop is refused.
         """
 
         def fail(host: str, port: Any, **kwargs: Any) -> list[Any]:
             raise socket.gaierror("no such host")
 
         monkeypatch.setattr(socket, "getaddrinfo", fail)
-        assert await logs_module._host_resolves_to_public_address("gone.example") is True
+        assert await logs_module._host_resolves_to_public_address("gone.example") is False
+
+    async def test_an_empty_resolution_is_refused(self, monkeypatch):
+        """An empty address list proves nothing either - same closed default."""
+
+        def none(host: str, port: Any, **kwargs: Any) -> list[Any]:
+            return []
+
+        monkeypatch.setattr(socket, "getaddrinfo", none)
+        assert await logs_module._host_resolves_to_public_address("ghost.example") is False
 
 
 class TestRedirectRefusal:
@@ -541,3 +568,120 @@ class TestDownloadTool:
     def test_the_default_size_cap_is_the_configured_one(self, monkeypatch):
         monkeypatch.delenv("NEXTDNS_DOWNLOAD_MAX_BYTES", raising=False)
         assert config.get_download_max_bytes() == config.DEFAULT_DOWNLOAD_MAX_BYTES
+
+
+class TestStreamedFailureIsTyped:
+    """A mid-download upstream failure answers as the typed payload, not a crash.
+
+    A streaming response raises ``httpx.ResponseNotRead`` from ``.json()`` and
+    ``.text`` until its body has been read, and ``http_error_payload`` reads
+    both - so a streaming 503 used to escape as ``ResponseNotRead`` instead of
+    describing the failure. The error document is now read bounded and
+    re-raised around a buffered copy of the response, so the payload carries
+    what upstream said without buffering an unbounded failure page.
+    """
+
+    async def test_a_streaming_503_reports_the_typed_error_with_its_body(self, monkeypatch, unauthenticated):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        monkeypatch.setattr(
+            client_module,
+            "api_client",
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)]),
+        )
+        unauthenticated(
+            [
+                _FakeResponse(
+                    signed,
+                    status_code=503,
+                    chunks=['{"errors":[{"code":"serverError","detail":"upstream down"}]}'],
+                )
+            ]
+        )
+
+        payload = await logs_module._download_logs_to_tempfile("abc123")
+        assert payload["code"] == ErrorCode.HTTP_ERROR
+        assert payload["status_code"] == 503
+        assert "upstream down" in payload.get("response_body", ""), "the error document must ride along"
+
+    async def test_a_consumed_error_response_reraises_without_another_body_read(self, monkeypatch):
+        """A failure whose body is already read goes straight back out.
+
+        ``is_stream_consumed`` is False on a live stream - the shape that
+        needs the bounded read - and True once the body has been read. Reading
+        a consumed body again raises inside the error handler, so the consumed
+        case must re-raise untouched, carrying the body it already holds.
+        """
+        reads: list = []
+
+        async def watch_body(response):
+            reads.append(response)
+            return b""
+
+        monkeypatch.setattr(logs_module, "_bounded_error_body", watch_body)
+        response = _FakeResponse("https://x/f.csv", status_code=502, chunks=["bad gateway"])
+        async for _ in response.aiter_bytes():  # consume it, exactly as a completed download would
+            pass
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await logs_module._raise_for_streamed_status(response)
+        assert reads == [], "a consumed body must not be re-read"
+
+    async def test_the_error_body_read_is_bounded(self, monkeypatch, unauthenticated):
+        """A hostile multi-megabyte failure page is read only up to the cap."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        monkeypatch.setattr(
+            client_module,
+            "api_client",
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)]),
+        )
+        huge = ["<html>" + ("x" * 5000), "x" * 5000 + "</html>"]
+        unauthenticated([_FakeResponse(signed, status_code=503, chunks=huge)])
+
+        payload = await logs_module._download_logs_to_tempfile("abc123")
+        assert payload["code"] == ErrorCode.HTTP_ERROR
+        assert payload.get("response_body_truncated") is True
+        assert len(payload.get("response_body", "")) <= logs_module.BODY_SLICE_BYTES + len(
+            " [truncated]"  # the marker the payload adds
+        )
+
+
+class TestByteAccountingAndPartialCodepoints:
+    """The file gets the raw bytes; text accounting never rewrites what is stored.
+
+    The size cap and the disk write use the raw chunk (no re-encode round
+    trip), and the text for row/preview tallying comes from an incremental
+    decoder, so a codepoint split across chunk boundaries still decodes -
+    as a whole codepoint when the stream supplies the rest, as the decoder's
+    replacement when it does not. What is on disk is byte-identical either way.
+    """
+
+    async def test_a_split_codepoint_decodes_across_chunks(self, tmp_path):
+        pieces = ["名前,値\n".encode(), b"ok", "é行".encode()]
+        # Split the last chunk so a codepoint straddles the boundary.
+        tail = "é行".encode()
+        payload = await logs_module._write_stream_to_tempfile(
+            _FakeResponse("https://x/f.csv", chunks=[pieces[0], pieces[1], tail[:1], tail[1:]]), str(tmp_path / "d.csv")
+        )
+        assert Path(payload["file_path"]).read_bytes() == pieces[0] + pieces[1] + tail
+        assert "é行" in payload["preview"]["text"]
+
+    async def test_a_truncated_codepoint_is_replaced_not_a_crash(self, tmp_path):
+        payload = await logs_module._write_stream_to_tempfile(
+            _FakeResponse("https://x/f.csv", chunks=[b"row\n", b"\xc3"]),  # lead byte with no trailer
+            str(tmp_path / "d.csv"),
+        )
+        assert Path(payload["file_path"]).read_bytes() == b"row\n\xc3"  # raw bytes written verbatim
+        assert payload["preview"]["text"].startswith("row")  # the decoder's replacement lands in the preview
+
+    async def test_the_cap_measures_raw_bytes_not_reencoded_text(self, tmp_path, monkeypatch):
+        """The limit applies to the bytes read, so accounting cannot drift from the file."""
+        monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "6")
+        with pytest.raises(logs_module.DownloadTooLargeError):
+            await logs_module._write_stream_to_tempfile(
+                _FakeResponse("https://x/f.csv", chunks=["一二三".encode()]),  # 9 bytes, 3 "characters"
+                str(tmp_path / "d.csv"),
+            )

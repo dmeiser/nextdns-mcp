@@ -231,9 +231,17 @@ class TestRestHelpers:
 
     def test_list_absent(self, h):
         resp = {"ok": True, "body": {"data": [{"id": "a.com"}]}}
-        assert h._list_absent(resp, ["b.com"])
-        assert not h._list_absent(resp, ["a.com"])
-        assert h._list_absent({"ok": False}, ["a.com"])
+        assert h._list_absent(resp, ["b.com"]) == (True, h.ABSENT)
+        assert h._list_absent(resp, ["a.com"]) == (False, h.PRESENT)
+        # A failed read proves nothing: a 503 used to be reported as absence
+        # and made a passing deletion out of a cleanup nobody observed.
+        absent, verdict = h._list_absent({"ok": False, "status": 503}, ["a.com"])
+        assert absent is False
+        assert verdict.startswith(h.INDETERMINATE)
+        # A malformed body proves nothing either; a 404 on the collection is the
+        # strongest absence the API offers.
+        assert h._list_absent({"ok": True, "body": "not-a-list"}, ["a.com"])[0] is False
+        assert h._list_absent({"ok": False, "status": 404}, ["a.com"]) == (True, h.ABSENT)
 
     def test_entry_ids(self, h):
         resp = {"ok": True, "body": {"data": [{"id": "a"}, {"id": "b"}, {"x": 1}]}}
@@ -557,9 +565,11 @@ class TestHarnessConfig:
         assert cfg.command[0] == "opencode"
         assert h.PLACEHOLDER_PROMPT in cfg.command
         assert cfg.model == ""
-        # the API key goes to the MCP server's env, not the actor.
-        assert cfg.server["env"]["NEXTDNS_API_KEY"] == "sk-test"
-        assert cfg.server["env"]["NEXTDNS_API_BASE"] == h.API_BASE
+        # the API key goes to the MCP server's env as a `{env:...}` reference,
+        # never the value: this env is serialized into the actor's argv through
+        # the {server_env} placeholder and the run report.
+        assert cfg.server["env"]["NEXTDNS_API_KEY"] == h.ENV_REF_API_KEY
+        assert cfg.server["env"]["NEXTDNS_API_BASE"] == h.api_base()
         assert cfg.server["args"] == ["-m", "nextdns_mcp.server"]
         assert "PYTHONPATH" in cfg.server["env"]
 
@@ -618,7 +628,7 @@ class TestHarnessConfig:
         assert cfg.timeout_s == 120
         assert cfg.server["command"] == "/bin/x" and cfg.server["args"] == ["-m", "y"]
         assert cfg.server["env"]["FOO"] == "bar"
-        assert cfg.server["env"]["NEXTDNS_API_KEY"] == "sk-test"  # merged, not dropped
+        assert cfg.server["env"]["NEXTDNS_API_KEY"] == h.ENV_REF_API_KEY  # merged, not dropped
 
     def test_render_argv_substitutes_placeholders(self, h):
         argv = h.render_argv(
@@ -774,7 +784,7 @@ class TestMcpConfigGeneration:
         assert srv["command"][1:] == cfg.server["args"]
         assert srv["cwd"] == cfg.server["cwd"]
         assert srv["environment"]["NEXTDNS_API_KEY"] == "{env:NEXTDNS_API_KEY}"
-        assert srv["environment"]["NEXTDNS_API_BASE"] == h.API_BASE
+        assert srv["environment"]["NEXTDNS_API_BASE"] == h.api_base()
         assert srv["enabled"] is True
 
     def test_the_config_carries_no_inline_api_key(self, h, tmp_path, monkeypatch):
@@ -934,6 +944,10 @@ class _FakeClient:
     async def rest_get(self, path, params=None):
         if path in self._by_path:
             return self._by_path[path]
+        if path == "/profiles":
+            # The listing answer: `_readable_rows` demands a `data` list, and
+            # absence verdicts are only proven from a readable listing.
+            return {"status": 200, "ok": True, "body": {"data": list(self._profiles)}}
         return {"status": 200, "ok": True, "body": {}}
 
     async def rest_post(self, path, json_body=None):
@@ -960,18 +974,44 @@ class TestMeasureState:
         t = h.TaskTargets(profile_name="P", tag="abc")
         import asyncio
 
-        # gone when nothing resolves
-        m = _FakeClient(profiles=[])
-        assert asyncio.run(h._profile_gone(m, "pid1", t)) is True
+        # gone when the id 404s and the listing resolves neither name
+        m = _FakeClient(profiles=[], by_path={"/profiles/pid1": {"status": 404, "ok": False, "body": {}}})
+        assert asyncio.run(h._profile_gone(m, "pid1", t)) == (True, h.ABSENT)
         # present under the id
         m2 = _FakeClient(by_path={"/profiles/pid1": {"ok": True, "body": {"data": {"id": "pid1"}}}})
-        assert asyncio.run(h._profile_gone(m2, "pid1", t)) is False
+        assert asyncio.run(h._profile_gone(m2, "pid1", t)) == (False, h.PRESENT)
         # present under the original name
         m3 = _FakeClient(profiles=[{"id": "pid1", "name": "P"}])
-        assert asyncio.run(h._profile_gone(m3, "pid1", t)) is False
+        assert asyncio.run(h._profile_gone(m3, "pid1", t)) == (False, h.PRESENT)
         # present under the renamed name
         m4 = _FakeClient(profiles=[{"id": "pid1", "name": "P-renamed"}])
-        assert asyncio.run(h._profile_gone(m4, "pid1", t)) is False
+        assert asyncio.run(h._profile_gone(m4, "pid1", t)) == (False, h.PRESENT)
+        # present by name even when the id itself 404s
+        m5 = _FakeClient(
+            profiles=[{"id": "pid1", "name": "P-renamed"}],
+            by_path={"/profiles/pid1": {"status": 404, "ok": False, "body": {}}},
+        )
+        assert asyncio.run(h._profile_gone(m5, "pid1", t)) == (False, h.PRESENT)
+
+    def test_profile_gone_is_indeterminate_on_failed_reads(self, h):
+        """A 503 is not a deletion: a failed read used to read as 'gone'."""
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        import asyncio
+
+        m = _FakeClient(profiles=[], by_path={"/profiles/pid1": {"status": 503, "ok": False, "body": "boom"}})
+        gone, verdict = asyncio.run(h._profile_gone(m, "pid1", t))
+        assert gone is False
+        assert verdict.startswith(h.INDETERMINATE)
+
+        # Even a 404 id cannot prove absence when the name listing is broken.
+        broken_listing = {"status": 500, "ok": False, "body": "boom"}
+        m2 = _FakeClient(
+            profiles=[],
+            by_path={"/profiles/pid1": {"status": 404, "ok": False, "body": {}}, "/profiles": broken_listing},
+        )
+        gone2, verdict2 = asyncio.run(h._profile_gone(m2, "pid1", t))
+        assert gone2 is False
+        assert verdict2.startswith(h.INDETERMINATE)
 
     def test_self_heal_noop_when_profile_alive(self, h):
         t = h.TaskTargets(profile_name="P", tag="abc")
@@ -1178,6 +1218,7 @@ class TestStepEndpointExpectations:
             {
                 "tool": "addToDenylist",
                 "endpoint": "POST /profiles/{profile_id}/denylist",
+                "profile_id": "abc123",
                 "ok": True,
                 "args": '{"id": "x.example.com"}',
                 "result": '{"data": []}',
@@ -1208,6 +1249,7 @@ class TestStepEndpointExpectations:
             {
                 "tool": "addToDenylist",
                 "endpoint": "POST /profiles/{profile_id}/denylist",
+                "profile_id": "abc123",
                 "ok": True,
                 "args": '{"id": "x"}',
                 "result": '{"data": []}',
@@ -1216,6 +1258,7 @@ class TestStepEndpointExpectations:
             {
                 "tool": "removeFromDenylist",
                 "endpoint": "DELETE /profiles/{profile_id}/denylist/{entry_id}",
+                "profile_id": "abc123",
                 "ok": True,
                 "args": "{}",
                 "result": '{"success": true}',
@@ -1404,6 +1447,7 @@ class TestExpectedCallAcceptsServerIssuedIds:
             {
                 "tool": "listRewrites",
                 "endpoint": "GET /profiles/{profile_id}/rewrites",
+                "profile_id": "cc33cc",
                 "ok": True,
                 "write": False,
                 "args": '{"profile_id": "cc33cc"}',
@@ -1412,6 +1456,7 @@ class TestExpectedCallAcceptsServerIssuedIds:
             {
                 "tool": "deleteRewrite",
                 "endpoint": "DELETE /profiles/{profile_id}/rewrites/{entry_id}",
+                "profile_id": "cc33cc",
                 "ok": True,
                 "write": True,
                 "args": f'{{"entry_id": "{entry_id}", "profile_id": "cc33cc"}}',
@@ -1624,7 +1669,15 @@ class TestRunValidityNotes:
 
 
 class TestStraySweep:
-    """Profiles the actor creates beyond the test profile are removed at the end."""
+    """Profiles this run's receipts prove it created are removed at the end.
+
+    The sweep used to diff the account against a before/after snapshot and
+    delete everything that appeared during the run: a failed baseline read
+    exposed every pre-existing profile, and a profile created concurrently by
+    another user or run was treated as this run's to delete. Now only ids from
+    successful createProfile rows (plus harness provisioning/self-heal) are
+    candidates, and a failed listing stands the sweep down entirely.
+    """
 
     def test_all_profile_ids_maps_names(self, h):
         import asyncio
@@ -1633,6 +1686,23 @@ class TestStraySweep:
             by_path={"/profiles": {"ok": True, "body": {"data": [{"id": "a1", "name": "One"}, {"id": "b2"}]}}}
         )
         assert asyncio.run(h._all_profile_ids(m)) == {"a1": "One", "b2": ""}
+
+    def test_all_profile_ids_is_none_when_the_listing_fails(self, h):
+        """An empty mapping from a failed read looked like an empty account."""
+        import asyncio
+
+        m = _FakeClient(by_path={"/profiles": {"status": 503, "ok": False, "body": "boom"}})
+        assert asyncio.run(h._all_profile_ids(m)) is None
+
+    def test_created_ids_come_from_successful_create_receipts(self, h):
+        records = [
+            {"endpoint": "POST /profiles", "ok": True, "result": '{"data": {"id": "new1"}}'},
+            {"endpoint": "POST /profiles", "ok": True, "result": '{"id": "new2"}'},
+            {"endpoint": "POST /profiles", "ok": False, "result": '{"error": "boom"}'},
+            {"endpoint": "GET /profiles", "ok": True, "result": '{"data": [{"id": "seen"}]}'},
+            {"endpoint": "POST /profiles", "ok": True, "result": "not json"},
+        ]
+        assert h._created_ids_from_records(records) == {"new1", "new2"}
 
     def test_sweep_removes_only_run_created_profiles(self, h, monkeypatch):
         import asyncio
@@ -1645,16 +1715,29 @@ class TestStraySweep:
                     "ok": True,
                     "body": {
                         "data": [
-                            {"id": "real", "name": "Pumpkin Bum"},  # pre-existing
+                            {"id": "real", "name": "Pumpkin Bum"},  # pre-existing, never a target
                             {"id": "test", "name": "P-renamed"},  # the test profile
-                            {"id": "stray", "name": "new-profile"},  # actor-created
+                            {"id": "stray", "name": "new-profile"},  # actor-created extra
                         ]
                     },
                 }
             }
         )
-        asyncio.run(h._sweep_stray_profiles(m, {"real"}, {"test"}))
+        note = asyncio.run(h._sweep_stray_profiles(m, {"stray", "test"}, {"test"}))
         assert m.deleted == ["/profiles/stray"]
+        assert note == ""
+
+    def test_sweep_ignores_ids_that_have_no_receipt(self, h, monkeypatch):
+        """A profile that merely appeared (another user, another run) is not deleted."""
+        import asyncio
+
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        monkeypatch.delenv("NEXTDNS_PLOT_PROFILE", raising=False)
+        m = _FakeClient(
+            by_path={"/profiles": {"ok": True, "body": {"data": [{"id": "other", "name": "Someone else's"}]}}}
+        )
+        asyncio.run(h._sweep_stray_profiles(m, set(), set()))
+        assert m.deleted == []
 
     def test_sweep_never_touches_protected_or_plot_profiles(self, h, monkeypatch):
         import asyncio
@@ -1669,9 +1752,404 @@ class TestStraySweep:
                 }
             }
         )
-        asyncio.run(h._sweep_stray_profiles(m, set(), set()))
+        asyncio.run(h._sweep_stray_profiles(m, {"home12", "plot99"}, set()))
         assert m.deleted == []
         assert h._never_delete_ids() == {"home12", "plot99"}
+
+    def test_sweep_skips_created_ids_already_gone(self, h, monkeypatch):
+        """A receipt for a profile deleted during the run needs no cleanup."""
+        import asyncio
+
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        monkeypatch.delenv("NEXTDNS_PLOT_PROFILE", raising=False)
+        m = _FakeClient(by_path={"/profiles": {"ok": True, "body": {"data": []}}})
+        note = asyncio.run(h._sweep_stray_profiles(m, {"gone1"}, set()))
+        assert m.deleted == []
+        assert note == ""
+
+    def test_sweep_stands_down_when_the_listing_fails(self, h, monkeypatch):
+        """Account state uncertain -> delete nothing, and say so in the report."""
+        import asyncio
+
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        monkeypatch.delenv("NEXTDNS_PLOT_PROFILE", raising=False)
+        m = _FakeClient(by_path={"/profiles": {"status": 503, "ok": False, "body": "boom"}})
+        note = asyncio.run(h._sweep_stray_profiles(m, {"stray1", "stray2"}, set()))
+        assert m.deleted == []
+        assert "stray sweep skipped" in note
+        assert "stray1" in note and "stray2" in note
+
+
+class TestPlotProfileFallback:
+    """With NEXTDNS_PLOT_PROFILE unset the plot/log steps used to read the
+    empty test profile and skip as data-starved, measuring nothing without
+    saying why. The resolver picks a data-bearing profile instead, or reports
+    honestly why it could not."""
+
+    def test_unset_falls_back_to_the_first_data_bearing_profile(self, h, monkeypatch):
+        import asyncio
+
+        monkeypatch.delenv("NEXTDNS_PLOT_PROFILE", raising=False)
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        m = _FakeClient(
+            profiles=[
+                {"id": "testpid", "name": "ai-e2e-x"},
+                {"id": "empty1", "name": "Empty"},
+                {"id": "home12", "name": "Home"},
+            ],
+            by_path={
+                "/profiles/empty1/analytics/status": {"ok": True, "body": {"data": []}},
+                "/profiles/home12/analytics/status": {"ok": True, "body": {"data": [{"queries": 42}]}},
+            },
+        )
+        note = asyncio.run(h._ensure_plot_profile(m, "testpid"))
+        assert os.environ.get("NEXTDNS_PLOT_PROFILE") == "home12"
+        assert "home12" in note and "unset" in note
+        # The fallback registers as the plot profile, so the stray sweep and
+        # the never-delete set both protect it.
+        assert "home12" in h._never_delete_ids()
+
+    def test_the_test_profile_and_protected_ids_are_never_candidates(self, h, monkeypatch):
+        import asyncio
+
+        monkeypatch.delenv("NEXTDNS_PLOT_PROFILE", raising=False)
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "home12")
+        # Both readable profiles are excluded: one is the write target of the
+        # run, the other is on the denylist. No probe may pick them.
+        m = _FakeClient(profiles=[{"id": "testpid", "name": "P"}, {"id": "home12", "name": "Home"}])
+        note = asyncio.run(h._ensure_plot_profile(m, "testpid"))
+        assert "NEXTDNS_PLOT_PROFILE" not in os.environ
+        assert "no readable profile" in note
+
+    def test_a_configured_plot_profile_is_left_alone(self, h, monkeypatch):
+        import asyncio
+
+        monkeypatch.setenv("NEXTDNS_PLOT_PROFILE", "aa11aa")
+        m = _FakeClient()
+        assert asyncio.run(h._ensure_plot_profile(m, "testpid")) == ""
+        assert os.environ["NEXTDNS_PLOT_PROFILE"] == "aa11aa"
+
+    def test_a_failed_listing_says_so_and_sets_nothing(self, h, monkeypatch):
+        import asyncio
+
+        monkeypatch.delenv("NEXTDNS_PLOT_PROFILE", raising=False)
+        m = _FakeClient(by_path={"/profiles": {"status": 503, "ok": False, "body": "boom"}})
+        note = asyncio.run(h._ensure_plot_profile(m, "testpid"))
+        assert "NEXTDNS_PLOT_PROFILE" not in os.environ
+        assert "listing failed" in note
+
+    def test_no_data_bearing_profile_skips_with_an_honest_note(self, h, monkeypatch):
+        import asyncio
+
+        monkeypatch.delenv("NEXTDNS_PLOT_PROFILE", raising=False)
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        m = _FakeClient(
+            profiles=[{"id": "other", "name": "Other"}],
+            by_path={"/profiles/other/analytics/status": {"ok": True, "body": {"data": []}}},
+        )
+        note = asyncio.run(h._ensure_plot_profile(m, "testpid"))
+        assert "NEXTDNS_PLOT_PROFILE" not in os.environ
+        assert "data-starved" in note
+
+
+# ===========================================================================
+# secret handling: the key travels as a reference, never a value (SEC-4)
+# =========================================================================== #
+
+
+class TestSecretHandling:
+    def test_api_base_reads_env_at_call_time(self, h, monkeypatch):
+        """Resolved when used, not at import: main() loads dotenv after importing."""
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://api.example.test/base/")
+        assert h.api_base() == "https://api.example.test/base"
+        monkeypatch.delenv("NEXTDNS_API_BASE")
+        assert h.api_base() == "https://api.nextdns.io"
+
+    def test_config_server_env_uses_the_api_base_as_loaded(self, h, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://late.example")
+        cfg = h.HarnessConfig.load(None)
+        assert cfg.server["env"]["NEXTDNS_API_BASE"] == "https://late.example"
+
+    def test_redacted_server_env_masks_an_inlined_key(self, h):
+        srv = {"env": {"NEXTDNS_API_KEY": "sk-inline-9f3a", "NEXTDNS_TOOL_SEARCH": "off"}}
+        out = h._redacted_server_env(srv)
+        assert out["NEXTDNS_API_KEY"] == h.ENV_REF_API_KEY
+        assert out["NEXTDNS_TOOL_SEARCH"] == "off"
+        assert "sk-inline-9f3a" not in json.dumps(out)
+        assert h._redacted_server_env({}) == {}
+        assert h._redacted_server_env({"env": {}}) == {}
+
+    def test_expand_env_refs_resolves_against_the_process_environment(self, h, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-real-value")
+        out = h._expand_env_refs({"NEXTDNS_API_KEY": h.ENV_REF_API_KEY, "NEXTDNS_TOOL_SEARCH": "off"})
+        assert out == {"NEXTDNS_API_KEY": "sk-real-value", "NEXTDNS_TOOL_SEARCH": "off"}
+        monkeypatch.delenv("NEXTDNS_API_KEY")
+        assert h._expand_env_refs({"K": "{env:NEXTDNS_API_KEY}"}) == {"K": ""}
+
+    def test_render_argv_does_not_rescan_substituted_values(self, h):
+        """One pass: a placeholder token inside a VALUE must stay literal.
+
+        The prompt is model-facing text; a prompt that spells {server_env}
+        would otherwise have the server environment — including the API key —
+        expanded into the rendered command line through it.
+        """
+        argv = h.render_argv(
+            ["harness", "{prompt}", "{server_env}"],
+            {"{prompt}": "type {server_env} verbatim", "{server_env}": '{"NEXTDNS_API_KEY": "x"}'},
+        )
+        assert argv == ["harness", "type {server_env} verbatim", '{"NEXTDNS_API_KEY": "x"}']
+
+    def test_run_actor_renders_the_server_env_redacted(self, h, monkeypatch, tmp_path):
+        """The {server_env} placeholder that reaches argv never carries the key."""
+
+        async def go():
+            cfg = h.HarnessConfig()
+            cfg.server["env"] = {"NEXTDNS_API_KEY": "sk-inline-9f3a"}
+            captured: dict = {}
+
+            def fake_render(self, values):
+                captured.update(values)
+                return []  # empty argv -> run_actor stops before spawning anything
+
+            monkeypatch.setattr(h.HarnessConfig, "render_argv", fake_render)
+            run = await h.run_actor(cfg, "prompt text", tmp_path)
+            assert run.error  # the command-not-found path proves nothing ran
+            env_json = captured[h.PLACEHOLDER_SERVER_ENV]
+            assert "sk-inline-9f3a" not in env_json
+            assert h.ENV_REF_API_KEY in env_json
+
+        import asyncio
+
+        asyncio.run(go())
+
+    def test_write_mcp_config_redacts_a_key_inlined_by_a_config_file(self, h, tmp_path):
+        """--config may inline a key; the generated opencode.json still may not."""
+        cfg = h.HarnessConfig()
+        cfg.server["env"] = {"NEXTDNS_API_KEY": "sk-inline-9f3a"}
+        out = h.write_mcp_config(cfg, tmp_path)
+        text = out.read_text(encoding="utf-8")
+        assert "sk-inline-9f3a" not in text
+        assert "{env:NEXTDNS_API_KEY}" in text
+
+
+# ===========================================================================
+# profile-scoped expected calls: a step is judged on the profile it targeted
+# =========================================================================== #
+
+
+class TestProfileScopedCallMatching:
+    def _rec(self, profile_id: str) -> dict:
+        return {
+            "tool": "getLogs",
+            "endpoint": "GET /profiles/{profile_id}/logs",
+            "profile_id": profile_id,
+            "ok": True,
+            "write": False,
+            "args": "{}",
+            "result": '{"data": []}',
+        }
+
+    def _expect(self, profile: str) -> dict:
+        return {
+            "endpoints": ["GET /profiles/{profile_id}/logs"],
+            "args": [],
+            "result": [],
+            "data": True,
+            "profile": profile,
+        }
+
+    def test_default_scope_requires_the_recorded_test_profile(self, h):
+        expect = self._expect("")
+        del expect["profile"]
+        assert h._expected_call_ok([self._rec("testpid")], expect, "testpid")[0]
+        ok, why = h._expected_call_ok([self._rec("otherpid")], expect, "testpid")
+        assert not ok and "otherpid, not the testpid under test" in why
+
+    def test_any_profile_token_ignores_the_recorded_profile(self, h):
+        """createProfile/listProfiles carry no profile_id; they cannot be scoped."""
+        expect = self._expect(h.ANY_PROFILE)
+        rec = self._rec("someone-else")
+        del rec["profile_id"]  # the row the server really writes for listProfiles
+        assert h._expected_call_ok([rec], expect, "testpid")[0]
+
+    def test_plot_token_matches_the_alt_profile(self, h):
+        expect = self._expect(h.PLOT_PROFILE)
+        assert h._expected_call_ok([self._rec("plotpid")], expect, "testpid", alt_pid="plotpid")[0]
+        ok, why = h._expected_call_ok([self._rec("plotpid")], expect, "testpid")
+        assert not ok and "not the testpid under test" in why
+
+    def test_plot_token_falls_back_to_the_test_profile(self, h):
+        """With no NEXTDNS_PLOT_PROFILE configured the step targets the test profile."""
+        expect = self._expect(h.PLOT_PROFILE)
+        assert h._expected_call_ok([self._rec("testpid")], expect, "testpid", alt_pid="")[0]
+
+    def test_expect_label_shows_the_profile_scope(self, h):
+        step = h.Step(
+            id="plots.status",
+            section="plots",
+            tool="plotAnalytics",
+            description="d",
+            prompt="p",
+            verify="plots",
+            expect=h._expect_local("plotAnalytics", args=("status",), result=("image",), profile=h.PLOT_PROFILE),
+        )
+        label = h._expect_label(step)
+        assert "plotAnalytics" in label
+        assert f"profile={h.PLOT_PROFILE}" in label
+
+
+# ===========================================================================
+# the checklist's expectations: profile scope + the list-update payload pin
+# =========================================================================== #
+
+
+class TestChecklistExpectationShape:
+    @pytest.fixture()
+    def steps(self, h) -> dict:
+        return {s.id: s for s in h.build_steps(h.TaskTargets(profile_name="P", tag="tg"))}
+
+    def test_steps_are_built_with_aligned_fields(self, h, steps):
+        """Keyword construction: every field names its own step (a positional swap would not)."""
+        for step in steps.values():
+            assert step.id
+            assert step.section == step.id.split(".")[0]
+            assert step.description and step.prompt
+            assert step.verify and step.expect
+
+    def test_profile_scoped_steps(self, h, steps):
+        assert steps["profiles.create"].expect["profile"] == h.ANY_PROFILE
+        assert steps["profiles.list"].expect["profile"] == h.ANY_PROFILE
+        assert steps["plots.status"].expect["profile"] == h.PLOT_PROFILE
+        assert steps["logs.download"].expect["profile"] == h.PLOT_PROFILE
+        # Everything else is scoped to the test profile by default.
+        assert "profile" not in steps["lists.denylist.add"].expect
+        assert "profile" not in steps["logs.get"].expect
+        assert "profile" not in steps["profiles.delete"].expect
+
+    def test_list_update_steps_pin_the_entry_and_the_false_value(self, h, steps):
+        """`args=("active",)` alone passed for active=true and for other entries."""
+        targets = h.TaskTargets(profile_name="P", tag="tg")
+        for name in ("allowlist", "denylist", "parental_categories", "parental_services"):
+            args = steps[f"lists.{name}.update"].expect["args"]
+            assert args[0] == targets.list_entries[name]
+            assert '"active": false' in args
+
+    def test_list_entries_come_from_the_shared_table(self, h):
+        targets = h.TaskTargets(profile_name="P", tag="zz9")
+        assert targets.list_entries["denylist"] == "ai-e2e-deny-zz9.example.com"
+        assert targets.list_entries["parental_services"] == "tiktok"
+        assert set(targets.list_entries) == set(h.LIST_ENTRIES)
+
+
+# ===========================================================================
+# verification verdicts: absence and state need proof, not a failed read
+# =========================================================================== #
+
+
+class TestVerifyStepVerdicts:
+    def _step(self, h, verify: str, vdata=None) -> "h.Step":
+        return h.Step(
+            id=f"v.{verify}",
+            section="lists",
+            tool="t",
+            description="d",
+            prompt="p",
+            verify=verify,
+            vdata=vdata or {},
+        )
+
+    def _run(self, h):
+        return h.ActorRun(command=["x"])
+
+    def test_list_update_requires_the_entry_read_back_inactive(self, h):
+        import asyncio
+
+        targets = h.TaskTargets(profile_name="P", tag="tg")
+        step = self._step(
+            h,
+            "list_update",
+            {"name": "denylist", "spec": {"path": "/denylist"}, "values": ["x.example.com"]},
+        )
+
+        def client(active_rows):
+            return _FakeClient(by_path={"/profiles/pid1/denylist": {"ok": True, "body": {"data": active_rows}}})
+
+        status, err, _, rest = asyncio.run(
+            h._verify_step(client([{"id": "x.example.com", "active": False}]), targets, "pid1", step, self._run(h))
+        )
+        assert status == "passed" and rest["verified_inactive"] is True
+        # active=true is not the outcome the step asked for.
+        status, err, _, _ = asyncio.run(
+            h._verify_step(client([{"id": "x.example.com", "active": True}]), targets, "pid1", step, self._run(h))
+        )
+        assert status == "failed" and "active=True" in err
+        # An update that touched a different entry did not do this step's work.
+        status, _, _, rest = asyncio.run(
+            h._verify_step(client([{"id": "other.example.com", "active": False}]), targets, "pid1", step, self._run(h))
+        )
+        assert status == "failed" and rest["verdict"] == h.ENTRY_MISSING
+        # A failed read proves nothing.
+        broken = _FakeClient(by_path={"/profiles/pid1/denylist": {"status": 503, "ok": False, "body": "boom"}})
+        status, err, _, rest = asyncio.run(h._verify_step(broken, targets, "pid1", step, self._run(h)))
+        assert status == "failed" and h.INDETERMINATE in rest["verdict"]
+
+    def test_list_removal_needs_a_confirmed_absence(self, h):
+        import asyncio
+
+        targets = h.TaskTargets(profile_name="P", tag="tg")
+        step = self._step(
+            h,
+            "list_remove",
+            {"name": "denylist", "spec": {"path": "/denylist"}, "values": ["x.example.com"]},
+        )
+        gone = _FakeClient(by_path={"/profiles/pid1/denylist": {"ok": True, "body": {"data": []}}})
+        status, _, _, rest = asyncio.run(h._verify_step(gone, targets, "pid1", step, self._run(h)))
+        assert status == "passed" and rest["verdict"] == h.ABSENT
+        # A 503 used to count as "gone".
+        broken = _FakeClient(by_path={"/profiles/pid1/denylist": {"status": 503, "ok": False, "body": "boom"}})
+        status, err, _, rest = asyncio.run(h._verify_step(broken, targets, "pid1", step, self._run(h)))
+        assert status == "failed" and h.INDETERMINATE in rest["verdict"]
+        assert "not confirmed" in err
+        # Verification must not itself delete anything (the old _req helper
+        # DELETEd for any non-GET method a caller might pass).
+        assert broken.deleted == [] and gone.deleted == []
+
+    def test_rewrite_deletion_needs_a_confirmed_absence(self, h):
+        import asyncio
+
+        targets = h.TaskTargets(profile_name="P", tag="tg")
+        step = self._step(h, "rewrite_delete", {"record": {"name": "a.example.com", "content": "1.2.3.4"}})
+        gone = _FakeClient(by_path={"/profiles/pid1/rewrites": {"ok": True, "body": {"data": []}}})
+        status, _, _, rest = asyncio.run(h._verify_step(gone, targets, "pid1", step, self._run(h)))
+        assert status == "passed" and rest["verdict"] == h.ABSENT
+        four_oh_four = _FakeClient(by_path={"/profiles/pid1/rewrites": {"status": 404, "ok": False, "body": {}}})
+        status, _, _, _ = asyncio.run(h._verify_step(four_oh_four, targets, "pid1", step, self._run(h)))
+        assert status == "passed"
+        # A malformed body is not proof the record is gone.
+        malformed = _FakeClient(by_path={"/profiles/pid1/rewrites": {"ok": True, "body": {"data": "not-a-list"}}})
+        status, err, _, rest = asyncio.run(h._verify_step(malformed, targets, "pid1", step, self._run(h)))
+        assert status == "failed" and h.INDETERMINATE in rest["verdict"]
+        assert "not confirmed" in err
+
+    def test_skipped_plot_and_log_steps_report_the_path_they_read(self, h, monkeypatch):
+        """MAINT-17: the evidence said `GET {test profile}/...` for a read of the plot profile."""
+        import asyncio
+
+        monkeypatch.setenv("NEXTDNS_PLOT_PROFILE", "plotpid")
+        targets = h.TaskTargets(profile_name="P", tag="tg")
+        no_data = _FakeClient(by_path={"/profiles/plotpid/analytics/status": {"ok": True, "body": {"data": []}}})
+        status, _, _, rest = asyncio.run(
+            h._verify_step(no_data, targets, "pid1", self._step(h, "plots", {"metric": "status"}), self._run(h))
+        )
+        assert status == "skipped"
+        assert rest["endpoint"] == "GET /profiles/plotpid/analytics/status"
+
+        no_logs = _FakeClient(by_path={"/profiles/plotpid/logs": {"ok": True, "body": {"data": []}}})
+        status, _, _, rest = asyncio.run(
+            h._verify_step(no_logs, targets, "pid1", self._step(h, "logs_download"), self._run(h))
+        )
+        assert status == "skipped"
+        assert rest["endpoint"] == "GET /profiles/plotpid/logs"
 
 
 # =========================================================================== #
@@ -1712,6 +2190,7 @@ class TestServerCallEvidence:
         right = {
             "tool": "addToDenylist",
             "endpoint": "POST /profiles/{profile_id}/denylist",
+            "profile_id": "pid",
             "ok": True,
             "write": True,
             "args": '{"entry_id": "ads.example.com"}',
@@ -1740,6 +2219,7 @@ class TestServerCallEvidence:
         write = {
             "tool": "replaceDenylist",
             "endpoint": "PUT /profiles/{profile_id}/denylist",
+            "profile_id": "pid",
             "ok": True,
             "write": True,
             "args": '{"entry_ids": ["x"]}',
@@ -1748,6 +2228,7 @@ class TestServerCallEvidence:
         confirm = {
             "tool": "getDenylist",
             "endpoint": "GET /profiles/{profile_id}/denylist",
+            "profile_id": "pid",
             "ok": True,
             "write": False,
             "args": "{}",
@@ -1769,6 +2250,7 @@ class TestServerCallEvidence:
         add = {
             "tool": "addRewrite",
             "endpoint": "POST /profiles/{profile_id}/rewrites",
+            "profile_id": "pid",
             "ok": True,
             "write": True,
             "args": '{"name": "a.example.com", "content": "192.0.2.100"}',
@@ -1804,6 +2286,7 @@ class TestServerCallEvidence:
         add = {
             "tool": "addRewrite",
             "endpoint": "POST /profiles/{profile_id}/rewrites",
+            "profile_id": "pid",
             "ok": True,
             "write": True,
             "args": '{"name": "a.example.com", "content": "192.0.2.100"}',
@@ -1834,6 +2317,7 @@ class TestServerCallEvidence:
         wrong_id = {
             "tool": "getProfile",
             "endpoint": "GET /profiles/{profile_id}",
+            "profile_id": "abc",
             "ok": True,
             "write": False,
             "args": '{"profile_id": "other"}',
@@ -1843,12 +2327,27 @@ class TestServerCallEvidence:
         empty = {
             "tool": "getProfile",
             "endpoint": "GET /profiles/{profile_id}",
+            "profile_id": "abc",
             "ok": True,
             "write": False,
             "args": '{"profile_id": "abc"}',
             "result": '{"error": "notFound"}',
         }
         assert "answered without" in h._expected_call_ok([empty], step.expect, "abc")[1]
+        # The call ran against a different readable profile: the endpoint
+        # template matched, the argument matched, but this is not an answer
+        # about the profile under test.
+        wrong_profile = {
+            "tool": "getProfile",
+            "endpoint": "GET /profiles/{profile_id}",
+            "profile_id": "other",
+            "ok": True,
+            "write": False,
+            "args": '{"profile_id": "abc"}',
+            "result": '{"data": {"id": "abc"}}',
+        }
+        why = h._expected_call_ok([wrong_profile], step.expect, "abc")[1]
+        assert "not the abc under test" in why
 
     def test_answered_accepts_an_empty_list_as_an_answer(self, h):
         """A fresh profile really does have an empty allowlist."""
@@ -2324,40 +2823,43 @@ class TestScratchIsolation:
     gets the path), and a retained-logs CSV is ~500 MB. Weeks of runs left
     ~6 GB of nextdns_logs_* dirs on /tmp — a tmpfs with a per-user quota —
     until EDQUOT failed a live download and degraded four later sessions.
+
+    The startup sweep of every ``nextdns_logs_*`` directory in the system temp
+    that reclaimed that space was removed: a downloadLogs in flight from
+    another server instance (the product keeps the CSV by design) had its
+    directory deleted mid-download. Scratch isolation now owns only what the
+    run itself creates, and removes it at exit.
     """
 
-    def test_sweep_removes_only_harness_download_dirs(self, h, tmp_path):
-        stale = tmp_path / "nextdns_logs_abc123"
-        stale.mkdir()
-        (tmp_path / "nextdns_logs_def456").mkdir()
-        keeper = tmp_path / "nextdns_logs_not_a_dir"
-        keeper.write_text("keep me", encoding="utf-8")
-        unrelated = tmp_path / "other-project"
-        unrelated.mkdir()
-
-        assert h._sweep_stale_download_dirs(tmp_path) == 2
-        assert not stale.exists()
-        assert keeper.exists()
-        assert unrelated.exists()
-
-    def test_sweep_of_empty_or_missing_base_is_zero(self, h, tmp_path):
-        assert h._sweep_stale_download_dirs(tmp_path) == 0
-        assert h._sweep_stale_download_dirs(tmp_path / "missing") == 0
-
-    def test_prepare_scratch_moves_tmpdir_to_home_and_sweeps_old_tmp(self, h, tmp_path, monkeypatch):
-        old_tmp = tmp_path / "oldtmp"
-        stale = old_tmp / "nextdns_logs_abc123"
-        stale.mkdir(parents=True)
+    def test_prepare_scratch_moves_tmpdir_to_home(self, h, tmp_path, monkeypatch):
         home = tmp_path / "home"
-        monkeypatch.setattr(h.tempfile, "gettempdir", lambda: str(old_tmp))
         monkeypatch.setattr(h.Path, "home", classmethod(lambda cls: home))
         monkeypatch.setenv("TMPDIR", "preset")  # snapshot + restore TMPDIR around the test
 
         scratch = h._prepare_scratch_dir()
         try:
-            assert not stale.exists()
             assert scratch.is_dir()
             assert home in scratch.parents
             assert os.environ["TMPDIR"] == str(scratch)
         finally:
             h.shutil.rmtree(scratch, ignore_errors=True)
+
+    def test_prepare_scratch_leaves_other_instances_downloads_alone(self, h, tmp_path, monkeypatch):
+        """A download from another server instance is not this run's to delete."""
+        old_tmp = tmp_path / "oldtmp"
+        in_flight = old_tmp / "nextdns_logs_abc123"
+        in_flight.mkdir(parents=True)
+        home = tmp_path / "home"
+        monkeypatch.setattr(h.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("TMPDIR", "preset")
+
+        scratch = h._prepare_scratch_dir()
+        try:
+            assert in_flight.exists()
+            assert in_flight.parent == old_tmp
+        finally:
+            h.shutil.rmtree(scratch, ignore_errors=True)
+
+    def test_the_startup_sweep_is_gone(self, h):
+        """No global temp sweep may come back: it deletes other processes' files."""
+        assert not hasattr(h, "_sweep_stale_download_dirs")

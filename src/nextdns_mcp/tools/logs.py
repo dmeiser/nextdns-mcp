@@ -14,6 +14,7 @@ the request the way it issues every other one.
 """
 
 import asyncio
+import codecs
 import ipaddress
 import logging
 import os
@@ -27,11 +28,12 @@ from .. import client
 from ..client import AccessDeniedError, _log_safe_error
 from ..config import get_download_max_bytes
 from ..errors import (
+    BODY_SLICE_BYTES,
     ErrorCode,
     error_payload,
     http_error_payload,
 )
-from ..utils import access_denied_payload
+from ..transport import access_denied_payload_for
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +77,14 @@ _MAX_DOWNLOAD_REDIRECTS = 5
 #
 # Known limitations of this reachability check, not bugs to fix here:
 # - The host is resolved here and resolved again by httpx when it connects, so
-#   a name whose answer changes in between (DNS rebinding) is not closed by it.
-# - A resolution failure (offline, unresolvable name) allows the hop through:
-#   such a host cannot be connected to anyway, and httpx reports the failure
-#   through the normal HTTP-error path.
+#   a name whose answer changes in between (DNS rebinding / TOCTOU) is not
+#   closed by it; closing that would mean pinning the vetted address into the
+#   connection, which the plain unauthenticated client here does not do. The
+#   window between the two resolutions is the residual risk, accepted and
+#   named (issue #266 review).
+# - A resolution failure REFUSES the hop (fail closed, see
+#   ``_host_resolves_to_public_address``): the guard does not degrade to
+#   allow when DNS misbehaves.
 ALLOWED_DOWNLOAD_SCHEMES = {"https"}
 
 # Verified public hosts allowed to serve log downloads even though they do not
@@ -108,17 +114,25 @@ def _is_public_address(address: str | int) -> bool:
 async def _host_resolves_to_public_address(host: str) -> bool:
     """Return whether every address ``host`` resolves to is globally routable.
 
-    Resolution runs off the event loop because it can block on DNS. A name that
-    does not resolve is not treated as a refusal: such a host cannot be
-    connected to anyway, and httpx surfaces the connection error through the
-    normal HTTP-error path. The address vetted here is not the address httpx
-    dials, since httpx resolves the name again when it connects.
+    Resolution runs off the event loop because it can block on DNS.
+
+    Fails closed: a name that does not resolve - resolver down, NXDOMAIN,
+    empty answer - is refused, not waved through. The old fail-open reading
+    argued an unresolvable host cannot be connected to anyway; that argument
+    holds only while this guard's resolver and httpx's answer the same
+    question with the same result, and a guard that disables itself whenever
+    DNS misbehaves is not a guard. The redirect can wait for a working
+    resolver; the metadata endpoint cannot wait for anything.
+
+    Residual and accepted (see the module note above): httpx resolves the name
+    again when it connects, so the address vetted here is not necessarily the
+    address dialed (DNS rebinding / TOCTOU).
     """
     try:
         infos = await asyncio.to_thread(socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
     except OSError:
-        return True
-    return all(_is_public_address(info[4][0]) for info in infos)
+        return False
+    return bool(infos) and all(_is_public_address(info[4][0]) for info in infos)
 
 
 async def _check_download_redirect_target(next_url: httpx.URL) -> None:
@@ -150,15 +164,25 @@ class DownloadTooLargeError(Exception):
     """Raised when a download exceeds the total-size cap mid-stream."""
 
 
+def _preview_full(preview: list[str], preview_bytes: int) -> bool:
+    """True once the preview has hit its line or byte cap."""
+    return len(preview) >= DOWNLOAD_PREVIEW_MAX_LINES or preview_bytes >= DOWNLOAD_PREVIEW_MAX_BYTES
+
+
 def _append_preview(preview: list[str], preview_bytes: int, text: str) -> int:
     """Add this chunk's leading lines to the preview, within the line and byte caps.
 
     Returns the new preview byte count. A preview that already hit either cap
-    collects nothing: the first line trips the same break the per-chunk guard
-    used before the extraction.
+    returns before the chunk is split into lines at all: past 20 lines or
+    256 KB there is nothing any later chunk can add, and ``splitlines()`` on
+    every remaining chunk of a 1 GiB CSV is work that buys nothing. A first
+    line that would cross the byte cap still trips the same break the
+    per-chunk guard used before the extraction.
     """
+    if _preview_full(preview, preview_bytes):
+        return preview_bytes
     for line in text.splitlines(keepends=True):
-        if len(preview) >= DOWNLOAD_PREVIEW_MAX_LINES:
+        if _preview_full(preview, preview_bytes):
             break
         line_bytes = len(line.encode("utf-8"))
         if preview_bytes + line_bytes > DOWNLOAD_PREVIEW_MAX_BYTES:
@@ -168,19 +192,87 @@ def _append_preview(preview: list[str], preview_bytes: int, text: str) -> int:
     return preview_bytes
 
 
+# Read off a failed stream at most this much of the body, so http_error_payload
+# can quote the upstream error document without reading a hostile multi-megabyte
+# failure page into memory. The size is errors.py's own body slice, so the read
+# always covers what the payload will show.
+_ERROR_BODY_READ_BYTES = BODY_SLICE_BYTES
+
+
+async def _bounded_error_body(response: httpx.Response) -> bytes:
+    """Read a bounded prefix of a streaming response's body."""
+    parts: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        parts.append(chunk)
+        total += len(chunk)
+        if total >= _ERROR_BODY_READ_BYTES:
+            break
+    return b"".join(parts)
+
+
+async def _raise_for_streamed_status(response: httpx.Response) -> None:
+    """``raise_for_status`` that leaves the failed response's body readable.
+
+    A streaming response raises ``httpx.ResponseNotRead`` from ``.json()`` and
+    ``.text`` until it has been read, and ``http_error_payload`` - which the
+    download handlers build from the raised error - reads both. Before this, a
+    mid-download 503 escaped as ``ResponseNotRead`` instead of the typed
+    payload. The bounded error document is read here and re-raised around a
+    buffered copy of the response, so the payload carries what upstream said
+    without buffering an unbounded body.
+    """
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if not e.response.is_stream_consumed:
+            body = await _bounded_error_body(e.response)
+            e.response = httpx.Response(
+                status_code=e.response.status_code,
+                headers=e.response.headers,
+                content=body,
+                request=e.response.request,
+            )
+        raise
+
+
+async def _stream_pieces(response: httpx.Response, decoder: codecs.IncrementalDecoder):
+    """Yield ``(raw_bytes, decoded_text)`` per chunk, then the final decoded tail.
+
+    One loop over this keeps the size cap, the disk write and the
+    row/preview tally in one place. Raw bytes are counted and written
+    verbatim - no re-encode of every chunk just to account for its size -
+    and the text comes from an incremental decoder, so a codepoint split
+    across chunk boundaries still decodes whole. The final piece carries no
+    bytes: it is whatever the decoder was holding at end-of-stream, already
+    on disk as part of the raw chunks.
+    """
+    async for raw in response.aiter_bytes():
+        if raw:
+            yield raw, decoder.decode(raw)
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        yield b"", tail
+
+
 async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict[str, Any]:
     """Write a streaming response body to ``path`` without double-buffering.
 
-    The full CSV is written straight to disk chunk by chunk; only a bounded
-    preview of the leading lines is kept in memory. The total bytes written
-    are tracked and, once the running total exceeds the total-size cap
+    The full CSV is written straight to disk chunk by chunk, in bytes: the
+    size cap is measured on the raw chunk it applies to (no re-encode of every
+    chunk just to count its bytes), the file gets the raw bytes rather than a
+    decode/re-encode round trip, and only the preview and row counts need the
+    text, which an incremental decoder supplies at the same chunk boundaries
+    httpx used (so a codepoint split across chunks still decodes whole). Only a
+    bounded preview of the leading lines is kept in memory. The total bytes
+    written are tracked and, once the running total exceeds the total-size cap
     (the ``NEXTDNS_DOWNLOAD_MAX_BYTES`` environment variable, default 1 GiB,
     see :func:`nextdns_mcp.config.get_download_max_bytes`), a
     :class:`DownloadTooLargeError`
     is raised immediately — while streaming, not after the body is in hand —
     so a single download cannot fill the temp directory.
     """
-    response.raise_for_status()
+    await _raise_for_streamed_status(response)
     max_total = get_download_max_bytes()
     preview: list[str] = []
     preview_bytes = 0
@@ -189,24 +281,20 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     # End-of-stream flag, not per-chunk state: it is recomputed for every
     # chunk and is only true when the last chunk left a line unterminated.
     open_line = False
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
     # fdopen (not open) so the file handle stays usable from the event loop
     # without tripping ASYNC230; per-chunk writes are small and cheap.
-    with os.fdopen(
-        os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8", errors="replace"
-    ) as out:
-        async for text in response.aiter_text():
-            if not text:
-                continue
-            chunk_bytes = len(text.encode("utf-8"))
-            if written_bytes + chunk_bytes > max_total:
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out:
+        async for raw, text in _stream_pieces(response, decoder):
+            if written_bytes + len(raw) > max_total:
                 raise DownloadTooLargeError(
                     f"Download exceeds the {max_total}-byte limit "
                     f"(NEXTDNS_DOWNLOAD_MAX_BYTES); aborted after {written_bytes} bytes."
                 )
-            written_bytes += chunk_bytes
-            out.write(text)
-            newlines = text.count("\n")
-            row_count += newlines
+            written_bytes += len(raw)
+            if raw:
+                out.write(raw)
+            row_count += text.count("\n")
             open_line = not text.endswith("\n")
             preview_bytes = _append_preview(preview, preview_bytes, text)
     if open_line:
@@ -300,7 +388,7 @@ async def _download_logs_controlled(profile_id: str, path: str) -> tuple[dict[st
         # kept out of the httpx.HTTPError branch so a real upstream 403 keeps
         # its existing http_error path.
         logger.warning(f"Access denied downloading logs: {_log_safe_error(e)}")
-        return access_denied_payload(e), False
+        return access_denied_payload_for(e), False
     except DownloadTooLargeError as e:
         # Raised mid-stream when the total-size cap is exceeded; the partially
         # written CSV and its parent are removed by the caller's guard.

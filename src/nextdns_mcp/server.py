@@ -20,7 +20,7 @@ from .config import (
     validate_configuration,
 )
 from .openapi import create_mcp_server
-from .spec_tools import register_spec_tools, spec_tool_names
+from .spec_tools import endpoints_for_routes, register_spec_tools, spec_routes, spec_tool_names
 from .tools.doh import dohLookup
 from .tools.plots import plotAnalytics
 
@@ -59,8 +59,13 @@ def build_mcp_server() -> FastMCP:
         FastMCP: Configured MCP server instance with all tools registered
     """
     logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
-    server = create_mcp_server(tool_names=published_tool_names())
-    register_spec_tools(server)
+    # One parse of the shipped document feeds all three views of it: the tool
+    # surface, the call-log endpoint map, and the published-name list in the
+    # initialize instructions (spec_tool_names hits the process-wide route
+    # cache). Each used to parse the YAML independently.
+    routes = spec_routes()
+    server = create_mcp_server(tool_names=published_tool_names(), endpoints=endpoints_for_routes(routes))
+    register_spec_tools(server, routes)
     for tool in _COMPOSITE_TOOLS:
         # FastMCP publishes only the first text section of a docstring as the tool
         # description, so the accepted values and the worked example further down

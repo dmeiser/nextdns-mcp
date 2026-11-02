@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 """
 
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -73,7 +74,11 @@ def _assert_error_contract(result: Any) -> None:
 
 def _http_error(status_code: int) -> httpx.HTTPError:
     exc = httpx.HTTPError("boom")
-    exc.response = MagicMock(status_code=status_code, text=f"server said {status_code}")
+    exc.response = MagicMock(
+        status_code=status_code,
+        text=f"server said {status_code}",
+        content=f"server said {status_code}".encode(),
+    )
     return exc
 
 
@@ -117,6 +122,7 @@ class TestErrorPayloadShape:
         exc.response.status_code = 500
         exc.response.json.side_effect = ValueError("not json")
         exc.response.text = "<html>500 Bad Gateway</html>"
+        exc.response.content = b"<html>500 Bad Gateway</html>"
         payload = http_error_payload("msg", exc)
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert payload["status_code"] == 500
@@ -241,6 +247,7 @@ class TestErrorPayloadShape:
         exc.response.status_code = 502
         exc.response.json.side_effect = ValueError("not json")
         exc.response.text = "<html>" + ("x" * (1024 * 1024)) + "</html>"
+        exc.response.content = b"<html>" + (b"x" * (1024 * 1024)) + b"</html>"
         payload = http_error_payload("msg", exc)
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert payload["response_body_truncated"] is True
@@ -255,6 +262,7 @@ class TestErrorPayloadShape:
         exc.response.status_code = 400
         exc.response.json.return_value = {"data": []}
         exc.response.text = ""
+        exc.response.content = b""
         payload = http_error_payload("fallback message", exc)
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert payload["error"] == "fallback message"
@@ -528,3 +536,76 @@ class TestUpstreamErrorDocument:
         mock_api_client.request.return_value = response
         result = await spec_call("listProfiles")
         assert result == {"data": [{"id": "x.com"}]}
+
+
+class TestUnreadableAndOversizedBodies:
+    """The failure reporter cannot become a second failure.
+
+    Two real shapes broke the old ``response.text`` read: a streaming response
+    whose body was never read raises ``httpx.ResponseNotRead`` (a RuntimeError)
+    from ``.text``/``.json()`` - reproduced on a streaming 503, where the
+    payload builder crashed instead of describing the failure - and a huge
+    unparseable body was decoded whole just to slice 2 KB off it. Both are
+    now total: the body reports as absent or bounded, never as a crash.
+    """
+
+    class _StreamNotRead:
+        """Shaped like an httpx streaming response whose body was never read."""
+
+        status_code = 503
+
+        @property
+        def content(self) -> bytes:
+            raise RuntimeError("Attempted to access this property on a streaming response")
+
+        @property
+        def text(self) -> str:
+            raise RuntimeError("Attempted to access this property on a streaming response")
+
+        def json(self) -> object:
+            raise RuntimeError("Attempted to access this property on a streaming response")
+
+    def test_body_text_of_an_unread_stream_is_none_not_a_crash(self):
+        from nextdns_mcp.errors import response_body_text
+
+        assert response_body_text(self._StreamNotRead()) is None
+
+    def test_error_payload_describes_a_streaming_failure_without_reading_it(self):
+        import httpx
+
+        from nextdns_mcp.errors import ErrorCode, http_error_payload
+
+        exc = httpx.HTTPError("upstream 503 mid-stream")
+        exc.response = self._StreamNotRead()  # type: ignore[attr-defined]
+        payload = http_error_payload("download failed", exc)
+        assert payload["code"] == ErrorCode.HTTP_ERROR
+        assert payload["status_code"] == 503
+        assert "response_body" not in payload
+
+    def test_a_text_only_stub_is_read_as_is(self):
+        from nextdns_mcp.errors import response_body_text
+
+        stub = SimpleNamespace(text="plain text body")
+        assert response_body_text(stub) == "plain text body"
+
+    def test_a_text_only_stub_that_raises_is_none_not_a_crash(self):
+        from nextdns_mcp.errors import response_body_text
+
+        class _TextRaises:
+            @property
+            def text(self) -> str:
+                raise RuntimeError("no body for you")
+
+        assert response_body_text(_TextRaises()) is None
+
+    def test_a_huge_multibyte_body_is_sliced_not_decoded_whole(self):
+        from nextdns_mcp.errors import MAX_RESPONSE_BODY_CHARS, response_body_text
+
+        body = ("データ" * 300_000).encode("utf-8")  # ~2.7 MB, three bytes per char
+        stub = SimpleNamespace(content=body)
+        text = response_body_text(stub)
+        assert text is not None
+        assert text.startswith("データ")
+        # The slice carries the multibyte margin, so the decode yields whole
+        # codepoints well past the character cap it exists to serve.
+        assert len(text) >= MAX_RESPONSE_BODY_CHARS

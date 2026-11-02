@@ -837,9 +837,7 @@ class TestPlotFetchUsesSharedWrapper:
         monkeypatch.setattr(plots_module, "_api_request", wrapped)
 
         params = {"from": "-1d", "to": "now", "interval": 3600}
-        payload, error = await plots_module._fetch_series_payload(
-            "/profiles/abc123/analytics/status;series", params, "status"
-        )
+        payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", params)
 
         wrapped.assert_awaited_once_with("GET", "/profiles/abc123/analytics/status;series", params=params)
         # Routing moved off the raw client: the underlying transport must not be hit.
@@ -853,9 +851,7 @@ class TestPlotFetchUsesSharedWrapper:
         upstream.response = httpx.Response(500, text="upstream exploded")
         mock_api_client.request.side_effect = upstream
 
-        payload, error = await plots_module._fetch_series_payload(
-            "/profiles/abc123/analytics/status;series", {}, "status"
-        )
+        payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", {})
 
         assert payload is None
         assert error is not None
@@ -907,3 +903,41 @@ class TestRangeReportingAndProfileGuard:
         assert result["code"] == "internal_error"
         assert "profile resolution failed" in result["error"].lower()
         wrapped.assert_not_awaited()
+
+
+class TestReporterIsTotal:
+    """The error paths of the plotter answer as payloads, never as crashes.
+
+    Two shapes used to escape as exceptions instead of typed errors: a time
+    value outside the platform's convertible range (the reporter formats the
+    very value it is reporting a refusal about), and a fetcher that returns
+    neither payload nor error (the old code trusted its own contract and
+    would have plotted None). Both are pinned here as payloads.
+    """
+
+    def test_a_time_point_beyond_the_platform_range_is_named_not_formatted(self):
+        """``fromtimestamp`` raises on the value; the reporter names it instead.
+
+        1e30 is a valid float but no platform can turn it into a date; an
+        error path that crashes with OverflowError while describing a bad
+        timestamp turns the caller's typed error into an internal one. The
+        value must appear in the string exactly as the caller sent it.
+        """
+        assert plots_module._format_resolved(1e30) == "out of range (1e+30)"
+        # The negative side overflows too on this platform.
+        assert plots_module._format_resolved(-1e30).startswith("out of range (")
+
+    @pytest.mark.asyncio
+    async def test_a_fetch_returning_nothing_at_all_is_an_internal_error(self, clean_env, monkeypatch):
+        """``(None, None)`` from the fetcher must not reach the renderer.
+
+        The fetcher's contract is payload-or-error; a violation answers as
+        the typed internal error naming the metric, rather than a TypeError
+        on None inside the chart renderer several frames away from the truth.
+        """
+        monkeypatch.setattr(plots_module, "_fetch_series_payload", AsyncMock(return_value=(None, None)))
+
+        result = await plots_module._plot_analytics_series_impl("status", profile_id="abc123")
+        assert result["code"] == "internal_error"
+        assert "status" in result["error"]
+        assert "no payload" in result["error"].lower()

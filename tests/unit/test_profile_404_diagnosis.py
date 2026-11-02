@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nextdns_mcp import utils
+from nextdns_mcp import transport
 from nextdns_mcp.errors import ErrorCode, NextDNSError
 
 
@@ -27,7 +27,7 @@ def _not_found(method: str, url: str) -> dict:
 
 class TestTheTwoIdsAProfilePathCanMiss:
     def test_a_404_names_both_ids_it_could_mean(self):
-        payload = utils._note_404_on_a_profile_path(
+        payload = transport._note_404_on_a_profile_path(
             _not_found("POST", "/profiles/abc123/rewrites"), "/profiles/abc123/rewrites"
         )
         hint = payload["hint"]
@@ -38,7 +38,7 @@ class TestTheTwoIdsAProfilePathCanMiss:
 
     def test_a_404_on_an_entry_under_a_real_profile_gets_the_same_two_way_hint(self):
         """The server cannot tell which id missed, so the hint must not claim one."""
-        payload = utils._note_404_on_a_profile_path(
+        payload = transport._note_404_on_a_profile_path(
             _not_found("PATCH", "/profiles/51c8a4/parentalControl/services/tiktok"),
             "/profiles/51c8a4/parentalControl/services/tiktok",
         )
@@ -54,7 +54,7 @@ class TestTheTwoIdsAProfilePathCanMiss:
         ],
     )
     def test_anything_that_is_not_a_profile_404_is_left_alone(self, payload, url):
-        assert "hint" not in utils._note_404_on_a_profile_path(payload, url)
+        assert "hint" not in transport._note_404_on_a_profile_path(payload, url)
 
     async def test_the_wiring_reaches_a_tool_call(self, monkeypatch):
         """The hint is added where the URL is known, not by each tool."""
@@ -64,12 +64,13 @@ class TestTheTwoIdsAProfilePathCanMiss:
             response.status_code = 404
             response.json.return_value = {"errors": [{"code": "notFound"}]}
             response.text = '{"errors":[{"code":"notFound"}]}'
-            error = NextDNSError(f"HTTP error in {method} {url}: Client error '404 Not Found'", status_code=404)
-            error.response = response  # type: ignore[attr-defined]
+            error = NextDNSError(
+                f"HTTP error in {method} {url}: Client error '404 Not Found'", status_code=404, response=response
+            )
             raise error
 
-        monkeypatch.setattr(utils, "_api_request", boom)
-        payload = await utils._api_request_payload("POST", "/profiles/abc123/rewrites")
+        monkeypatch.setattr(transport, "_api_request", boom)
+        payload = await transport._api_request_payload("POST", "/profiles/abc123/rewrites")
         assert payload["upstream_code"] == "notFound"
         assert "profile id or the entry id" in str(payload.get("hint", ""))
 

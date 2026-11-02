@@ -19,6 +19,7 @@ A Model Context Protocol (MCP) server that exposes the NextDNS API as tools for 
 - Safety Guidelines: [safety.md](safety.md)
 - Troubleshooting: [troubleshooting.md](troubleshooting.md)
 - FAQ: [faq.md](faq.md)
+- Architecture decision records: [architecture/0001-openapi-spec-generated-tools.md](architecture/0001-openapi-spec-generated-tools.md)
 
 ## Requirements
 - NextDNS API key from https://my.nextdns.io/account

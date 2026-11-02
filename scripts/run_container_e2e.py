@@ -24,8 +24,10 @@ from mcp.types import ImageContent, TextContent
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from scripts import validate_schema
+from scripts import ai_e2e_common, validate_schema
 from scripts.validate_schema import (
     assert_operation_coverage,
     load_openapi_spec,
@@ -161,23 +163,44 @@ READ_ARGUMENT_DEFAULTS: dict[str, Any] = {"from": "-1d", "to": "now", "limit": 1
 # with, after ``{profile}`` and ``{ts}`` are substituted. Every entry that adds
 # something is paired with the one that takes it away, so a completed run leaves the
 # profile as it found it.
+#
+# The seven settings writes are derived from the shared SETTINGS_CATEGORIES table
+# (the same payloads the actor harness drives), through the writer each category's
+# endpoint exposes; this script restated those payloads with its own values and had
+# already drifted from the table (retention 86400 vs 604800, blockpage enabled
+# True vs False). The order below is the run order and is pinned by the unit test.
+_SETTINGS_WRITE_TOOLS: dict[str, str] = {
+    "general": "updateSettings",
+    "logs": "updateLogsSettings",
+    "blockpage": "updateBlockPageSettings",
+    "performance": "updatePerformanceSettings",
+    "privacy": "updatePrivacySettings",
+    "security": "updateSecuritySettings",
+    "parental": "updateParentalControlSettings",
+}
+_SETTINGS_WRITE_ORDER: tuple[str, ...] = (
+    "general",
+    "logs",
+    "blockpage",
+    "performance",
+    "privacy",
+    "security",
+    "parental",
+)
+
+
+def _settings_write_cases() -> list[tuple[str, dict[str, Any]]]:
+    """The settings write cases, payloads taken from SETTINGS_CATEGORIES."""
+    return [
+        (_SETTINGS_WRITE_TOOLS[cat], {"profile_id": "{profile}", **ai_e2e_common.SETTINGS_CATEGORIES[cat]["set"]})
+        for cat in _SETTINGS_WRITE_ORDER
+    ]
+
+
 WRITE_CASES: list[tuple[str, dict[str, Any]]] = [
     ("updateProfile", {"profile_id": "{profile}", "name": "Updated E2E Profile {ts}"}),
     # One call per settings endpoint the spec describes; the category is the endpoint.
-    ("updateSettings", {"profile_id": "{profile}", "web3": True}),
-    ("updateLogsSettings", {"profile_id": "{profile}", "enabled": True, "retention": 86400}),
-    ("updateBlockPageSettings", {"profile_id": "{profile}", "enabled": True}),
-    ("updatePerformanceSettings", {"profile_id": "{profile}", "ecs": True, "cacheBoost": True}),
-    ("updatePrivacySettings", {"profile_id": "{profile}", "disguisedTrackers": True, "allowAffiliate": False}),
-    (
-        "updateSecuritySettings",
-        {
-            "profile_id": "{profile}",
-            "threatIntelligenceFeeds": True,
-            "googleSafeBrowsing": True,
-        },
-    ),
-    ("updateParentalControlSettings", {"profile_id": "{profile}", "safeSearch": True, "youtubeRestrictedMode": True}),
+    *_settings_write_cases(),
     # List entries: add, update where the entry has its own endpoint, remove.
     ("addToDenylist", {"profile_id": "{profile}", "id": "e2e-{ts}-deny.example.com"}),
     ("updateDenylistEntry", {"profile_id": "{profile}", "entry_id": "e2e-{ts}-deny.example.com", "active": True}),
@@ -199,6 +222,26 @@ WRITE_CASES: list[tuple[str, dict[str, Any]]] = [
 
 SPEC_PATH = PROJECT_ROOT / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
 
+# The shipped document was parsed twice per process: once here for the catalog
+# and once per runner for schema validation (~160 ms each). One memo, keyed by
+# path so a monkeypatched SPEC_PATH reparses rather than serving a stale memo.
+_SPEC_MEMO: tuple[Path, dict[str, Any]] | None = None
+
+
+def _load_spec_once(path: Path) -> dict[str, Any]:
+    """Parse the OpenAPI document once per path (see ``_SPEC_MEMO``)."""
+    global _SPEC_MEMO
+    if _SPEC_MEMO is not None and _SPEC_MEMO[0] == path:
+        return _SPEC_MEMO[1]
+    spec = load_openapi_spec(str(path))
+    _SPEC_MEMO = (path, spec)
+    return spec
+
+
+# The "unwrap `data`, read `id`" idiom a create/add answer needs, shared with
+# the actor harness rather than re-typed per site.
+_unwrap_id = ai_e2e_common._unwrap_id
+
 # Early-access security toggles reported from the NextDNS dashboard but not
 # listed in the official API docs. This E2E verifies whether the API actually
 # accepts them via PATCH /profiles/:id/security.
@@ -212,7 +255,7 @@ SECURITY_TOGGLE_KEYS = [
 
 # The catalog expected of a container built from the shipped document. Computed here so
 # the summary and the preflight, and the unit test for this script, all read one list.
-EXPECTED_TOOLS = expected_tools(load_openapi_spec(str(SPEC_PATH))) if SPEC_PATH.exists() else []
+EXPECTED_TOOLS = expected_tools(_load_spec_once(SPEC_PATH)) if SPEC_PATH.exists() else []
 
 
 def _input_schema(tool: Any) -> dict[str, Any]:
@@ -260,27 +303,11 @@ def _catalog_drift(served: set[str]) -> list[str]:
     return drift
 
 
-def _created_profile_id(res: Any) -> str:
-    """The id out of a createProfile answer, unwrapping `data` when the answer wraps."""
-    if not isinstance(res, dict):
-        return ""
-    data_obj = res.get("data") if isinstance(res.get("data"), dict) else res
-    return str(data_obj.get("id") or "") if isinstance(data_obj, dict) else ""
-
-
 def _first_profile_id(res: Any) -> str:
     """The id of the first profile in a listProfiles answer, '' when there is none."""
     if not isinstance(res, dict) or not res.get("data"):
         return ""
     return str(res["data"][0].get("id") or "")
-
-
-def _rewrite_id(res: Any) -> str:
-    """The id out of an addRewrite answer, unwrapping `data` when the answer wraps."""
-    if not isinstance(res, dict):
-        return ""
-    rw_data = res.get("data") if isinstance(res.get("data"), dict) else res
-    return str(rw_data.get("id") or "") if isinstance(rw_data, dict) else ""
 
 
 def _document_reads(operations: dict[str, str]) -> list[str]:
@@ -331,7 +358,7 @@ class ContainerE2ERunner:
 
         self.spec: dict[str, Any] = {}
         if SPEC_PATH.exists():
-            self.spec = load_openapi_spec(str(SPEC_PATH))
+            self.spec = _load_spec_once(SPEC_PATH)
             # Hard-fail on mapping drift: an operationId that resolves to no
             # schema would otherwise degrade to SKIPPED at validation time,
             # which the workflow counts as neither pass nor fail.
@@ -607,7 +634,7 @@ class ContainerE2ERunner:
         ts = int(time.time())
         p_name = f"E2E Test Profile {ts}"
         ok, res = await self.execute_call(session, "createProfile", {"name": p_name})
-        created_profile_id = _created_profile_id(res) if ok else ""
+        created_profile_id = _unwrap_id(res) if ok else ""
         if created_profile_id:
             (self.artifacts_dir / "test_profile_id.txt").write_text(created_profile_id, encoding="utf-8")
             log_success(f"Created test profile: {created_profile_id}")
@@ -714,17 +741,9 @@ class ContainerE2ERunner:
 
     async def _run_plot_sweep(self, session: ClientSession, plot_profile_id: str) -> None:
         """Exercise plotAnalytics for each metric, or record skips when no plot profile is set."""
-        plot_metrics = [
-            "status",
-            "devices",
-            "protocols",
-            "queryTypes",
-            "ipVersions",
-            "dnssec",
-            "encryption",
-            "reasons",
-            "ips",
-        ]
+        # The nine chartable metrics, from the server's own typed literal — the
+        # same table the actor harness walks — not a list retyped here.
+        plot_metrics = ai_e2e_common.PLOT_METRICS
         if self.plot_profile:
             for metric in plot_metrics:
                 await self.execute_call(
@@ -778,7 +797,7 @@ class ContainerE2ERunner:
             "addRewrite",
             {"profile_id": profile_id, "name": f"e2e-{ts}.example.com", "content": "192.0.2.1"},
         )
-        rewrite_id = _rewrite_id(rw_res) if ok else ""
+        rewrite_id = _unwrap_id(rw_res) if ok else ""
         if rewrite_id:
             await self.execute_call(session, "deleteRewrite", {"profile_id": profile_id, "entry_id": rewrite_id})
         else:

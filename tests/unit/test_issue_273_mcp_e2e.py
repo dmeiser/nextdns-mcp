@@ -148,15 +148,19 @@ async def test_integer_shape_helper_is_live_in_the_mcp_call_path(
 ) -> None:
     """The moved ``is_integer_shaped`` still runs before the arguments are sent.
 
-    ``"١٠"`` (Arabic-Indic decimal digits) is not accepted by pydantic's lax int
-    parsing, so the value only reaches the API as the number 10 because
-    ``StripExtraFieldsMiddleware`` recognises the integer shape and converts it
-    first. That makes the surviving helper observable in the live request path,
-    not just in a unit test.
+    ``"٢٥٩٢٠٠٠"`` (Arabic-Indic decimal digits for 2592000) is not accepted by
+    pydantic's lax int parsing, so the value only reaches the API as a number
+    because ``StripExtraFieldsMiddleware`` recognises the integer shape and
+    converts it first. That makes the surviving helper observable in the live
+    request path, not just in a unit test.
+
+    The coerced value must also survive the tool's own schema gate:
+    ``retention`` is an enum of allowed seconds, so the digit string stands
+    for a valid member (2592000 - 30 days), not an arbitrary integer.
     """
-    result = await mcp_client.call_tool("updateLogsSettings", {"profile_id": "abc123", "retention": "١٠"})
+    result = await mcp_client.call_tool("updateLogsSettings", {"profile_id": "abc123", "retention": "٢٥٩٢٠٠٠"})
     assert result.data == {"data": []}
 
     sent = recorder.body()
-    assert sent == {"retention": 10}, f"the shape helper did not run: {sent!r}"
+    assert sent == {"retention": 2592000}, f"the shape helper did not run: {sent!r}"
     assert isinstance(sent["retention"], int)

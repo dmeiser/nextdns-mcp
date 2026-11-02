@@ -19,7 +19,7 @@ import pytest
 from fastmcp import Client
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import utils
+from nextdns_mcp import transport
 from nextdns_mcp.errors import NextDNSAuthError, NextDNSError, NextDNSRateLimitError, NextDNSServerError
 from nextdns_mcp.server import build_mcp_server
 
@@ -123,7 +123,7 @@ async def test_upstream_status_raises_typed_exception_with_status_and_body(
 ):
     """The caller-facing surface a retry/circuit-breaker needs: type, status, body."""
     with pytest.raises(expected_type) as excinfo:
-        await utils._api_request("GET", path)
+        await transport._api_request("GET", path)
 
     assert isinstance(excinfo.value, NextDNSError)
     assert excinfo.value.status_code == expected_status
@@ -134,7 +134,7 @@ async def test_upstream_status_raises_typed_exception_with_status_and_body(
 
 @pytest.mark.asyncio
 async def test_successful_upstream_response_is_unchanged(stub_nextdns_api):
-    payload = await utils._api_request_payload("GET", "/profiles")
+    payload = await transport._api_request_payload("GET", "/profiles")
     assert payload == {"data": [{"id": "abc123", "name": "Home Network"}]}
 
 
@@ -146,7 +146,7 @@ async def test_non_http_failure_raises_base_exception_without_status(stub_nextdn
     monkeypatch.setattr(client_module.get_api_client(), "request", boom)
 
     with pytest.raises(NextDNSError) as excinfo:
-        await utils._api_request("GET", "/profiles")
+        await transport._api_request("GET", "/profiles")
     assert type(excinfo.value) is NextDNSError
     assert excinfo.value.status_code is None
     assert excinfo.value.response_body is None

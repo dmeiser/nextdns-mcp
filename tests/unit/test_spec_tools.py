@@ -16,7 +16,6 @@ import pytest
 from fastmcp import Client, FastMCP
 
 from nextdns_mcp import spec_tools
-from nextdns_mcp.call_log import resolve_endpoint
 
 # Operations in nextdns-openapi.yaml, the one that is not offered, and the two the
 # server performs itself.
@@ -229,8 +228,8 @@ class TestToolCall:
         would break the endpoint rather than protect it.
         """
         tool = self._tool(monkeypatch, calls, "getLogs")
-        await tool.run({"profile_id": "abc123", "search": "a b?c#d", "limit": 5})
-        assert calls[0]["params"] == {"search": "a b?c#d", "limit": 5}
+        await tool.run({"profile_id": "abc123", "search": "a b?c#d", "limit": 100})
+        assert calls[0]["params"] == {"search": "a b?c#d", "limit": 100}
 
     async def test_a_missing_entry_argument_says_where_entry_ids_come_from(self, monkeypatch, calls):
         tool = self._tool(monkeypatch, calls, "removeFromDenylist")
@@ -277,25 +276,31 @@ class TestToolCall:
 
 
 class TestRegistration:
-    def test_registering_records_each_endpoint_for_the_call_log(self, monkeypatch):
+    def test_registering_derives_the_call_log_endpoints_from_the_routes(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_API_KEY", "k")
-        names = spec_tools.register_spec_tools(FastMCP("probe"))
-        assert resolve_endpoint("addToDenylist") == ("POST", "/profiles/{profile_id}/denylist")
-        assert resolve_endpoint("getAnalyticsDevicesSeries") == (
+        routes = spec_tools.spec_routes()
+        names = spec_tools.register_spec_tools(FastMCP("probe"), routes)
+        endpoints = spec_tools.endpoints_for_routes(routes)
+        assert endpoints["addToDenylist"] == ("POST", "/profiles/{profile_id}/denylist")
+        assert endpoints["getAnalyticsDevicesSeries"] == (
             "GET",
             "/profiles/{profile_id}/analytics/devices;series",
         )
         assert names == spec_tools.spec_tool_names()
 
-    def test_the_record_carries_the_endpoint_and_a_method_derived_write(self, tmp_path):
+    async def test_the_record_carries_the_endpoint_and_a_method_derived_write(self, tmp_path):
         from nextdns_mcp.call_log import CallLogMiddleware
 
         path = tmp_path / "calls.jsonl"
-        middleware = CallLogMiddleware(path=str(path))
-        spec_tools.register_endpoint("addRewrite", "POST", "/profiles/{profile_id}/rewrites")
-        spec_tools.register_endpoint("listRewrites", "GET", "/profiles/{profile_id}/rewrites")
-        middleware._record("addRewrite", {"profile_id": "abc123"}, ok=True, error="")
-        middleware._record("listRewrites", {"profile_id": "abc123"}, ok=True, error="")
+        middleware = CallLogMiddleware(
+            path=str(path),
+            endpoints={
+                "addRewrite": ("POST", "/profiles/{profile_id}/rewrites"),
+                "listRewrites": ("GET", "/profiles/{profile_id}/rewrites"),
+            },
+        )
+        await middleware._record("addRewrite", {"profile_id": "abc123"}, ok=True, error="")
+        await middleware._record("listRewrites", {"profile_id": "abc123"}, ok=True, error="")
         rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         assert rows[0]["endpoint"] == "POST /profiles/{profile_id}/rewrites"
         assert rows[0]["write"] is True
@@ -379,3 +384,207 @@ class TestRegistration:
                 "call_tool", {"name": "addToDenylist", "arguments": {"profile_id": "abc123", "id": "example.com"}}
             )
             assert called.structured_content == {"data": [{"id": "zip"}]}
+
+
+class TestRefusalsBeforeTransport:
+    """Nothing malformed reaches the API: every guard answers before dispatch.
+
+    The published ``inputSchema`` is what docs/troubleshooting.md says the
+    server enforces ("rejected without reaching the API"), path arguments are
+    checked for anything that could address a different endpoint, and a series
+    range beyond the documented point budget is refused where it is built.
+    Each of these must answer as a typed payload with no upstream request at
+    all — an argument refused locally is cheaper and clearer than the 400 the
+    API would answer, and a path value refused here is the ACL layer never
+    having to interpret a crafted URL.
+    """
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    def _tool(self, monkeypatch, calls, operation_id: str):
+        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}[operation_id])
+
+    async def test_a_value_beyond_the_published_bound_is_refused_locally(self, monkeypatch, calls):
+        """``LogsLimit`` caps at 1000; a larger limit never reaches the API."""
+        tool = self._tool(monkeypatch, calls, "getLogs")
+        payload = (await tool.run({"profile_id": "abc123", "limit": 99999})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "limit" in payload["error"]
+        assert calls == [], "an argument the published schema rejects must not be sent upstream"
+
+    async def test_a_percent_in_a_path_value_is_refused_not_sent(self, monkeypatch, calls):
+        """``%`` is refused outright: its meaning depends on what decodes it.
+
+        ``%2e%2e`` is ``..`` to anything that percent-decodes, and a
+        double-encoded variant is invisible to a single decode pass; refusing
+        the character closes both, and no legal NextDNS id contains it.
+        """
+        tool = self._tool(monkeypatch, calls, "getDenylist")
+        payload = (await tool.run({"profile_id": "ab%cd"})).structured_content
+        assert payload["code"] == "invalid_profile_id"
+        assert calls == []
+
+    @pytest.mark.parametrize("value", ["{profile_id}", "a}b", "{"])
+    async def test_a_brace_in_a_path_value_is_refused(self, monkeypatch, calls, value):
+        """A brace is the shape of a path placeholder; an id may not carry one."""
+        tool = self._tool(monkeypatch, calls, "getDenylist")
+        payload = (await tool.run({"profile_id": value})).structured_content
+        assert payload["code"] == "invalid_profile_id"
+        assert calls == []
+
+    async def test_an_impossible_profile_shape_is_refused_before_the_acl(self, monkeypatch, calls):
+        """A printable-but-impossible id is an invalid id, not an unsafe URL.
+
+        13 lowercase alphanumerics contain none of the refused characters, so
+        without a shape guard this id used to be substituted into the path and
+        refused by the access-control layer as an unclassifiable URL - a 403
+        about the request when the honest answer names the id.
+        """
+        tool = self._tool(monkeypatch, calls, "getDenylist")
+        payload = (await tool.run({"profile_id": "abcdefg123456"})).structured_content
+        assert payload["code"] == "invalid_profile_id"
+        assert "listProfiles()" in payload["hint"]
+        assert calls == []
+
+    async def test_a_null_path_value_is_missing_not_the_text_none(self, monkeypatch, calls):
+        """An explicit null for a path parameter means "not filled in"."""
+        tool = self._tool(monkeypatch, calls, "getDenylist")
+        payload = (await tool.run({"profile_id": None})).structured_content
+        assert payload["code"] == "missing_required_argument"
+        assert "None" not in payload["error"]
+        assert calls == []
+
+    async def test_a_null_query_value_is_dropped_not_sent(self, monkeypatch, calls):
+        """``?to=`` is a validation error naming an empty string; null means absent."""
+        tool = self._tool(monkeypatch, calls, "getLogs")
+        await tool.run({"profile_id": "abc123", "to": None})
+        assert calls[0]["params"] is None or "to" not in calls[0]["params"]
+
+    def test_path_rendering_is_one_pass_so_a_value_cannot_re_substitute(self):
+        """A value is inserted, never rescanned.
+
+        With sequential ``str.replace`` passes, a second argument holding the
+        first argument's placeholder gets substituted on the later pass, so
+        the path that leaves differs from the one the ACL authorized. One
+        ``re.sub`` pass over the template makes that structurally impossible.
+        """
+        located = [
+            ("profile_id", "profile_id", "path"),
+            ("entry_id", "entry_id", "path"),
+        ]
+        rendered = spec_tools._rendered_path(
+            "/profiles/{profile_id}/denylist/{entry_id}",
+            located,
+            {"profile_id": "abc123", "entry_id": "{profile_id}"},
+        )
+        # The inserted value is never rescanned: the second placeholder stays
+        # exactly what the caller sent, instead of becoming the authorized
+        # profile id a sequential-replace renderer would have substituted.
+        assert rendered == "/profiles/abc123/denylist/{profile_id}"
+
+    def test_many_schema_violations_are_named_then_counted(self):
+        """Up to five violations are named; the rest are counted, not hidden."""
+        from types import SimpleNamespace
+
+        problems = [SimpleNamespace(absolute_path=[f"f{i}"], message=f"bad {i}") for i in range(7)]
+        described = spec_tools._describe_schema_errors(problems)
+        assert "f0: bad 0" in described
+        assert "f4: bad 4" in described
+        assert "f5" not in described.split("; and")[0]
+        assert "and 2 more" in described
+
+    def test_a_root_schema_violation_is_located_at_the_arguments(self):
+        error = SimpleNamespace(absolute_path=[])
+        assert spec_tools._schema_error_where(error) == "<arguments>"
+
+
+class TestDelegationGuardsRunFirst:
+    """``downloadLogs`` is delegated, but delegation runs after the shape guards.
+
+    The guarded downloader builds ``/profiles/{profile_id}/logs/download`` from
+    the id it is handed, so the checks that keep a generated path honest have
+    to fire before the handoff — otherwise delegation is a door around them.
+    """
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    def _downloader(self, monkeypatch, calls):
+        from nextdns_mcp.tools import logs as logs_module
+
+        async def fake_download(profile_id):
+            calls.append({"profile_id": profile_id})
+            return {"ok": True}
+
+        monkeypatch.setattr(logs_module, "_download_logs_to_tempfile", fake_download)
+        return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"])
+
+    async def test_an_unsafe_profile_id_never_reaches_the_downloader(self, monkeypatch, calls):
+        tool = self._downloader(monkeypatch, calls)
+        payload = (await tool.run({"profile_id": "a/b"})).structured_content
+        assert payload["code"] == "invalid_profile_id"
+        assert calls == [], "delegation must not run ahead of the unsafe-path guard"
+
+    @pytest.mark.parametrize("bad", ["nope", "TOOLONG1PROFILE", "ab cd"])
+    async def test_a_malformed_profile_id_is_refused_typed(self, monkeypatch, calls, bad):
+        tool = self._downloader(monkeypatch, calls)
+        payload = (await tool.run({"profile_id": bad})).structured_content
+        assert payload["code"] == "invalid_profile_id"
+        assert calls == []
+
+    async def test_a_valid_id_reaches_the_guarded_downloader(self, monkeypatch, calls):
+        tool = self._downloader(monkeypatch, calls)
+        result = await tool.run({"profile_id": "abc123"})
+        assert result.structured_content == {"ok": True}
+        assert calls == [{"profile_id": "abc123"}]
+
+    async def test_a_resolver_error_that_is_not_missing_is_forwarded_typed(self, monkeypatch, calls):
+        """Whatever else the resolver answers is the caller's answer, verbatim.
+
+        The shape guards above catch every malformed id a caller can send
+        through the public surface, so this pins the forwarding contract
+        itself: a resolver error other than \"missing\" (an access denial, for
+        instance) must reach the caller as the typed payload rather than be
+        swallowed into a downloader call with a None profile.
+        """
+        tool = self._downloader(monkeypatch, calls)
+        denial = {"code": "access_denied", "error": "profile abcdef is not readable"}
+        monkeypatch.setattr(spec_tools, "resolve_profile_id", lambda pid, **kwargs: (None, denial))
+        payload = (await tool.run({"profile_id": "abcdef"})).structured_content
+        assert payload == denial
+        assert calls == [], "the delegation must not run when the resolver refused"
+
+
+class TestGeneratedSeriesBudget:
+    """The documented 2000-point budget guards the generated door too.
+
+    ``plotAnalytics`` refuses an over-budget range; the ``getAnalytics*Series``
+    tools read the same endpoint with the same per-interval cost, so they get
+    the same refusal. A call that names no interval takes the endpoint's own
+    default, which this server did not choose and cannot bound.
+    """
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    def _tool(self, monkeypatch, calls):
+        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
+
+    async def test_a_generated_series_range_beyond_the_budget_is_refused(self, monkeypatch, calls):
+        """30 days at 60s intervals would answer ~43k points against a 2000 cap."""
+        tool = self._tool(monkeypatch, calls)
+        payload = (await tool.run({"profile_id": "abc123", "from": "-30d", "interval": 60})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "2000" in payload["error"]
+        assert calls == []
+
+    async def test_a_generated_series_without_an_interval_is_not_bounded_here(self, monkeypatch, calls):
+        tool = self._tool(monkeypatch, calls)
+        await tool.run({"profile_id": "abc123", "from": "-30d"})
+        assert calls, "the request goes out; its interval is the endpoint's default"
