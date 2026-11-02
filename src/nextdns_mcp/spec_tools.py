@@ -539,24 +539,6 @@ def _normalized_for_validation(route: HTTPRoute, arguments: dict[str, Any]) -> d
     return merged
 
 
-def _iter_top_level_errors(
-    validator: jsonschema.Draft202012Validator, arguments: dict[str, Any]
-) -> list[jsonschema.ValidationError]:
-    """The schema violations at the level this server interprets.
-
-    Each top-level argument is checked against its published schema (type,
-    enum, range, required). A container argument's *contents* are not: an
-    object or array body is forwarded opaquely, the same schema-less boundary
-    ``StripExtraFieldsMiddleware`` coerces it with (issue #273 - a nested
-    password ``"0012"`` must reach the API exactly as written, not be
-    reinterpreted by anything in the middle). Validation that descended into
-    nested contents would reject shapes the pipeline deliberately preserves,
-    turning the opacity contract into a refusal; the endpoint itself validates
-    those contents, which is the layer that owns them.
-    """
-    return [error for error in validator.iter_errors(arguments) if len(error.absolute_path) <= 1]
-
-
 def _schema_validation_payload(
     validator: jsonschema.Draft202012Validator, tool_name: str, arguments: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -568,8 +550,16 @@ def _schema_validation_payload(
     request is constructed: a wrong-typed body, an unknown enum value or an
     out-of-range query parameter answers with the typed ``invalid_argument``
     naming every violation, and nothing goes upstream.
+
+    The whole argument tree is checked, nested body contents included:
+    ``replaceDenylist(body=[{"wrong": "x"}])`` violates the document's own
+    item schema (``required: [id]``) and is refused, not forwarded. Opacity
+    (issue #273) is about types, not structure - the normalizers never rewrite
+    a nested value, so a published nested constraint is exactly the constraint
+    the request would satisfy; anything looser would let the server advertise
+    a schema it does not enforce.
     """
-    problems = _iter_top_level_errors(validator, _without_nulls(arguments))
+    problems = list(validator.iter_errors(_without_nulls(arguments)))
     if not problems:
         return None
     return error_payload(
@@ -593,10 +583,15 @@ def _series_budget_for_generated_call(route: HTTPRoute, query: dict[str, Any]) -
     ``plotAnalytics`` refuses a range that would return more than
     ``PLOT_MAX_POINTS`` points; the generated ``getAnalytics*Series`` tools
     read the same endpoint with the same per-interval cost, so they get the
-    same refusal (issue #267 applies to both doors). It fires only when the
-    caller stated both a ``from`` and an ``interval``: a call naming neither
-    takes the endpoint's own defaults, which this server did not choose and
-    cannot bound.
+    same refusal (issue #267 applies to both doors). It fires when the caller
+    stated a ``from`` and an ``interval``: a call naming no ``interval`` takes
+    the endpoint's own adaptive default, which is itself bounded - probed
+    2026-11 against live profiles, the API answers at most one point per
+    second of real range at its coarsest (a 365-day window returns 365
+    points at interval 86400; 30 days returns 30), so an un-interval'd call
+    can never outpoint the budget the server enforces when an interval is
+    stated. A stated ``to`` of 0 is the epoch, not an omission: ``or`` would
+    silently swap in ``now`` and re-price the window.
     """
     if ";series" not in route.path:
         return None
@@ -604,7 +599,8 @@ def _series_budget_for_generated_call(route: HTTPRoute, query: dict[str, Any]) -
     from_time = query.get("from")
     if interval is None or from_time is None:
         return None
-    return _series_budget_error(from_time, query.get("to") or "now", interval)
+    to_time = query.get("to")
+    return _series_budget_error(from_time, "now" if to_time is None else to_time, interval)
 
 
 def _required(route: HTTPRoute) -> list[str]:

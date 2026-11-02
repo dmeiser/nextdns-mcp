@@ -228,12 +228,21 @@ class CallLogMiddleware(Middleware):
             row["endpoint"] = f"{endpoint[0]} {endpoint[1]}"
         return row
 
+    def _record_row_into(self, path: str, tool: str, args: Any, ok: bool, error: str, result: Any) -> None:
+        """Build the row and append it; both off the event loop (``_record`` offloads here)."""
+        _append_row(path, self._record_row(tool, args, ok, error, result))
+
     async def _record(self, tool: str, args: Any, ok: bool, error: str, result: Any = None) -> None:
-        """Append one row, off the event loop; a failed write never fails the call."""
+        """Append one row, off the event loop; a failed write never fails the call.
+
+        The whole row - projection and JSON of the arguments and the result,
+        not just the disk write - is built on the worker thread: projecting a
+        2,000-point series or a 10,000-entry allowlist is the expensive part,
+        and doing it inline made the log slow the call it merely observes.
+        """
         if not self._path:
             return
-        row = self._record_row(tool, args, ok, error, result)
-        await asyncio.to_thread(_append_row, self._path, row)
+        await asyncio.to_thread(self._record_row_into, self._path, tool, args, ok, error, result)
 
 
 def _append_row(path: str, row: dict[str, Any]) -> None:
@@ -254,7 +263,18 @@ def _open_log_file(path: str) -> Any:
     moment it exists. ``open(..., "a")`` applies the process umask (often
     ``0022``) at creation; ``os.open`` with an explicit mode does not.
     """
-    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a", encoding="utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        # The creation mode only covers a brand-new file; a log that already
+        # exists (a reused path, or an older run's file made under a
+        # permissive umask) is tightened through the fd we just took, so the
+        # contract holds for the file's whole life in this process.
+        # Best-effort: an alien-owned file must not fail the write it shares
+        # with nobody.
+        os.fchmod(fd, 0o600)
+    except OSError:
+        logger.debug("call log chmod failed for %s", path, exc_info=True)
+    return os.fdopen(fd, "a", encoding="utf-8")
 
 
 def _result_text(result: Any) -> str:

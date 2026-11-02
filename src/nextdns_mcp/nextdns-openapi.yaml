@@ -135,8 +135,8 @@ components:
               description: Enable query logging
             retention:
               type: integer
-              description: Log retention period in days
-              enum: [1, 7, 30, 90, 180, 365]
+              description: Log retention period in seconds (86400=1d, 604800=7d, 2592000=30d, 7776000=90d, 15552000=180d, 31536000=365d)
+              enum: [86400, 604800, 2592000, 7776000, 15552000, 31536000]
         performance:
           type: object
           properties:

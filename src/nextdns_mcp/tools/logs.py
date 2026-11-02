@@ -15,11 +15,13 @@ the request the way it issues every other one.
 
 import asyncio
 import codecs
+import contextlib
 import ipaddress
 import logging
 import os
 import socket
 import tempfile
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -75,15 +77,19 @@ _MAX_DOWNLOAD_REDIRECTS = 5
 # origin. The scheme check applies to pinned hosts too, so a pin can never
 # allow a plaintext fetch.
 #
-# Known limitations of this reachability check, not bugs to fix here:
-# - The host is resolved here and resolved again by httpx when it connects, so
-#   a name whose answer changes in between (DNS rebinding / TOCTOU) is not
-#   closed by it; closing that would mean pinning the vetted address into the
-#   connection, which the plain unauthenticated client here does not do. The
-#   window between the two resolutions is the residual risk, accepted and
-#   named (issue #266 review).
+# Known properties of this reachability check:
+# - The vetted address IS the dialled address (issue #266 review): while the
+#   hop is fetched, ``socket.getaddrinfo`` is pinned to the answer that was
+#   vetted (``_pinned_dns``), so httpcore connects to the vetted IP instead of
+#   resolving the name again — the DNS-rebinding / TOCTOU window between
+#   "vetted" and "dialled" is closed rather than accepted. The request URL,
+#   TLS SNI, certificate verification and the Host header all stay hostname-
+#   based; only the dialled address is pinned. The patch is process-global for
+#   the duration of one hop's fetch (``socket`` is the only resolver httpcore
+#   reaches through); other names resolve normally during the window, and the
+#   pinned name resolves to addresses already vetted as public.
 # - A resolution failure REFUSES the hop (fail closed, see
-#   ``_host_resolves_to_public_address``): the guard does not degrade to
+#   ``_resolve_public_addresses``): the guard does not degrade to
 #   allow when DNS misbehaves.
 ALLOWED_DOWNLOAD_SCHEMES = {"https"}
 
@@ -111,8 +117,8 @@ def _is_public_address(address: str | int) -> bool:
     return parsed.is_global and not parsed.is_multicast and not parsed.is_reserved
 
 
-async def _host_resolves_to_public_address(host: str) -> bool:
-    """Return whether every address ``host`` resolves to is globally routable.
+async def _resolve_public_addresses(host: str) -> list[Any] | None:
+    """The vetted addrinfo entries for ``host``, or None when the hop must be refused.
 
     Resolution runs off the event loop because it can block on DNS.
 
@@ -124,40 +130,76 @@ async def _host_resolves_to_public_address(host: str) -> bool:
     DNS misbehaves is not a guard. The redirect can wait for a working
     resolver; the metadata endpoint cannot wait for anything.
 
-    Residual and accepted (see the module note above): httpx resolves the name
-    again when it connects, so the address vetted here is not necessarily the
-    address dialed (DNS rebinding / TOCTOU).
+    Returning the vetted entries (not just a bool) is what lets the fetch
+    connect to *these* addresses via ``_pinned_dns`` instead of resolving the
+    name a second time and hoping the answer held still.
     """
     try:
         infos = await asyncio.to_thread(socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
     except OSError:
-        return False
-    return bool(infos) and all(_is_public_address(info[4][0]) for info in infos)
+        return None
+    if not infos or not all(_is_public_address(info[4][0]) for info in infos):
+        return None
+    return list(infos)
 
 
-async def _check_download_redirect_target(next_url: httpx.URL) -> None:
-    """Raise :class:`DownloadRedirectRefusedError` unless ``next_url`` is a public https destination.
+async def _host_resolves_to_public_address(host: str) -> bool:
+    """Whether ``host`` resolves only to globally routable addresses."""
+    return await _resolve_public_addresses(host) is not None
 
-    Args:
-        next_url: The resolved URL about to be fetched (the first hop's
-            ``Location`` or a later hop's).
+
+@contextlib.contextmanager
+def _pinned_dns(host: str | None, infos: list[Any] | None) -> Iterator[None]:
+    """Make ``socket.getaddrinfo`` return the vetted ``infos`` for ``host``.
+
+    Installed for the duration of one hop's fetch, so the connection httpcore
+    opens dials the address that was vetted, closing the rebinding window
+    (module note above). httpcore resolves through the event loop, which
+    reaches ``socket.getaddrinfo`` by module attribute at call time - the only
+    hook available without replacing the transport stack. The patch is
+    process-global while active; concurrent name lookups for other hosts pass
+    through to the real resolver, and a concurrent lookup of *this* host gets
+    addresses already vetted as public. A no-op for pinned allow hosts
+    (``infos is None``), which skip resolution entirely.
+    """
+    if host is None or infos is None:
+        yield
+        return
+    real = socket.getaddrinfo
+
+    def pinned(name: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(name) == host:
+            return infos
+        return real(name, *args, **kwargs)
+
+    socket.getaddrinfo = pinned  # type: ignore[assignment]  # typeshed overloads are narrower than the swap
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real
+
+
+async def _check_download_redirect_target(next_url: httpx.URL) -> list[Any] | None:
+    """Vet one redirect hop; return its vetted addresses, or None for a pinned host.
 
     Raises:
         DownloadRedirectRefusedError: If the scheme is not in
-            :data:`ALLOWED_DOWNLOAD_SCHEMES`, or the host is not pinned in
-            :data:`ALLOWED_DOWNLOAD_HOSTS` and does not resolve to a globally
-            routable address.
+        :data:`ALLOWED_DOWNLOAD_SCHEMES`, or the host is not pinned in
+        :data:`ALLOWED_DOWNLOAD_HOSTS` and does not resolve to only globally
+        routable addresses.
     """
     if next_url.scheme not in ALLOWED_DOWNLOAD_SCHEMES:
         raise DownloadRedirectRefusedError(
             f"Refusing log download redirect to {next_url.scheme}://{next_url.host}: scheme not allowed"
         )
     if next_url.host in ALLOWED_DOWNLOAD_HOSTS:
-        return
-    if not await _host_resolves_to_public_address(next_url.host):
+        return None
+    infos = await _resolve_public_addresses(next_url.host)
+    if infos is None:
         raise DownloadRedirectRefusedError(
             f"Refusing log download redirect to {next_url.scheme}://{next_url.host}: host is not publicly routable"
         )
+    return infos
 
 
 class DownloadTooLargeError(Exception):
@@ -253,6 +295,29 @@ async def _stream_pieces(response: httpx.Response, decoder: codecs.IncrementalDe
         yield b"", tail
 
 
+def _previewable(carry: str, text: str) -> tuple[str, str]:
+    """Split a stream piece into whole leading lines and the trailing fragment.
+
+    A chunk boundary is not a record boundary: only whole lines reach the
+    preview, and the unterminated tail rides over to the next chunk, so a CSV
+    record is never previewed as two fragments (or dropped and counted).
+    """
+    piece = carry + text
+    if piece.endswith("\n"):
+        return piece, ""
+    cut = piece.rfind("\n")
+    if cut == -1:
+        return "", piece
+    return piece[: cut + 1], piece[cut + 1 :]
+
+
+def _flush_tail(preview: list[str], preview_bytes: int, carry: str, open_line: bool) -> tuple[int, int]:
+    """The stream's final unterminated record: extra rows and the new preview size."""
+    if carry:
+        preview_bytes = _append_preview(preview, preview_bytes, carry)
+    return (1 if open_line else 0), preview_bytes
+
+
 async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict[str, Any]:
     """Write a streaming response body to ``path`` without double-buffering.
 
@@ -280,6 +345,7 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     # chunk and is only true when the last chunk left a line unterminated.
     open_line = False
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    preview_carry = ""
     # fdopen (not open) so the file handle stays usable from the event loop
     # without tripping ASYNC230; per-chunk writes are small and cheap.
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out:
@@ -294,9 +360,14 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
                 out.write(raw)
             row_count += text.count("\n")
             open_line = not text.endswith("\n")
-            preview_bytes = _append_preview(preview, preview_bytes, text)
-    if open_line:
-        row_count += 1
+            piece, preview_carry = _previewable(preview_carry, text)
+            if len(preview_carry) > DOWNLOAD_PREVIEW_MAX_BYTES:
+                # A single record longer than the whole preview can never fit
+                # in it: drop the carry instead of growing it with the line.
+                preview_carry = ""
+            preview_bytes = _append_preview(preview, preview_bytes, piece)
+    extra_rows, preview_bytes = _flush_tail(preview, preview_bytes, preview_carry, open_line)
+    row_count += extra_rows
     size = os.path.getsize(path)
     text_preview = "".join(preview)
     return {
@@ -328,18 +399,20 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
     try:
         while True:
             # Checked before every fetch, so the first ``Location`` is covered
-            # by the same rule as the rest of the chain.
-            await _check_download_redirect_target(next_url)
-            async with unauthenticated.stream("GET", next_url) as response:
-                if response.has_redirect_location:
-                    redirects += 1
-                    if redirects > _MAX_DOWNLOAD_REDIRECTS:
-                        raise httpx.TooManyRedirects(
-                            f"Exceeded {_MAX_DOWNLOAD_REDIRECTS} redirects", request=response.request
-                        )
-                    next_url = response.request.url.join(response.headers["location"])
-                    continue
-                return await _write_stream_to_tempfile(response, path)
+            # by the same rule as the rest of the chain; the fetch then dials
+            # the vetted addresses rather than re-resolving the name.
+            infos = await _check_download_redirect_target(next_url)
+            with _pinned_dns(next_url.host, infos):
+                async with unauthenticated.stream("GET", next_url) as response:
+                    if response.has_redirect_location:
+                        redirects += 1
+                        if redirects > _MAX_DOWNLOAD_REDIRECTS:
+                            raise httpx.TooManyRedirects(
+                                f"Exceeded {_MAX_DOWNLOAD_REDIRECTS} redirects", request=response.request
+                            )
+                        next_url = response.request.url.join(response.headers["location"])
+                        continue
+                    return await _write_stream_to_tempfile(response, path)
     finally:
         await unauthenticated.aclose()
 

@@ -72,7 +72,7 @@ class DummyToolManager:
         return DummyTool()
 
 
-async def _no_tools() -> list:
+async def _no_tools(**_: object) -> list:
     """The catalog a minimal dummy server lists: nothing, so the owner hint stays generic."""
     return []
 

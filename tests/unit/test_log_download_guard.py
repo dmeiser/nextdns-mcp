@@ -685,3 +685,103 @@ class TestByteAccountingAndPartialCodepoints:
                 _FakeResponse("https://x/f.csv", chunks=["一二三".encode()]),  # 9 bytes, 3 "characters"
                 str(tmp_path / "d.csv"),
             )
+
+
+class TestDiallingTheVettedAddress:
+    """The vetted IP is the dialled IP: the rebinding window is closed, not accepted.
+
+    A ``Location`` that vets public on the first lookup must not be fetched
+    after a second lookup flips the name to loopback (classic rebinding), and
+    while the hop is fetched the process resolver must be answering from the
+    vetted set - the URL, and therefore TLS SNI, certificate verification and
+    the Host header, stay hostname-based.
+    """
+
+    async def test_a_name_that_flips_to_private_between_hops_is_refused(self, tmp_path, unauthenticated, monkeypatch):
+        signed = "https://storage.example/file.csv?X-Amz-Signature=deadbeef"
+        answers = iter([PUBLIC_IP, "127.0.0.1"])
+
+        def flip(host: str, port: Any, **kwargs: Any) -> list[Any]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (next(answers), 0))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", flip)
+        follower = unauthenticated([_FakeResponse(signed, location="https://storage.example/second.csv")])
+        with pytest.raises(logs_module.DownloadRedirectRefusedError):
+            await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
+        assert [url for _, url in follower.calls] == [signed], "the poisoned second hop was fetched"
+
+    async def test_the_pinned_resolver_is_installed_while_the_hop_is_fetched(self, tmp_path, monkeypatch):
+        signed = "https://storage.example/file.csv"
+
+        def public(host: str, port: Any, **kwargs: Any) -> list[Any]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_IP, 0))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", public)
+        observed: dict[str, Any] = {}
+
+        class _ProbeClient:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def stream(self, method: str, url: Any) -> Any:
+                observed["resolver"] = socket.getaddrinfo
+                observed["url"] = str(url)
+                return _FakeResponse(str(url), chunks=["a\n"])
+
+            async def aclose(self) -> None:
+                pass
+
+        monkeypatch.setattr(httpx, "AsyncClient", _ProbeClient)
+        await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
+
+        pinned = observed["resolver"]
+        assert pinned is not public, "the fetch ran with the process resolver, not the pinned one"
+        assert pinned("storage.example", None)[0][4][0] == PUBLIC_IP
+        assert pinned("other.example", None)[0][4][0] == PUBLIC_IP, "other names fall through to the real resolver"
+        assert observed["url"] == signed, "the request URL stays hostname-based (SNI, Host, cert)"
+
+    def test_pinned_dns_answers_only_for_the_vetted_host(self, monkeypatch):
+        vetted = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_IP, 0))]
+
+        def real(host: str, port: Any, **kwargs: Any) -> list[Any]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.99", 0))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", real)
+        with logs_module._pinned_dns("cdn.example", vetted):
+            assert socket.getaddrinfo("cdn.example", None)[0][4][0] == PUBLIC_IP
+            assert socket.getaddrinfo("other.example", None)[0][4][0] == "93.184.216.99"
+        assert socket.getaddrinfo("cdn.example", None)[0][4][0] == "93.184.216.99"
+
+    def test_pinned_dns_is_a_noop_for_pinned_allow_hosts(self, monkeypatch):
+        def real(host: str, port: Any, **kwargs: Any) -> list[Any]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_IP, 0))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", real)
+        with logs_module._pinned_dns("cdn.nextdns.io", None):
+            assert socket.getaddrinfo is real
+
+
+class TestPreviewRespectsRecordBoundaries:
+    """Chunk boundaries are not CSV record boundaries: a split line is previewed whole."""
+
+    async def test_a_record_split_across_chunks_is_previewed_whole(self, tmp_path, unauthenticated, monkeypatch):
+        signed = "https://storage.example/file.csv"
+        unauthenticated([_FakeResponse(signed, chunks=["host,rea", "son\na.co", "m,blocked\n"])])
+        payload = await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
+        assert payload["preview"]["text"] == "host,reason\na.com,blocked\n"
+        assert payload["preview"]["line_count"] == 2
+
+    async def test_the_final_unterminated_record_is_previewed(self, tmp_path, unauthenticated, monkeypatch):
+        signed = "https://storage.example/file.csv"
+        unauthenticated([_FakeResponse(signed, chunks=["a\nb,c"])])
+        payload = await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
+        assert payload["preview"]["text"] == "a\nb,c"
+
+    async def test_a_record_larger_than_the_preview_does_not_grow_the_carry(self, tmp_path, unauthenticated, monkeypatch):
+        """One oversized record: the carry is dropped, not accumulated forever."""
+        signed = "https://storage.example/file.csv"
+        giant = "x" * (logs_module.DOWNLOAD_PREVIEW_MAX_BYTES * 2 + 1024)
+        unauthenticated([_FakeResponse(signed, chunks=[giant[: len(giant) // 2], giant[len(giant) // 2 :] + "\n"])])
+        payload = await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
+        assert payload["row_count"] == 1
+        assert payload["preview"]["line_count"] <= 1

@@ -3,11 +3,15 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import mcp.types
 import pytest
+from fastmcp import Client
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.tools import ToolResult
 
+from nextdns_mcp import openapi, spec_tools
 from nextdns_mcp.openapi import StripExtraFieldsMiddleware
+from nextdns_mcp.server import build_mcp_server
 
 
 class TestStripExtraFieldsMiddleware:
@@ -432,8 +436,9 @@ class TestOwnerIndexIsTheRegisteredCatalog:
 
     @staticmethod
     def _server_with(tools: list) -> SimpleNamespace:
+        by_name = {t.name: t for t in tools}
         server = SimpleNamespace()
-        server.list_tools = AsyncMock(return_value=tools)
+        server.get_tool = AsyncMock(side_effect=lambda name: by_name.get(name))
         return server
 
     @staticmethod
@@ -444,10 +449,9 @@ class TestOwnerIndexIsTheRegisteredCatalog:
     async def test_composite_tools_own_their_arguments(self):
         from nextdns_mcp.openapi import _catalog_argument_index
 
-        server = self._server_with(
-            [self._tool("plotAnalytics", ["metric", "profile_id"]), self._tool("getProfile", ["profile_id"])]
-        )
-        index = await _catalog_argument_index(server)
+        tools = [self._tool("plotAnalytics", ["metric", "profile_id"]), self._tool("getProfile", ["profile_id"])]
+        server = self._server_with(tools)
+        index = await _catalog_argument_index(server, [t.name for t in tools])
         assert index["metric"] == ("plotAnalytics",)
         assert set(index["profile_id"]) == {"plotAnalytics", "getProfile"}
 
@@ -458,28 +462,31 @@ class TestOwnerIndexIsTheRegisteredCatalog:
 
         tools = [self._tool(name, ["name", "arguments"]) for name in sorted(SYNTHETIC_TOOL_NAMES)]
         tools.append(self._tool("getProfile", ["profile_id"]))
-        index = await _catalog_argument_index(self._server_with(tools))
+        index = await _catalog_argument_index(self._server_with(tools), [t.name for t in tools])
         assert all(name not in index for name in SYNTHETIC_TOOL_NAMES)
         assert index == {"profile_id": ("getProfile",)}
 
     @pytest.mark.asyncio
     async def test_the_index_is_built_once_per_server_not_per_call(self):
-        mw = StripExtraFieldsMiddleware()
-        server = self._server_with([self._tool("getProfile", ["profile_id"])])
+        tools = [self._tool("getProfile", ["profile_id"])]
+        mw = StripExtraFieldsMiddleware(tool_names=[t.name for t in tools])
+        server = self._server_with(tools)
         first = await mw._owner_index(server)
         second = await mw._owner_index(server)
         assert first is second
-        server.list_tools.assert_awaited_once()
+        assert server.get_tool.await_count == 1
 
     @pytest.mark.asyncio
     async def test_a_second_server_does_not_read_the_firsts_cache(self):
-        mw = StripExtraFieldsMiddleware()
-        server_a = self._server_with([self._tool("plotAnalytics", ["metric"])])
-        server_b = self._server_with([self._tool("getProfile", ["profile_id"])])
+        tools_a = [self._tool("plotAnalytics", ["metric"])]
+        tools_b = [self._tool("getProfile", ["profile_id"])]
+        mw = StripExtraFieldsMiddleware(tool_names=[t.name for t in tools_a + tools_b])
+        server_a = self._server_with(tools_a)
+        server_b = self._server_with(tools_b)
         index_a = await mw._owner_index(server_a)
         index_b = await mw._owner_index(server_b)
         assert "metric" in index_a and "metric" not in index_b
-        server_b.list_tools.assert_awaited_once()
+        assert server_b.get_tool.await_count == 2, "every name re-probed on the new server"
 
     @pytest.mark.asyncio
     async def test_tool_schemas_are_memoized_after_the_first_fetch(self):
@@ -533,3 +540,66 @@ class TestIgnoredArgumentsNeverClobberTheToolHint:
         result = ToolResult(structured_content={"data": []})
         _report_ignored_arguments(result, ["x"], "the note")
         assert result.structured_content["hint"] == "the note"
+
+
+class TestIgnoredArgumentsMerge:
+    """Under disclosure both passes report; neither pass erases the other."""
+
+    def test_an_inner_report_survives_the_outer_pass(self):
+        result = ToolResult(
+            structured_content={"data": [], "ignored_arguments": ["from"], "ignored_arguments_hint": "inner hint"}
+        )
+        openapi._report_ignored_arguments(result, ["query"], "outer hint")
+        assert result.structured_content["ignored_arguments"] == ["from", "query"]
+        assert "inner hint" in result.structured_content["ignored_arguments_hint"]
+        assert "outer hint" in result.structured_content["ignored_arguments_hint"]
+
+    def test_a_duplicate_report_adds_nothing(self):
+        result = ToolResult(structured_content={"data": [], "ignored_arguments": ["x"], "ignored_arguments_hint": "h"})
+        openapi._report_ignored_arguments(result, ["x"], "h")
+        assert result.structured_content["ignored_arguments"] == ["x"]
+
+    def test_a_content_only_result_gets_a_visible_note(self):
+        """An image result has no structured dict: the drop is said in the content."""
+        result = ToolResult(content=[mcp.types.ImageContent(type="image", data="AA", mimeType="image/png")])
+        openapi._report_ignored_arguments(result, ["from"], "from_time is this tool's name for it")
+        note = result.content[-1]
+        assert note.type == "text" and "from" in note.text
+
+
+class TestOwnerIndexUnderDisclosure:
+    """The owner hint works in the default BM25 mode, where list_tools is the pair."""
+
+    async def test_a_dropped_argument_names_its_owner_under_bm25(self, monkeypatch):
+        calls: list[dict] = []
+
+        async def fake_request(method, url, params=None, json_body=None):
+            calls.append({"method": method, "url": url})
+            return {"data": []}
+
+        monkeypatch.setattr(spec_tools, "_api_request_payload", fake_request)
+        server = build_mcp_server()
+        async with Client(server) as client:
+            found = await client.call_tool(
+                "call_tool",
+                {"name": "getLogs", "arguments": {"profile_id": "abc123", "metric": "status"}},
+            )
+        structured = found.structured_content or {}
+        assert structured.get("ignored_arguments") == ["metric"]
+        assert "plotAnalytics" in structured.get("ignored_arguments_hint", ""), structured
+
+
+class TestIgnoredArgumentsEdgePaths:
+    """The annotation paths stay total: no-op reports, and no hint duplication."""
+
+    def test_a_content_only_result_with_nothing_dropped_is_untouched(self):
+        result = ToolResult(content=[mcp.types.ImageContent(type="image", data="AA", mimeType="image/png")])
+        openapi._report_ignored_arguments(result, [], "nothing")
+        assert len(result.content) == 1
+
+    def test_a_hint_already_present_is_not_appended_twice(self):
+        result = ToolResult(
+            structured_content={"data": [], "hint": "keep it | owner hint"},
+        )
+        openapi._report_ignored_arguments(result, ["x"], "owner hint")
+        assert result.structured_content["hint"] == "keep it | owner hint"

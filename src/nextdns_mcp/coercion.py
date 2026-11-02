@@ -31,4 +31,3 @@ def _coerce_profile_id(v: object) -> object:
 
 _coerce_to_str = BeforeValidator(_coerce_profile_id) if BeforeValidator is not None else lambda x: x
 OptionalProfileId = Annotated[str | None, _coerce_to_str]
-ProfileId = Annotated[str, _coerce_to_str]

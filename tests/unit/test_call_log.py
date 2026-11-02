@@ -13,6 +13,8 @@ SPDX-License-Identifier: MIT
 """
 
 import json
+import os
+import stat
 from typing import ClassVar
 
 import pytest
@@ -22,6 +24,7 @@ from fastmcp.exceptions import ToolError
 from nextdns_mcp.call_log import (
     CALL_LOG_ENV,
     CallLogMiddleware,
+    _append_row,
     call_log_path,
     get_call_log,
     result_error,
@@ -411,3 +414,36 @@ class TestLoggingCannotBreakACall:
         with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
             assert get_call_log() == []
         assert any("call log read failed" in record.getMessage() for record in caplog.records)
+
+
+class TestExistingLogPermissions:
+    """The 0600 contract covers the file's whole life, not only its creation.
+
+    ``os.open(..., 0o600)`` only modes a brand-new file; a log left behind by
+    an older run (or made under a permissive umask) keeps its old mode unless
+    the writer tightens it.
+    """
+
+    def test_an_existing_permissive_log_is_tightened(self, tmp_path):
+        path = tmp_path / "calls.jsonl"
+        path.write_text("")
+        os.chmod(path, 0o644)
+        _append_row(str(path), {"tool": "x", "ok": True})
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_a_new_log_is_created_private(self, tmp_path):
+        path = tmp_path / "calls.jsonl"
+        _append_row(str(path), {"tool": "x", "ok": True})
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_fchmod_failure_still_writes_the_row(tmp_path, monkeypatch):
+    """Tightening is best-effort: an alien-owned file must not lose the record."""
+
+    def boom(fd: int, mode: int) -> None:
+        raise PermissionError("not ours")
+
+    monkeypatch.setattr(os, "fchmod", boom)
+    path = tmp_path / "calls.jsonl"
+    _append_row(str(path), {"tool": "x", "ok": True})
+    assert "x" in path.read_text()

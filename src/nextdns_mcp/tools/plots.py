@@ -187,14 +187,22 @@ def _now() -> float:
 
 
 def _relative_time_seconds(text: str, now: float) -> float | None:
-    """Resolve ``now`` and relative offsets (``-1d``, ``+2h``) to Unix seconds."""
+    """Resolve ``now`` and relative offsets (``-1d``, ``+2h``) to Unix seconds.
+
+    Total: an offset with a huge digit count (``-9`` + 400 digits + ``d``) is
+    syntactically a relative offset but cannot be added to a float - the
+    unresolvable-None path covers it, same as an unparseable one.
+    """
     if text.lower() == "now":
         return now
     match = _RELATIVE_TIME_RE.match(text)
     if not match:
         return None
     sign = -1.0 if match.group(1) else 1.0
-    return now + sign * int(match.group(2)) * _RELATIVE_UNIT_SECONDS[match.group(3)]
+    try:
+        return now + sign * int(match.group(2)) * _RELATIVE_UNIT_SECONDS[match.group(3)]
+    except OverflowError:
+        return None
 
 
 def _absolute_or_iso_seconds(text: str) -> float | None:
@@ -218,6 +226,22 @@ def _absolute_or_iso_seconds(text: str) -> float | None:
         return None
 
 
+def _numeric_seconds(value: float) -> float | None:
+    """A finite float for a numeric time point, or None when it cannot be one.
+
+    Non-finite floats (JSON ``Infinity``/``NaN`` survive Python's json decoder)
+    resolve to nothing: they bound no range, and letting them through would
+    put them in the budget arithmetic and the error text. A Python int past
+    the float range (JSON carries arbitrary integers) raises OverflowError on
+    the conversion - same unresolvable answer.
+    """
+    try:
+        seconds = float(value)
+    except OverflowError:
+        return None
+    return seconds if math.isfinite(seconds) else None
+
+
 def _resolve_time_point(value: str | int, now: float) -> float | None:
     """Resolve a ``from``/``to`` argument to Unix seconds, or None if unparseable.
 
@@ -231,11 +255,7 @@ def _resolve_time_point(value: str | int, now: float) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        # Non-finite floats (JSON `Infinity`/`NaN` survive Python's json
-        # decoder) resolve to nothing: they bound no range, and letting them
-        # through would put them in the budget arithmetic and the error text.
-        seconds = float(value)
-        return seconds if math.isfinite(seconds) else None
+        return _numeric_seconds(value)
     text = str(value).strip()
     relative = _relative_time_seconds(text, now)
     if relative is not None:
@@ -562,6 +582,12 @@ async def plotAnalytics(
     Use this to visualize query trends over time. The profile should have recent
     query history; otherwise the tool returns an error explaining that no data is
     available.
+
+    This tool names its window arguments ``from_time``/``to_time``; the generated
+    ``getAnalytics*Series`` tools name the same window ``from``/``to``. Sending
+    ``from``/``to`` here does not set the window: they are not in this tool's
+    published schema, the server drops them, and the drop is reported on the
+    result (``ignored_arguments``, or a text note beside the image).
 
     Supported metrics: ``status``, ``devices``, ``protocols``, ``queryTypes``,
     ``ipVersions``, ``dnssec``, ``encryption``, ``reasons``, ``ips``.

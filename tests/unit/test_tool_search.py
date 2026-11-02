@@ -1110,6 +1110,7 @@ class TestShapeRepairAnnouncesItself:
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
         assert (getattr(result, "structured_content", None) or {}).get("resolved_from") == "get_denylist"
+        assert (getattr(result, "structured_content", None) or {}).get("resolved_name") == "getDenylist"
         assert any(r.levelno == logging.WARNING and "once normalised" in r.getMessage() for r in caplog.records)
 
     async def test_a_plain_name_carries_no_annotation_and_no_warning(self, caplog):

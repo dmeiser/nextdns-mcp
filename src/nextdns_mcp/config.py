@@ -48,8 +48,14 @@ def configure_logging() -> None:
         logging.getLogger(library_logger).setLevel(logging.WARNING)
 
 
-# Core API configuration
-NEXTDNS_BASE_URL = "https://api.nextdns.io"
+# Core API configuration. Overridable via NEXTDNS_API_BASE - the name the
+# harness and container-E2E scripts already pass into the server's
+# environment; before this the override reached the child process and was
+# simply ignored, so a custom base configured the harness's REST checks but
+# not the MCP server under test. Read once at import: the ACL client's
+# base_url, the DoH allowlist host and the startup banner all resolve from
+# this constant, so the override configures every one of them.
+NEXTDNS_BASE_URL = os.getenv("NEXTDNS_API_BASE", "https://api.nextdns.io").rstrip("/")
 
 # Default HTTP request timeout in seconds
 DEFAULT_HTTP_TIMEOUT: float = 30.0
@@ -239,21 +245,30 @@ def _normalized_profile_ids(raw: str) -> set[str]:
 
 
 def parse_profile_list(profile_str: str) -> set[str] | None:
-    """Parse a comma-separated list of profile IDs.
-
-    Args:
-        profile_str: Comma-separated string of profile IDs
+    """Parse a comma-separated list of profile IDs into an access decision.
 
     Returns:
-        Set of profile IDs normalized to lowercase (profile IDs are hex and
-        matched case-insensitively), None if string is empty/unset (deny all),
-        or empty set if "ALL"/"all" specified (allow all)
+        None - deny everything (unset, empty, or a list that names no profile:
+        ``",,,"`` is punctuation, not a grant);
+        the empty set - allow everything (the literal ``ALL``/``all``);
+        a non-empty set - exactly those ids, lowercased.
+
+        The None/set() sentinel is the shape every caller in this module and
+        the client consumes; the distinction is documented here and pinned by
+        tests rather than re-shaped per call site.
     """
     if _is_empty_profile_list(profile_str):
         return None  # Empty/unset = deny all
     if _is_allow_all(profile_str):
         return set()  # Empty set = allow all
-    return _normalized_profile_ids(profile_str)
+    ids = _normalized_profile_ids(profile_str)
+    if not ids:
+        # Non-blank input that parses to no ids (e.g. ",,," or ", ,"): it is
+        # neither unset nor ALL, and it names nothing - fail closed. Reading a
+        # malformed allowlist as "allow all" inverts a typo into the widest
+        # possible grant.
+        return None
+    return ids
 
 
 @dataclass(frozen=True)

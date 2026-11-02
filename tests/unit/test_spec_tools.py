@@ -415,9 +415,42 @@ class TestRefusalsBeforeTransport:
         assert "limit" in payload["error"]
         assert calls == [], "an argument the published schema rejects must not be sent upstream"
 
+    async def test_a_nested_body_violation_is_refused_not_sent(self, monkeypatch, calls):
+        """The whole argument tree is validated: a body item without its required id.
+
+        ``replaceDenylist(body=[{"wrong": "x"}])`` is the exact call the
+        re-review reached the transport with; the published schema demands
+        ``id`` on every item, so the refusal - with the dotted path naming the
+        offending entry - is what docs/troubleshooting.md promises.
+        """
+        tool = self._tool(monkeypatch, calls, "replaceDenylist")
+        payload = (await tool.run({"profile_id": "abc123", "body": [{"wrong": "x"}]})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "body.0" in payload["error"], payload["error"]
+        assert calls == []
+
+    async def test_a_body_of_the_wrong_kind_is_refused_not_sent(self, monkeypatch, calls):
+        tool = self._tool(monkeypatch, calls, "replaceDenylist")
+        payload = (await tool.run({"profile_id": "abc123", "body": "not-an-array"})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert calls == []
+
+    async def test_a_schema_valid_nested_body_still_reaches_transport(self, monkeypatch, calls):
+        """Full-tree validation gates on the published schema only - valid bodies pass."""
+        tool = self._tool(monkeypatch, calls, "replaceDenylist")
+        await tool.run({"profile_id": "abc123", "body": [{"id": "evil.example"}]})
+        assert calls
+
+    async def test_a_deep_setting_value_outside_the_published_enum_is_refused(self, monkeypatch, calls):
+        """Nested enums bind too: Settings.logs.retention is an enum of seconds."""
+        tool = self._tool(monkeypatch, calls, "updateSettings")
+        payload = (await tool.run({"profile_id": "abc123", "logs": {"retention": 30}})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "logs.retention" in payload["error"], payload["error"]
+        assert calls == []
+
     async def test_a_percent_in_a_path_value_is_refused_not_sent(self, monkeypatch, calls):
         """``%`` is refused outright: its meaning depends on what decodes it.
-
         ``%2e%2e`` is ``..`` to anything that percent-decodes, and a
         double-encoded variant is invisible to a single decode pass; refusing
         the character closes both, and no legal NextDNS id contains it.
@@ -588,3 +621,29 @@ class TestGeneratedSeriesBudget:
         tool = self._tool(monkeypatch, calls)
         await tool.run({"profile_id": "abc123", "from": "-30d"})
         assert calls, "the request goes out; its interval is the endpoint's default"
+
+    async def test_to_zero_is_a_window_end_not_an_omission(self, monkeypatch, calls):
+        """``to=0`` is the epoch, not a missing value.
+
+        ``query.get("to") or "now"`` treated the literal 0 as absent: an
+        epoch-to-epoch window (zero span) was priced as now-minus-epoch -
+        decades - and the call was refused for a budget it never spent.
+        """
+        tool = self._tool(monkeypatch, calls)
+        result = await tool.run({"profile_id": "abc123", "from": 0, "to": 0, "interval": 60})
+        payload = result.structured_content
+        assert isinstance(payload, dict) and payload.get("code") == "invalid_argument"
+        assert "2000" not in payload["error"], f"budget arithmetic treated to=0 as now: {payload['error']}"
+        assert "end after" in payload["error"], "zero epoch span: range order is the honest refusal"
+
+    async def test_the_adaptive_default_needs_no_local_interval_floor(self, monkeypatch, calls):
+        """No-interval series pass: the endpoint's own default is already bounded.
+
+        Probed live 2026-11: -30d answers 30 points at interval 86400, -365d
+        answers 365 - the adaptive default never exceeds one point per day for
+        wide windows, so the pass-through cannot outpoint the 2000 cap that a
+        stated interval is checked against.
+        """
+        tool = self._tool(monkeypatch, calls)
+        await tool.run({"profile_id": "abc123", "from": "-365d"})
+        assert calls

@@ -116,23 +116,34 @@ def _tool_property_names(tool: Any) -> list[str]:
     return [str(prop) for prop in (tool.parameters or {}).get("properties") or {}]
 
 
-async def _catalog_argument_index(fastmcp_server: FastMCP) -> dict[str, tuple[str, ...]]:
+async def _catalog_argument_index(fastmcp_server: FastMCP, tool_names: Sequence[str]) -> dict[str, tuple[str, ...]]:
     """Each argument name mapped to the registered tools that declare it.
 
-    Built from the server's registered tool catalog, not from the spec
-    module: the composite operations (``plotAnalytics``, ``dohLookup``) declare
-    arguments too and live outside the spec surface, so a spec-derived index
-    would blame the wrong owner (or none) for an argument they own - and
-    ``openapi`` would keep an import edge into ``spec_tools`` for it. The
-    disclosure transform's synthetic entries are excluded: nobody should be
-    told "these are parameters of call_tool".
+    Enumerated BY NAME (the server's own registration list, passed in) rather
+    than by ``list_tools()``: under the default BM25 disclosure the registry
+    listing - with middleware or without it - answers only with the synthetic
+    pair, so a listing-built index is empty and every dropped argument would
+    read "matched no single other tool", exactly in the mode where callers
+    most need the owner hint. ``get_tool`` resolves the real tool either way
+    (it is how the call itself dispatches). The composite operations
+    (``plotAnalytics``, ``dohLookup``) declare arguments too and live outside
+    the spec surface, so the name list is the server's, not the spec's - and
+    ``openapi`` keeps no import edge into ``spec_tools`` for it. Synthetic
+    entries are excluded: nobody should be told "these are parameters of
+    call_tool".
     """
     index: dict[str, set[str]] = {}
-    for tool in await fastmcp_server.list_tools():
-        if tool.name in SYNTHETIC_TOOL_NAMES:
+    for name in tool_names:
+        tool = None if name in SYNTHETIC_TOOL_NAMES else await fastmcp_server.get_tool(name)
+        if tool is None:
             continue
         for prop in _tool_property_names(tool):
-            index.setdefault(prop, set()).add(tool.name)
+            index.setdefault(prop, set()).add(name)
+    return _freeze_owner_index(index)
+
+
+def _freeze_owner_index(index: dict[str, set[str]]) -> dict[str, tuple[str, ...]]:
+    """The index in its served form: sorted owner tuples, stable for tests and diffs."""
     return {name: tuple(sorted(owners)) for name, owners in index.items()}
 
 
@@ -199,12 +210,54 @@ def _report_ignored_arguments(result: ToolResult, ignored: list[str], hint: str)
     """
     structured = getattr(result, "structured_content", None)
     if not isinstance(structured, dict):
+        _annotate_content_only(result, ignored, hint)
         return
-    structured["ignored_arguments"] = ignored
+    # Merge, never overwrite: under the search transform an inner call reports
+    # the names dropped from the target's own arguments, and the outer wrapper
+    # pass reports the names dropped from the wrapper it unpacked. Both are
+    # true about the same call; overwriting hides one pass behind the other.
+    already = structured.get("ignored_arguments")
+    merged = list(dict.fromkeys([*(already if isinstance(already, list) else []), *ignored]))
+    structured["ignored_arguments"] = merged
+    _merge_ignored_hints(structured, hint)
+
+
+def _merge_ignored_hints(structured: dict[str, Any], hint: str) -> None:
+    """Keep the inner pass's owner text beside the outer pass's, then merge into the tool hint."""
+    prior_hint = structured.get("ignored_arguments_hint")
+    if isinstance(prior_hint, str) and prior_hint and prior_hint != hint:
+        hint = f"{prior_hint} | {hint}"
     structured["ignored_arguments_hint"] = hint
+    _merge_result_hint(structured, hint)
+
+
+def _annotate_content_only(result: ToolResult, ignored: list[str], hint: str) -> None:
+    """A content-only result has no structured payload to annotate: say it in the content.
+
+    plotAnalytics answers with image content and no structured dict; without
+    this the argument drop would be silent for exactly the tool whose names
+    (from/to on the series endpoints) differ from this one's
+    (from_time/to_time).
+    """
+    if not ignored:
+        return
+    try:
+        result.content.append(
+            mcp.types.TextContent(
+                type="text",
+                text=f"Note: the server ignored argument(s) {', '.join(ignored)}; {hint}",
+            )
+        )
+    except Exception:
+        logger.debug("ignored-arguments annotation could not be appended", exc_info=True)
+
+
+def _merge_result_hint(structured: dict[str, Any], hint: str) -> None:
+    """Append the annotation hint to the tool's own hint without duplicating it."""
     existing = structured.get("hint")
     if isinstance(existing, str) and existing:
-        structured["hint"] = f"{existing} | {hint}"
+        if hint not in existing:
+            structured["hint"] = f"{existing} | {hint}"
     else:
         structured["hint"] = hint
 
@@ -279,11 +332,14 @@ class StripExtraFieldsMiddleware(Middleware):
     same process cannot read the first one's catalog.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, tool_names: Sequence[str] = ()) -> None:
         # (server identity, tool name) -> that tool's parameter schema.
         self._schema_cache: dict[tuple[int, str], dict[str, Any]] = {}
         # (server identity) -> argument-name owner index, built on first use.
         self._owner_cache: tuple[int, dict[str, tuple[str, ...]]] | None = None
+        # The server's registration list: the only source that enumerates the
+        # real tools under disclosure (see _catalog_argument_index).
+        self._tool_names: tuple[str, ...] = tuple(tool_names)
 
     async def _tool_parameters(self, fastmcp_server: FastMCP, tool_name: str) -> dict[str, Any] | None:
         """The tool's parameter schema, memoized; None when the tool is unknown.
@@ -306,7 +362,7 @@ class StripExtraFieldsMiddleware(Middleware):
     async def _owner_index(self, fastmcp_server: FastMCP) -> dict[str, tuple[str, ...]]:
         """The registered catalog's argument-owner index, built once per server."""
         if self._owner_cache is None or self._owner_cache[0] != id(fastmcp_server):
-            self._owner_cache = (id(fastmcp_server), await _catalog_argument_index(fastmcp_server))
+            self._owner_cache = (id(fastmcp_server), await _catalog_argument_index(fastmcp_server, self._tool_names))
         return self._owner_cache[1]
 
     def _get_schema_property_types(self, prop_schema: Any) -> set[str]:
@@ -524,7 +580,7 @@ def create_mcp_server(
 
     # Add middleware to strip unknown fields from tool arguments
     # This allows AI clients (like OpenAI) that send extra fields to work properly
-    mcp.add_middleware(StripExtraFieldsMiddleware())
+    mcp.add_middleware(StripExtraFieldsMiddleware(tool_names=tool_names))
 
     # Record what this server actually executed (see nextdns_mcp.call_log). A
     # read leaves no trace in the API, so a harness that verifies over REST

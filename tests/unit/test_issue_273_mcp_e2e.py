@@ -95,28 +95,35 @@ async def test_numeric_profile_name_reaches_api_as_string(mcp_client: Client, re
 async def test_leading_zero_strings_survive_the_full_mcp_round_trip(
     mcp_client: Client, recorder: _RecordingClient
 ) -> None:
-    """The exact payload from issue #273 (``password: "0012"``) stays intact.
+    """The issue #273 hazard — ``"0012"`` silently cast to ``12`` — stays impossible.
 
-    The flattened body keeps the nested object opaque: its values are recursed
-    without schema context, so a leading zero inside it is sent as written,
-    while the sibling argument the schema declares boolean is still coerced.
+    Nested container values stay opaque to *types*: nothing in the pipeline
+    rewrites them, so a leading zero inside one is sent exactly as written.
+    The published schema now constrains the *structure* of nested bodies
+    (declared fields' types, required ids), so the opaque shape here is a
+    schema-valid one: declared fields arrive typed, undeclared or string-typed
+    ones survive byte-for-byte.
     """
     result = await mcp_client.call_tool(
         "updateSettings",
         {
             "profile_id": "abc123",
-            "logs": {"enabled": "true", "retention": "0012", "name": "315244"},
+            "logs": {"enabled": True, "retention": 2592000, "name": "0012"},
+            "rewrites": [{"name": "315244", "content": "192.0.2.1"}],
             "web3": "true",
         },
     )
     assert result.data == {"data": []}
 
     sent = recorder.body()
-    assert sent == {"logs": {"enabled": "true", "retention": "0012", "name": "315244"}, "web3": True}, (
-        f"coerced: {sent!r}"
-    )
+    assert sent == {
+        "logs": {"enabled": True, "retention": 2592000, "name": "0012"},
+        "rewrites": [{"name": "315244", "content": "192.0.2.1"}],
+        "web3": True,
+    }, f"coerced: {sent!r}"
     assert sent["web3"] is True
-    assert all(isinstance(value, str) for value in sent["logs"].values())
+    assert sent["logs"]["name"] == "0012"
+    assert sent["rewrites"][0]["name"] == "315244"
 
 
 async def test_schema_typed_scalars_are_still_coerced(mcp_client: Client, recorder: _RecordingClient) -> None:

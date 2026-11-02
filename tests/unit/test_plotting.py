@@ -941,3 +941,21 @@ class TestReporterIsTotal:
         assert result["code"] == "internal_error"
         assert "status" in result["error"]
         assert "no payload" in result["error"].lower()
+
+
+class TestUnresolvableExtremeTimes:
+    """Time resolution is total: an extreme value answers None, never OverflowError.
+
+    A 400-digit timestamp and a 400-digit relative offset both used to raise out
+    of the resolution helpers - a crash where the typed "unresolved range"
+    refusal is the contract (issue #267 range bounding).
+    """
+
+    def test_an_absolute_int_past_the_float_range_is_unresolved(self):
+        assert plots_module._resolve_time_point(10**400, now=1_700_000_000.0) is None
+
+    def test_a_relative_offset_past_the_float_range_is_unresolved(self):
+        assert plots_module._resolve_time_point("-" + "9" * 400 + "d", now=1_700_000_000.0) is None
+
+    def test_a_numeric_string_past_the_float_range_is_unresolved(self):
+        assert plots_module._resolve_time_point("1" + "0" * 400, now=1_700_000_000.0) is None

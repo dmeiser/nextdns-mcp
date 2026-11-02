@@ -1017,6 +1017,9 @@ def _annotate_resolved_from(result: Any, supplied: Any, resolved: str | None) ->
     structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         structured["resolved_from"] = _supplied_name_label(supplied)
+        # Name it in the other direction too: a caller that reads only the
+        # result (not the transport logs) learns which tool actually ran.
+        structured["resolved_name"] = resolved
     return result
 
 
@@ -1089,14 +1092,34 @@ class CallToolShapeMiddleware(Middleware):
         self._transform = transform
         self._endpoints = endpoints
 
+    def _is_exact_ready_call(self, supplied: Any, arguments: Mapping[str, Any]) -> bool:
+        """A well-formed exact call: the name is a real operation, parameters are inside.
+
+        The catalog fetch exists only to resolve names, and this shape needs
+        none: the endpoint map carries every spec operation's name. Parameters
+        sent beside ``name`` (the wrapper-shape repair) or an unlisted name
+        (aliases, search answers, the two local operations) take the catalog
+        path, where resolution happens.
+        """
+        return (
+            isinstance(supplied, str)
+            and self._endpoints is not None
+            and supplied in self._endpoints
+            and set(arguments) <= {"name", "arguments"}
+        )
+
     async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> Any:
         message = getattr(context, "message", None)
         arguments = getattr(message, "arguments", None)
         if getattr(message, "name", "") != self._call_tool_name or not isinstance(arguments, dict):
             return await call_next(context)
 
-        tools = await self._catalog(context)
         supplied = arguments.get("name")
+        # Exact-name fast path: the catalog fetch only exists to resolve
+        # names, and a well-formed exact call needs no resolution.
+        if self._is_exact_ready_call(supplied, arguments):
+            return await call_next(context)
+        tools = await self._catalog(context)
         resolved, target = await self._resolve_tool_name(supplied, tools)
         shaped = self._shape_arguments(arguments, resolved, target)
         if shaped != arguments:
