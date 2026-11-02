@@ -343,9 +343,18 @@ def _skip_dropped_record_tail(piece: str, dropping: bool) -> tuple[str, bool]:
     return piece[piece.find("\n") + 1 :], False
 
 
-def _flush_tail(preview: list[str], preview_bytes: int, carry: str, open_line: bool) -> tuple[int, int]:
-    """The stream's final unterminated record: extra rows and the new preview size."""
-    if carry:
+def _flush_tail(
+    preview: list[str], preview_bytes: int, carry: str, open_line: bool, dropping_record: bool
+) -> tuple[int, int]:
+    """The stream's final unterminated record: extra rows and the new preview size.
+
+    ``dropping_record`` means the record still being read was already dropped
+    from the preview for crossing the byte cap; its leftover tail at EOF
+    belongs to that same record, so previewing it would resurrect the dropped
+    record as a phantom line. The row itself still counts - it exists in the
+    file whether or not the preview shows it.
+    """
+    if carry and not dropping_record:
         preview_bytes = _append_preview(preview, preview_bytes, carry)
     return (1 if open_line else 0), preview_bytes
 
@@ -405,7 +414,7 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
                 dropping_record = True
             piece, dropping_record = _skip_dropped_record_tail(piece, dropping_record)
             preview_bytes = _append_preview(preview, preview_bytes, piece)
-    extra_rows, preview_bytes = _flush_tail(preview, preview_bytes, preview_carry, open_line)
+    extra_rows, preview_bytes = _flush_tail(preview, preview_bytes, preview_carry, open_line, dropping_record)
     row_count += extra_rows
     size = os.path.getsize(path)
     text_preview = "".join(preview)

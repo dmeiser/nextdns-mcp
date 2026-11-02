@@ -202,3 +202,47 @@ class TestToolsReportUpstreamFailuresAsPayloads:
             denylist = await client.call_tool("getDenylist", {"profile_id": "abc123"})
         assert profiles.structured_content == {"data": [{"id": "abc123", "name": "Home Network"}]}
         assert denylist.structured_content == {"data": []}
+
+
+# ---------------------------------------------------------------------------
+# Response-cap streaming: the ceiling refuses on the wire, before the body is
+# buffered whole or JSON-decoded (issue #266 review: a post-parse size check
+# bounds only what is returned, not transport memory).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_response_is_refused_before_it_is_parsed(stub_nextdns_api):
+    """An undecodable giant body still refuses as the typed ceiling error.
+
+    "[" * 200_000 is not valid JSON anywhere; if the cap did not fire during
+    streaming, the failure would be a JSON decode error, not this one.
+    """
+    _serve(200, "[" * 200_000)
+    with pytest.raises(transport.NextDNSResponseTooLargeError) as excinfo:
+        await transport._api_request("GET", "/profiles", max_response_bytes=10_000)
+    assert excinfo.value.max_response_bytes == 10_000
+
+
+@pytest.mark.asyncio
+async def test_the_payload_surface_types_the_ceiling_refusal(stub_nextdns_api):
+    _serve(200, "[" * 200_000)
+    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=10_000)
+    assert payload["code"] == "response_too_large"
+    assert payload["max_response_bytes"] == 10_000
+
+
+@pytest.mark.asyncio
+async def test_a_response_under_the_cap_parses_unchanged(stub_nextdns_api):
+    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=10_000)
+    assert payload == {"data": [{"id": "abc123", "name": "Home Network"}]}
+
+
+@pytest.mark.asyncio
+async def test_an_error_status_under_the_cap_keeps_its_typed_error(stub_nextdns_api):
+    """The capped (streamed) path re-exposes the body as a normal response:
+    status handling and the error payload are unchanged below the cap."""
+    _serve(503, '{"error":"upstream unavailable"}')
+    payload = await transport._api_request_payload("GET", "/upstream/unavailable", max_response_bytes=10_000)
+    assert payload["code"] == "http_error"
+    assert payload["status_code"] == 503

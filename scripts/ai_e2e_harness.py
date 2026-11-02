@@ -1085,10 +1085,19 @@ async def _all_profile_ids(m: MeasureClient) -> dict[str, str] | None:
 
 
 def _never_delete_ids() -> set[str]:
-    """Profile ids the stray sweep must never remove (protected + plot)."""
+    """Profile ids the stray sweep must never remove (protected + plot).
+
+    Normalized exactly the way the server's ACL layer normalizes its
+    ``NEXTDNS_PROTECTED_PROFILES`` (``config._normalized_profile_ids``:
+    strip, lowercase, drop blanks) so an env var written with upper-case
+    characters still matches the lower-case ids the profile listing and the
+    sweep compare against - two normalizations would drift.
+    """
+    from nextdns_mcp.config import _normalized_profile_ids
+
     ids: set[str] = set()
     for var in ("NEXTDNS_PROTECTED_PROFILES", "NEXTDNS_PLOT_PROFILE"):
-        ids |= {p.strip() for p in os.environ.get(var, "").split(",") if p.strip()}
+        ids |= _normalized_profile_ids(os.environ.get(var, ""))
     return ids
 
 
@@ -1114,9 +1123,9 @@ async def _ensure_plot_profile(m: MeasureClient, pid: str) -> str:
             "NEXTDNS_PLOT_PROFILE is unset and the profile listing failed, so no fallback "
             "could be resolved; plot/log steps fall back to the empty test profile"
         )
-    never = {pid} | _never_delete_ids()
+    never = {pid.lower()} | _never_delete_ids()
     for candidate in listing:
-        if candidate in never:
+        if candidate.lower() in never:
             continue
         probe = await m.rest_get(f"/profiles/{candidate}/analytics/status")
         if common._analytics_has_data(probe):
@@ -1197,7 +1206,8 @@ async def _sweep_stray_profiles(m: MeasureClient, created: set[str], keep: set[s
     and nothing is deleted, with the reason surfaced in the report.
     """
     protected = _never_delete_ids()
-    doomed = sorted(pid for pid in created if pid and pid not in keep and pid not in protected)
+    keep_lower = {k.lower() for k in keep}
+    doomed = sorted(pid for pid in created if pid and pid.lower() not in keep_lower and pid.lower() not in protected)
     if not doomed:
         return ""
     current = await _all_profile_ids(m)
@@ -1227,11 +1237,21 @@ async def _self_heal_profile(m: MeasureClient, pid: str, targets: TaskTargets) -
     RENAMED name because every post-rename step verifies against that name.
 
     Returns the (possibly new) profile id, or "" if recreation failed.
+
+    Recreation requires CONFIRMED deletion: a 404 on the profile read. A
+    failed read that does not say 404 - a 5xx, a transport failure, a
+    malformed answer - is indeterminate: the profile may well exist, and
+    POSTing a duplicate on that guess would both pollute the account and
+    hand the run a second profile it must not delete. Indeterminate reads
+    leave the run on the original id and let later steps report honestly.
     """
     if not pid:
         return pid
     resp = await m.rest_get(f"/profiles/{pid}")
     if isinstance(resp, dict) and resp.get("ok"):
+        return pid
+    if not (isinstance(resp, dict) and resp.get("status") == 404):
+        _progress(f"self-heal: read of test profile {pid} was indeterminate ({resp!r}); not recreating on a guess")
         return pid
     created = await m.rest_post("/profiles", {"name": targets.renamed_name})
     new_id = ""

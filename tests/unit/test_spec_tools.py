@@ -27,8 +27,8 @@ COMPOSITES = ("plotAnalytics", "dohLookup")
 def _fake_api(payload: dict[str, Any], calls: list[Any]):
     """Stand in for the HTTP layer, recording how the endpoint was addressed."""
 
-    async def _request(method, url, params=None, json_body=None):
-        calls.append({"method": method, "url": url, "params": params, "body": json_body})
+    async def _request(method, url, params=None, json_body=None, **extra):
+        calls.append({"method": method, "url": url, "params": params, "body": json_body, **extra})
         return payload
 
     return _request
@@ -523,7 +523,7 @@ class TestRefusalsBeforeTransport:
         from types import SimpleNamespace
 
         problems = [SimpleNamespace(absolute_path=[f"f{i}"], message=f"bad {i}") for i in range(7)]
-        described = spec_tools._describe_schema_errors(problems)
+        described = spec_tools._describe_schema_errors(problems[: spec_tools._SCHEMA_ERROR_LIMIT], 2)
         assert "f0: bad 0" in described
         assert "f4: bad 4" in described
         assert "f5" not in described.split("; and")[0]
@@ -714,3 +714,70 @@ class TestSeriesBudgetHelperEdges:
         the endpoint's 400 to give, not this helper's guess."""
         query = {"from": "not-a-time", "to": "also-not-a-time"}
         assert spec_tools._series_budget_for_generated_call(self._route(), query) is None
+
+
+class TestSeriesStreamCeilingWiring:
+    """The byte ceiling travels into the transport, where streaming enforces it."""
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    def _series_tool(self, monkeypatch, calls):
+        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
+
+    async def test_a_generated_series_call_passes_the_cap_to_the_transport(self, monkeypatch, calls):
+        tool = self._series_tool(monkeypatch, calls)
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+        assert calls[0]["max_response_bytes"] == spec_tools.MAX_SERIES_RESPONSE_BYTES
+
+    async def test_a_non_series_call_carries_no_cap(self, monkeypatch, calls):
+        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getDenylist"])
+        await tool.run({"profile_id": "abc123"})
+        assert "max_response_bytes" not in calls[0]
+
+    async def test_a_transport_ceiling_refusal_becomes_the_series_ceiling_payload(self, monkeypatch, calls):
+        async def capped_transport(*args, **kwargs):
+            return {"code": "response_too_large", "error": "exceeded the ceiling", "max_response_bytes": 1}
+
+        tool = self._series_tool(monkeypatch, calls)
+        monkeypatch.setattr(spec_tools, "_api_request_payload", capped_transport)
+        payload = (await tool.run({"profile_id": "abc123", "from": "-1d"})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "series response ceiling" in payload["error"]
+        assert payload["max_response_bytes"] == spec_tools.MAX_SERIES_RESPONSE_BYTES
+        assert "response_bytes" not in payload, "a mid-stream refusal has no measured size to claim"
+
+
+class TestSchemaProblemStreamIsBounded:
+    """Violations are streamed: retention and counting stay bounded, coverage does not."""
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    def test_retention_stops_at_the_rendered_few_and_counting_at_the_cap(self):
+        import jsonschema as js
+
+        validator = js.Draft202012Validator({"type": "array", "items": {"required": ["id"]}})
+        body = [{"wrong": i} for i in range(1500)]
+        kept, extra = spec_tools._schema_problems(validator, body)
+        assert len(kept) == spec_tools._SCHEMA_ERROR_LIMIT
+        assert extra == spec_tools._SCHEMA_ERROR_COUNT_CAP  # counting stopped at the cap
+
+    async def test_an_over_cap_violation_tail_says_at_least(self, monkeypatch, calls):
+        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["replaceDenylist"])
+        body = [{"wrong": i} for i in range(spec_tools._SCHEMA_ERROR_COUNT_CAP + 100)]
+        payload = (await tool.run({"profile_id": "abc123", "body": body})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert f"and at least {spec_tools._SCHEMA_ERROR_COUNT_CAP} more" in payload["error"]
+        assert calls == []
+
+
+def test_series_refusal_ignores_a_non_mapping_answer():
+    """A transport that answers with a bare list gets no annotation, no crash."""
+    route = next(r for r in spec_tools.spec_routes() if r.path.endswith("/analytics/status;series"))
+    assert spec_tools._series_refusal(route, ["data", "rows"]) is None

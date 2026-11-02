@@ -1,5 +1,6 @@
 """Tests for the analytics plotting helpers and tool wrappers."""
 
+import json
 import struct
 import threading
 from datetime import datetime, timedelta
@@ -308,16 +309,45 @@ def now():
     return 1_700_000_000.0
 
 
+class _StreamedResponse:
+    """Async-CM stand-in for a streaming httpx response (the capped path)."""
+
+    def __init__(self, status_code: int, body: bytes, request: httpx.Request) -> None:
+        self.status_code = status_code
+        self.headers = httpx.Headers()
+        self.request = request
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    async def aiter_bytes(self):
+        yield self._body
+
+
 @pytest.fixture
 def mock_api_client(monkeypatch):
     """Replace the module-level api_client with an AsyncMock.
 
-    The plot fetch routes through ``_api_request`` (issue #183), which issues
-    requests via ``client.api_client.request``; tests therefore drive the mock
-    through ``.request``.
+    The plot fetch routes through the payload wrapper (issue #183), which
+    issues uncapped requests via ``client.api_client.request``; the generated
+    ``;series`` tools run under the response cap and therefore STREAM - so
+    ``.stream`` returns a real async-CM over a canned body (``stream_state``)
+    and records the call. Tests drive the uncapped path through ``.request``.
     """
     monkeypatch.setenv("NEXTDNS_API_KEY", "test-api-key")
     client = AsyncMock()
+    client.stream_state = {"body": json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()}
+    client.stream_calls: list[dict] = []
+
+    def _stream(method, url, params=None, json=None, **kwargs):
+        client.stream_calls.append({"method": method, "url": url, "params": params})
+        return _StreamedResponse(200, client.stream_state["body"], httpx.Request(method, url))
+
+    client.stream = _stream
     monkeypatch.setattr(client_module, "api_client", client)
     return client
 
@@ -411,10 +441,12 @@ class TestPlotAnalyticsSeriesImpl:
 
         route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
         await spec_tools.SpecApiTool(route).run({"profile_id": "abc123", **window})
-        series_call = mock_api_client.request.call_args
+        # The generated call is capped, so it arrives on the STREAM path, not request.
+        assert mock_api_client.stream_calls, "the capped series call must stream, not buffer"
+        series_call = mock_api_client.stream_calls[-1]
 
-        assert plot_call.args[1] == series_call.args[1] == "/profiles/abc123/analytics/status;series"
-        assert plot_call.kwargs["params"] == series_call.kwargs["params"]
+        assert plot_call.args[1] == series_call["url"] == "/profiles/abc123/analytics/status;series"
+        assert plot_call.kwargs["params"] == series_call["params"]
         assert plot_call.kwargs["params"] == {
             "from": 1_700_000_000 - 86_400,
             "to": 1_700_000_000,
@@ -820,11 +852,12 @@ class TestPlotAnalyticsEndToEndRendering:
 
 
 class TestPlotFetchUsesSharedWrapper:
-    """Regression (issue #183): the plot series fetch must route through ``_api_request``.
+    """Regression (issue #183): the plot series fetch must route through the payload wrapper.
 
     Before the fix ``_fetch_series_payload`` called the raw
-    ``client.api_client.get(...)`` directly, bypassing ``_api_request`` and its
-    error handling/logging (and any future retry/rate-limit/telemetry). These
+    ``client.api_client.get(...)`` directly, bypassing the transport's payload
+    wrapper (``_api_request_payload``) and its error handling/logging - a
+    parallel wrapper of its own stayed a second copy of that contract. (and any future retry/rate-limit/telemetry). These
     mock-level assertions pin the wrapped path so a raw-client regression is
     caught: the shared wrapper is awaited and the raw transport is not.
     """
@@ -834,7 +867,7 @@ class TestPlotFetchUsesSharedWrapper:
         self, clean_env, monkeypatch, mock_api_client, sample_series_payload
     ):
         wrapped = AsyncMock(return_value=sample_series_payload)
-        monkeypatch.setattr(plots_module, "_api_request", wrapped)
+        monkeypatch.setattr(plots_module, "_api_request_payload", wrapped)
 
         params = {"from": "-1d", "to": "now", "interval": 3600}
         payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", params)
@@ -865,7 +898,7 @@ class TestPlotFetchUsesSharedWrapper:
         # Empty series so the impl returns before rendering; the fetch has already
         # run, which is what we are asserting on.
         wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
-        monkeypatch.setattr(plots_module, "_api_request", wrapped)
+        monkeypatch.setattr(plots_module, "_api_request_payload", wrapped)
 
         # Drive the impl end-to-end; the fetch must go through the shared
         # wrapper rather than the raw client.
@@ -897,7 +930,7 @@ class TestRangeReportingAndProfileGuard:
         monkeypatch.setattr(plots_module, "resolve_profile_id", lambda profile_id, **kwargs: (None, None))
 
         wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
-        monkeypatch.setattr(plots_module, "_api_request", wrapped)
+        monkeypatch.setattr(plots_module, "_api_request_payload", wrapped)
 
         result = await plots_module._plot_analytics_series_impl("status", profile_id="abc123")
         assert result["code"] == "internal_error"

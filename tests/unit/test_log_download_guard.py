@@ -900,3 +900,20 @@ class TestOversizedRecordsDropWhole:
         )
         assert payload["preview"]["text"] == "x,y\n"
         assert payload["row_count"] == 2
+
+
+class TestOversizedRecordAtEof:
+    """The dropped record's final tail stays dropped when the stream just ends."""
+
+    async def test_an_unterminated_oversized_record_stays_out_of_the_preview_at_eof(self, tmp_path, monkeypatch):
+        """The carry survives into EOF mid-dropped-record; _flush_tail must not
+        preview it (it is the same record already excluded), while the row
+        itself still counts - it exists on disk."""
+        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
+        payload = await logs_module._write_stream_to_tempfile(
+            _FakeResponse("https://x/file.csv", chunks=["A" * 30, "xyz"]), str(tmp_path / "d.csv")
+        )
+        assert payload["preview"]["text"] == ""
+        assert payload["preview"]["line_count"] == 0
+        assert payload["row_count"] == 1
+        assert payload["size"] == 33

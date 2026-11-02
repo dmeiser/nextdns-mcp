@@ -2982,3 +2982,30 @@ class TestEvidenceBackedExtraction:
         assert ident["entry-six"] == ["id-six-bbbb"]
         assert ident["entry-seven"] == ["id-seven-cccc"]
         assert ident["entry-one"] == ["id-one-aaaa"]
+
+
+class TestSelfHealRequiresConfirmedDeletion:
+    """Only a 404 proves the profile is gone; indeterminate reads must not create."""
+
+    def test_a_503_read_does_not_trigger_a_recreate(self, h):
+        import asyncio
+
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        m = _FakeClient(by_path={"/profiles/pid1": {"status": 503, "ok": False, "body": "boom"}})
+        assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == "pid1"
+        assert m.posted == [], "a 503 is not proof of deletion; POSTing would duplicate the account"
+
+    def test_a_malformed_read_does_not_trigger_a_recreate(self, h):
+        import asyncio
+
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        m = _FakeClient(by_path={"/profiles/pid1": None})
+        assert asyncio.run(h._self_heal_profile(m, "pid1", t)) == "pid1"
+        assert m.posted == []
+
+
+def test_never_delete_ids_use_the_server_normalization(h, monkeypatch):
+    """Upper-case env entries match the lower-case ids the sweep compares."""
+    monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "Home12 , PLOT99,")
+    monkeypatch.setenv("NEXTDNS_PLOT_PROFILE", "Plot99")
+    assert h._never_delete_ids() == {"home12", "plot99"}

@@ -412,16 +412,23 @@ class SpecApiTool(Tool):
     async def _call_endpoint(self, path: str, query: dict[str, Any], body: Any) -> ToolResult:
         """Send the request this route describes and wrap its payload.
 
-        A ``;series`` payload gets the response-side ceiling check: the
-        request-side budgets bound the arithmetic, this bounds what actually
-        arrives, so an over-wide answer comes back as a typed refusal instead
-        of an oversized context dump.
+        A ``;series`` route runs under ``MAX_SERIES_RESPONSE_BYTES`` *inside
+        the transport*: the response streams and the refusal fires while the
+        body is still arriving, so an over-wide answer never fills transport
+        memory and is never JSON-decoded. ``_series_refusal`` renders either
+        ceiling layer as the typed series refusal.
         """
         request = self._transport or _api_request_payload
-        payload = await request(self._route.method, path, params=query or None, json_body=body)
-        oversized = _series_response_ceiling_error(self._route, payload)
-        if oversized is not None:
-            return ToolResult(structured_content=oversized)
+        payload = await request(
+            self._route.method,
+            path,
+            params=query or None,
+            json_body=body,
+            **({"max_response_bytes": MAX_SERIES_RESPONSE_BYTES} if ";series" in self._route.path else {}),
+        )
+        refused = _series_refusal(self._route, payload)
+        if refused is not None:
+            return ToolResult(structured_content=refused)
         return ToolResult(structured_content=payload)
 
     async def _run_delegated(self, arguments: dict[str, Any]) -> ToolResult:
@@ -533,6 +540,34 @@ _SCHEMA_ERROR_LIMIT = 5
 # not its payload.
 _SCHEMA_ERROR_MSG_CHARS = 300
 
+# Cap on how far past the kept five violations the count runs before the
+# iteration stops and reports the tail as a lower bound ("and at least N
+# more"). An array body crafted to produce one violation per element cannot
+# make this server walk - or remember - a violation per element.
+_SCHEMA_ERROR_COUNT_CAP = 1_000
+
+
+def _schema_problems(validator: jsonschema.Draft202012Validator, arguments: dict[str, Any]) -> tuple[list[Any], int]:
+    """Consume ``iter_errors`` incrementally: keep at most LIMIT, count at most LIMIT+CAP.
+
+    ``list(validator.iter_errors(...))`` materialized *every* violation, each
+    holding its offending subtree, while the answer renders only the first
+    ``_SCHEMA_ERROR_LIMIT`` and uses the rest as a bare count. Streaming the
+    generator bounds what is retained to the rendered five, bounds the
+    counting pass to ``_SCHEMA_ERROR_COUNT_CAP`` past them, and leaves the
+    full argument tree just as fully checked.
+    """
+    kept: list[Any] = []
+    extra = 0
+    for error in validator.iter_errors(arguments):
+        if len(kept) < _SCHEMA_ERROR_LIMIT:
+            kept.append(error)
+            continue
+        extra += 1
+        if extra >= _SCHEMA_ERROR_COUNT_CAP:
+            break
+    return kept, extra
+
 
 def _without_nulls(arguments: dict[str, Any]) -> dict[str, Any]:
     """Drop explicitly-null arguments: null means "not provided" (see _query_arguments)."""
@@ -544,12 +579,10 @@ def _schema_error_where(error: jsonschema.ValidationError) -> str:
     return ".".join(str(part) for part in error.absolute_path) or "<arguments>"
 
 
-def _describe_schema_errors(problems: list[jsonschema.ValidationError]) -> str:
-    named = [
-        f"{_schema_error_where(error)}: {error.message[:_SCHEMA_ERROR_MSG_CHARS]}"
-        for error in problems[:_SCHEMA_ERROR_LIMIT]
-    ]
-    extra = len(problems) - _SCHEMA_ERROR_LIMIT
+def _describe_schema_errors(kept: list[Any], extra: int) -> str:
+    named = [f"{_schema_error_where(error)}: {error.message[:_SCHEMA_ERROR_MSG_CHARS]}" for error in kept]
+    if extra >= _SCHEMA_ERROR_COUNT_CAP:
+        return "; ".join(named) + f"; and at least {extra} more"
     return "; ".join(named) + (f"; and {extra} more" if extra > 0 else "")
 
 
@@ -590,14 +623,16 @@ def _schema_validation_payload(
     (issue #273) is about types, not structure - the normalizers never rewrite
     a nested value, so a published nested constraint is exactly the constraint
     the request would satisfy; anything looser would let the server advertise
-    a schema it does not enforce.
+    a schema it does not enforce. Violations are streamed (see
+    :func:`_schema_problems`): every part of the tree is checked while only
+    the rendered few are kept.
     """
-    problems = list(validator.iter_errors(_without_nulls(arguments)))
+    problems, extra = _schema_problems(validator, _without_nulls(arguments))
     if not problems:
         return None
     return error_payload(
         ErrorCode.INVALID_ARGUMENT,
-        f"{tool_name} arguments do not match the published schema: {_describe_schema_errors(problems)}",
+        f"{tool_name} arguments do not match the published schema: {_describe_schema_errors(problems, extra)}",
         hint="the tool's inputSchema is the accepted shape: fix the named values, or omit optional arguments entirely",
     )
 
@@ -669,34 +704,62 @@ def _default_interval_estimate(from_time: Any, to_time_raw: Any) -> int | None:
     )
 
 
+def _series_refusal(route: HTTPRoute, payload: Any) -> dict[str, Any] | None:
+    """The typed ceiling refusal for a ``;series`` result, from either layer.
+
+    The transport enforces the cap while streaming and answers with the typed
+    ``response_too_large`` payload; that gets the series wording with no
+    measured size claimed (nothing was measured - the refusal came from the
+    wire). The serialized check is the backstop for an injected transport
+    that honours no cap. Only ``;series`` routes get here (the caller gates).
+    """
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("code") == ErrorCode.RESPONSE_TOO_LARGE:
+        return _series_ceiling_payload(str(route.operation_id), None)
+    return _series_response_ceiling_error(route, payload)
+
+
+def _series_ceiling_payload(operation_id: str, response_bytes: int | None) -> dict[str, Any]:
+    """The typed refusal for a ``;series`` answer over the byte ceiling.
+
+    ``response_bytes`` is the measured size when something measured it (the
+    serialized backstop); None when the transport refused mid-stream and the
+    only known fact is that the cap was crossed.
+    """
+    answered = (
+        f"{response_bytes} bytes" if response_bytes is not None else f"more than {MAX_SERIES_RESPONSE_BYTES} bytes"
+    )
+    extra: dict[str, Any] = {"max_response_bytes": MAX_SERIES_RESPONSE_BYTES}
+    if response_bytes is not None:
+        extra["response_bytes"] = response_bytes
+    return error_payload(
+        ErrorCode.INVALID_ARGUMENT,
+        f"{operation_id} answered {answered}, more than the "
+        f"{MAX_SERIES_RESPONSE_BYTES}-byte series response ceiling; the range/interval produced "
+        "more data than this server returns in one tool result",
+        hint="use a larger interval or a shorter range, or read an aggregate endpoint instead of ;series",
+        **extra,
+    )
+
+
 def _series_response_ceiling_error(route: HTTPRoute, payload: Any) -> dict[str, Any] | None:
     """Typed refusal when a fetched ``;series`` payload is too big to hand back.
 
-    The request-side budgets bound one series' point count, and the endpoint's
-    default top-N bounds its row count - but this server does not publish the
-    row cap, so the row count upstream actually returns is not fully ours to
-    price up front. The response-side ceiling is the backstop: a payload whose
-    JSON is over ``MAX_SERIES_RESPONSE_BYTES`` is refused as a typed error
-    rather than dumped into the caller's context. The budgets make it a rare
-    refusal; the guard makes "rare" enforceable.
+    The transport enforces ``MAX_SERIES_RESPONSE_BYTES`` while streaming;
+    this is the backstop for a transport that does not honour the cap (an
+    injected test double, a future custom transport): a payload whose JSON
+    is over the ceiling is refused as a typed error rather than dumped into
+    the caller's context. Only reached for ``;series`` routes, gated by
+    :func:`_series_refusal`.
     """
-    if ";series" not in route.path:
-        return None
     try:
         size = len(json.dumps(payload, default=str))
     except (TypeError, ValueError):  # pragma: no cover - transport payloads are JSON-shaped
         size = len(str(payload))
     if size <= MAX_SERIES_RESPONSE_BYTES:
         return None
-    return error_payload(
-        ErrorCode.INVALID_ARGUMENT,
-        f"{route.operation_id} answered {size} bytes, more than the "
-        f"{MAX_SERIES_RESPONSE_BYTES}-byte series response ceiling; the range/interval produced "
-        "more data than this server returns in one tool result",
-        hint="use a larger interval or a shorter range, or read an aggregate endpoint instead of ;series",
-        max_response_bytes=MAX_SERIES_RESPONSE_BYTES,
-        response_bytes=size,
-    )
+    return _series_ceiling_payload(str(route.operation_id), size)
 
 
 def _required(route: HTTPRoute) -> list[str]:

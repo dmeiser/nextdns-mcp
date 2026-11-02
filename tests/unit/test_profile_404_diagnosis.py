@@ -59,7 +59,7 @@ class TestTheTwoIdsAProfilePathCanMiss:
     async def test_the_wiring_reaches_a_tool_call(self, monkeypatch):
         """The hint is added where the URL is known, not by each tool."""
 
-        async def boom(method: str, url: str, params=None, json_body=None):
+        async def boom(method: str, url: str, params=None, json_body=None, max_response_bytes=None):
             response = MagicMock()
             response.status_code = 404
             response.json.return_value = {"errors": [{"code": "notFound"}]}

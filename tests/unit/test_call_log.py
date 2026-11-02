@@ -193,7 +193,7 @@ class TestALocalOperationHasNoEndpoint:
         async def empty_series(method, url, params=None, json_body=None):
             return {"meta": {"series": {"times": []}}, "data": []}
 
-        monkeypatch.setattr(plots_module, "_api_request", empty_series)
+        monkeypatch.setattr(plots_module, "_api_request_payload", empty_series)
 
         async with Client(build_mcp_server()) as client:
             await client.call_tool("plotAnalytics", {"metric": "status", "profile_id": "abc123"})

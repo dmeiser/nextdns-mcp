@@ -25,6 +25,11 @@ and imports no network layer at all. The dependency runs one way - transport
 imports client - and the call log, the client and the transport share their
 few names in common through ``constants``.
 
+There is deliberately no rate limiter in this module: upstream 429 handling is
+never retried and the request/download bounds above cover the expensive axes;
+the reasoning (and where a per-client limiter belongs instead) is in
+``docs/safety.md`` under "Rate limiting" (issue #266 review, SEC-5).
+
 Tests replace these functions by attribute on this module (or on the calling
 module that imports them), which is why call sites resolve them as module
 globals rather than capturing them at construction time.
@@ -43,6 +48,7 @@ from .errors import (
     NextDNSAuthError,
     NextDNSError,
     NextDNSRateLimitError,
+    NextDNSResponseTooLargeError,
     NextDNSServerError,
     error_payload,
     http_error_payload,
@@ -88,7 +94,11 @@ def _handle_api_error(e: NextDNSError) -> dict[str, Any]:
 
 
 async def _api_request(
-    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
+    method: str,
+    url: str,
+    params: dict[str, Any] | None = None,
+    json_body: Any = None,
+    max_response_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Make an HTTP request through the access-controlled client and return JSON.
 
@@ -102,9 +112,16 @@ async def _api_request(
     For non-HTTP failures, a ``NextDNSError`` is raised with status_code=None.
     Tools that report failures as payloads should await ``_api_request_payload``,
     which applies this conversion.
+
+    ``max_response_bytes`` caps the response body at the caller's ceiling: the
+    body is streamed and read no further than the cap, so an oversized answer
+    never fills transport memory and is never JSON-decoded - the refusal comes
+    from the wire, not from the finished document.
     """
     try:
-        return await _api_request_json(method, url, params=params, json_body=json_body)
+        return await _api_request_json(
+            method, url, params=params, json_body=json_body, max_response_bytes=max_response_bytes
+        )
     except AccessDeniedError as e:
         # Raised by the ACL layer before any network request. Kept out of the
         # httpx.HTTPError branch: a real upstream 403 (raise_for_status) must
@@ -125,16 +142,50 @@ async def _api_request(
 
 
 async def _api_request_json(
-    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
+    method: str,
+    url: str,
+    params: dict[str, Any] | None = None,
+    json_body: Any = None,
+    max_response_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Send the request and return its JSON document, raising typed errors on failure."""
-    response = await client.api_client.request(method, url, params=params, json=json_body)
+    """Send the request and return its JSON document, raising typed errors on failure.
+
+    With ``max_response_bytes`` the response arrives through the client's
+    streaming path and the body is read only up to the cap; crossing it raises
+    :class:`NextDNSResponseTooLargeError` with nothing oversized ever buffered
+    or parsed. The capped body is then re-exposed as an ordinary buffered
+    :class:`httpx.Response` so the status, empty-body and error-document
+    handling below is the same on both paths.
+    """
+    response = (
+        await client.api_client.request(method, url, params=params, json=json_body)
+        if max_response_bytes is None
+        else await _request_capped(method, url, params, json_body, max_response_bytes)
+    )
     response.raise_for_status()
     if _is_empty_success(response):
         return {"success": True}
     data = response.json()
     _reject_error_document(method, url, response, data)
     return data
+
+
+async def _request_capped(
+    method: str, url: str, params: dict[str, Any] | None, json_body: Any, max_response_bytes: int
+) -> httpx.Response:
+    """Stream the response, buffering it only while it stays under the cap."""
+    async with client.api_client.stream(method, url, params=params, json=json_body) as streamed:
+        body = bytearray()
+        async for chunk in streamed.aiter_bytes():
+            body += chunk
+            if len(body) > max_response_bytes:
+                raise NextDNSResponseTooLargeError(
+                    f"HTTP response to {method} {url} exceeded the {max_response_bytes}-byte response ceiling",
+                    max_response_bytes=max_response_bytes,
+                )
+        return httpx.Response(
+            streamed.status_code, headers=streamed.headers, content=bytes(body), request=streamed.request
+        )
 
 
 def _http_error_parts(error: Exception) -> tuple[int | None, Any]:
@@ -195,16 +246,26 @@ def _typed_http_error(message: str, status_code: int | None, response_body: str 
 
 
 async def _api_request_payload(
-    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
+    method: str,
+    url: str,
+    params: dict[str, Any] | None = None,
+    json_body: Any = None,
+    max_response_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Perform an API request, reporting typed upstream failures as error payloads.
 
     Equivalent to awaiting ``_api_request`` and passing any raised
     ``NextDNSError`` through ``_handle_api_error``, so every tool reports the
-    same standardized failure shape.
+    same standardized failure shape. A response that crosses
+    ``max_response_bytes`` - refused while streaming, before parsing - comes
+    back as the typed ``response_too_large`` payload.
     """
     try:
-        return await _api_request(method, url, params=params, json_body=json_body)
+        return await _api_request(
+            method, url, params=params, json_body=json_body, max_response_bytes=max_response_bytes
+        )
+    except NextDNSResponseTooLargeError as e:
+        return error_payload(ErrorCode.RESPONSE_TOO_LARGE, str(e), max_response_bytes=e.max_response_bytes)
     except NextDNSError as e:
         return _note_404_on_a_profile_path(_handle_api_error(e), url)
 

@@ -94,7 +94,7 @@ class TestTheToolsSaySoThemselves:
         """Capture the query parameters the generated tool puts on the wire."""
         captured: dict = {}
 
-        async def fake(method, url, params=None, json_body=None):
+        async def fake(method, url, params=None, json_body=None, **extra):
             captured["url"] = url
             captured["params"] = params or {}
             return {"data": []}

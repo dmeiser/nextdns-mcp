@@ -45,6 +45,7 @@ class ErrorCode:
     UNSUPPORTED_METRIC = "unsupported_metric"
     HTTP_ERROR = "http_error"
     DOWNLOAD_TOO_LARGE = "download_too_large"
+    RESPONSE_TOO_LARGE = "response_too_large"
     INTERNAL_ERROR = "internal_error"
     NO_DATA = "no_data"
 
@@ -412,3 +413,16 @@ class NextDNSRateLimitError(NextDNSError):
 
 class NextDNSServerError(NextDNSError):
     """Raised for 5xx errors."""
+
+
+class NextDNSResponseTooLargeError(NextDNSError):
+    """Raised when a response body crosses a caller-stated byte ceiling.
+
+    Raised *while streaming*, before the body is buffered whole or JSON-decoded,
+    so the ceiling bounds transport memory, not just what is later returned.
+    Carries the ceiling that was crossed in ``max_response_bytes``.
+    """
+
+    def __init__(self, message: str, max_response_bytes: int):
+        super().__init__(message, status_code=None)
+        self.max_response_bytes = max_response_bytes
