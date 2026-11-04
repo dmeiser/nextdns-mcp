@@ -567,7 +567,7 @@ class TestSearchAnswerAsName:
         assert _name_from_search_answer([{"id": 1}]) == ""
         async with Client(build_mcp_server()) as client:
             with pytest.raises(Exception, match="Input should be"):
-                await client.call_tool("call_tool", {"name": 42, "arguments": {}}, raise_on_error=False)
+                await client.call_tool("call_tool", {"name": 42, "arguments": {}})
 
     async def test_a_plain_name_is_left_exactly_as_sent(self):
         from fastmcp import Client
@@ -621,7 +621,7 @@ class TestMistypedToolName:
 
         async with Client(build_mcp_server()) as client:
             with pytest.raises(Exception, match="is not a tool of this server") as raised:
-                await client.call_tool("call_tool", {"name": "analytics", "arguments": {}}, raise_on_error=False)
+                await client.call_tool("call_tool", {"name": "analytics", "arguments": {}})
         assert "search_tools" in str(raised.value)
 
 
@@ -847,7 +847,7 @@ class TestATypedNameSaysWhichNamesThereAre:
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
             with pytest.raises(Exception, match="Its words match") as raised:
-                await client.call_tool("call_tool", {"name": "generate analytics plot", "arguments": {}}, raise_on_error=False)
+                await client.call_tool("call_tool", {"name": "generate analytics plot", "arguments": {}})
         message = str(raised.value)
         assert "plotAnalytics takes" in message, message
         assert "search_tools" not in message, message
@@ -858,7 +858,7 @@ class TestATypedNameSaysWhichNamesThereAre:
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
             with pytest.raises(Exception, match="is not a tool of this server") as raised:
-                await client.call_tool("call_tool", {"name": "zzzqqqTool", "arguments": {}}, raise_on_error=False)
+                await client.call_tool("call_tool", {"name": "zzzqqqTool", "arguments": {}})
         assert "search_tools(query)" in str(raised.value)
 
 

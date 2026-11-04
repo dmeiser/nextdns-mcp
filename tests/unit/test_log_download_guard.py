@@ -724,7 +724,7 @@ class TestDiallingTheVettedAddress:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 pass
 
-            def stream(self, method: str, url: Any) -> Any:
+            def stream(self, method: str, url: Any, **kwargs: Any) -> Any:
                 observed["resolver"] = socket.getaddrinfo
                 observed["url"] = str(url)
                 return _FakeResponse(str(url), chunks=["a\n"])

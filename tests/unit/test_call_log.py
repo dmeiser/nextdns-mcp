@@ -254,7 +254,7 @@ class TestCallLogMiddleware:
         monkeypatch.setattr(spec_tools, "_api_request_payload", crash)
         async with Client(build_mcp_server()) as client:
             with pytest.raises(ToolError):
-                await client.call_tool("getDenylist", {"profile_id": "abc123"}, raise_on_error=False)
+                await client.call_tool("getDenylist", {"profile_id": "abc123"})
 
         rows = _rows(path)
         assert rows and rows[0]["tool"] == "getDenylist" and rows[0]["ok"] is False

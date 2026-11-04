@@ -448,9 +448,13 @@ class HarnessConfig:
         # Protect every profile that already exists on the account, so a model
         # picking a wrong id during a write cannot hit a real profile.
         api_key = os.environ.get("NEXTDNS_API_KEY")
-        if api_key and httpx is not None:
+        try:
+            import httpx as _httpx
+        except Exception:
+            _httpx = None
+        if api_key and _httpx is not None:
             try:
-                resp = httpx.get(f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, timeout=10.0)
+                resp = _httpx.get(f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, timeout=10.0)
                 for row in (resp.json().get("data") or []):
                     if isinstance(row, dict) and row.get("id"):
                         _protect_server_profile(cfg, str(row["id"]))
