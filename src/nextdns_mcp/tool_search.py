@@ -619,6 +619,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         # A scope reference is scored out before anything else, because it is
         # the one phrase every task in this API contains and the one that most
         # often points the ranking at the wrong tool.
+        query = query[:512] if isinstance(query, str) else query
         catalog = self._catalog_words(tools)
         stripped = _strip_scope_mentions(query, catalog.scope)
         # Only the scoring query widens; the name-inclusion below stays on the
@@ -647,7 +648,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         if not results:
             # Nothing matched at all: the caller's words are the only signal
             # left, so answer with the catalog and let the name order sort it.
-            results = list(tools)
+            results = sorted(tools, key=lambda t: getattr(t, "name", ""), reverse=True)
         merged = _merge_named_results(results, tools, named)
         shared = (catalog.name_shared, catalog.vocab_shared)
         ranked = _rank_by_name_overlap(merged, stripped, catalog.names, catalog.vocabulary, shared)
@@ -1163,7 +1164,13 @@ class CallToolShapeMiddleware(Middleware):
         entry = _resolved_entry(resolved, by_name)
         if entry is None:
             raise ToolError(_unknown_tool_message(resolved, tools))
+        if self._loose_write_refused(resolved, by_name, entry):
+            raise ToolError(_unknown_tool_message(resolved, tools))
         return entry
+
+    def _loose_write_refused(self, resolved: str, by_name: dict[str, Tool], entry: tuple[str, Tool]) -> bool:
+        """Whether a loosely matched name landed on a write operation."""
+        return resolved not in by_name and is_write_operation(self._endpoint_method(entry[0]))
 
     def _refuse_ambiguous_write(self, supplied: Any) -> None:
         """Refuse a multi-entry answer whose head is a write; resolve everything else.

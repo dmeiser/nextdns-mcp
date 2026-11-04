@@ -186,7 +186,8 @@ def _pinned_dns(host: str | None, infos: list[Any] | None) -> Iterator[None]:
     real = socket.getaddrinfo
 
     def pinned(name: Any, *args: Any, **kwargs: Any) -> Any:
-        if str(name) == host:
+        resolved_name = name.decode() if isinstance(name, (bytes, bytearray)) else str(name)
+        if resolved_name == host:
             return infos
         return real(name, *args, **kwargs)
 
@@ -520,6 +521,26 @@ async def _download_logs_controlled(profile_id: str, path: str) -> tuple[dict[st
         return error_payload(ErrorCode.DOWNLOAD_TOO_LARGE, str(e)), False
 
 
+
+
+def _download_error_details(error: Exception) -> tuple[Any, Any, Any]:
+    """Best-effort (status, scheme, host) from an httpx error, without raising."""
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    url = None
+    try:
+        request = getattr(error, "request", None)
+    except RuntimeError:
+        request = None
+    if request is not None:
+        try:
+            url = getattr(request, "url", None)
+        except Exception:  # noqa: BLE001
+            url = None
+    scheme = getattr(url, "scheme", None)
+    host = getattr(url, "host", None)
+    return status, scheme, host
+
+
 async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     """Stream a log CSV download to a temp file without double-buffering.
 
@@ -548,7 +569,12 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
         return payload
     except httpx.HTTPError as e:
         logger.error(f"HTTP error downloading logs: {_log_safe_error(e)}")
-        return http_error_payload(f"HTTP error while downloading logs: {e}", e, fallback_code=ErrorCode.HTTP_ERROR)
+        status, scheme, host = _download_error_details(e)
+        return http_error_payload(
+            f"HTTP error while downloading logs: {status} {scheme}://{host}".strip(),
+            e,
+            fallback_code=ErrorCode.HTTP_ERROR,
+        )
     except Exception as e:  # noqa: BLE001
         logger.error(f"Unexpected error downloading logs: {_log_safe_error(e)}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")

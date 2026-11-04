@@ -153,7 +153,7 @@ _QUERY_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
 # ``{``/``}`` are refused for the same reason in the other direction: they are the
 # shape of a path placeholder, and an id carrying one must not be able to name a
 # different parameter.
-_UNSAFE_PATH_VALUE = re.compile(r"[\s/?#\\{}%]|\.\.|[^\x21-\x7e]")
+_UNSAFE_PATH_VALUE = re.compile(r"[\s/?#\\{}%]|\.\.|^\.{1,}$|[^\x21-\x7e]")
 
 
 def load_spec(path: Path = SPEC_PATH) -> dict[str, Any]:
@@ -207,6 +207,20 @@ def endpoints_for_routes(routes: list[HTTPRoute] | None = None) -> dict[str, tup
     }
 
 
+
+
+def _truncate_description(text: str, limit: int) -> str:
+    """Truncate ``text`` to ``limit`` chars, preferring a sentence/paragraph boundary."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    boundary = max(cut.rfind("\n"), cut.rfind(". "))
+    if boundary < limit // 2:
+        return cut.rstrip()
+    step = 1 if cut[boundary] == "\n" else 2
+    return cut[: boundary + step].rstrip()
+
+
 def describe(route: HTTPRoute) -> str:
     """The published description: the spec's words, plus the endpoint it binds.
 
@@ -219,7 +233,8 @@ def describe(route: HTTPRoute) -> str:
     detail = (route.description or "").strip()
     parts = [part for part in (summary, detail) if part]
     parts.append(f"NextDNS API: {route.method} {route.path}")
-    return "\n\n".join(parts)[:DESCRIPTION_MAX_CHARS]
+    text = "\n\n".join(parts)
+    return _truncate_description(text, DESCRIPTION_MAX_CHARS)
 
 
 def split_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> tuple[str, dict[str, Any], Any]:
@@ -305,7 +320,8 @@ def _split_body_arguments(located: list[tuple[str, str, str]], arguments: dict[s
         if openapi_name == WHOLE_BODY_ARG:
             whole_body = arguments[name]
         else:
-            body_properties[openapi_name] = arguments[name]
+            if arguments[name] is not None:
+                body_properties[openapi_name] = arguments[name]
     return _request_body(whole_body, body_properties)
 
 
