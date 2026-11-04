@@ -2864,52 +2864,62 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
         # profiles this run holds a create receipt for.
         async def _teardown() -> None:
             nonlocal pid
-            # Safety net: if the model deleted the profile, verify; if not, the
-            # harness owns cleanup. For a targeted range that excludes
-            # profiles.delete the teardown is harness-owned from the start, so it
-            # goes through the same MCP tool the actor would have used.
-            # Deletion requires the receipt: every path that set ``pid`` (harness
-            # provisioning via createProfile, self-heal from a create response, a
-            # receipt-backed adoption) put the id in created_ids; an id that got
-            # there any other way is not this run's to delete, and the run says
-            # so in its notes instead of destroying it.
-            if pid and not _deletable_by_this_run(pid, created_ids):
-                note = f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
-                report.notes.append(note)
-                _progress(f"  NOTE    : {note}")
-                pid = ""
-            if pid:
-                gone, _verdict = await _profile_gone(m, pid, targets)
-                if not gone and needs_harness_teardown(selected):
-                    err = await _harness_delete_profile(config, pid)
+            crashing = sys.exc_info()[0] is not None
+            try:
+                # Safety net: if the model deleted the profile, verify; if not, the
+                # harness owns cleanup. For a targeted range that excludes
+                # profiles.delete the teardown is harness-owned from the start, so it
+                # goes through the same MCP tool the actor would have used.
+                # Deletion requires the receipt: every path that set ``pid`` (harness
+                # provisioning via createProfile, self-heal from a create response, a
+                # receipt-backed adoption) put the id in created_ids; an id that got
+                # there any other way is not this run's to delete, and the run says
+                # so in its notes instead of destroying it.
+                if pid and not _deletable_by_this_run(pid, created_ids):
+                    note = f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
+                    report.notes.append(note)
+                    _progress(f"  NOTE    : {note}")
+                    pid = ""
+                if pid:
                     gone, _verdict = await _profile_gone(m, pid, targets)
-                    if gone:
-                        _progress("targeted teardown: test profile deleted via deleteProfile")
-                    else:
-                        _progress(f"targeted teardown incomplete via MCP ({err or 'profile still present'})")
-                if not gone:
-                    _progress("safety cleanup: deleting the test profile via REST")
-                    for attempt in range(4):
-                        resp = await m.rest_delete(f"/profiles/{pid}")
-                        if isinstance(resp, dict) and resp.get("ok"):
-                            break
-                        await asyncio.sleep(5 * (attempt + 1))
-                    gone, _verdict = await _profile_gone(m, pid, targets)
-                report.cleanup = (
-                    "clean: profile deleted and verified gone via REST" if gone else "FAILED (profile still present)"
-                )
-                report.profile_id = pid
-            else:
-                report.cleanup = "skipped (test profile not found on the server)"
+                    if not gone and needs_harness_teardown(selected):
+                        try:
+                            err = await _harness_delete_profile(config, pid)
+                        except Exception as e:  # noqa: BLE001
+                            err = f"{type(e).__name__}: {e}"
+                        gone, _verdict = await _profile_gone(m, pid, targets)
+                        if gone:
+                            _progress("targeted teardown: test profile deleted via deleteProfile")
+                        else:
+                            _progress(f"targeted teardown incomplete via MCP ({err or 'profile still present'})")
+                    if not gone:
+                        _progress("safety cleanup: deleting the test profile via REST")
+                        for attempt in range(4):
+                            resp = await m.rest_delete(f"/profiles/{pid}")
+                            if isinstance(resp, dict) and resp.get("ok"):
+                                break
+                            await asyncio.sleep(5 * (attempt + 1))
+                        gone, _verdict = await _profile_gone(m, pid, targets)
+                    report.cleanup = (
+                        "clean: profile deleted and verified gone via REST" if gone else "FAILED (profile still present)"
+                    )
+                    report.profile_id = pid
+                else:
+                    report.cleanup = "skipped (test profile not found on the server)"
 
-            # Remove any extra profiles THIS run created beyond the test profile,
-            # so they do not accumulate in the account between runs. Only ids with
-            # a createProfile receipt are candidates; if the account listing fails
-            # the sweep stands down and says so in the report.
-            sweep_note = await _sweep_stray_profiles(m, created_ids, {pid} if pid else set())
-            if sweep_note:
-                _progress(f"  NOTE    : {sweep_note}")
-                report.notes.append(sweep_note)
+                # Remove any extra profiles THIS run created beyond the test profile,
+                # so they do not accumulate in the account between runs. Only ids with
+                # a createProfile receipt are candidates; if the account listing fails
+                # the sweep stands down and says so in the report.
+                sweep_note = await _sweep_stray_profiles(m, created_ids, {pid} if pid else set())
+                if sweep_note:
+                    _progress(f"  NOTE    : {sweep_note}")
+                    report.notes.append(sweep_note)
+            except BaseException as e:
+                if not crashing:
+                    raise
+                _progress(f"teardown interrupted while a mid-run crash was unwinding: {e!r}")
+                report.notes.append(f"teardown interrupted while a mid-run crash was unwinding: {e!r}")
 
         try:
             # Targeted run: when the range does not include profiles.create the
