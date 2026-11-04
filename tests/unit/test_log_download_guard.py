@@ -919,7 +919,6 @@ class TestOversizedRecordAtEof:
         assert payload["size"] == 33
 
 
-
 def test_download_error_details_url_raises():
     from types import SimpleNamespace
 

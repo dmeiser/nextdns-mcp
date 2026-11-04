@@ -343,7 +343,9 @@ class TestRegistration:
         async with Client(build_mcp_server()) as client:
             found = await client.call_tool("search_tools", {"query": "DNS-over-HTTPS lookup"}, raise_on_error=False)
             hits = [hit["name"] for hit in (found.structured_content or {})["result"]]
-            charted = await client.call_tool("search_tools", {"query": "render a chart of analytics over time"}, raise_on_error=False)
+            charted = await client.call_tool(
+                "search_tools", {"query": "render a chart of analytics over time"}, raise_on_error=False
+            )
             chart_hits = [hit["name"] for hit in (charted.structured_content or {})["result"]]
         assert hits[0] == "dohLookup"
         assert chart_hits[0] == "plotAnalytics"
@@ -361,7 +363,9 @@ class TestRegistration:
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
-            await client.call_tool("getLogs", {"profile_id": "abc123", "limit": "20", "raw": "true"}, raise_on_error=False)
+            await client.call_tool(
+                "getLogs", {"profile_id": "abc123", "limit": "20", "raw": "true"}, raise_on_error=False
+            )
         assert calls[0]["params"] == {"limit": 20, "raw": True}
 
     async def test_disclosure_and_call_tool_work_on_generated_tools(self, monkeypatch):
@@ -377,7 +381,9 @@ class TestRegistration:
         async with Client(build_mcp_server()) as client:
             listed = await client.list_tools()
             assert [tool.name for tool in listed] == ["search_tools", "call_tool"]
-            found = await client.call_tool("search_tools", {"query": "add a domain to the denylist"}, raise_on_error=False)
+            found = await client.call_tool(
+                "search_tools", {"query": "add a domain to the denylist"}, raise_on_error=False
+            )
             hits = [hit["name"] for hit in (found.structured_content or {})["result"]]
             assert "addToDenylist" in hits
             called = await client.call_tool(
@@ -856,7 +862,15 @@ def test_empty_write_refusal_branches():
     from types import SimpleNamespace
 
     from nextdns_mcp import spec_tools
-    route = SimpleNamespace(method="PATCH", operation_id="updateSecuritySettings", description="", path="/x", flat_param_schema={}, summary="")
+
+    route = SimpleNamespace(
+        method="PATCH",
+        operation_id="updateSecuritySettings",
+        description="",
+        path="/x",
+        flat_param_schema={},
+        summary="",
+    )
     tool = spec_tools.SpecApiTool(route=route)
     # None body
     res = tool._empty_write_refusal("PATCH", None)
@@ -877,7 +891,10 @@ def test_create_profile_guard_all_protected(monkeypatch):
     monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1"})
     monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
     from types import SimpleNamespace
-    route = SimpleNamespace(method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary="")
+
+    route = SimpleNamespace(
+        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
+    )
     tool = spec_tools.SpecApiTool(route=route)
     res = tool._create_profile_guard()
     assert res is not None and res.is_error
@@ -890,7 +907,10 @@ def test_create_profile_guard_not_all_protected(monkeypatch):
     monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1", "p2"})
     monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
     from types import SimpleNamespace
-    route = SimpleNamespace(method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary="")
+
+    route = SimpleNamespace(
+        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
+    )
     tool = spec_tools.SpecApiTool(route=route)
     assert tool._create_profile_guard() is None
 
@@ -901,6 +921,7 @@ import asyncio
 def test_split_body_drops_none():
 
     from nextdns_mcp import spec_tools
+
     # located body prop with None
     located = [("typoSquatting", "typoSquatting", "body")]
     args = {"typoSquatting": None}
@@ -914,13 +935,26 @@ def test_create_profile_guard_run_path(monkeypatch):
 
     from nextdns_mcp import spec_tools
     from nextdns_mcp.tools import logs as _logs  # noqa
-    route = SimpleNamespace(method="POST", operation_id="createProfile", description="", path="/profiles", flat_param_schema={"type": "object", "properties": {}}, summary="", parameter_map={})
+
+    route = SimpleNamespace(
+        method="POST",
+        operation_id="createProfile",
+        description="",
+        path="/profiles",
+        flat_param_schema={"type": "object", "properties": {}},
+        summary="",
+        parameter_map={},
+    )
     tool = spec_tools.SpecApiTool(route=route)
     tool._request_refusal = lambda args: None
-    tool._create_profile_guard = lambda: spec_tools.ToolResult(structured_content={"code": "invalid_argument", "error": "x"}, is_error=True)
+    tool._create_profile_guard = lambda: spec_tools.ToolResult(
+        structured_content={"code": "invalid_argument", "error": "x"}, is_error=True
+    )
+
     async def main():
         res = await tool.run({})
         assert res.is_error
+
     asyncio.run(main())
 
 
@@ -928,11 +962,22 @@ def test_empty_write_run_path():
     from types import SimpleNamespace
 
     from nextdns_mcp import spec_tools
-    route = SimpleNamespace(method="PATCH", operation_id="updateSecuritySettings", description="", path="/x", flat_param_schema={"type": "object", "properties": {}}, summary="", parameter_map={})
+
+    route = SimpleNamespace(
+        method="PATCH",
+        operation_id="updateSecuritySettings",
+        description="",
+        path="/x",
+        flat_param_schema={"type": "object", "properties": {}},
+        summary="",
+        parameter_map={},
+    )
     tool = spec_tools.SpecApiTool(route=route)
     tool._request_refusal = lambda args: None
     tool._create_profile_guard = lambda: None
+
     async def main():
         res = await tool.run({})
         assert res.is_error
+
     asyncio.run(main())

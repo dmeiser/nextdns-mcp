@@ -445,6 +445,7 @@ async def _fetch_series_payload(
     merely happens to carry an ``error`` key is data.
     """
     from ..spec_tools import MAX_SERIES_RESPONSE_BYTES
+
     payload = await _api_request_payload("GET", url, params=params, max_response_bytes=MAX_SERIES_RESPONSE_BYTES)
     if isinstance(payload, dict) and "code" in payload and "error" in payload and "data" not in payload:
         return None, payload

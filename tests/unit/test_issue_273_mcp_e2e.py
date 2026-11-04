@@ -165,7 +165,9 @@ async def test_integer_shape_helper_is_live_in_the_mcp_call_path(
     ``retention`` is an enum of allowed seconds, so the digit string stands
     for a valid member (2592000 - 30 days), not an arbitrary integer.
     """
-    result = await mcp_client.call_tool("updateLogsSettings", {"profile_id": "abc123", "retention": "٢٥٩٢٠٠٠"}, raise_on_error=False)
+    result = await mcp_client.call_tool(
+        "updateLogsSettings", {"profile_id": "abc123", "retention": "٢٥٩٢٠٠٠"}, raise_on_error=False
+    )
     assert result.data == {"data": []}
 
     sent = recorder.body()

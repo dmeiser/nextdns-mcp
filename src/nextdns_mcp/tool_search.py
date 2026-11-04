@@ -652,9 +652,14 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
                 endpoints = getattr(self, "_endpoints", None) or {}
                 method = endpoints.get(name, ("GET",))[0] if isinstance(endpoints, dict) else "GET"
                 # Fall back to a name-based heuristic when no endpoint map is wired.
-                if method == "GET" and name[:3].lower() not in {"get", "doh", "plo"} and not name.startswith(("download", "plot")):
+                if (
+                    method == "GET"
+                    and name[:3].lower() not in {"get", "doh", "plo"}
+                    and not name.startswith(("download", "plot"))
+                ):
                     method = "POST"
                 return is_write_operation(method)
+
             results = sorted(tools, key=lambda t: (_is_write(getattr(t, "name", "")), getattr(t, "name", "")))
         merged = _merge_named_results(results, tools, named)
         shared = (catalog.name_shared, catalog.vocab_shared)

@@ -208,8 +208,6 @@ def endpoints_for_routes(routes: list[HTTPRoute] | None = None) -> dict[str, tup
     }
 
 
-
-
 def _truncate_description(text: str, limit: int) -> str:
     """Truncate ``text`` to ``limit`` chars, preferring a sentence/paragraph boundary."""
     if len(text) <= limit:

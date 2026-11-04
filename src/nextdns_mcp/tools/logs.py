@@ -461,7 +461,9 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
                     # the vetted addresses rather than re-resolving the name.
                     infos = await _check_download_redirect_target(next_url)
                     with _pinned_dns(next_url.host, infos):
-                        async with unauthenticated.stream("GET", next_url, headers={"Accept-Encoding": "identity"}) as response:
+                        async with unauthenticated.stream(
+                            "GET", next_url, headers={"Accept-Encoding": "identity"}
+                        ) as response:
                             if response.has_redirect_location:
                                 redirects += 1
                                 if redirects > _MAX_DOWNLOAD_REDIRECTS:
@@ -477,7 +479,9 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
 
 async def _stream_download_to_path(profile_id: str, path: str) -> dict[str, Any]:
     """Stream the log download for ``profile_id`` into ``path`` and return the payload."""
-    async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download", headers={"Accept-Encoding": "identity"}) as initial:
+    async with client.api_client.stream(
+        "GET", f"/profiles/{profile_id}/logs/download", headers={"Accept-Encoding": "identity"}
+    ) as initial:
         # A non-redirect response is written straight to disk;
         # _write_stream_to_tempfile surfaces any HTTP error via
         # raise_for_status.
@@ -525,8 +529,6 @@ async def _download_logs_controlled(profile_id: str, path: str) -> tuple[dict[st
         return error_payload(ErrorCode.DOWNLOAD_TOO_LARGE, str(e)), False
 
 
-
-
 def _download_error_details(error: Exception) -> tuple[Any, Any, Any]:
     """Best-effort (status, scheme, host) from an httpx error, without raising."""
     status = getattr(getattr(error, "response", None), "status_code", None)
@@ -543,6 +545,18 @@ def _download_error_details(error: Exception) -> tuple[Any, Any, Any]:
     scheme = getattr(url, "scheme", None)
     host = getattr(url, "host", None)
     return status, scheme, host
+
+
+def _download_error_detail(status: Any, scheme: Any, host: Any) -> str:
+    """Render the parts of the failed request that exist, space-joined; skip the rest."""
+    return " ".join(
+        part
+        for part in (
+            str(status) if status is not None else "",
+            f"{scheme}://{host}" if scheme else "",
+        )
+        if part
+    )
 
 
 async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
@@ -574,14 +588,7 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     except httpx.HTTPError as e:
         logger.error(f"HTTP error downloading logs: {_log_safe_error(e)}")
         status, scheme, host = _download_error_details(e)
-        detail = " ".join(
-            part
-            for part in (
-                str(status) if status is not None else "",
-                f"{scheme}://{host}" if scheme else "",
-            )
-            if part
-        )
+        detail = _download_error_detail(status, scheme, host)
         return http_error_payload(
             "HTTP error while downloading logs" + (f": {detail}" if detail else ""),
             e,

@@ -717,20 +717,24 @@ class TestPlotAnalyticsSeriesImpl:
         # A future upstream schema change must degrade to the same typed error
         # payload rather than escaping as a raw exception (issue #286).
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.stream_state["body"] = json.dumps({
-            "meta": ["not-a-mapping"],
-            "data": [{"name": "x", "queries": [1]}],
-        }).encode()
+        mock_api_client.stream_state["body"] = json.dumps(
+            {
+                "meta": ["not-a-mapping"],
+                "data": [{"name": "x", "queries": [1]}],
+            }
+        ).encode()
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
     async def test_rendering_error_returns_error(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.stream_state["body"] = json.dumps({
-            "meta": {"series": {"times": ["bad-timestamp"]}},
-            "data": [{"name": "x", "queries": [1]}],
-        }).encode()
+        mock_api_client.stream_state["body"] = json.dumps(
+            {
+                "meta": {"series": {"times": ["bad-timestamp"]}},
+                "data": [{"name": "x", "queries": [1]}],
+            }
+        ).encode()
         result = await plots_module._plot_analytics_series_impl("status")
         assert "error" in result
         assert "Error rendering chart" in result["error"]
@@ -829,10 +833,12 @@ class TestPlotAnalyticsEndToEndRendering:
         # ValueError from deep inside the tool: the user gets a structured
         # error payload back.
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.stream_state["body"] = json.dumps({
-            "meta": {"series": {"times": ["15 January 2024"]}},
-            "data": [{"status": "blocked", "queries": [1]}],
-        }).encode()
+        mock_api_client.stream_state["body"] = json.dumps(
+            {
+                "meta": {"series": {"times": ["15 January 2024"]}},
+                "data": [{"status": "blocked", "queries": [1]}],
+            }
+        ).encode()
 
         result = await server.plotAnalytics("status")
 
@@ -862,7 +868,9 @@ class TestPlotFetchUsesSharedWrapper:
         params = {"from": "-1d", "to": "now", "interval": 3600}
         payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", params)
 
-        wrapped.assert_awaited_once_with("GET", "/profiles/abc123/analytics/status;series", params=params, max_response_bytes=512000)
+        wrapped.assert_awaited_once_with(
+            "GET", "/profiles/abc123/analytics/status;series", params=params, max_response_bytes=512000
+        )
         # Routing moved off the raw client: the underlying transport must not be hit.
         mock_api_client.request.assert_not_awaited()
         assert error is None

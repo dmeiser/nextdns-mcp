@@ -342,13 +342,9 @@ def _coerce_float_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
     return False, s
 
 
-
-
 def _preserves_time_string(value: str, schema_types: set[str]) -> bool:
     """Whether a string time value must survive coercion untouched."""
-    return "string" in schema_types and bool(
-        _BARE_NEGATIVE_RE.match(value) or _NOW_OFFSET_RE.match(value)
-    )
+    return "string" in schema_types and bool(_BARE_NEGATIVE_RE.match(value) or _NOW_OFFSET_RE.match(value))
 
 
 class StripExtraFieldsMiddleware(Middleware):

@@ -150,9 +150,9 @@ import asyncio
 import atexit
 import json
 import os
-import signal
 import re
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -456,7 +456,7 @@ class HarnessConfig:
         if api_key and _httpx is not None:
             try:
                 resp = _httpx.get(f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, timeout=10.0)
-                for row in (resp.json().get("data") or []):
+                for row in resp.json().get("data") or []:
                     if isinstance(row, dict) and row.get("id"):
                         _protect_server_profile(cfg, str(row["id"]))
             except Exception as exc:  # noqa: BLE001
@@ -2876,7 +2876,9 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 # there any other way is not this run's to delete, and the run says
                 # so in its notes instead of destroying it.
                 if pid and not _deletable_by_this_run(pid, created_ids):
-                    note = f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
+                    note = (
+                        f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
+                    )
                     report.notes.append(note)
                     _progress(f"  NOTE    : {note}")
                     pid = ""
@@ -2901,7 +2903,9 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                             await asyncio.sleep(5 * (attempt + 1))
                         gone, _verdict = await _profile_gone(m, pid, targets)
                     report.cleanup = (
-                        "clean: profile deleted and verified gone via REST" if gone else "FAILED (profile still present)"
+                        "clean: profile deleted and verified gone via REST"
+                        if gone
+                        else "FAILED (profile still present)"
                     )
                     report.profile_id = pid
                 else:

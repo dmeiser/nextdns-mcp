@@ -206,7 +206,9 @@ class TestMorphologicalQueryExpansion:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "update profile privacy_natives"}, raise_on_error=False)
+            found = await client.call_tool(
+                "search_tools", {"query": "update profile privacy_natives"}, raise_on_error=False
+            )
         assert "replacePrivacyNatives" in [tool.get("name") for tool in found.data]
 
 
@@ -573,7 +575,9 @@ class TestSearchAnswerAsName:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            result = await client.call_tool("call_tool", {"name": "listProfiles", "arguments": {}}, raise_on_error=False)
+            result = await client.call_tool(
+                "call_tool", {"name": "listProfiles", "arguments": {}}, raise_on_error=False
+            )
         assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
 
 
@@ -645,7 +649,9 @@ class TestParametersSentBesideTheName:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            result = await client.call_tool("call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False)
+            result = await client.call_tool(
+                "call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False
+            )
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
 
@@ -656,7 +662,8 @@ class TestParametersSentBesideTheName:
         async with Client(build_mcp_server()) as client:
             result = await client.call_tool(
                 "call_tool",
-                {"name": "getDenylist", "profile_id": "zzz999", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
+                {"name": "getDenylist", "profile_id": "zzz999", "arguments": {"profile_id": "abc123"}},
+                raise_on_error=False,
             )
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
@@ -1133,7 +1140,9 @@ class TestShapeRepairAnnouncesItself:
 
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
-                await client.call_tool("call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False)
+                await client.call_tool(
+                    "call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False
+                )
         assert any(r.levelno == logging.WARNING and "beside name" in r.getMessage() for r in caplog.records)
 
     async def test_a_search_answer_name_repair_logs_at_warning(self, caplog):
@@ -1194,12 +1203,12 @@ class TestFastMCPPrivateSurface:
         assert fastmcp.__version__ == "4.1.2"
 
 
-
 def test_loose_write_refused_raises_clean():
     import asyncio
     from types import SimpleNamespace
 
     import nextdns_mcp.tool_search as ts
+
     tools = [SimpleNamespace(name="deleteProfile")]
     transform = ts.CallToolShapeMiddleware.__new__(ts.CallToolShapeMiddleware)
     transform._endpoint_method = lambda name: "DELETE"
