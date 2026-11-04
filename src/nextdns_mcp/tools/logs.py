@@ -450,23 +450,24 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
     redirects = 0
     unauthenticated = httpx.AsyncClient(timeout=client.get_http_timeout(), follow_redirects=False)
     try:
-        async with _PIN_FETCH_LOCK:
-            while True:
-                # Checked before every fetch, so the first ``Location`` is covered
-                # by the same rule as the rest of the chain; the fetch then dials
-                # the vetted addresses rather than re-resolving the name.
-                infos = await _check_download_redirect_target(next_url)
-                with _pinned_dns(next_url.host, infos):
-                    async with unauthenticated.stream("GET", next_url, headers={"Accept-Encoding": "identity"}) as response:
-                        if response.has_redirect_location:
-                            redirects += 1
-                            if redirects > _MAX_DOWNLOAD_REDIRECTS:
-                                raise httpx.TooManyRedirects(
-                                    f"Exceeded {_MAX_DOWNLOAD_REDIRECTS} redirects", request=response.request
-                                )
-                            next_url = response.request.url.join(response.headers["location"])
-                            continue
-                        return await _write_stream_to_tempfile(response, path)
+        async with asyncio.timeout(client.get_http_timeout() * (_MAX_DOWNLOAD_REDIRECTS + 1)):
+            async with _PIN_FETCH_LOCK:
+                while True:
+                    # Checked before every fetch, so the first ``Location`` is covered
+                    # by the same rule as the rest of the chain; the fetch then dials
+                    # the vetted addresses rather than re-resolving the name.
+                    infos = await _check_download_redirect_target(next_url)
+                    with _pinned_dns(next_url.host, infos):
+                        async with unauthenticated.stream("GET", next_url, headers={"Accept-Encoding": "identity"}) as response:
+                            if response.has_redirect_location:
+                                redirects += 1
+                                if redirects > _MAX_DOWNLOAD_REDIRECTS:
+                                    raise httpx.TooManyRedirects(
+                                        f"Exceeded {_MAX_DOWNLOAD_REDIRECTS} redirects", request=response.request
+                                    )
+                                next_url = response.request.url.join(response.headers["location"])
+                                continue
+                            return await _write_stream_to_tempfile(response, path)
     finally:
         await unauthenticated.aclose()
 

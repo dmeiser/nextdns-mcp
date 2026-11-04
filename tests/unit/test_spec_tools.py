@@ -841,3 +841,97 @@ def test_truncate_description_no_boundary():
 
     out = spec_tools._truncate_description("a" * 2000, 100)
     assert len(out) == 100
+
+
+def test_truncate_description_prefers_boundary():
+    from nextdns_mcp import spec_tools
+
+    text = "x" * 30 + "\n" + "y" * 30
+    out = spec_tools._truncate_description(text, 40)
+    assert len(out) <= 40
+    assert out.endswith("x")
+
+
+def test_empty_write_refusal_branches():
+    from nextdns_mcp import spec_tools, errors
+    from unittest.mock import MagicMock
+
+    from types import SimpleNamespace
+    route = SimpleNamespace(method="PATCH", operation_id="updateSecuritySettings", description="", path="/x", flat_param_schema={}, summary="")
+    tool = spec_tools.SpecApiTool(route=route)
+    # None body
+    res = tool._empty_write_refusal("PATCH", None)
+    assert res is not None and res.is_error
+    # empty dict
+    res2 = tool._empty_write_refusal("PATCH", {})
+    assert res2 is not None and res2.is_error
+    # non-empty body
+    assert tool._empty_write_refusal("PATCH", {"a": 1}) is None
+    # non-write method
+    assert tool._empty_write_refusal("GET", None) is None
+
+
+def test_create_profile_guard_all_protected(monkeypatch):
+    from nextdns_mcp import spec_tools, config
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1"})
+    monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
+    from types import SimpleNamespace
+    route = SimpleNamespace(method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary="")
+    tool = spec_tools.SpecApiTool(route=route)
+    res = tool._create_profile_guard()
+    assert res is not None and res.is_error
+
+
+def test_create_profile_guard_not_all_protected(monkeypatch):
+    from nextdns_mcp import spec_tools, config
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1", "p2"})
+    monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
+    from types import SimpleNamespace
+    route = SimpleNamespace(method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary="")
+    tool = spec_tools.SpecApiTool(route=route)
+    assert tool._create_profile_guard() is None
+
+
+import asyncio
+
+def test_split_body_drops_none():
+    from nextdns_mcp import spec_tools
+    from types import SimpleNamespace
+    route = SimpleNamespace(method="PATCH", operation_id="updateSecuritySettings", description="", path="/x", flat_param_schema={}, summary="")
+    # located body prop with None
+    located = [("typoSquatting", "typoSquatting", "body")]
+    args = {"typoSquatting": None}
+    body = spec_tools._split_body_arguments(located, args)
+    # should be None (no body props)
+    assert body is None
+
+
+def test_create_profile_guard_run_path(monkeypatch):
+    from nextdns_mcp import spec_tools
+    from types import SimpleNamespace
+    from nextdns_mcp.tools import logs as _logs  # noqa
+    route = SimpleNamespace(method="POST", operation_id="createProfile", description="", path="/profiles", flat_param_schema={"type": "object", "properties": {}}, summary="", parameter_map={})
+    tool = spec_tools.SpecApiTool(route=route)
+    tool._request_refusal = lambda args: None
+    tool._create_profile_guard = lambda: spec_tools.ToolResult(structured_content={"code": "invalid_argument", "error": "x"}, is_error=True)
+    async def main():
+        res = await tool.run({})
+        assert res.is_error
+    asyncio.run(main())
+
+
+def test_empty_write_run_path():
+    from nextdns_mcp import spec_tools
+    from types import SimpleNamespace
+    route = SimpleNamespace(method="PATCH", operation_id="updateSecuritySettings", description="", path="/x", flat_param_schema={"type": "object", "properties": {}}, summary="", parameter_map={})
+    tool = spec_tools.SpecApiTool(route=route)
+    tool._request_refusal = lambda args: None
+    tool._create_profile_guard = lambda: None
+    async def main():
+        res = await tool.run({})
+        assert res.is_error
+    asyncio.run(main())

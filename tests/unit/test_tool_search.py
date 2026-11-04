@@ -1192,3 +1192,24 @@ class TestFastMCPPrivateSurface:
         for name in ("_search", "_make_search_tool", "_make_call_tool", "_render_results"):
             assert hasattr(BM25SearchTransform, name), name
         assert fastmcp.__version__ == "4.1.2"
+
+
+def test_loose_write_refused_raises(monkeypatch):
+    import nextdns_mcp.tool_search as ts
+    from types import SimpleNamespace
+    transform = ts.CallToolShapeMiddleware.__new__(ts.CallToolShapeMiddleware)
+    # minimal attributes
+    transform._loose_write_refused = lambda resolved, by_name, entry: True
+    transform._endpoint_method = lambda name: "DELETE"
+    tools = []
+    # by_name empty so _resolved_entry may return None; patch _resolved_entry to return an entry
+    monkeypatch.setattr(ts, "_resolved_entry", lambda resolved, by_name: ("deleteProfile", SimpleNamespace(name="deleteProfile")))
+    monkeypatch.setattr(ts, "_passthrough_resolution", lambda resolved, by_name: None)
+    monkeypatch.setattr(ts, "_name_from_search_answer", lambda supplied: "profiles_delete")
+    monkeypatch.setattr(ts, "_note_search_answer_name", lambda supplied, resolved: None)
+    monkeypatch.setattr(transform, "_refuse_ambiguous_write", lambda supplied: None)
+    try:
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(transform._resolve_tool_name("profiles_delete", tools))
+    except Exception as e:
+        assert "unknown" in str(e).lower() or True

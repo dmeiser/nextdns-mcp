@@ -150,6 +150,7 @@ import asyncio
 import atexit
 import json
 import os
+import signal
 import re
 import shutil
 import sys
@@ -865,7 +866,10 @@ async def _collect_streams(proc: asyncio.subprocess.Process, timeout_s: float) -
     except TimeoutError:
         timed_out = True
         with _suppress():
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
     # The pipes close when the process does, so the drains finish on their own;
     # bounded so a child that leaves a grandchild holding a pipe cannot hang the
     # harness here.
@@ -923,6 +927,7 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(workdir),
                 env=env,
+                start_new_session=True,
             )
         except Exception as e:  # noqa: BLE001
             run.error = f"failed to spawn actor harness: {type(e).__name__}: {e}"
