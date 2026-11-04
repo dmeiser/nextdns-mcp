@@ -78,7 +78,7 @@ def _strip_migration_table(text: str) -> str:
     # stripped; the ban still applies everywhere else.
     import re as _re
 
-    return _re.sub(r"<!-- migration-table:start -->.*?<!-- migration-table:end -->", "", text, flags=_re.S)
+    return _re.sub(r"<!-- migration-table:start -->.*?<!-- migration-table:end -->", "", text, flags=_re.DOTALL)
 
 
 def _docs_text() -> dict[str, str]:

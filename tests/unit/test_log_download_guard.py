@@ -917,3 +917,23 @@ class TestOversizedRecordAtEof:
         assert payload["preview"]["line_count"] == 0
         assert payload["row_count"] == 1
         assert payload["size"] == 33
+
+
+
+def test_download_error_details_url_raises():
+    from types import SimpleNamespace
+
+    from nextdns_mcp.tools.logs import _download_error_details
+
+    class Req:
+        @property
+        def url(self):
+            raise RuntimeError("boom")
+
+    e = Exception()
+    e.response = SimpleNamespace(status_code=500)
+    e.request = Req()
+    status, scheme, host = _download_error_details(e)
+    assert status == 500
+    assert scheme is None
+    assert host is None

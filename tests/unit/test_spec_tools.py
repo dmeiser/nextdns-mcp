@@ -853,10 +853,9 @@ def test_truncate_description_prefers_boundary():
 
 
 def test_empty_write_refusal_branches():
-    from nextdns_mcp import spec_tools, errors
-    from unittest.mock import MagicMock
-
     from types import SimpleNamespace
+
+    from nextdns_mcp import spec_tools
     route = SimpleNamespace(method="PATCH", operation_id="updateSecuritySettings", description="", path="/x", flat_param_schema={}, summary="")
     tool = spec_tools.SpecApiTool(route=route)
     # None body
@@ -872,8 +871,8 @@ def test_empty_write_refusal_branches():
 
 
 def test_create_profile_guard_all_protected(monkeypatch):
-    from nextdns_mcp import spec_tools, config
-    from unittest.mock import MagicMock
+
+    from nextdns_mcp import config, spec_tools
 
     monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1"})
     monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
@@ -885,8 +884,8 @@ def test_create_profile_guard_all_protected(monkeypatch):
 
 
 def test_create_profile_guard_not_all_protected(monkeypatch):
-    from nextdns_mcp import spec_tools, config
-    from unittest.mock import MagicMock
+
+    from nextdns_mcp import config, spec_tools
 
     monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1", "p2"})
     monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
@@ -898,10 +897,10 @@ def test_create_profile_guard_not_all_protected(monkeypatch):
 
 import asyncio
 
+
 def test_split_body_drops_none():
+
     from nextdns_mcp import spec_tools
-    from types import SimpleNamespace
-    route = SimpleNamespace(method="PATCH", operation_id="updateSecuritySettings", description="", path="/x", flat_param_schema={}, summary="")
     # located body prop with None
     located = [("typoSquatting", "typoSquatting", "body")]
     args = {"typoSquatting": None}
@@ -911,8 +910,9 @@ def test_split_body_drops_none():
 
 
 def test_create_profile_guard_run_path(monkeypatch):
-    from nextdns_mcp import spec_tools
     from types import SimpleNamespace
+
+    from nextdns_mcp import spec_tools
     from nextdns_mcp.tools import logs as _logs  # noqa
     route = SimpleNamespace(method="POST", operation_id="createProfile", description="", path="/profiles", flat_param_schema={"type": "object", "properties": {}}, summary="", parameter_map={})
     tool = spec_tools.SpecApiTool(route=route)
@@ -925,8 +925,9 @@ def test_create_profile_guard_run_path(monkeypatch):
 
 
 def test_empty_write_run_path():
-    from nextdns_mcp import spec_tools
     from types import SimpleNamespace
+
+    from nextdns_mcp import spec_tools
     route = SimpleNamespace(method="PATCH", operation_id="updateSecuritySettings", description="", path="/x", flat_param_schema={"type": "object", "properties": {}}, summary="", parameter_map={})
     tool = spec_tools.SpecApiTool(route=route)
     tool._request_refusal = lambda args: None
