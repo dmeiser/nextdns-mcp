@@ -834,3 +834,10 @@ def test_a_big_non_series_payload_is_not_refused_by_the_series_backstop():
     route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getDenylist")
     big = {"data": [{"id": f"entry-{i}", "name": "x" * 40} for i in range(30_000)]}
     assert spec_tools._series_refusal(route, big) is None
+
+
+def test_truncate_description_no_boundary():
+    from nextdns_mcp import spec_tools
+
+    out = spec_tools._truncate_description("a" * 2000, 100)
+    assert len(out) == 100
