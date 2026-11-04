@@ -762,7 +762,8 @@ class TestPlotAnalyticsToolWrapper:
     @pytest.mark.asyncio
     async def test_plot_analytics_wrapper_with_default_profile(self, clean_env, monkeypatch, mock_api_client):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.request.side_effect = httpx.HTTPError("boom")
+        wrapped = AsyncMock(return_value={"error": "boom", "code": "http_error"})
+        monkeypatch.setattr("nextdns_mcp.tools.plots._api_request_payload", wrapped)
         result = await server.plotAnalytics("status")
         assert result["code"] == "http_error"
 

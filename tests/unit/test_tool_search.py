@@ -1191,4 +1191,4 @@ class TestFastMCPPrivateSurface:
 
         for name in ("_search", "_make_search_tool", "_make_call_tool", "_render_results"):
             assert hasattr(BM25SearchTransform, name), name
-        assert fastmcp.__version__ == "4.1.2" or True
+        assert fastmcp.__version__ == "4.1.2"

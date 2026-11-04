@@ -450,7 +450,7 @@ class HarnessConfig:
         api_key = os.environ.get("NEXTDNS_API_KEY")
         try:
             import httpx as _httpx
-        except Exception:
+        except ImportError:
             _httpx = None
         if api_key and _httpx is not None:
             try:
@@ -458,8 +458,8 @@ class HarnessConfig:
                 for row in (resp.json().get("data") or []):
                     if isinstance(row, dict) and row.get("id"):
                         _protect_server_profile(cfg, str(row["id"]))
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                _progress(f"profile protection probe failed: {exc}")
         return cfg
 
     def render_argv(self, values: dict[str, str]) -> list[str]:

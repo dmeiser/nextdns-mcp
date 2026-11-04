@@ -51,10 +51,10 @@ import yaml
 from fastmcp import FastMCP
 from fastmcp.tools.base import Tool, ToolResult
 from fastmcp.utilities.openapi import HTTPRoute, parse_openapi_to_http_routes
+from mcp.types import ToolAnnotations
 
 from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
-from mcp.types import ToolAnnotations
 from .tools import logs as _logs
 from .tools.plots import _now, _resolve_time_point, _series_budget_error
 from .transport import _api_request_payload
@@ -408,12 +408,9 @@ class SpecApiTool(Tool):
         refused = self._request_refusal(args)
         if refused is not None:
             return ToolResult(structured_content=refused)
-        if self.name == "createProfile":
-            from . import config as _config
-            writable = _config.get_writable_profiles_set()
-            protected = _config.get_protected_profiles()
-            if writable is not None and writable and writable.issubset(protected):
-                return ToolResult(structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no writable profile available"), is_error=True)
+        create_refusal = self._create_profile_guard()
+        if create_refusal is not None:
+            return create_refusal
         if self.name in DELEGATED_OPERATIONS:
             return await self._run_delegated(args)
         path, query, body = split_arguments(self._route, args)
@@ -426,6 +423,21 @@ class SpecApiTool(Tool):
             return self._unsafe_path_payload(unsafe)
         return _malformed_profile_id_payload(self._route, args)
 
+    def _create_profile_guard(self) -> ToolResult | None:
+        """Refuse createProfile when every writable profile is also protected."""
+        if self.name != "createProfile":
+            return None
+        from . import config as _config
+
+        writable = _config.get_writable_profiles_set()
+        protected = _config.get_protected_profiles()
+        if writable is not None and writable and writable.issubset(protected):
+            return ToolResult(
+                structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no writable profile available"),
+                is_error=True,
+            )
+        return None
+
     async def _dispatch_rendered(self, path: str, query: dict[str, Any], body: Any, args: dict[str, Any]) -> ToolResult:
         unfilled = _PATH_PLACEHOLDER.findall(path)
         if unfilled:
@@ -436,11 +448,21 @@ class SpecApiTool(Tool):
         budget = _series_budget_for_generated_call(self._route, query)
         if budget is not None:
             return ToolResult(structured_content=budget)
-        method = str(self._route.method).upper()
-        if method in {"PATCH", "PUT"} and (body is None or body == {}):
-            # A write with nothing to apply must not be reported as success.
-            return ToolResult(structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no applicable fields to update"), is_error=True)
+        empty = self._empty_write_refusal(self._route.method, body)
+        if empty is not None:
+            return empty
         return await self._call_endpoint(path, query, body)
+
+    def _empty_write_refusal(self, method: Any, body: Any) -> ToolResult | None:
+        """A PATCH/PUT with nothing to apply is an error, not a silent success."""
+        if str(method).upper() not in {"PATCH", "PUT"}:
+            return None
+        if body is not None and body != {}:
+            return None
+        return ToolResult(
+            structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no applicable fields to update"),
+            is_error=True,
+        )
 
     async def _call_endpoint(self, path: str, query: dict[str, Any], body: Any) -> ToolResult:
         """Send the request this route describes and wrap its payload.
@@ -461,6 +483,10 @@ class SpecApiTool(Tool):
             json_body=body,
             **_capped_transport_kwargs(self._route, request),
         )
+        return self._wrap_call_result(payload)
+
+    def _wrap_call_result(self, payload: Any) -> ToolResult:
+        """Turn a transport payload into a typed ToolResult."""
         refused = _series_refusal(self._route, payload)
         if refused is not None:
             return ToolResult(structured_content=refused, is_error=True)

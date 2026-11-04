@@ -454,7 +454,8 @@ class TestPlotAndDohErrorContract:
     @pytest.mark.asyncio
     async def test_plot_no_data(self, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
+        wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
+        monkeypatch.setattr("nextdns_mcp.tools.plots._api_request_payload", wrapped)
         result = await _plot_analytics_series_impl("status")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.NO_DATA
