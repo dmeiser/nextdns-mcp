@@ -143,8 +143,8 @@ _QUERY_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
 # value is substituted into the request path, and the access-control layer authorizes
 # the request by reading the profile id back out of that path, so an unvetted value
 # can move the call somewhere the caller was not authorized for. Nothing upstream can
-# be assumed to reject it. A domain is a legal entry id, so a lone dot is not refused
-# — only ``..``, which no domain contains.
+# be assumed to reject it. ``..`` walks up and a lone dot (or a bare run of
+# dots) is refused outright — no domain is either.
 #
 # ``%`` is refused outright, not just when followed by a recognizable escape: it is
 # the one character whose *meaning* depends on what decodes the URL. ``%2e%2e`` is

@@ -2860,298 +2860,305 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
         # user or another run may have created.
         created_ids: set[str] = set()
 
-        # Targeted run: when the range does not include profiles.create the
-        # harness provisions the test profile itself, through the MCP tool so
-        # the server's ACLs apply. Without it every later step has nothing to
-        # act on and the report measures nothing.
-        if needs_harness_setup(selected):
-            pid, note = await _harness_provision_profile(config, targets)
-            report.setup = note
-            report.profile_id = pid
+        # Runs from a finally, so a mid-run crash or Ctrl-C still deletes the
+        # profiles this run holds a create receipt for.
+        async def _teardown() -> None:
+            nonlocal pid
+            # Safety net: if the model deleted the profile, verify; if not, the
+            # harness owns cleanup. For a targeted range that excludes
+            # profiles.delete the teardown is harness-owned from the start, so it
+            # goes through the same MCP tool the actor would have used.
+            # Deletion requires the receipt: every path that set ``pid`` (harness
+            # provisioning via createProfile, self-heal from a create response, a
+            # receipt-backed adoption) put the id in created_ids; an id that got
+            # there any other way is not this run's to delete, and the run says
+            # so in its notes instead of destroying it.
+            if pid and not _deletable_by_this_run(pid, created_ids):
+                note = f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
+                report.notes.append(note)
+                _progress(f"  NOTE    : {note}")
+                pid = ""
             if pid:
-                created_ids.add(pid)
-            _progress(f"targeted setup: {note}")
-
-        # Read-only plot/log steps target NEXTDNS_PLOT_PROFILE; when it is unset
-        # they would all read the empty test profile and skip as data-starved,
-        # so resolve a data-bearing one up front and say so in the report.
-        if any(step.section == "plots" or step.id == "logs.download" for _, step in selected) and (
-            plot_note := await _ensure_plot_profile(m, pid)
-        ):
-            report.notes.append(plot_note)
-            _progress(f"plot profile: {plot_note}")
-            # The fallback selection must reach the child server's protected
-            # set too: the explicit NEXTDNS_PLOT_PROFILE is protected when the
-            # config is built, but a fallback resolved after that point was
-            # left writable — the one data-bearing profile the actor must never
-            # mutate. Re-protect and re-write the config before any step launches.
-            if chosen := os.environ.get("NEXTDNS_PLOT_PROFILE", "").strip():
-                _protect_server_profile(config, chosen)
-                write_mcp_config(config, workdir)
-
-        aborted_reason = ""
-        outage_streak = 0
-        instrument_read = False
-        for i, step in selected:
-            if aborted_reason:
-                report.results.append(
-                    CheckResult(
-                        step.id,
-                        step.section,
-                        step.description,
-                        "skipped",
-                        mcp_tool=step.tool,
-                        reason=aborted_reason,
-                    )
+                gone, _verdict = await _profile_gone(m, pid, targets)
+                if not gone and needs_harness_teardown(selected):
+                    err = await _harness_delete_profile(config, pid)
+                    gone, _verdict = await _profile_gone(m, pid, targets)
+                    if gone:
+                        _progress("targeted teardown: test profile deleted via deleteProfile")
+                    else:
+                        _progress(f"targeted teardown incomplete via MCP ({err or 'profile still present'})")
+                if not gone:
+                    _progress("safety cleanup: deleting the test profile via REST")
+                    for attempt in range(4):
+                        resp = await m.rest_delete(f"/profiles/{pid}")
+                        if isinstance(resp, dict) and resp.get("ok"):
+                            break
+                        await asyncio.sleep(5 * (attempt + 1))
+                    gone, _verdict = await _profile_gone(m, pid, targets)
+                report.cleanup = (
+                    "clean: profile deleted and verified gone via REST" if gone else "FAILED (profile still present)"
                 )
-                continue
-            if time.monotonic() - started > budget:
-                rest = CheckResult(
-                    step.id,
-                    step.section,
-                    step.description,
-                    "skipped",
-                    mcp_tool=step.tool,
-                    reason=f"overall time budget ({budget:.0f}s) exhausted",
-                )
-                report.results.append(rest)
-                continue
-            if step.section != "profiles" and not pid:
-                report.results.append(
-                    CheckResult(
-                        step.id,
-                        step.section,
-                        step.description,
-                        "skipped",
-                        mcp_tool=step.tool,
-                        reason="test profile was not provisioned",
-                    )
-                )
-                continue
-            expect = step.expect
-            if step.section != "profiles" and pid:
-                # The actor may delete the test profile mid-run (wrong-tool
-                # mistake); recreate it so the report measures each step, not
-                # a 404 cascade. Harness scheduling only — no env change.
-                healed = await _self_heal_profile(m, pid, targets)
-                if healed != pid:
-                    pid = healed
-                    report.profile_id = pid
-                    if pid:
-                        created_ids.add(pid)
-                    # The profile vanished between steps. This harness deleted
-                    # it zero times in the run this happened in, so something
-                    # else is using the account and every step around it is
-                    # measuring a 404, not the model.
-                    report.notes.append(
-                        f"self-heal: test profile was deleted mid-run and recreated as {pid}; "
-                        "another process is using this NextDNS account"
-                    )
-
-            prompt_pid = pid
-            if (step.section == "plots" or step.id == "logs.download") and os.environ.get("NEXTDNS_PLOT_PROFILE"):
-                prompt_pid = os.environ["NEXTDNS_PLOT_PROFILE"]
-            prompt = step.prompt.replace("{profile_id}", prompt_pid)
-            run: ActorRun | None = None
-            status, error, reason = "failed", "", ""
-            rest_v: dict[str, Any] = {}
-            # Attempt loop: infrastructure transients re-run the step (see
-            # _transient_actor_failure), each kind with its own cap.
-            transients: list[str] = []
-            attempts_by_kind = {kind: 0 for kind in TRANSIENT_ATTEMPTS}
-            attempt = 0
-            server_calls: list[dict[str, Any]] = []
-            while True:
-                attempt += 1
-                _progress(f"[{i}/{total}] {step.id}" + (f" (retry {attempt - 1})" if attempt > 1 else ""))
-                # Where the server's call log stands before this attempt; the
-                # lines after it are this attempt's authoritative record.
-                log_offset = call_log.stat().st_size if call_log.exists() else 0
-                # One subprocess per attempt: run_actor's own internal retry is
-                # off here because it would silently double the window this
-                # step's call-log slice covers. Observed: a step whose first
-                # attempt timed out at 300s and whose second produced no parsed
-                # events reported "actor=0, server=56" - the server records
-                # were real, they just came from both attempts. The step loop
-                # below already retries transients, with the bookkeeping.
-                run = await run_actor(step_cfg, prompt, workdir, retries=0)
-                total_events += len(run.tool_calls)
-                for t in run.tools_used():
-                    if t not in tools_used:
-                        tools_used.append(t)
-                if run.stderr:
-                    last_stderr = run.stderr
-                all_raw.extend(run.raw_lines)
-                server_calls = _read_new_calls(call_log, log_offset)
-                # A successful createProfile row is this run's receipt that a
-                # profile is its own to clean up (the model sometimes creates
-                # extras beyond the test profile).
-                created_ids |= _created_ids_from_records(server_calls)
-
-                status, error, reason, rest_v = await _verify_step(m, targets, pid, step, run)
-                # REST says what the state is, not who produced it, and for a
-                # read it cannot see the call at all. So the server's own record
-                # decides the transcript half of the verdict: the exact expected
-                # call succeeded, on the profile the step targets, and nothing
-                # wrote over it afterwards.
-                call_ok, call_why = _expected_call_ok(server_calls, expect, pid, alt_pid=prompt_pid)
-                if status == "passed" and not call_ok:
-                    status = "failed"
-                    error = call_why
-                kind, why = _transient_actor_failure(
-                    run,
-                    " ".join(
-                        [error, reason]
-                        + _extract_error_events(run)
-                        + [c.result_text or "" for c in run.tool_calls]
-                        + [str(r.get("error") or "") for r in server_calls]
-                        + ([run.final_text] if run.final_text else [])
-                    ).lower(),
-                )
-                if status != "failed" or not kind or attempts_by_kind[kind] >= TRANSIENT_ATTEMPTS[kind]:
-                    break
-                attempts_by_kind[kind] += 1
-                transients.append(f"{kind}: {why}")
-                _progress(f"  RETRY   : transient actor failure ({why}); retrying")
-
-            if run is None:  # pragma: no cover - defensive
-                run = ActorRun(command=list(step_cfg.command))
-
-            if _provider_outage(run):
-                outage_streak += 1
-                if outage_streak >= PROVIDER_OUTAGE_STEPS:
-                    aborted_reason = "model provider is not serving this model (run aborted)"
-                    events = _extract_error_events(run)
-                    report.notes.append(
-                        f"provider outage after {len(report.results) + 1} step(s): "
-                        f"{(events[0] if events else run.error)[:200]}"
-                    )
-                    _progress(f"  ABORT   : {aborted_reason}; every remaining step is skipped")
+                report.profile_id = pid
             else:
-                outage_streak = 0
+                report.cleanup = "skipped (test profile not found on the server)"
 
-            if not instrument_read and _actor_read_the_instrument(run, call_log):
-                instrument_read = True
-                report.notes.append(
-                    f"actor read the harness call log ({call_log}): the record this verdict is made "
-                    "from was visible to the subject"
-                )
-                _progress("  NOTE    : actor read the harness call log; this run's ground truth was visible")
+            # Remove any extra profiles THIS run created beyond the test profile,
+            # so they do not accumulate in the account between runs. Only ids with
+            # a createProfile receipt are candidates; if the account listing fails
+            # the sweep stands down and says so in the report.
+            sweep_note = await _sweep_stray_profiles(m, created_ids, {pid} if pid else set())
+            if sweep_note:
+                _progress(f"  NOTE    : {sweep_note}")
+                report.notes.append(sweep_note)
 
-            # Verdict comes from the task outcome (REST verification), not from
-            # how many tool calls the model needed to get there.
-            fb = _feedback_block(
-                step, run, status, error, reason, rest_v, server_calls=server_calls, verbose=config.verbose
-            )
-            for ln in fb:
-                _progress(ln)
-
-            r = CheckResult(
-                id=step.id,
-                section=step.section,
-                description=step.description,
-                status=status,
-                mcp_tool=step.tool,
-                mcp_request={
-                    "prompt": prompt[:500],
-                    "exit_code": run.exit_code,
-                    "tool_events": len(run.tool_calls),
-                    "attempts": attempt,
-                },
-                mcp_response={
-                    "calls": _summarize_calls(run),
-                    "final_text": run.final_text[:1000],
-                    "error_events": _extract_error_events(run)[:3],
-                    "feedback": fb,
-                    # Recorded, not just printed: a report that cannot say how
-                    # many attempts a step took hides infrastructure noise.
-                    "transients": transients,
-                    # The server's own record of the attempt: what it executed,
-                    # with which operation, and whether it succeeded.
-                    "server_calls": server_calls,
-                    # How the transcript half of the verdict was decided, so a
-                    # failure says which condition it failed.
-                    "expected_call": {"ok": call_ok, "why": call_why, "expect": step.expect},
-                    # Set on the step where the actor opened the call log; the
-                    # run-level note says when, this says which step.
-                    "instrument_read": instrument_read and _actor_read_the_instrument(run, call_log),
-                },
-                rest_verification=rest_v,
-                reason=reason,
-                error=error,
-                duration_ms=run.duration_ms,
-            )
-            report.results.append(r)
-
-            # Capture the profile id as soon as the profile exists — even when
-            # this step's own verdict failed. Otherwise every later prompt
-            # renders a literal "{profile_id}" and the report measures a
-            # cascade of argument errors instead of the model's behaviour.
-            # A name lookup may only supply an id this run holds a create
-            # receipt for (_proven_created_id): when the actor created the
-            # profile, the server's call log carries the createProfile receipt
-            # and its id is a created_ids member; when nobody in this run
-            # created it, the lookup is ambiguity - it is not adopted, not
-            # written to, and never deleted.
-            if not pid and step.verify in ("profile_exists", "profile_renamed"):
-                prof = await m.find_profile(targets.profile_name) or await m.find_profile(targets.renamed_name)
-                pid = _proven_created_id(prof, created_ids)
-                if prof is not None and not pid:
-                    note = (
-                        f"a profile answering to {targets.profile_name!r} (id {prof.get('id')}) has no "
-                        "createProfile receipt from this run: not adopted, not written to, not deleted"
-                    )
-                    report.notes.append(note)
-                    _progress(f"  NOTE    : {note}")
+        try:
+            # Targeted run: when the range does not include profiles.create the
+            # harness provisions the test profile itself, through the MCP tool so
+            # the server's ACLs apply. Without it every later step has nothing to
+            # act on and the report measures nothing.
+            if needs_harness_setup(selected):
+                pid, note = await _harness_provision_profile(config, targets)
+                report.setup = note
+                report.profile_id = pid
                 if pid:
-                    report.profile_id = pid
+                    created_ids.add(pid)
+                _progress(f"targeted setup: {note}")
 
-        # Safety net: if the model deleted the profile, verify; if not, the
-        # harness owns cleanup. For a targeted range that excludes
-        # profiles.delete the teardown is harness-owned from the start, so it
-        # goes through the same MCP tool the actor would have used.
-        # Deletion requires the receipt: every path that set ``pid`` (harness
-        # provisioning via createProfile, self-heal from a create response, a
-        # receipt-backed adoption) put the id in created_ids; an id that got
-        # there any other way is not this run's to delete, and the run says
-        # so in its notes instead of destroying it.
-        if pid and not _deletable_by_this_run(pid, created_ids):
-            note = f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
-            report.notes.append(note)
-            _progress(f"  NOTE    : {note}")
-            pid = ""
-        if pid:
-            gone, _verdict = await _profile_gone(m, pid, targets)
-            if not gone and needs_harness_teardown(selected):
-                err = await _harness_delete_profile(config, pid)
-                gone, _verdict = await _profile_gone(m, pid, targets)
-                if gone:
-                    _progress("targeted teardown: test profile deleted via deleteProfile")
-                else:
-                    _progress(f"targeted teardown incomplete via MCP ({err or 'profile still present'})")
-            if not gone:
-                _progress("safety cleanup: deleting the test profile via REST")
-                for attempt in range(4):
-                    resp = await m.rest_delete(f"/profiles/{pid}")
-                    if isinstance(resp, dict) and resp.get("ok"):
+            # Read-only plot/log steps target NEXTDNS_PLOT_PROFILE; when it is unset
+            # they would all read the empty test profile and skip as data-starved,
+            # so resolve a data-bearing one up front and say so in the report.
+            if any(step.section == "plots" or step.id == "logs.download" for _, step in selected) and (
+                plot_note := await _ensure_plot_profile(m, pid)
+            ):
+                report.notes.append(plot_note)
+                _progress(f"plot profile: {plot_note}")
+                # The fallback selection must reach the child server's protected
+                # set too: the explicit NEXTDNS_PLOT_PROFILE is protected when the
+                # config is built, but a fallback resolved after that point was
+                # left writable — the one data-bearing profile the actor must never
+                # mutate. Re-protect and re-write the config before any step launches.
+                if chosen := os.environ.get("NEXTDNS_PLOT_PROFILE", "").strip():
+                    _protect_server_profile(config, chosen)
+                    write_mcp_config(config, workdir)
+
+            aborted_reason = ""
+            outage_streak = 0
+            instrument_read = False
+            for i, step in selected:
+                if aborted_reason:
+                    report.results.append(
+                        CheckResult(
+                            step.id,
+                            step.section,
+                            step.description,
+                            "skipped",
+                            mcp_tool=step.tool,
+                            reason=aborted_reason,
+                        )
+                    )
+                    continue
+                if time.monotonic() - started > budget:
+                    rest = CheckResult(
+                        step.id,
+                        step.section,
+                        step.description,
+                        "skipped",
+                        mcp_tool=step.tool,
+                        reason=f"overall time budget ({budget:.0f}s) exhausted",
+                    )
+                    report.results.append(rest)
+                    continue
+                if step.section != "profiles" and not pid:
+                    report.results.append(
+                        CheckResult(
+                            step.id,
+                            step.section,
+                            step.description,
+                            "skipped",
+                            mcp_tool=step.tool,
+                            reason="test profile was not provisioned",
+                        )
+                    )
+                    continue
+                expect = step.expect
+                if step.section != "profiles" and pid:
+                    # The actor may delete the test profile mid-run (wrong-tool
+                    # mistake); recreate it so the report measures each step, not
+                    # a 404 cascade. Harness scheduling only — no env change.
+                    healed = await _self_heal_profile(m, pid, targets)
+                    if healed != pid:
+                        pid = healed
+                        report.profile_id = pid
+                        if pid:
+                            created_ids.add(pid)
+                        # The profile vanished between steps. This harness deleted
+                        # it zero times in the run this happened in, so something
+                        # else is using the account and every step around it is
+                        # measuring a 404, not the model.
+                        report.notes.append(
+                            f"self-heal: test profile was deleted mid-run and recreated as {pid}; "
+                            "another process is using this NextDNS account"
+                        )
+
+                prompt_pid = pid
+                if (step.section == "plots" or step.id == "logs.download") and os.environ.get("NEXTDNS_PLOT_PROFILE"):
+                    prompt_pid = os.environ["NEXTDNS_PLOT_PROFILE"]
+                prompt = step.prompt.replace("{profile_id}", prompt_pid)
+                run: ActorRun | None = None
+                status, error, reason = "failed", "", ""
+                rest_v: dict[str, Any] = {}
+                # Attempt loop: infrastructure transients re-run the step (see
+                # _transient_actor_failure), each kind with its own cap.
+                transients: list[str] = []
+                attempts_by_kind = {kind: 0 for kind in TRANSIENT_ATTEMPTS}
+                attempt = 0
+                server_calls: list[dict[str, Any]] = []
+                while True:
+                    attempt += 1
+                    _progress(f"[{i}/{total}] {step.id}" + (f" (retry {attempt - 1})" if attempt > 1 else ""))
+                    # Where the server's call log stands before this attempt; the
+                    # lines after it are this attempt's authoritative record.
+                    log_offset = call_log.stat().st_size if call_log.exists() else 0
+                    # One subprocess per attempt: run_actor's own internal retry is
+                    # off here because it would silently double the window this
+                    # step's call-log slice covers. Observed: a step whose first
+                    # attempt timed out at 300s and whose second produced no parsed
+                    # events reported "actor=0, server=56" - the server records
+                    # were real, they just came from both attempts. The step loop
+                    # below already retries transients, with the bookkeeping.
+                    run = await run_actor(step_cfg, prompt, workdir, retries=0)
+                    total_events += len(run.tool_calls)
+                    for t in run.tools_used():
+                        if t not in tools_used:
+                            tools_used.append(t)
+                    if run.stderr:
+                        last_stderr = run.stderr
+                    all_raw.extend(run.raw_lines)
+                    server_calls = _read_new_calls(call_log, log_offset)
+                    # A successful createProfile row is this run's receipt that a
+                    # profile is its own to clean up (the model sometimes creates
+                    # extras beyond the test profile).
+                    created_ids |= _created_ids_from_records(server_calls)
+
+                    status, error, reason, rest_v = await _verify_step(m, targets, pid, step, run)
+                    # REST says what the state is, not who produced it, and for a
+                    # read it cannot see the call at all. So the server's own record
+                    # decides the transcript half of the verdict: the exact expected
+                    # call succeeded, on the profile the step targets, and nothing
+                    # wrote over it afterwards.
+                    call_ok, call_why = _expected_call_ok(server_calls, expect, pid, alt_pid=prompt_pid)
+                    if status == "passed" and not call_ok:
+                        status = "failed"
+                        error = call_why
+                    kind, why = _transient_actor_failure(
+                        run,
+                        " ".join(
+                            [error, reason]
+                            + _extract_error_events(run)
+                            + [c.result_text or "" for c in run.tool_calls]
+                            + [str(r.get("error") or "") for r in server_calls]
+                            + ([run.final_text] if run.final_text else [])
+                        ).lower(),
+                    )
+                    if status != "failed" or not kind or attempts_by_kind[kind] >= TRANSIENT_ATTEMPTS[kind]:
                         break
-                    await asyncio.sleep(5 * (attempt + 1))
-                gone, _verdict = await _profile_gone(m, pid, targets)
-            report.cleanup = (
-                "clean: profile deleted and verified gone via REST" if gone else "FAILED (profile still present)"
-            )
-            report.profile_id = pid
-        else:
-            report.cleanup = "skipped (test profile not found on the server)"
+                    attempts_by_kind[kind] += 1
+                    transients.append(f"{kind}: {why}")
+                    _progress(f"  RETRY   : transient actor failure ({why}); retrying")
 
-        # Remove any extra profiles THIS run created beyond the test profile,
-        # so they do not accumulate in the account between runs. Only ids with
-        # a createProfile receipt are candidates; if the account listing fails
-        # the sweep stands down and says so in the report.
-        sweep_note = await _sweep_stray_profiles(m, created_ids, {pid} if pid else set())
-        if sweep_note:
-            _progress(f"  NOTE    : {sweep_note}")
-            report.notes.append(sweep_note)
+                if run is None:  # pragma: no cover - defensive
+                    run = ActorRun(command=list(step_cfg.command))
+
+                if _provider_outage(run):
+                    outage_streak += 1
+                    if outage_streak >= PROVIDER_OUTAGE_STEPS:
+                        aborted_reason = "model provider is not serving this model (run aborted)"
+                        events = _extract_error_events(run)
+                        report.notes.append(
+                            f"provider outage after {len(report.results) + 1} step(s): "
+                            f"{(events[0] if events else run.error)[:200]}"
+                        )
+                        _progress(f"  ABORT   : {aborted_reason}; every remaining step is skipped")
+                else:
+                    outage_streak = 0
+
+                if not instrument_read and _actor_read_the_instrument(run, call_log):
+                    instrument_read = True
+                    report.notes.append(
+                        f"actor read the harness call log ({call_log}): the record this verdict is made "
+                        "from was visible to the subject"
+                    )
+                    _progress("  NOTE    : actor read the harness call log; this run's ground truth was visible")
+
+                # Verdict comes from the task outcome (REST verification), not from
+                # how many tool calls the model needed to get there.
+                fb = _feedback_block(
+                    step, run, status, error, reason, rest_v, server_calls=server_calls, verbose=config.verbose
+                )
+                for ln in fb:
+                    _progress(ln)
+
+                r = CheckResult(
+                    id=step.id,
+                    section=step.section,
+                    description=step.description,
+                    status=status,
+                    mcp_tool=step.tool,
+                    mcp_request={
+                        "prompt": prompt[:500],
+                        "exit_code": run.exit_code,
+                        "tool_events": len(run.tool_calls),
+                        "attempts": attempt,
+                    },
+                    mcp_response={
+                        "calls": _summarize_calls(run),
+                        "final_text": run.final_text[:1000],
+                        "error_events": _extract_error_events(run)[:3],
+                        "feedback": fb,
+                        # Recorded, not just printed: a report that cannot say how
+                        # many attempts a step took hides infrastructure noise.
+                        "transients": transients,
+                        # The server's own record of the attempt: what it executed,
+                        # with which operation, and whether it succeeded.
+                        "server_calls": server_calls,
+                        # How the transcript half of the verdict was decided, so a
+                        # failure says which condition it failed.
+                        "expected_call": {"ok": call_ok, "why": call_why, "expect": step.expect},
+                        # Set on the step where the actor opened the call log; the
+                        # run-level note says when, this says which step.
+                        "instrument_read": instrument_read and _actor_read_the_instrument(run, call_log),
+                    },
+                    rest_verification=rest_v,
+                    reason=reason,
+                    error=error,
+                    duration_ms=run.duration_ms,
+                )
+                report.results.append(r)
+
+                # Capture the profile id as soon as the profile exists — even when
+                # this step's own verdict failed. Otherwise every later prompt
+                # renders a literal "{profile_id}" and the report measures a
+                # cascade of argument errors instead of the model's behaviour.
+                # A name lookup may only supply an id this run holds a create
+                # receipt for (_proven_created_id): when the actor created the
+                # profile, the server's call log carries the createProfile receipt
+                # and its id is a created_ids member; when nobody in this run
+                # created it, the lookup is ambiguity - it is not adopted, not
+                # written to, and never deleted.
+                if not pid and step.verify in ("profile_exists", "profile_renamed"):
+                    prof = await m.find_profile(targets.profile_name) or await m.find_profile(targets.renamed_name)
+                    pid = _proven_created_id(prof, created_ids)
+                    if prof is not None and not pid:
+                        note = (
+                            f"a profile answering to {targets.profile_name!r} (id {prof.get('id')}) has no "
+                            "createProfile receipt from this run: not adopted, not written to, not deleted"
+                        )
+                        report.notes.append(note)
+                        _progress(f"  NOTE    : {note}")
+                    if pid:
+                        report.profile_id = pid
+        finally:
+            await _teardown()
 
     report.actor_tool_calls = total_events
     report.actor_tools_used = tools_used

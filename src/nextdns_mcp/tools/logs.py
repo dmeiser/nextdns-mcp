@@ -286,9 +286,12 @@ async def _raise_for_streamed_status(response: httpx.Response) -> None:
     except httpx.HTTPStatusError as e:
         if not e.response.is_stream_consumed:
             body = await _bounded_error_body(e.response)
+            headers = httpx.Headers(e.response.headers)
+            headers.pop("content-encoding", None)
+            headers.pop("content-length", None)
             e.response = httpx.Response(
                 status_code=e.response.status_code,
-                headers=e.response.headers,
+                headers=headers,
                 content=body,
                 request=e.response.request,
             )
@@ -571,8 +574,16 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     except httpx.HTTPError as e:
         logger.error(f"HTTP error downloading logs: {_log_safe_error(e)}")
         status, scheme, host = _download_error_details(e)
+        detail = " ".join(
+            part
+            for part in (
+                str(status) if status is not None else "",
+                f"{scheme}://{host}" if scheme else "",
+            )
+            if part
+        )
         return http_error_payload(
-            f"HTTP error while downloading logs: {status} {scheme}://{host}".strip(),
+            "HTTP error while downloading logs" + (f": {detail}" if detail else ""),
             e,
             fallback_code=ErrorCode.HTTP_ERROR,
         )
