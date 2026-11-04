@@ -104,7 +104,7 @@ class TestTheToolsSaySoThemselves:
 
     async def _call(self, tool: str, arguments: dict) -> dict:
         async with Client(build_mcp_server()) as client:
-            result = await client.call_tool(tool, arguments)
+            result = await client.call_tool(tool, arguments, raise_on_error=False)
         return getattr(result, "structured_content", None) or {}
 
     def test_the_series_endpoint_demands_a_start_time_and_the_aggregate_does_not(self):

@@ -195,7 +195,7 @@ class TestToolsReportUpstreamFailuresAsPayloads:
 
         async with Client(build_mcp_server()) as client:
             for tool, args in self._CALLS:
-                result = await client.call_tool(tool, args)
+                result = await client.call_tool(tool, args, raise_on_error=False)
                 payload = result.structured_content
                 assert payload.get("code") == "http_error", f"{tool} did not report http_error: {payload}"
                 assert payload.get("status_code") == status, f"{tool} lost the upstream status: {payload}"
@@ -205,8 +205,8 @@ class TestToolsReportUpstreamFailuresAsPayloads:
     async def test_tools_still_succeed_when_upstream_is_healthy(self, stub_nextdns_api):
         """The failure handling above must not swallow a good response."""
         async with Client(build_mcp_server()) as client:
-            profiles = await client.call_tool("listProfiles", {})
-            denylist = await client.call_tool("getDenylist", {"profile_id": "abc123"})
+            profiles = await client.call_tool("listProfiles", {}, raise_on_error=False)
+            denylist = await client.call_tool("getDenylist", {"profile_id": "abc123"}, raise_on_error=False)
         assert profiles.structured_content == {"data": [{"id": "abc123", "name": "Home Network"}]}
         assert denylist.structured_content == {"data": []}
 

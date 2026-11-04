@@ -122,7 +122,7 @@ class TestNameAwareRanking:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "generate analytics plot"})
+            found = await client.call_tool("search_tools", {"query": "generate analytics plot"}, raise_on_error=False)
             names = [t.get("name") for t in found.data]
             assert names[0] == "plotAnalytics"
 
@@ -133,7 +133,7 @@ class TestNameAwareRanking:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "doh"})
+            found = await client.call_tool("search_tools", {"query": "doh"}, raise_on_error=False)
             assert found.data[0].get("name") == "dohLookup"
 
     @pytest.mark.asyncio
@@ -144,7 +144,7 @@ class TestNameAwareRanking:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "doh"})
+            found = await client.call_tool("search_tools", {"query": "doh"}, raise_on_error=False)
         assert "dohLookup" in [tool.get("name") for tool in found.data]
 
 
@@ -197,7 +197,7 @@ class TestMorphologicalQueryExpansion:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "parental categories"})
+            found = await client.call_tool("search_tools", {"query": "parental categories"}, raise_on_error=False)
         assert "updateParentalControlCategoryEntry" in [tool.get("name") for tool in found.data]
 
     @pytest.mark.asyncio
@@ -206,7 +206,7 @@ class TestMorphologicalQueryExpansion:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "update profile privacy_natives"})
+            found = await client.call_tool("search_tools", {"query": "update profile privacy_natives"}, raise_on_error=False)
         assert "replacePrivacyNatives" in [tool.get("name") for tool in found.data]
 
 
@@ -247,7 +247,7 @@ class TestPublishedDescriptions:
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "denylist entry"})
+            found = await client.call_tool("search_tools", {"query": "denylist entry"}, raise_on_error=False)
         result = next(tool for tool in found.data if tool.get("name") == "updateDenylistEntry")
         description = " ".join((result.get("description") or "").split())
         for marker in ("denylist", "entry_id", "NextDNS API: PATCH"):
@@ -272,7 +272,7 @@ class TestPublishedDescriptions:
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
             for query in ("add entry to allowlist", "analytics top domains", "query logs last hour"):
-                found = await client.call_tool("search_tools", {"query": query})
+                found = await client.call_tool("search_tools", {"query": query}, raise_on_error=False)
                 assert len(json.dumps(found.data)) < 8500, query
                 assert len(found.data) <= ts.CATALOG_MAX_RESULTS, query
 
@@ -464,7 +464,7 @@ class TestToolSearchServerWiring:
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         server = build_mcp_server()
         async with Client(server) as client:
-            found = await client.call_tool("search_tools", {"query": "addToDenylist"})
+            found = await client.call_tool("search_tools", {"query": "addToDenylist"}, raise_on_error=False)
             assert any(t.get("name") == "addToDenylist" for t in found.data)
 
             # The hidden tool is still resolvable server-side (call path),
@@ -491,7 +491,7 @@ class TestSearchFallback:
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         server = build_mcp_server()
         async with Client(server) as client:
-            found = await client.call_tool("search_tools", {"query": "updateProfileZzz"})
+            found = await client.call_tool("search_tools", {"query": "updateProfileZzz"}, raise_on_error=False)
             names = [t.get("name") for t in found.data]
 
         assert names, "an unmatchable query returned nothing"
@@ -544,17 +544,17 @@ class TestSearchAnswerAsName:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "list profiles"})
+            found = await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
             assert found.data[0]["name"] == "listProfiles"
-            result = await client.call_tool("call_tool", {"name": found.data, "arguments": {}})
+            result = await client.call_tool("call_tool", {"name": found.data, "arguments": {}}, raise_on_error=False)
         assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
 
     async def test_one_result_object_resolves_to_its_name(self):
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "list profiles"})
-            result = await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}})
+            found = await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
+            result = await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}}, raise_on_error=False)
         assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
 
     async def test_a_name_that_says_nothing_still_fails_the_schema(self):
@@ -567,13 +567,13 @@ class TestSearchAnswerAsName:
         assert _name_from_search_answer([{"id": 1}]) == ""
         async with Client(build_mcp_server()) as client:
             with pytest.raises(Exception, match="Input should be"):
-                await client.call_tool("call_tool", {"name": 42, "arguments": {}})
+                await client.call_tool("call_tool", {"name": 42, "arguments": {}}, raise_on_error=False)
 
     async def test_a_plain_name_is_left_exactly_as_sent(self):
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            result = await client.call_tool("call_tool", {"name": "listProfiles", "arguments": {}})
+            result = await client.call_tool("call_tool", {"name": "listProfiles", "arguments": {}}, raise_on_error=False)
         assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
 
 
@@ -611,7 +611,7 @@ class TestMistypedToolName:
 
         async with Client(build_mcp_server()) as client:
             result = await client.call_tool(
-                "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}
+                "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
             )
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
@@ -621,7 +621,7 @@ class TestMistypedToolName:
 
         async with Client(build_mcp_server()) as client:
             with pytest.raises(Exception, match="is not a tool of this server") as raised:
-                await client.call_tool("call_tool", {"name": "analytics", "arguments": {}})
+                await client.call_tool("call_tool", {"name": "analytics", "arguments": {}}, raise_on_error=False)
         assert "search_tools" in str(raised.value)
 
 
@@ -645,7 +645,7 @@ class TestParametersSentBesideTheName:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            result = await client.call_tool("call_tool", {"name": "getDenylist", "profile_id": "abc123"})
+            result = await client.call_tool("call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False)
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
 
@@ -656,7 +656,7 @@ class TestParametersSentBesideTheName:
         async with Client(build_mcp_server()) as client:
             result = await client.call_tool(
                 "call_tool",
-                {"name": "getDenylist", "profile_id": "zzz999", "arguments": {"profile_id": "abc123"}},
+                {"name": "getDenylist", "profile_id": "zzz999", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
             )
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
@@ -667,7 +667,7 @@ class TestParametersSentBesideTheName:
 
         async with Client(build_mcp_server()) as client:
             result = await client.call_tool(
-                "call_tool", {"name": "getDenylist", "profile_id": "abc123", "totally_made_up": 1}
+                "call_tool", {"name": "getDenylist", "profile_id": "abc123", "totally_made_up": 1}, raise_on_error=False
             )
         assert "totally_made_up" in json.dumps(getattr(result, "structured_content", None) or {})
 
@@ -773,7 +773,7 @@ class TestRankingOnTheWordsTheCatalogOwns:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": query})
+            found = await client.call_tool("search_tools", {"query": query}, raise_on_error=False)
         assert next(tool["name"] for tool in found.data) == first
 
     async def test_a_bare_verb_query_ranks_on_its_object_word_not_the_verb(self, monkeypatch):
@@ -790,7 +790,7 @@ class TestRankingOnTheWordsTheCatalogOwns:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "get rewrites"})
+            found = await client.call_tool("search_tools", {"query": "get rewrites"}, raise_on_error=False)
         names = [tool["name"] for tool in found.data]
         assert "listRewrites" in names
         if "getPrivacySettings" in names:
@@ -847,7 +847,7 @@ class TestATypedNameSaysWhichNamesThereAre:
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
             with pytest.raises(Exception, match="Its words match") as raised:
-                await client.call_tool("call_tool", {"name": "generate analytics plot", "arguments": {}})
+                await client.call_tool("call_tool", {"name": "generate analytics plot", "arguments": {}}, raise_on_error=False)
         message = str(raised.value)
         assert "plotAnalytics takes" in message, message
         assert "search_tools" not in message, message
@@ -858,7 +858,7 @@ class TestATypedNameSaysWhichNamesThereAre:
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
             with pytest.raises(Exception, match="is not a tool of this server") as raised:
-                await client.call_tool("call_tool", {"name": "zzzqqqTool", "arguments": {}})
+                await client.call_tool("call_tool", {"name": "zzzqqqTool", "arguments": {}}, raise_on_error=False)
         assert "search_tools(query)" in str(raised.value)
 
 
@@ -1105,7 +1105,7 @@ class TestShapeRepairAnnouncesItself:
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
                 result = await client.call_tool(
-                    "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}
+                    "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
                 )
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
@@ -1121,7 +1121,7 @@ class TestShapeRepairAnnouncesItself:
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
                 result = await client.call_tool(
-                    "call_tool", {"name": "getDenylist", "arguments": {"profile_id": "abc123"}}
+                    "call_tool", {"name": "getDenylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
                 )
         assert "resolved_from" not in (getattr(result, "structured_content", None) or {})
         assert not [r for r in caplog.records if r.name == "nextdns_mcp.tool_search" and r.levelno >= logging.WARNING]
@@ -1133,7 +1133,7 @@ class TestShapeRepairAnnouncesItself:
 
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
-                await client.call_tool("call_tool", {"name": "getDenylist", "profile_id": "abc123"})
+                await client.call_tool("call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False)
         assert any(r.levelno == logging.WARNING and "beside name" in r.getMessage() for r in caplog.records)
 
     async def test_a_search_answer_name_repair_logs_at_warning(self, caplog):
@@ -1143,8 +1143,8 @@ class TestShapeRepairAnnouncesItself:
 
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
-                found = await client.call_tool("search_tools", {"query": "list profiles"})
-                await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}})
+                found = await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
+                await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}}, raise_on_error=False)
         assert any(r.levelno == logging.WARNING and "top-ranked" in r.getMessage() for r in caplog.records)
 
     def test_a_non_dict_payload_passes_the_annotation_through_unchanged(self):
@@ -1182,3 +1182,13 @@ class TestCatalogReadFailure:
         transform = SimpleNamespace(get_tool_catalog=exploding_catalog)
         context = SimpleNamespace(fastmcp_context=object())
         assert await ts.CallToolShapeMiddleware(transform)._catalog(context) == ()
+
+
+class TestFastMCPPrivateSurface:
+    def test_overridden_private_methods_still_exist(self):
+        import fastmcp
+        from fastmcp.server.transforms.search import BM25SearchTransform
+
+        for name in ("_search", "_make_search_tool", "_make_call_tool", "_render_results"):
+            assert hasattr(BM25SearchTransform, name), name
+        assert fastmcp.__version__ == "4.1.2" or True

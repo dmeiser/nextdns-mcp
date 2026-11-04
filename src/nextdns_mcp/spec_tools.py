@@ -54,6 +54,7 @@ from fastmcp.utilities.openapi import HTTPRoute, parse_openapi_to_http_routes
 
 from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
+from mcp.types import ToolAnnotations
 from .tools import logs as _logs
 from .tools.plots import _now, _resolve_time_point, _series_budget_error
 from .transport import _api_request_payload
@@ -370,11 +371,16 @@ class SpecApiTool(Tool):
         route: HTTPRoute,
         transport: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
+        method = str(route.method).upper()
         super().__init__(
             name=str(route.operation_id),
             description=describe(route),
             parameters=route.flat_param_schema,
             tags={"nextdns", "spec"},
+            annotations=ToolAnnotations(
+                read_only_hint=method in {"GET", "HEAD"},
+                destructive_hint=method in {"DELETE", "PUT", "PATCH"},
+            ),
         )
         self._route = route
         self._transport = transport
@@ -402,6 +408,12 @@ class SpecApiTool(Tool):
         refused = self._request_refusal(args)
         if refused is not None:
             return ToolResult(structured_content=refused)
+        if self.name == "createProfile":
+            from . import config as _config
+            writable = _config.get_writable_profiles_set()
+            protected = _config.get_protected_profiles()
+            if writable is not None and writable and writable.issubset(protected):
+                return ToolResult(structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no writable profile available"), is_error=True)
         if self.name in DELEGATED_OPERATIONS:
             return await self._run_delegated(args)
         path, query, body = split_arguments(self._route, args)
@@ -424,6 +436,10 @@ class SpecApiTool(Tool):
         budget = _series_budget_for_generated_call(self._route, query)
         if budget is not None:
             return ToolResult(structured_content=budget)
+        method = str(self._route.method).upper()
+        if method in {"PATCH", "PUT"} and (body is None or body == {}):
+            # A write with nothing to apply must not be reported as success.
+            return ToolResult(structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no applicable fields to update"), is_error=True)
         return await self._call_endpoint(path, query, body)
 
     async def _call_endpoint(self, path: str, query: dict[str, Any], body: Any) -> ToolResult:
@@ -447,8 +463,9 @@ class SpecApiTool(Tool):
         )
         refused = _series_refusal(self._route, payload)
         if refused is not None:
-            return ToolResult(structured_content=refused)
-        return ToolResult(structured_content=payload)
+            return ToolResult(structured_content=refused, is_error=True)
+        is_err = isinstance(payload, dict) and ("error" in payload or "code" in payload) and "data" not in payload
+        return ToolResult(structured_content=payload, is_error=is_err)
 
     async def _run_delegated(self, arguments: dict[str, Any]) -> ToolResult:
         """Serve a delegated operation with its own guarded handler.

@@ -872,17 +872,16 @@ class TestPlotFetchUsesSharedWrapper:
         params = {"from": "-1d", "to": "now", "interval": 3600}
         payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", params)
 
-        wrapped.assert_awaited_once_with("GET", "/profiles/abc123/analytics/status;series", params=params)
+        wrapped.assert_awaited_once_with("GET", "/profiles/abc123/analytics/status;series", params=params, max_response_bytes=512000)
         # Routing moved off the raw client: the underlying transport must not be hit.
         mock_api_client.request.assert_not_awaited()
         assert error is None
         assert payload is sample_series_payload
 
     @pytest.mark.asyncio
-    async def test_fetch_series_payload_surfaces_wrapper_error(self, clean_env, mock_api_client):
-        upstream = httpx.HTTPError("boom")
-        upstream.response = httpx.Response(500, text="upstream exploded")
-        mock_api_client.request.side_effect = upstream
+    async def test_fetch_series_payload_surfaces_wrapper_error(self, clean_env, monkeypatch, mock_api_client):
+        wrapped = AsyncMock(return_value={"error": "upstream failure", "code": "http_error", "status_code": 500})
+        monkeypatch.setattr(plots_module, "_api_request_payload", wrapped)
 
         payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", {})
 
@@ -890,7 +889,6 @@ class TestPlotFetchUsesSharedWrapper:
         assert error is not None
         assert error["code"] == "http_error"
         assert error["status_code"] == 500
-        mock_api_client.request.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_plot_analytics_series_impl_uses_api_request(self, clean_env, monkeypatch):

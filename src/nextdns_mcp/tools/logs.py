@@ -457,7 +457,7 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
                 # the vetted addresses rather than re-resolving the name.
                 infos = await _check_download_redirect_target(next_url)
                 with _pinned_dns(next_url.host, infos):
-                    async with unauthenticated.stream("GET", next_url) as response:
+                    async with unauthenticated.stream("GET", next_url, headers={"Accept-Encoding": "identity"}) as response:
                         if response.has_redirect_location:
                             redirects += 1
                             if redirects > _MAX_DOWNLOAD_REDIRECTS:
@@ -473,7 +473,7 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
 
 async def _stream_download_to_path(profile_id: str, path: str) -> dict[str, Any]:
     """Stream the log download for ``profile_id`` into ``path`` and return the payload."""
-    async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download") as initial:
+    async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download", headers={"Accept-Encoding": "identity"}) as initial:
         # A non-redirect response is written straight to disk;
         # _write_stream_to_tempfile surfaces any HTTP error via
         # raise_for_status.

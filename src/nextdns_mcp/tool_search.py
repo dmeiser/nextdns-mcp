@@ -648,7 +648,14 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         if not results:
             # Nothing matched at all: the caller's words are the only signal
             # left, so answer with the catalog and let the name order sort it.
-            results = sorted(tools, key=lambda t: getattr(t, "name", ""), reverse=True)
+            def _is_write(name: str) -> bool:
+                endpoints = getattr(self, "_endpoints", None) or {}
+                method = endpoints.get(name, ("GET",))[0] if isinstance(endpoints, dict) else "GET"
+                # Fall back to a name-based heuristic when no endpoint map is wired.
+                if method == "GET" and name[:3].lower() not in {"get", "doh", "plo"} and not name.startswith(("download", "plot")):
+                    method = "POST"
+                return is_write_operation(method)
+            results = sorted(tools, key=lambda t: (_is_write(getattr(t, "name", "")), getattr(t, "name", "")))
         merged = _merge_named_results(results, tools, named)
         shared = (catalog.name_shared, catalog.vocab_shared)
         ranked = _rank_by_name_overlap(merged, stripped, catalog.names, catalog.vocabulary, shared)

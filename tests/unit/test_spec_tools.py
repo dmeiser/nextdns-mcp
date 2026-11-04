@@ -341,9 +341,9 @@ class TestRegistration:
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "DNS-over-HTTPS lookup"})
+            found = await client.call_tool("search_tools", {"query": "DNS-over-HTTPS lookup"}, raise_on_error=False)
             hits = [hit["name"] for hit in (found.structured_content or {})["result"]]
-            charted = await client.call_tool("search_tools", {"query": "render a chart of analytics over time"})
+            charted = await client.call_tool("search_tools", {"query": "render a chart of analytics over time"}, raise_on_error=False)
             chart_hits = [hit["name"] for hit in (charted.structured_content or {})["result"]]
         assert hits[0] == "dohLookup"
         assert chart_hits[0] == "plotAnalytics"
@@ -361,7 +361,7 @@ class TestRegistration:
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
-            await client.call_tool("getLogs", {"profile_id": "abc123", "limit": "20", "raw": "true"})
+            await client.call_tool("getLogs", {"profile_id": "abc123", "limit": "20", "raw": "true"}, raise_on_error=False)
         assert calls[0]["params"] == {"limit": 20, "raw": True}
 
     async def test_disclosure_and_call_tool_work_on_generated_tools(self, monkeypatch):
@@ -377,7 +377,7 @@ class TestRegistration:
         async with Client(build_mcp_server()) as client:
             listed = await client.list_tools()
             assert [tool.name for tool in listed] == ["search_tools", "call_tool"]
-            found = await client.call_tool("search_tools", {"query": "add a domain to the denylist"})
+            found = await client.call_tool("search_tools", {"query": "add a domain to the denylist"}, raise_on_error=False)
             hits = [hit["name"] for hit in (found.structured_content or {})["result"]]
             assert "addToDenylist" in hits
             called = await client.call_tool(

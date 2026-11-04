@@ -445,6 +445,17 @@ class HarnessConfig:
         # (e.g. deleteProfile with the wrong id) even under ALL.
         if plot_pid := os.environ.get("NEXTDNS_PLOT_PROFILE"):
             _protect_server_profile(cfg, plot_pid.strip())
+        # Protect every profile that already exists on the account, so a model
+        # picking a wrong id during a write cannot hit a real profile.
+        api_key = os.environ.get("NEXTDNS_API_KEY")
+        if api_key and httpx is not None:
+            try:
+                resp = httpx.get(f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, timeout=10.0)
+                for row in (resp.json().get("data") or []):
+                    if isinstance(row, dict) and row.get("id"):
+                        _protect_server_profile(cfg, str(row["id"]))
+            except Exception:
+                pass
         return cfg
 
     def render_argv(self, values: dict[str, str]) -> list[str]:

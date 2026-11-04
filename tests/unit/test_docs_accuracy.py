@@ -71,8 +71,18 @@ _TOOL_NAME_PREFIXES = (
 )
 
 
+def _strip_migration_table(text: str) -> str:
+    # Narrow exemption: the 4.0.0 migration table is the one place the
+    # removed (old) tool names are allowed to appear, so users can map them
+    # to their replacements. Only the fenced migration-table section is
+    # stripped; the ban still applies everywhere else.
+    import re as _re
+
+    return _re.sub(r"<!-- migration-table:start -->.*?<!-- migration-table:end -->", "", text, flags=_re.S)
+
+
 def _docs_text() -> dict[str, str]:
-    return {path.name: path.read_text(encoding="utf-8") for path in DOC_FILES}
+    return {path.name: _strip_migration_table(path.read_text(encoding="utf-8")) for path in DOC_FILES}
 
 
 class TestRemovedSurfaceStaysOutOfDocs:
