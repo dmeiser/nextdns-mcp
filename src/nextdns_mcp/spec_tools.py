@@ -405,7 +405,8 @@ class SpecApiTool(Tool):
         args = arguments or {}
         refused = self._request_refusal(args)
         if refused is not None:
-            return ToolResult(structured_content=refused)
+            # Path-safety and malformed-id refusals are errors, not results.
+            return ToolResult(structured_content=refused, is_error=True)
         create_refusal = self._create_profile_guard()
         if create_refusal is not None:
             return create_refusal
@@ -439,13 +440,13 @@ class SpecApiTool(Tool):
     async def _dispatch_rendered(self, path: str, query: dict[str, Any], body: Any, args: dict[str, Any]) -> ToolResult:
         unfilled = _PATH_PLACEHOLDER.findall(path)
         if unfilled:
-            return ToolResult(structured_content=self._missing_payload(unfilled))
+            return ToolResult(structured_content=self._missing_payload(unfilled), is_error=True)
         invalid = _schema_validation_payload(self._validator, self.name, _normalized_for_validation(self._route, args))
         if invalid is not None:
-            return ToolResult(structured_content=invalid)
+            return ToolResult(structured_content=invalid, is_error=True)
         budget = _series_budget_for_generated_call(self._route, query)
         if budget is not None:
-            return ToolResult(structured_content=budget)
+            return ToolResult(structured_content=budget, is_error=True)
         empty = self._empty_write_refusal(self._route.method, body)
         if empty is not None:
             return empty
@@ -488,8 +489,7 @@ class SpecApiTool(Tool):
         refused = _series_refusal(self._route, payload)
         if refused is not None:
             return ToolResult(structured_content=refused, is_error=True)
-        is_err = isinstance(payload, dict) and ("error" in payload or "code" in payload) and "data" not in payload
-        return ToolResult(structured_content=payload, is_error=is_err)
+        return ToolResult(structured_content=payload, is_error=_payload_is_error(payload))
 
     async def _run_delegated(self, arguments: dict[str, Any]) -> ToolResult:
         """Serve a delegated operation with its own guarded handler.
@@ -503,10 +503,14 @@ class SpecApiTool(Tool):
         profile_id = arguments.get("profile_id")
         resolved, error = resolve_profile_id("" if profile_id is None else str(profile_id).strip(), allow_default=False)
         if error is not None and error.get("code") == ErrorCode.MISSING_PROFILE_ID:
-            return ToolResult(structured_content=self._missing_payload(["profile_id"]))
+            return ToolResult(structured_content=self._missing_payload(["profile_id"]), is_error=True)
         if error is not None:
-            return ToolResult(structured_content=error)
-        return ToolResult(structured_content=await DELEGATED_HANDLERS[self.name](str(resolved)))
+            return ToolResult(structured_content=error, is_error=True)
+        payload = await DELEGATED_HANDLERS[self.name](str(resolved))
+        # The delegated handler (downloadLogs) answers errors as typed payloads;
+        # they must surface as errors, while a successful download payload must
+        # not. Detection is the same rule _wrap_call_result uses.
+        return ToolResult(structured_content=payload, is_error=_payload_is_error(payload))
 
     def _unsafe_path_payload(self, names: list[str]) -> dict[str, Any]:
         """A typed error refusing to put an id-shaped argument anywhere but a path segment."""
@@ -535,6 +539,20 @@ class SpecApiTool(Tool):
             f"{self.name} needs {', '.join(missing)} for {self._route.method} {self._route.path}",
             hint=hints.get(missing[0], "required by this endpoint: " + ", ".join(_required(self._route))),
         )
+
+
+def _payload_is_error(payload: Any) -> bool:
+    """Whether a structured payload is a typed error rather than a result.
+
+    Every refusal and failure this module renders goes through
+    :func:`nextdns_mcp.errors.error_payload` (``{"error": ..., "code": ...}``),
+    and a successful API answer carries ``data``; a payload with an
+    ``error``/``code`` key and no ``data`` is therefore an error whatever door
+    produced it. MCP clients surface ``isError`` to the model, so every one of
+    those doors must set the flag — a refusal reported as a successful result
+    teaches the caller the refusal shape is a normal answer.
+    """
+    return isinstance(payload, dict) and ("error" in payload or "code" in payload) and "data" not in payload
 
 
 def _mapped_path_name(name: str, mapped: dict[str, Any] | None) -> tuple[str, str] | None:
