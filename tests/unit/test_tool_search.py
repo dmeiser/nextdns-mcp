@@ -182,14 +182,14 @@ class TestMorphologicalQueryExpansion:
         from nextdns_mcp.tool_search import FallbackBM25SearchTransform
 
         assert (
-            FallbackBM25SearchTransform()._augment_query("parental categories", {"category"})
+            FallbackBM25SearchTransform(endpoints={})._augment_query("parental categories", {"category"})
             == "parental categories category"
         )
 
     def test_augmentation_without_variants_leaves_the_query_alone(self):
         from nextdns_mcp.tool_search import FallbackBM25SearchTransform
 
-        assert FallbackBM25SearchTransform()._augment_query("natives", set()) == "natives"
+        assert FallbackBM25SearchTransform(endpoints={})._augment_query("natives", set()) == "natives"
 
     @pytest.mark.asyncio
     async def test_a_plural_noun_query_reaches_the_singular_named_tool(self, monkeypatch):
@@ -509,12 +509,12 @@ class TestSearchFallback:
 
         from nextdns_mcp.tool_search import FallbackBM25SearchTransform, build_search_transform
 
-        assert isinstance(build_search_transform("bm25"), FallbackBM25SearchTransform)
+        assert isinstance(build_search_transform("bm25", endpoints={}), FallbackBM25SearchTransform)
         # The fold is direct: FallbackBM25SearchTransform subclasses FastMCP's
         # transform itself (no untyped mixin in between, PRIN-1/ARCH-3).
-        assert isinstance(build_search_transform("bm25"), BM25SearchTransform)
+        assert isinstance(build_search_transform("bm25", endpoints={}), BM25SearchTransform)
         assert FallbackBM25SearchTransform.__mro__[1] is BM25SearchTransform
-        assert build_search_transform("off") is None
+        assert build_search_transform("off", endpoints={}) is None
 
     def test_an_unimplemented_mode_raises_rather_than_silencing_disclosure(self):
         """A mode the factory has not implemented must fail, not mean 'off' (PRIN-9).
@@ -524,7 +524,7 @@ class TestSearchFallback:
         discovery off. The raise is the seam where they cannot drift quietly.
         """
         with pytest.raises(ValueError, match="tool-search"):
-            ts.build_search_transform("regex")
+            ts.build_search_transform("regex", endpoints={})
 
 
 class TestSearchAnswerAsName:
@@ -960,7 +960,7 @@ class TestMemoizedCatalogStructures:
     def test_catalog_words_are_memoized_by_tool_names(self):
         from fastmcp.tools.base import Tool
 
-        transform = ts.FallbackBM25SearchTransform()
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
         tools = [
             Tool.from_function(lambda: None, name="aTool"),
             Tool.from_function(lambda: None, name="bTool"),
@@ -975,7 +975,7 @@ class TestMemoizedCatalogStructures:
         """The cache is never handed out by reference; a caller cannot mutate it."""
         from fastmcp.tools.base import Tool
 
-        transform = ts.FallbackBM25SearchTransform()
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
         tool = Tool.from_function(lambda: None, name="aTool", description="does a thing")
         first = await transform._render_results([tool])
         first[0]["name"] = "mutated-through-the-answer"
@@ -985,7 +985,7 @@ class TestMemoizedCatalogStructures:
 
     def test_synthetic_tools_are_built_once(self):
         """FastMCP rebuilds them per listing; they are constants of the transform."""
-        transform = ts.FallbackBM25SearchTransform()
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
         assert transform._make_search_tool() is transform._make_search_tool()
         assert transform._make_call_tool() is transform._make_call_tool()
         assert transform._make_search_tool() is not transform._make_call_tool()
@@ -1276,8 +1276,8 @@ def test_the_fallback_classifies_writes_from_the_endpoint_map():
     asyncio.run(main())
 
 
-def test_the_fallback_without_an_endpoint_map_keeps_the_read_only_heuristic():
-    """No map (no caller has one today) falls back to name shapes, reading."""
+def test_the_fallback_reads_a_name_off_the_map_like_the_composites():
+    """A name the map does not carry (plotAnalytics, dohLookup) sorts as a read."""
     import asyncio
 
     from fastmcp.tools.base import Tool
@@ -1286,13 +1286,17 @@ def test_the_fallback_without_an_endpoint_map_keeps_the_read_only_heuristic():
 
     tools = [
         Tool.from_function(lambda: None, name="addToDenylist"),
-        Tool.from_function(lambda: None, name="getDenylist"),
+        Tool.from_function(lambda: None, name="dohLookup"),
+        Tool.from_function(lambda: None, name="plotAnalytics"),
     ]
-    transform = ts.build_search_transform("bm25")
-    assert transform is not None and transform._endpoints == {}
+    transform = ts.build_search_transform(
+        "bm25", endpoints={"addToDenylist": ("POST", "/profiles/{profile_id}/denylist")}
+    )
+    assert transform is not None
 
     async def main():
         ranked = [t.name for t in await transform._search(tools, "qxqv zzxj no such tool words")]
-        assert ranked.index("getDenylist") < ranked.index("addToDenylist")
+        assert ranked.index("dohLookup") < ranked.index("addToDenylist")
+        assert ranked.index("plotAnalytics") < ranked.index("addToDenylist")
 
     asyncio.run(main())

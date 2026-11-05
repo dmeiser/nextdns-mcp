@@ -104,7 +104,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         search_tool_name: str = "search_tools",
         call_tool_name: str = "call_tool",
         search_result_serializer: Any = None,
-        endpoints: Mapping[str, tuple[str, str]] | None = None,
+        endpoints: Mapping[str, tuple[str, str]],
     ) -> None:
         super().__init__(
             max_results=max_results,
@@ -115,9 +115,8 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         )
         # tool name -> (method, path template), from the server's single route
         # parse. The full-catalog fallback classifies writes from this map; a
-        # name it does not carry (the two local operations) reads. Without the
-        # map the name-shape heuristic misreads every list* tool as a write.
-        self._endpoints: dict[str, tuple[str, str]] = dict(endpoints) if endpoints else {}
+        # name it does not carry (the two local operations) reads.
+        self._endpoints: dict[str, tuple[str, str]] = dict(endpoints)
         self._word_memos: dict[tuple[str, ...], _CatalogWords] = {}
         self._compacted_cache: dict[int, tuple[Tool, dict[str, Any], int]] = {}
         self._synthetic_tools: dict[str, Tool] = {}
@@ -191,11 +190,8 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
                     # The map is the fact of what the call executes.
                     return is_write_operation(endpoint[0])
                 # The map does not carry this name (the two local operations):
-                # fall back to the name-shape heuristic, which reads.
-                method = "GET"
-                if name[:3].lower() not in {"get", "doh", "plo"} and not name.startswith(("download", "plot")):
-                    method = "POST"
-                return is_write_operation(method)
+                # a miss reads, the same reading _endpoint_method applies.
+                return False
 
             results = sorted(tools, key=lambda t: (_is_write(getattr(t, "name", "")), getattr(t, "name", "")))
             # The fallback IS the catalog: an unmatchable query gets every tool
@@ -786,16 +782,14 @@ class CallToolShapeMiddleware(Middleware):
             return ()
 
 
-def build_search_transform(
-    mode: str, endpoints: Mapping[str, tuple[str, str]] | None = None
-) -> BM25SearchTransform | None:
+def build_search_transform(mode: str, endpoints: Mapping[str, tuple[str, str]]) -> BM25SearchTransform | None:
     """Return the configured search transform for ``mode`` (``off`` -> None).
 
     ``endpoints`` is the ``tool name -> (method, path template)`` map from the
     server's route parse. The factory wires it into the transform so the
-    full-catalog fallback classifies reads and writes from the spec itself; a
-    caller that has no map (none does today) gets the read-only fallback
-    heuristic, never a misclassified write list.
+    full-catalog fallback classifies reads and writes from the spec itself -
+    the fallback needs the map because a name-shape guess misreads every
+    list* tool as a write.
 
     Any other mode raises: ``config`` validates NEXTDNS_TOOL_SEARCH against
     its own accepted list, and the factory must not turn a mode added there

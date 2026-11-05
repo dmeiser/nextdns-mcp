@@ -1730,6 +1730,37 @@ class TestStraySweep:
         m = _FakeClient(by_path={"/profiles": {"status": 503, "ok": False, "body": "boom"}})
         assert asyncio.run(h._all_profile_ids(m)) is None
 
+    def test_all_profile_ids_follows_the_listing_cursor(self, h):
+        """One GET is one page; the map must cover every profile on the account."""
+        import asyncio
+
+        class _Paged:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def rest_get(self, path, params=None):
+                assert path == "/profiles"
+                self.calls.append((params or {}).get("cursor"))
+                if self.calls[-1] == "c2":
+                    return {"status": 200, "ok": True, "body": {"data": [{"id": "b2", "name": "Two"}]}}
+                return {"status": 200, "ok": True, "body": {"data": [{"id": "a1", "name": "One"}], "cursor": "c2"}}
+
+        m = _Paged()
+        assert asyncio.run(h._all_profile_ids(m)) == {"a1": "One", "b2": "Two"}
+        assert m.calls == [None, "c2"]
+
+    def test_all_profile_ids_is_none_when_a_later_page_fails(self, h):
+        """A truncated first page must not stand the stray sweep on a partial map."""
+        import asyncio
+
+        class _Paged:
+            async def rest_get(self, path, params=None):
+                if params and params.get("cursor"):
+                    return {"status": 503, "ok": False, "body": "boom"}
+                return {"status": 200, "ok": True, "body": {"data": [{"id": "a1"}], "cursor": "c2"}}
+
+        assert asyncio.run(h._all_profile_ids(_Paged())) is None
+
     def test_created_ids_come_from_successful_create_receipts(self, h):
         records = [
             {"endpoint": "POST /profiles", "ok": True, "result": '{"data": {"id": "new1"}}'},
@@ -2052,6 +2083,89 @@ class TestProfileProtectionProbeFailsClosed:
         monkeypatch.setattr("httpx.get", lambda url, **kw: calls.append(url))
         h.HarnessConfig.load(None)
         assert calls == []
+
+
+class TestProtectionProbeFollowsPagination:
+    """ProfileList paginates; a one-page probe protects only page one (mcp PR review)."""
+
+    @staticmethod
+    def _paging_get(monkeypatch, pages):
+        calls: list[dict] = []
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return pages[len(calls) - 1]
+
+        def _get(url, **kw):
+            calls.append(kw.get("params") or {})
+            if len(calls) > len(pages):
+                raise AssertionError("the probe requested more pages than were served")
+            return _Resp()
+
+        monkeypatch.setattr("httpx.get", _get)
+        return calls
+
+    def test_probe_protects_every_page_of_the_listing(self, h, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        calls = self._paging_get(
+            monkeypatch,
+            [
+                {"data": [{"id": "pre1"}], "cursor": "c2"},
+                {"data": [{"id": "pre2"}], "meta": {"pagination": {"cursor": None}}},
+            ],
+        )
+        cfg = h.HarnessConfig.load(None)
+        assert calls[0].get("cursor") is None
+        assert calls[1].get("cursor") == "c2"
+        protected = cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"]
+        assert "pre1" in protected and "pre2" in protected
+
+    def test_a_repeated_cursor_ends_the_walk(self, h, monkeypatch):
+        """A cursor that never exhausts must not spin the probe forever."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        calls = self._paging_get(
+            monkeypatch,
+            [
+                {"data": [{"id": "pre1"}], "cursor": "c2"},
+                {"data": [{"id": "pre2"}], "cursor": "c2"},
+            ],
+        )
+        cfg = h.HarnessConfig.load(None)
+        assert len(calls) == 2
+        protected = cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"]
+        assert "pre1" in protected and "pre2" in protected
+
+    def test_a_later_page_failure_still_aborts(self, h, monkeypatch):
+        import httpx
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+
+        class _Resp:
+            def __init__(self, payload=None, status=200):
+                self._payload = payload
+                self._status = status
+
+            def raise_for_status(self):
+                if self._status >= 400:
+                    raise httpx.HTTPStatusError("500", request=None, response=None)
+
+            def json(self):
+                return self._payload
+
+        def _get(url, **kw):
+            if kw.get("params", {}).get("cursor"):
+                return _Resp(status=500)
+            return _Resp({"data": [{"id": "pre1"}], "cursor": "c2"})
+
+        monkeypatch.setattr("httpx.get", _get)
+        with pytest.raises(h.HarnessAbortError, match="profile-protection probe failed"):
+            h.HarnessConfig.load(None)
 
 
 class TestAbnormalExitKillsTheProcessGroup:

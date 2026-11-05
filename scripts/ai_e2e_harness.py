@@ -536,13 +536,29 @@ def _profile_protection_probe(cfg: HarnessConfig) -> None:
             "profile-protection probe requires httpx, which is not importable; "
             "refusing to start a key-bearing run without pre-existing profile protection"
         ) from exc
+    # The ProfileList contract paginates, so one GET protects only the first
+    # page and every pre-existing profile on later pages stays writable. Follow
+    # the cursor to exhaustion; any page's transport/HTTP/JSON failure aborts,
+    # the same fail-closed contract the first page is held to.
+    rows = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
     try:
-        # api_base() validates https before any request is built (see
-        # ai_e2e_common.api_base); the ValueError it raises on a plaintext
-        # base propagates unchanged — it is the same loud refusal.
-        resp = _httpx.get(f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, timeout=10.0)
-        resp.raise_for_status()
-        rows = resp.json().get("data") or []
+        while True:
+            # api_base() validates https before any request is built (see
+            # ai_e2e_common.api_base); the ValueError it raises on a plaintext
+            # base propagates unchanged — it is the same loud refusal.
+            params = {"cursor": cursor} if cursor else {}
+            resp = _httpx.get(
+                f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, params=params, timeout=10.0
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            rows.extend(payload.get("data") or [])
+            cursor = _profile_list_cursor(payload)
+            if not cursor or cursor in seen_cursors:
+                break
+            seen_cursors.add(cursor)
     except HarnessAbortError:
         raise
     except Exception as exc:
@@ -554,6 +570,23 @@ def _profile_protection_probe(cfg: HarnessConfig) -> None:
     for row in rows:
         if isinstance(row, dict) and row.get("id"):
             _protect_server_profile(cfg, str(row["id"]))
+
+
+def _profile_list_cursor(payload: object) -> str | None:
+    """The next-page cursor of a ProfileList body, or None when the list ended."""
+    if not isinstance(payload, dict):
+        return None
+    cursor = payload.get("cursor")
+    if isinstance(cursor, str) and cursor:
+        return cursor
+    meta = payload.get("meta")
+    if isinstance(meta, dict):
+        pagination = meta.get("pagination")
+        if isinstance(pagination, dict):
+            nested = pagination.get("cursor")
+            if isinstance(nested, str) and nested:
+                return nested
+    return None
 
 
 def _protect_server_profile(config: HarnessConfig, profile_id: str) -> None:
@@ -1165,10 +1198,22 @@ async def _all_profile_ids(m: MeasureClient) -> dict[str, str] | None:
     to look like an empty account, which handed the stray sweep every profile on
     it. Callers must treat ``None`` as "account state uncertain".
     """
-    resp = await m.rest_get("/profiles")
-    rows = common._readable_rows(resp)
-    if rows is None:
-        return None
+    # Same pagination contract the protection probe holds: one GET is only
+    # the first page, and a page-truncated map under-protects and under-deletes.
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    rows: list[Any] = []
+    while True:
+        page = await m.rest_get("/profiles", params={"cursor": cursor} if cursor else None)
+        page_rows = common._readable_rows(page)
+        if page_rows is None:
+            return None
+        rows.extend(page_rows)
+        body = page.get("body") if isinstance(page, dict) else None
+        cursor = _profile_list_cursor(body)
+        if not cursor or cursor in seen_cursors:
+            break
+        seen_cursors.add(cursor)
     out: dict[str, str] = {}
     for p in rows:
         if isinstance(p, dict) and p.get("id"):

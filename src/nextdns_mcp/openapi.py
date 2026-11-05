@@ -55,6 +55,7 @@ from .call_log import CallLogMiddleware, call_log_path
 from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
 from .constants import SYNTHETIC_TOOL_NAMES
+from .spec_tools import endpoints_for_routes
 from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import close_doh_client
 from .tools.logs import cleanup_successful_downloads
@@ -593,12 +594,16 @@ def create_mcp_server(
             initialize instructions can describe a small catalog directly.
         endpoints: ``tool name -> (method, path template)`` for the call log,
             built once from the parsed routes by the server, so the log and the
-            tool surface are two views of one parse.
+            tool surface are two views of one parse. ``None`` falls back to the
+            shipped document's own parse; a caller registering tools from a
+            modified document must pass the parse it registered from.
 
     Returns:
         FastMCP: Configured MCP server instance
     """
     logger.info("Creating NextDNS MCP server...")
+    if endpoints is None:
+        endpoints = endpoints_for_routes()
     transforms: list[Any] = []
     tool_search_mode = get_tool_search_mode()
     search_transform = build_search_transform(tool_search_mode, endpoints=endpoints)
