@@ -602,8 +602,39 @@ def create_mcp_server(
         FastMCP: Configured MCP server instance
     """
     logger.info("Creating NextDNS MCP server...")
+    mcp, endpoints = _build_fastmcp_instance(tool_names, endpoints)
+
+    # Add middleware to strip unknown fields from tool arguments
+    # This allows AI clients (like OpenAI) that send extra fields to work properly
+    mcp.add_middleware(StripExtraFieldsMiddleware(tool_names=tool_names))
+
+    _add_call_log_middleware(mcp, endpoints)
+
+    logger.info("MCP server created successfully")
+    default_profile = get_default_profile()
+    if default_profile:
+        logger.info(f"Default profile: {default_profile}")
+
+    _register_health_endpoint(mcp)
+
+    return mcp
+
+
+def _build_fastmcp_instance(
+    tool_names: Sequence[str],
+    endpoints: Mapping[str, tuple[str, str]] | None,
+) -> tuple[FastMCP, Mapping[str, tuple[str, str]]]:
+    """Build the ``FastMCP`` instance with progressive disclosure wired.
+
+    Constructing the instance and the shape middleware stay one step because
+    the middleware must exist on the instance before any tool call is served.
+    The resolved endpoint map is returned beside the instance so the caller can
+    add the strip and call-log middlewares between/after the shape middleware
+    without re-deriving the map (or deriving one that disagrees with it).
+    """
     if endpoints is None:
         endpoints = endpoints_for_routes()
+
     transforms: list[Any] = []
     tool_search_mode = get_tool_search_mode()
     search_transform = build_search_transform(tool_search_mode, endpoints=endpoints)
@@ -631,31 +662,25 @@ def create_mcp_server(
     if search_transform is not None:
         mcp.add_middleware(CallToolShapeMiddleware(transform=search_transform, endpoints=endpoints))
 
-    # Add middleware to strip unknown fields from tool arguments
-    # This allows AI clients (like OpenAI) that send extra fields to work properly
-    mcp.add_middleware(StripExtraFieldsMiddleware(tool_names=tool_names))
+    return mcp, endpoints
 
-    # Record what this server actually executed (see nextdns_mcp.call_log). A
-    # read leaves no trace in the API, so a harness that verifies over REST
-    # cannot tell "the model read it" from "the model did nothing and the state
-    # was already right". The server can say, and it does so here. The path is
-    # read from the environment once and passed in, so the middleware cannot
-    # disagree with the "enabled" line logged beside it, and the endpoint map
-    # arrives from the server's single route parse rather than a registry this
-    # module would have to import and populate.
+
+def _add_call_log_middleware(mcp: FastMCP, endpoints: Mapping[str, tuple[str, str]]) -> None:
+    """Attach the call log when a path is configured (see ``nextdns_mcp.call_log``).
+
+    Record what this server actually executed. A read leaves no trace in the
+    API, so a harness that verifies over REST cannot tell "the model read it"
+    from "the model did nothing and the state was already right". The server
+    can say, and it does so here. The path is read from the environment once
+    and passed in, so the middleware cannot disagree with the "enabled" line
+    logged beside it, and the endpoint map arrives from the server's single
+    route parse rather than a registry this module would have to import and
+    populate.
+    """
     log_path = call_log_path()
     if log_path:
         mcp.add_middleware(CallLogMiddleware(path=log_path, endpoints=endpoints))
         logger.info("Call log enabled: %s", log_path)
-
-    logger.info("MCP server created successfully")
-    default_profile = get_default_profile()
-    if default_profile:
-        logger.info(f"Default profile: {default_profile}")
-
-    _register_health_endpoint(mcp)
-
-    return mcp
 
 
 def _register_health_endpoint(mcp: FastMCP) -> None:

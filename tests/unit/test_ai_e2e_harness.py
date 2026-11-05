@@ -2287,6 +2287,48 @@ class TestAbnormalExitKillsTheProcessGroup:
         assert "scratch" in created, "the run reached the scratch setup"
         assert created["scratch"].exists() is False, "the aborted run left its scratch dir behind"
 
+    def test_a_failing_teardown_does_not_mask_the_in_flight_crash(self, h, monkeypatch, capsys):
+        """A raisable teardown site on the crash path is logged, never re-raised.
+
+        A mid-run crash (here a KeyboardInterrupt from a Ctrl-C) is already
+        unwinding when the finally runs the teardown. A teardown request that
+        itself explodes (the MCP spawn path is the raisable site) must not
+        replace the crash: the original exception propagates and the teardown
+        failure is recorded, so the profile leak is diagnosed from the report
+        instead of a teardown traceback standing in for the crash (mcp PR
+        review round 2).
+        """
+        import asyncio
+
+        config = h.HarnessConfig(None) if None else h.HarnessConfig()
+        config.steps = "logs.get"  # a targeted range whose profile is harness-owned
+
+        async def provision(config_, targets):
+            return "pid-crash", "provisioned"
+
+        monkeypatch.setattr(h, "_harness_provision_profile", provision)
+
+        async def crash(config_, prompt, workdir, retries=1):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(h, "run_actor", crash)
+
+        async def wipe(m, pid, targets):
+            raise RuntimeError("rest read exploded")
+
+        # The teardown's _profile_gone (REST safety-net read) is a raisable
+        # site outside the MCP-delete try/except: a read explosion must be
+        # swallowed with the crash recorded, then re-raised as the crash.
+        monkeypatch.setattr(h, "_profile_gone", wipe)
+
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(h.run_harness("sk-test", config))
+        out = capsys.readouterr().err
+        assert "teardown interrupted while a mid-run crash was unwinding" in out, (
+            "the teardown failure was neither surfaced nor suppressed against the crash"
+        )
+        assert "rest read exploded" in out
+
     def test_write_mcp_config_redacts_a_key_inlined_by_a_config_file(self, h, tmp_path):
         """--config may inline a key; the generated opencode.json still may not."""
         cfg = h.HarnessConfig()
