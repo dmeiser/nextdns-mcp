@@ -447,20 +447,12 @@ class HarnessConfig:
         if plot_pid := os.environ.get("NEXTDNS_PLOT_PROFILE"):
             _protect_server_profile(cfg, plot_pid.strip())
         # Protect every profile that already exists on the account, so a model
-        # picking a wrong id during a write cannot hit a real profile.
-        api_key = os.environ.get("NEXTDNS_API_KEY")
-        try:
-            import httpx as _httpx
-        except ImportError:
-            _httpx = None
-        if api_key and _httpx is not None:
-            try:
-                resp = _httpx.get(f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, timeout=10.0)
-                for row in resp.json().get("data") or []:
-                    if isinstance(row, dict) and row.get("id"):
-                        _protect_server_profile(cfg, str(row["id"]))
-            except Exception as exc:  # noqa: BLE001
-                _progress(f"profile protection probe failed: {exc}")
+        # picking a wrong id during a write cannot hit a real profile. The probe
+        # FAILS CLOSED: any request or JSON failure aborts the run rather than
+        # continuing with an unknown pre-existing profile set (which, under
+        # NEXTDNS_WRITABLE_PROFILES=ALL, would leave every real profile
+        # model-writable).
+        _profile_protection_probe(cfg)
         return cfg
 
     def render_argv(self, values: dict[str, str]) -> list[str]:
@@ -512,6 +504,58 @@ def render_argv(template: list[str], values: dict[str, str]) -> list[str]:
 # the server's to publish, through channels any MCP client sees — the MCP
 # ``initialize`` instructions, the tool descriptions, and the usage
 # prompt/resource (see ``nextdns_mcp.usage`` and ``tool_search``).
+class HarnessAbortError(RuntimeError):
+    """The run cannot be made safe, so it must not start (or must not continue).
+
+    Raised by the profile-protection probe when the pre-existing profile set
+    cannot be established. Continuing without it would hand the actor an
+    ALL-writable server that real profiles are only nominally protected from,
+    so the failure is fatal to the run, never a warning line.
+    """
+
+
+def _profile_protection_probe(cfg: "HarnessConfig") -> None:
+    """Protect every profile that already exists on the account; FAIL CLOSED.
+
+    The probe's answer is what keeps a wrong-id write from reaching a real
+    profile. A probe that "fails open" (logs and continues) leaves the run
+    holding NEXTDNS_WRITABLE_PROFILES=ALL with an incomplete protected list —
+    the exact misconfiguration this step exists to prevent. So every failure
+    mode is fatal: a missing httpx, a transport error, a non-2xx answer, or an
+    unparseable body each raise :class:`HarnessAbortError` and ``main``
+    reports the aborted run with a non-zero exit. A run that never starts
+    cannot write to a profile it was never told to protect.
+    """
+    api_key = os.environ.get("NEXTDNS_API_KEY")
+    if not api_key:
+        return
+    try:
+        import httpx as _httpx
+    except ImportError as exc:
+        raise HarnessAbortError(
+            "profile-protection probe requires httpx, which is not importable; "
+            "refusing to start a key-bearing run without pre-existing profile protection"
+        ) from exc
+    try:
+        # api_base() validates https before any request is built (see
+        # ai_e2e_common.api_base); the ValueError it raises on a plaintext
+        # base propagates unchanged — it is the same loud refusal.
+        resp = _httpx.get(f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, timeout=10.0)
+        resp.raise_for_status()
+        rows = resp.json().get("data") or []
+    except HarnessAbortError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HarnessAbortError(
+            "profile-protection probe failed "
+            f"({type(exc).__name__}: {exc}); refusing to run with an unknown pre-existing "
+            "profile set — set NEXTDNS_PROTECTED_PROFILES explicitly or fix the API reachability"
+        ) from exc
+    for row in rows:
+        if isinstance(row, dict) and row.get("id"):
+            _protect_server_profile(cfg, str(row["id"]))
+
+
 def _protect_server_profile(config: HarnessConfig, profile_id: str) -> None:
     """Add ``profile_id`` to the child server's NEXTDNS_PROTECTED_PROFILES.
 
@@ -3537,9 +3581,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = HarnessConfig.load(args.config)
-    except ValueError as exc:
+    except (ValueError, HarnessAbortError) as exc:
         # A plaintext http base (or any other invalid base) is refused before
-        # any request carries the key; there is nothing to run.
+        # any request carries the key, and a failed profile-protection probe
+        # aborts rather than running unprotected; there is nothing to run.
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.harness_cmd:

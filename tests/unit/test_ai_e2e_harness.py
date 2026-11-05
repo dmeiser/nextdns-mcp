@@ -32,6 +32,26 @@ def h():
     return module
 
 
+@pytest.fixture(autouse=True)
+def _stub_probe_httpx(monkeypatch):
+    """The profile-protection probe's HTTP answer is faked for the whole module.
+
+    The probe fails closed, so an unstubbed probe would abort every config
+    load in tests that set NEXTDNS_API_KEY (and would hit the real network).
+    Tests that exercise probe behaviour install their own fake, which
+    overrides this one.
+    """
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": []}
+
+    monkeypatch.setattr("httpx.get", lambda url, **kw: _Resp())
+
+
 # =========================================================================== #
 # result classification
 # =========================================================================== #
@@ -1959,6 +1979,9 @@ class TestHttpsBaseRequired:
         calls: list[str] = []
 
         class _Resp:
+            def raise_for_status(self):
+                return None
+
             def json(self):
                 return {"data": [{"id": "pre22"}]}
 
@@ -1970,6 +1993,65 @@ class TestHttpsBaseRequired:
         cfg = h.HarnessConfig.load(None)
         assert calls == ["https://api.example.test/profiles"]
         assert cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"] == "pre22"
+
+
+class TestProfileProtectionProbeFailsClosed:
+    """A probe that cannot establish the pre-existing set must abort the run."""
+
+    def test_probe_timeout_aborts_the_config_load(self, h, monkeypatch):
+        import httpx
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+
+        def _boom(url, **kw):
+            raise httpx.ConnectTimeout("timed out reaching the API")
+
+        monkeypatch.setattr("httpx.get", _boom)
+        with pytest.raises(h.HarnessAbortError, match="profile-protection probe failed"):
+            h.HarnessConfig.load(None)
+
+    def test_probe_http_500_aborts_instead_of_continuing(self, h, monkeypatch):
+        import httpx
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+
+        class _Resp:
+            status_code = 500
+
+            def raise_for_status(self):
+                raise httpx.HTTPStatusError("500 Internal Server Error", request=None, response=None)
+
+            def json(self):  # pragma: no cover - raise_for_status fires first
+                return {}
+
+        monkeypatch.setattr("httpx.get", lambda url, **kw: _Resp())
+        with pytest.raises(h.HarnessAbortError, match="profile-protection probe failed"):
+            h.HarnessConfig.load(None)
+
+    def test_probe_unparseable_body_aborts(self, h, monkeypatch):
+        import json
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                raise json.JSONDecodeError("bad", "", 0)
+
+        monkeypatch.setattr("httpx.get", lambda url, **kw: _Resp())
+        with pytest.raises(h.HarnessAbortError, match="profile-protection probe failed"):
+            h.HarnessConfig.load(None)
+
+    def test_probe_without_a_key_is_a_no_op(self, h, monkeypatch):
+        monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+        calls: list[str] = []
+        monkeypatch.setattr("httpx.get", lambda url, **kw: calls.append(url))
+        h.HarnessConfig.load(None)
+        assert calls == []
 
     def test_write_mcp_config_redacts_a_key_inlined_by_a_config_file(self, h, tmp_path):
         """--config may inline a key; the generated opencode.json still may not."""
