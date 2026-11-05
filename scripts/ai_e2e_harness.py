@@ -2915,6 +2915,11 @@ def _prepare_scratch_dir() -> Path:
     scratch = Path.home() / ".cache" / "nextdns-mcp-e2e" / f"run-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     scratch.mkdir(parents=True, exist_ok=True)
     os.environ["TMPDIR"] = str(scratch)
+    # tempfile resolves and caches its directory at the first use. Priming
+    # the cache here keeps the workdir's mkdtemp inside the scratch even
+    # when an earlier tempfile call in this process already pinned the
+    # ambient temp dir.
+    tempfile.tempdir = str(scratch)
     atexit.register(partial(shutil.rmtree, scratch, ignore_errors=True))
     return scratch
 
@@ -3308,6 +3313,11 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 os.environ["TMPDIR"] = old_tmpdir  # type: ignore[index]
             else:
                 os.environ.pop("TMPDIR", None)
+        # Also clear the resolved-cache tempfile pinned at the scratch: it
+        # takes precedence over TMPDIR, so leaving it dangling would keep
+        # routing later mktemp calls at the deleted directory.
+        if tempfile.tempdir == str(scratch):
+            tempfile.tempdir = None
     report.actor_tool_calls = total_events
     report.actor_tools_used = tools_used
     report.actor_stderr = last_stderr[:4000]

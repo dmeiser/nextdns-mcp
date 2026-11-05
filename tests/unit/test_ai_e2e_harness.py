@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import ClassVar
 
@@ -3243,12 +3244,15 @@ class TestScratchIsolation:
         monkeypatch.setattr(h.Path, "home", classmethod(lambda cls: home))
         monkeypatch.setenv("TMPDIR", "preset")  # snapshot + restore TMPDIR around the test
 
+        old_cached = tempfile.tempdir
         scratch = h._prepare_scratch_dir()
         try:
             assert scratch.is_dir()
             assert home in scratch.parents
             assert os.environ["TMPDIR"] == str(scratch)
+            assert tempfile.tempdir == str(scratch)
         finally:
+            tempfile.tempdir = old_cached
             h.shutil.rmtree(scratch, ignore_errors=True)
 
     def test_prepare_scratch_leaves_other_instances_downloads_alone(self, h, tmp_path, monkeypatch):
@@ -3260,11 +3264,13 @@ class TestScratchIsolation:
         monkeypatch.setattr(h.Path, "home", classmethod(lambda cls: home))
         monkeypatch.setenv("TMPDIR", "preset")
 
+        old_cached = tempfile.tempdir
         scratch = h._prepare_scratch_dir()
         try:
             assert in_flight.exists()
             assert in_flight.parent == old_tmp
         finally:
+            tempfile.tempdir = old_cached
             h.shutil.rmtree(scratch, ignore_errors=True)
 
     def test_no_startup_sweep_touches_other_runs_files(self, h, tmp_path, monkeypatch):
@@ -3283,6 +3289,7 @@ class TestScratchIsolation:
         monkeypatch.setattr(h.Path, "home", classmethod(lambda cls: home))
         monkeypatch.setenv("TMPDIR", "preset")
 
+        old_cached = tempfile.tempdir
         scratch = h._prepare_scratch_dir()
         try:
             marker = in_flight / "partial.csv"
@@ -3290,6 +3297,7 @@ class TestScratchIsolation:
             h.shutil.rmtree(scratch, ignore_errors=True)
             assert marker.read_text(encoding="utf-8") == "another run's partial download"
         finally:
+            tempfile.tempdir = old_cached
             h.shutil.rmtree(scratch, ignore_errors=True)
 
 
