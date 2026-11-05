@@ -8,6 +8,7 @@ by file path.
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -2052,6 +2053,94 @@ class TestProfileProtectionProbeFailsClosed:
         monkeypatch.setattr("httpx.get", lambda url, **kw: calls.append(url))
         h.HarnessConfig.load(None)
         assert calls == []
+
+
+class TestAbnormalExitKillsTheProcessGroup:
+    """No abnormal path leaves the actor or its MCP server alive."""
+
+    @staticmethod
+    async def _spawn():
+        return await asyncio.create_subprocess_exec(
+            "sleep",
+            "30",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+
+    @staticmethod
+    def _assert_group_reaped(pgid: int) -> None:
+        """The group has no live member: signal-0 probe keeps failing.
+
+        A short retry covers the orphaned-grandchild case: an init reaps an
+        orphaned zombie on its own schedule, so a single probe could still see
+        it milliseconds after the kill.
+        """
+        import time
+
+        for _ in range(30):
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        pytest.fail(f"process group {pgid} still has a live member")
+
+    def test_timeout_kills_the_group(self, h):
+        async def go():
+            proc = await self._spawn()
+            _out, _err, timed_out = await h._collect_streams(proc, 0.3)
+            assert timed_out
+            await asyncio.wait_for(proc.wait(), 5)  # reap before probing
+            self._assert_group_reaped(proc.pid)
+
+        asyncio.run(go())
+
+    def test_cancellation_kills_the_group(self, h):
+        async def go():
+            proc = await self._spawn()
+            task = asyncio.ensure_future(h._collect_streams(proc, 60))
+            await asyncio.sleep(0.3)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(proc.wait(), 5)
+            self._assert_group_reaped(proc.pid)
+
+        asyncio.run(go())
+
+    def test_keyboard_interrupt_kills_the_group(self, h, monkeypatch):
+        import asyncio
+
+        def _interrupt(coro, *args, **kwargs):
+            coro.close()  # the harness hands wait_for a fresh proc.wait() coroutine
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(asyncio, "wait_for", _interrupt)
+
+        async def go():
+            proc = await self._spawn()
+            with pytest.raises(KeyboardInterrupt):
+                await h._collect_streams(proc, 60)
+            await proc.wait()  # wait_for is patched; the SIGKILL'd child reaps immediately
+            await asyncio.sleep(0.1)  # let the drain tasks see their closed pipes
+            self._assert_group_reaped(proc.pid)
+
+        asyncio.run(go())
+
+    def test_abnormal_actor_exit_reaps_the_spawned_server(self, h, tmp_path):
+        """run_actor kills the group when the actor exits non-zero.
+
+        The stand-in actor backgrounds a long sleeper (the MCP server it
+        "spawned") and exits 1; the sleeper shares the actor's process group,
+        so a live member after run_actor returns is the leak under test.
+        """
+        marker = tmp_path / "actor-pgid"
+        cfg = h.HarnessConfig(command=["sh", "-c", f"sleep 30 & echo $$ > {marker}; exit 1"])
+        run = asyncio.run(h.run_actor(cfg, "prompt", tmp_path))
+        assert run.error  # the attempt itself failed ...
+        assert run.ok is False  # ... and the group was torn down with it
+        self._assert_group_reaped(int(marker.read_text().strip()))
 
     def test_write_mcp_config_redacts_a_key_inlined_by_a_config_file(self, h, tmp_path):
         """--config may inline a key; the generated opencode.json still may not."""

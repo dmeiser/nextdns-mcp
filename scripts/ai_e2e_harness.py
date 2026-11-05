@@ -514,7 +514,7 @@ class HarnessAbortError(RuntimeError):
     """
 
 
-def _profile_protection_probe(cfg: "HarnessConfig") -> None:
+def _profile_protection_probe(cfg: HarnessConfig) -> None:
     """Protect every profile that already exists on the account; FAIL CLOSED.
 
     The probe's answer is what keeps a wrong-id write from reaching a real
@@ -545,7 +545,7 @@ def _profile_protection_probe(cfg: "HarnessConfig") -> None:
         rows = resp.json().get("data") or []
     except HarnessAbortError:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HarnessAbortError(
             "profile-protection probe failed "
             f"({type(exc).__name__}: {exc}); refusing to run with an unknown pre-existing "
@@ -880,13 +880,37 @@ def parse_actor_events(lines: list[str]) -> tuple[list[ToolCall], str]:
 # =========================================================================== #
 
 
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """SIGKILL the actor's whole process group, falling back to the direct child.
+
+    The actor is its own session (``start_new_session=True``), so the group is
+    the actor plus everything it spawned — the MCP server included. Without
+    this, a timed-out or crashed actor left its MCP server alive, and that
+    server kept writing state and call records that later steps attributed to
+    themselves. Best effort throughout: an already-dead group is success.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+        return
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass
+    with _suppress():
+        proc.kill()
+
+
 async def _collect_streams(proc: asyncio.subprocess.Process, timeout_s: float) -> tuple[list[bytes], list[bytes], bool]:
     """Drain the actor's stdout and stderr while it runs, up to ``timeout_s``.
 
     Returns (stdout lines, stderr chunks, timed_out). On a timeout whatever the
     actor had already written is returned with it: the event stream is what
     shows whether the model stalled before its first tool call or in the middle
-    of a chain, and discarding it made a timed-out step un diagnosable.
+    Every abnormal exit — timeout, task cancellation (Ctrl-C arrives as
+    :class:`asyncio.CancelledError` inside the loop), or a
+    :class:`KeyboardInterrupt` — kills the actor's whole process group before
+    propagating, so neither the actor nor the MCP server it spawned survives
+    teardown to keep writing state or call records.
     """
     out: list[bytes] = []
     err: list[bytes] = []
@@ -909,11 +933,10 @@ async def _collect_streams(proc: asyncio.subprocess.Process, timeout_s: float) -
         await asyncio.wait_for(proc.wait(), timeout=timeout_s)
     except TimeoutError:
         timed_out = True
-        with _suppress():
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                proc.kill()
+        _kill_process_group(proc)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        _kill_process_group(proc)
+        raise
     # The pipes close when the process does, so the drains finish on their own;
     # bounded so a child that leaves a grandchild holding a pipe cannot hang the
     # harness here.
@@ -987,6 +1010,11 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
         # produced, so the one question that matters most on a timeout - where
         # did the model stop? - was the one the report could not answer.
         out_lines, err_chunks, timed_out = await _collect_streams(proc, config.timeout_s)
+        # An abnormal actor exit (non-zero code, including a crash that already
+        # reaped the direct child) gets the same process-group teardown as a
+        # timeout: nothing the actor spawned outlives the attempt.
+        if timed_out or proc.returncode not in (0, None):
+            _kill_process_group(proc)
 
         err_text = b"".join(err_chunks).decode("utf-8", errors="replace").strip()
         run.stderr = err_text
