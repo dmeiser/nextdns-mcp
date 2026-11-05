@@ -2944,6 +2944,8 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     # reclaims it - atexit alone left a 500 MB log CSV behind on any path
     # that unwound without process exit (cancellation, Ctrl-C, a mid-run
     # exception).
+    had_tmpdir = "TMPDIR" in os.environ
+    old_tmpdir = os.environ.get("TMPDIR")
     scratch = _prepare_scratch_dir()
     try:
         workdir = Path(config.workdir) if config.workdir else Path(tempfile.mkdtemp(prefix="nextdns_e2e_"))
@@ -3297,6 +3299,15 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
 
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+        # The scratch dir is gone; a TMPDIR still pointing at it breaks every
+        # later mktemp in this process (run-scoped tests drive run_harness
+        # in-process). Restore the ambient value - but only if nothing else
+        # moved TMPDIR after we set it.
+        if os.environ.get("TMPDIR") == str(scratch):
+            if had_tmpdir:
+                os.environ["TMPDIR"] = old_tmpdir  # type: ignore[index]
+            else:
+                os.environ.pop("TMPDIR", None)
     report.actor_tool_calls = total_events
     report.actor_tools_used = tools_used
     report.actor_stderr = last_stderr[:4000]
