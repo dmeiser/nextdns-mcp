@@ -193,10 +193,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
                 # The map does not carry this name (the two local operations):
                 # fall back to the name-shape heuristic, which reads.
                 method = "GET"
-                if (
-                    name[:3].lower() not in {"get", "doh", "plo"}
-                    and not name.startswith(("download", "plot"))
-                ):
+                if name[:3].lower() not in {"get", "doh", "plo"} and not name.startswith(("download", "plot")):
                     method = "POST"
                 return is_write_operation(method)
 
@@ -516,8 +513,6 @@ def _name_from_search_answer(value: Any) -> str:
     return ""
 
 
-
-
 def _dict_or_empty(value: Any) -> dict[str, Any]:
     """A supplied value as a dict copy, or empty when it is not a dict at all."""
     return dict(value) if isinstance(value, dict) else {}
@@ -791,7 +786,9 @@ class CallToolShapeMiddleware(Middleware):
             return ()
 
 
-def build_search_transform(mode: str, endpoints: Mapping[str, tuple[str, str]] | None = None) -> BM25SearchTransform | None:
+def build_search_transform(
+    mode: str, endpoints: Mapping[str, tuple[str, str]] | None = None
+) -> BM25SearchTransform | None:
     """Return the configured search transform for ``mode`` (``off`` -> None).
 
     ``endpoints`` is the ``tool name -> (method, path template)`` map from the

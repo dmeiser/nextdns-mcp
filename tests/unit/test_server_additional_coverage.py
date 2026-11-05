@@ -41,9 +41,7 @@ async def test_middleware_leaves_leading_zero_identifiers_alone():
             return StringDummyTool()
 
     context = DummyContext("tool", {})
-    context.fastmcp_context.fastmcp = SimpleNamespace(
-        get_tool=StringToolManager().get_tool, list_tools=_no_tools
-    )
+    context.fastmcp_context.fastmcp = SimpleNamespace(get_tool=StringToolManager().get_tool, list_tools=_no_tools)
     context.message.arguments = {"password": "0012"}
     result = await mw.on_call_tool(context, _dummy_call_next)
     assert result == {"password": "0012"}
