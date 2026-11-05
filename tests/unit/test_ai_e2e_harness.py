@@ -1938,6 +1938,39 @@ class TestSecretHandling:
 
         asyncio.run(go())
 
+
+class TestHttpsBaseRequired:
+    """An http base must be refused before the API key is sent anywhere (SEC)."""
+
+    def test_http_base_is_refused_before_any_request(self, h, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_API_BASE", "http://plain.example.test")
+        calls: list[str] = []
+        monkeypatch.setattr("httpx.get", lambda url, **kw: calls.append(url))
+        with pytest.raises(ValueError, match="https://"):
+            h.HarnessConfig.load(None)
+        # The probe never fired: the key never left for a plaintext host.
+        assert calls == []
+
+    def test_https_base_proceeds_to_the_probe(self, h, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://api.example.test")
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        calls: list[str] = []
+
+        class _Resp:
+            def json(self):
+                return {"data": [{"id": "pre22"}]}
+
+        def _get(url, **kw):
+            calls.append(url)
+            return _Resp()
+
+        monkeypatch.setattr("httpx.get", _get)
+        cfg = h.HarnessConfig.load(None)
+        assert calls == ["https://api.example.test/profiles"]
+        assert cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"] == "pre22"
+
     def test_write_mcp_config_redacts_a_key_inlined_by_a_config_file(self, h, tmp_path):
         """--config may inline a key; the generated opencode.json still may not."""
         cfg = h.HarnessConfig()

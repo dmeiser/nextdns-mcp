@@ -3535,7 +3535,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Report written to {args.report}")
         return 0
 
-    config = HarnessConfig.load(args.config)
+    try:
+        config = HarnessConfig.load(args.config)
+    except ValueError as exc:
+        # A plaintext http base (or any other invalid base) is refused before
+        # any request carries the key; there is nothing to run.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.harness_cmd:
         config.command = _as_argv(args.harness_cmd)
     if args.model:
@@ -3552,7 +3558,13 @@ def main(argv: list[str] | None = None) -> int:
     config.verbose = bool(args.verbose)
     config.codemode = args.codemode == "on"
 
-    report = asyncio.run(run_harness(api_key, config))
+    try:
+        report = asyncio.run(run_harness(api_key, config))
+    except ValueError as exc:
+        # Same refusal class as config load: the measuring client also resolves
+        # the base at run time, and a late discovery must fail as loudly.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     write_report(report, args.report, args.actor_log)
     if args.report != "-":
         print(f"Report written to {args.report}")
