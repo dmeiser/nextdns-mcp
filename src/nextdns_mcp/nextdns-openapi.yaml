@@ -182,7 +182,7 @@ components:
           description: DNS query type (A, AAAA, etc.)
         status:
           type: string
-          description: Response status (default, blocked, allowed)
+          description: Response status (default, blocked, allowed, relayed)
         timestamp:
           type: string
           format: date-time
@@ -198,7 +198,7 @@ components:
             properties:
               status:
                 type: string
-                description: Query status (default, blocked, allowed)
+                description: Query status (default, blocked, allowed, relayed)
               queries:
                 type: integer
                 description: Number of queries with this status
@@ -527,7 +527,7 @@ components:
       description: Filter results by query status
       schema:
         type: string
-        enum: [default, blocked, allowed]
+        enum: [default, blocked, allowed, relayed]
 
     Root:
       name: root
@@ -2659,7 +2659,7 @@ paths:
           description: Filter by query status
           schema:
             type: string
-            enum: [default, blocked, allowed]
+            enum: [default, blocked, allowed, relayed]
         - name: search
           in: query
           description: Search query for domain names
