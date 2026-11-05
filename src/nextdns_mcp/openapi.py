@@ -597,7 +597,7 @@ def create_mcp_server(
     logger.info("Creating NextDNS MCP server...")
     transforms: list[Any] = []
     tool_search_mode = get_tool_search_mode()
-    search_transform = build_search_transform(tool_search_mode)
+    search_transform = build_search_transform(tool_search_mode, endpoints=endpoints)
     if search_transform is not None:
         transforms.append(search_transform)
         logger.info(

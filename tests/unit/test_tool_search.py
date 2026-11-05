@@ -1203,25 +1203,94 @@ class TestFastMCPPrivateSurface:
         assert fastmcp.__version__ == "4.1.2"
 
 
-def test_loose_write_refused_raises_clean():
+def test_a_loosely_matched_write_name_is_refused_with_the_catalog(monkeypatch):
+    """A write runs only under its exact name: a loose match is refused, not run.
+
+    Executing a write the caller never singled out is kept inside the reads:
+    the refusal names what the words matched so the caller re-sends the exact
+    name. The module's real helpers do the resolving — only the endpoint map
+    is supplied, as the server wires it.
+    """
     import asyncio
-    from types import SimpleNamespace
+
+    from fastmcp.tools.base import Tool
 
     import nextdns_mcp.tool_search as ts
 
-    tools = [SimpleNamespace(name="deleteProfile")]
-    transform = ts.CallToolShapeMiddleware.__new__(ts.CallToolShapeMiddleware)
-    transform._endpoint_method = lambda name: "DELETE"
-    ts._name_from_search_answer = lambda supplied: "profiles_delete"
-    ts._note_search_answer_name = lambda supplied, resolved: None
-    transform._refuse_ambiguous_write = lambda supplied: None
-    ts._passthrough_resolution = lambda resolved, by_name: None
-    ts._resolved_entry = lambda resolved, by_name: ("deleteProfile", SimpleNamespace(name="deleteProfile"))
+    tools = [Tool.from_function(lambda: None, name="deleteProfile")]
+    middleware = ts.CallToolShapeMiddleware(endpoints={"deleteProfile": ("DELETE", "/profiles/{profile_id}")})
 
     async def main():
-        try:
-            await transform._resolve_tool_name("profiles_delete", tools)
-        except Exception as exc:  # noqa: BLE001
-            assert "unknown" in str(exc).lower() or True
+        with pytest.raises(ts.ToolError) as excinfo:
+            await middleware._resolve_tool_name("profiles_delete", tools)
+        message = str(excinfo.value)
+        assert "'profiles_delete' is not a tool of this server" in message
+        assert "deleteProfile takes" in message
+        # The exact name still resolves: only the loose write is refused.
+        resolved, target = await middleware._resolve_tool_name("deleteProfile", tools)
+        assert resolved == "deleteProfile"
+        assert target is tools[0]
+
+    asyncio.run(main())
+
+
+def test_the_fallback_classifies_writes_from_the_endpoint_map():
+    """The no-match fallback sorts reads first using the spec's own methods.
+
+    The name-shape heuristic it replaces read every list* tool as a write, so
+    a model that found nothing got a page of mutations. build_search_transform
+    wires the route parse into the transform; the fallback answers with the
+    GETs ahead of the writes.
+    """
+    import asyncio
+
+    from fastmcp.tools.base import Tool
+
+    import nextdns_mcp.tool_search as ts
+
+    tools = [
+        Tool.from_function(lambda: None, name="addToDenylist"),
+        Tool.from_function(lambda: None, name="deleteProfile"),
+        Tool.from_function(lambda: None, name="listProfiles"),
+        Tool.from_function(lambda: None, name="listRewrites"),
+    ]
+    endpoints = {
+        "addToDenylist": ("POST", "/profiles/{profile_id}/denylist"),
+        "deleteProfile": ("DELETE", "/profiles/{profile_id}"),
+        "listProfiles": ("GET", "/profiles"),
+        "listRewrites": ("GET", "/profiles/{profile_id}/rewrites"),
+    }
+    transform = ts.build_search_transform("bm25", endpoints=endpoints)
+    assert transform is not None
+    assert transform._endpoints == endpoints
+
+    async def main():
+        ranked = [t.name for t in await transform._search(tools, "qxqv zzxj no such tool words")]
+        assert ranked.index("listProfiles") < ranked.index("addToDenylist")
+        assert ranked.index("listProfiles") < ranked.index("deleteProfile")
+        assert ranked.index("listRewrites") < ranked.index("addToDenylist")
+        assert ranked.index("listRewrites") < ranked.index("deleteProfile")
+
+    asyncio.run(main())
+
+
+def test_the_fallback_without_an_endpoint_map_keeps_the_read_only_heuristic():
+    """No map (no caller has one today) falls back to name shapes, reading."""
+    import asyncio
+
+    from fastmcp.tools.base import Tool
+
+    import nextdns_mcp.tool_search as ts
+
+    tools = [
+        Tool.from_function(lambda: None, name="addToDenylist"),
+        Tool.from_function(lambda: None, name="getDenylist"),
+    ]
+    transform = ts.build_search_transform("bm25")
+    assert transform is not None and transform._endpoints == {}
+
+    async def main():
+        ranked = [t.name for t in await transform._search(tools, "qxqv zzxj no such tool words")]
+        assert ranked.index("getDenylist") < ranked.index("addToDenylist")
 
     asyncio.run(main())
