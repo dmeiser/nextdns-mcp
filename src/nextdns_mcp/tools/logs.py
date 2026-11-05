@@ -56,6 +56,26 @@ def _unlink_temp_file(path: str) -> None:
         pass
 
 
+# Successful downloads this process has handed out. The CSV must outlive the
+# tool call - the caller reads the file at the returned path after the call
+# returns - so it cannot be removed when the call ends. Registration here is
+# what bounds total disk use: the server lifespan removes everything in this
+# set at shutdown (see nextdns_mcp.openapi._server_lifespan), so successful
+# downloads no longer accumulate on disk for the life of the container.
+_SUCCESSFUL_DOWNLOADS: set[str] = set()
+
+
+def cleanup_successful_downloads() -> None:
+    """Remove every successful-download temp file and its directory.
+
+    Called once at server shutdown. A downloadLogs CSV can be hundreds of MB;
+    without this the file outlived the process that created it. Best effort
+    and idempotent: a second call has nothing registered and does nothing.
+    """
+    while _SUCCESSFUL_DOWNLOADS:
+        _unlink_temp_file(_SUCCESSFUL_DOWNLOADS.pop())
+
+
 # Caps for log downloads: the CSV is streamed to a temp file (never buffered
 # twice or inlined into the tool payload) and only a bounded preview is
 # returned so large downloads cannot blow up the LLM context. The total
@@ -584,6 +604,10 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     downloaded = False
     try:
         payload, downloaded = await _download_logs_controlled(profile_id, path)
+        if downloaded:
+            # The file must survive until the caller has read it; the server
+            # lifespan reclaims it at shutdown (see cleanup_successful_downloads).
+            _SUCCESSFUL_DOWNLOADS.add(path)
         return payload
     except httpx.HTTPError as e:
         logger.error(f"HTTP error downloading logs: {_log_safe_error(e)}")

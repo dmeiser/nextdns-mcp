@@ -490,6 +490,29 @@ class TestDownloadTool:
         assert os.path.exists(payload["file_path"])
         assert payload["preview"]["text"].startswith("host,reason")
 
+    async def test_a_successful_download_is_reclaimed_at_shutdown(self, monkeypatch, unauthenticated):
+        """The kept CSV is bounded: the lifespan cleanup removes it and its dir.
+
+        The file must outlive the call (the caller reads the returned path),
+        so the reclaim point is server shutdown - without it, every successful
+        download accumulated for the life of the container.
+        """
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        monkeypatch.setattr(
+            client_module,
+            "api_client",
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)]),
+        )
+        unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+
+        payload = await logs_module._download_logs_to_tempfile("abc123")
+        assert os.path.exists(payload["file_path"])
+        assert payload["file_path"] in logs_module._SUCCESSFUL_DOWNLOADS
+        logs_module.cleanup_successful_downloads()
+        assert not os.path.exists(payload["file_path"])
+        assert not os.path.exists(os.path.dirname(payload["file_path"]))
+        logs_module.cleanup_successful_downloads()  # idempotent: nothing registered, nothing to do
+
     async def test_an_acl_denial_is_typed_and_leaves_no_temp_file(self, monkeypatch):
         class Denied:
             def stream(self, method, url, **kwargs):

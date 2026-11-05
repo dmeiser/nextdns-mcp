@@ -2142,6 +2142,27 @@ class TestAbnormalExitKillsTheProcessGroup:
         assert run.ok is False  # ... and the group was torn down with it
         self._assert_group_reaped(int(marker.read_text().strip()))
 
+    def test_the_scratch_dir_is_reclaimed_when_the_run_aborts(self, h, monkeypatch):
+        """Scratch cleanup must not be atexit-only: a run that unwinds mid-way
+        (cancellation, Ctrl-C, a mid-run exception) still leaves no 500 MB log
+        CSV behind. An http API base aborts the run at the measuring client's
+        first use - after the scratch dir exists."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_API_BASE", "http://plain.example.test")
+        created: dict[str, Path] = {}
+        real_prepare = h._prepare_scratch_dir
+
+        def _spying_prepare():
+            scratch = real_prepare()
+            created["scratch"] = scratch
+            return scratch
+
+        monkeypatch.setattr(h, "_prepare_scratch_dir", _spying_prepare)
+        with pytest.raises(ValueError, match="https://"):
+            asyncio.run(h.run_harness("sk-test", h.HarnessConfig()))
+        assert "scratch" in created, "the run reached the scratch setup"
+        assert created["scratch"].exists() is False, "the aborted run left its scratch dir behind"
+
     def test_write_mcp_config_redacts_a_key_inlined_by_a_config_file(self, h, tmp_path):
         """--config may inline a key; the generated opencode.json still may not."""
         cfg = h.HarnessConfig()
