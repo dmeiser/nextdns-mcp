@@ -15,7 +15,9 @@ on:
     tags:
       - 'v*.*.*'  # Also run on version tags
   pull_request:
-    branches: [ main ]  # Run on all PRs to main
+    # main plus the stacked-feature branches: PRs stacked on fm/* (the
+    # openapi-only stack) get real CI instead of none (see PR #384).
+    branches: [ main, "fm/*" ]  # Run on all PRs to main and to stacked feature branches
   workflow_dispatch:
   merge_group:
 
