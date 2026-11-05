@@ -10,6 +10,7 @@ import sys
 from typing import Any
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from .client import get_api_client
 from .config import (
@@ -32,6 +33,13 @@ logger = logging.getLogger(__name__)
 # describe, so they are the two hand-written tools published beside the generated
 # ones — and a caller would otherwise have no way to know they exist.
 _COMPOSITE_TOOLS = (plotAnalytics, dohLookup)
+
+# Neither composite tool mutates anything: dohLookup answers a DNS question and
+# plotAnalytics renders a chart from analytics already collected. The generated
+# SpecApiTool derives these hints from the endpoint method; the composites have
+# no endpoint, so the hints are stated here — without them a caller scanning for
+# destructive tools gets no signal either way.
+_COMPOSITE_ANNOTATIONS = ToolAnnotations(read_only_hint=True, destructive_hint=False)
 
 _mcp_server: FastMCP | None = None
 
@@ -71,7 +79,10 @@ def build_mcp_server() -> FastMCP:
         # description, so the accepted values and the worked example further down
         # would never reach a caller — and for these two tools that is exactly the
         # part a caller needs (a chart's interval range, a lookup's record types).
-        server.tool(description=inspect.getdoc(tool) or "")(tool)
+        server.tool(
+            description=inspect.getdoc(tool) or "",
+            annotations=_COMPOSITE_ANNOTATIONS,
+        )(tool)
     return server
 
 

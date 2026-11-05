@@ -117,6 +117,22 @@ class TestProductionServerTools:
         assert {"plotAnalytics", "dohLookup"} <= names
 
     @pytest.mark.asyncio
+    async def test_the_composite_tools_announce_themselves_as_read_only(self):
+        """The generated tools derive their hints from the endpoint method; the
+        composites have no endpoint, so their annotations are stated by hand —
+        a caller scanning for destructive tools must see them as safe."""
+        from nextdns_mcp.server import build_mcp_server
+
+        tools = {tool.name: tool for tool in await build_mcp_server().list_tools()}
+        for name in ("plotAnalytics", "dohLookup"):
+            annotations = tools[name].annotations
+            assert annotations is not None
+            assert annotations.read_only_hint is True
+            assert annotations.destructive_hint is False
+        # The generated side still flags writes, so the comparison is meaningful.
+        assert tools["deleteProfile"].annotations.destructive_hint is True
+
+    @pytest.mark.asyncio
     async def test_the_grouped_area_tools_are_not_published(self):
         """The eight area tools are gone, and so is the second choice they imposed.
 
