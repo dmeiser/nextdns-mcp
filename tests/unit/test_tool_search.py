@@ -497,12 +497,12 @@ class TestSearchFallback:
             names = [t.get("name") for t in found.data]
 
         assert names, "an unmatchable query returned nothing"
-        # Everything it falls back to is a tool this server will actually run, and
-        # at least some of it is generated from the spec: the fallback has to
-        # surface the API surface, not just the two hand-written tools.
         assert set(names) <= set(published_tool_names())
         assert set(names) & set(spec_tool_names())
-        assert len(names) <= ts.CATALOG_MAX_RESULTS
+        # The fallback answers with the catalog itself, not a six-entry sample
+        # (which used to be six add* writes - a page of mutations). The
+        # whole-answer byte budget (SEARCH_ANSWER_MAX_BYTES) is what bounds it.
+        assert len(names) > ts.CATALOG_MAX_RESULTS
 
     def test_build_transform_types(self):
         from fastmcp.server.transforms.search import BM25SearchTransform

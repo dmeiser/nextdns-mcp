@@ -76,6 +76,12 @@ def cleanup_successful_downloads() -> None:
         _unlink_temp_file(_SUCCESSFUL_DOWNLOADS.pop())
 
 
+def _note_successful_download(path: str, downloaded: bool) -> None:
+    """Register a fully-written CSV for shutdown reclaim; failures stay unregistered."""
+    if downloaded:
+        _SUCCESSFUL_DOWNLOADS.add(path)
+
+
 # Caps for log downloads: the CSV is streamed to a temp file (never buffered
 # twice or inlined into the tool payload) and only a bounded preview is
 # returned so large downloads cannot blow up the LLM context. The total
@@ -604,10 +610,9 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     downloaded = False
     try:
         payload, downloaded = await _download_logs_controlled(profile_id, path)
-        if downloaded:
-            # The file must survive until the caller has read it; the server
-            # lifespan reclaims it at shutdown (see cleanup_successful_downloads).
-            _SUCCESSFUL_DOWNLOADS.add(path)
+        # The file must survive until the caller has read it; the server
+        # lifespan reclaims it at shutdown (see cleanup_successful_downloads).
+        _note_successful_download(path, downloaded)
         return payload
     except httpx.HTTPError as e:
         logger.error(f"HTTP error downloading logs: {_log_safe_error(e)}")

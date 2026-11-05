@@ -673,10 +673,18 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
                 return is_write_operation(method)
 
             results = sorted(tools, key=lambda t: (_is_write(getattr(t, "name", "")), getattr(t, "name", "")))
+            # The fallback IS the catalog: an unmatchable query gets every tool
+            # (reads first), not a six-entry sample - a small model that finds
+            # nothing needs the surface, and six entries of it taught it the
+            # catalog was six add* writes. Serialization still enforces the
+            # whole-answer byte budget, so the answer stays readable.
+            fell_back = True
+        else:
+            fell_back = False
         merged = _merge_named_results(results, tools, named)
         shared = (catalog.name_shared, catalog.vocab_shared)
         ranked = _rank_by_name_overlap(merged, stripped, catalog.names, catalog.vocabulary, shared)
-        return ranked[: self._max_results]
+        return ranked if fell_back else ranked[: self._max_results]
 
     def _make_search_tool(self) -> Tool:
         """FastMCP's search tool, with this server's discovery contract on it.
