@@ -734,35 +734,61 @@ class TestDiallingTheVettedAddress:
             await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
         assert [url for _, url in follower.calls] == [signed], "the poisoned second hop was fetched"
 
-    async def test_the_pinned_resolver_is_installed_while_the_hop_is_fetched(self, tmp_path, monkeypatch):
-        signed = "https://storage.example/file.csv"
+    async def test_a_real_httpx_connection_dials_the_vetted_address(self):
+        """The pin owns the dial: a real connection through a real httpx client.
 
-        def public(host: str, port: Any, **kwargs: Any) -> list[Any]:
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_IP, 0))]
+        The previous version of this test used a fake client that merely
+        recorded which resolver was installed - it proved the swap existed,
+        not that httpcore's real resolution path dials the vetted address.
+        Here a real TCP server stands in for the storage host: the URL names
+        a public hostname, the pin answers it with the listener's address,
+        and the request must actually arrive - Host header still the
+        hostname, and a bytes name (the shape anyio hands httpcore) decoded
+        before the compare.
+        """
+        hits: list[tuple[bytes, bytes]] = []
+        body = b"host,reason\na.example,blocked\n"
 
-        monkeypatch.setattr(socket, "getaddrinfo", public)
-        observed: dict[str, Any] = {}
+        async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            request_line = await reader.readline()
+            headers = b""
+            while True:
+                line = await reader.readline()
+                if line in (b"\r\n", b""):
+                    break
+                headers += line
+            hits.append((request_line, headers))
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Length: "
+                + str(len(body)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+            writer.close()
 
-        class _ProbeClient:
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
-                pass
-
-            def stream(self, method: str, url: Any, **kwargs: Any) -> Any:
-                observed["resolver"] = socket.getaddrinfo
-                observed["url"] = str(url)
-                return _FakeResponse(str(url), chunks=["a\n"])
-
-            async def aclose(self) -> None:
-                pass
-
-        monkeypatch.setattr(httpx, "AsyncClient", _ProbeClient)
-        await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
-
-        pinned = observed["resolver"]
-        assert pinned is not public, "the fetch ran with the process resolver, not the pinned one"
-        assert pinned("storage.example", None)[0][4][0] == PUBLIC_IP
-        assert pinned("other.example", None)[0][4][0] == PUBLIC_IP, "other names fall through to the real resolver"
-        assert observed["url"] == signed, "the request URL stays hostname-based (SNI, Host, cert)"
+        server = await asyncio.start_server(_serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        # anyio dials (vetted address, URL port): the port must come from the
+        # URL, only the address comes from the pin (production: always 443).
+        vetted = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+        try:
+            async with logs_module._PIN_FETCH_LOCK:
+                with logs_module._pinned_dns("pin.example", vetted):
+                    # anyio passes bytes names to getaddrinfo: the pin must
+                    # decode before comparing, or it never matches.
+                    assert socket.getaddrinfo(b"pin.example", None, type=socket.SOCK_STREAM) == vetted
+                    async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+                        response = await client.get(f"http://pin.example:{port}/file.csv")
+            assert response.status_code == 200
+            assert response.content == body
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert len(hits) == 1, "exactly one real connection arrived"
+        request_line, headers = hits[0]
+        assert request_line.startswith(b"GET /file.csv ")
+        assert b"host: pin.example" in headers.lower(), "the dialled IP is the vetted one; the Host stays the hostname"
 
     def test_pinned_dns_answers_only_for_the_vetted_host(self, monkeypatch):
         vetted = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_IP, 0))]
