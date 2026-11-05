@@ -48,7 +48,7 @@ class TestNameAwareRanking:
     """The caller's own words should surface the tool whose NAME says them."""
 
     def test_words_splits_camel_case_and_singularizes(self):
-        from nextdns_mcp.tool_search import _words
+        from nextdns_mcp.tool_search_rank import _words
 
         assert _words("queryTimeSeries") == {"query", "time", "sery"}
         # "analytics" loses its trailing s the same way "Domains" does, which is what
@@ -68,7 +68,7 @@ class TestNameAwareRanking:
         noun has a second carrier, which cancelled the words that actually say which
         tool is meant and left the ordering to alphabetical ties.
         """
-        from nextdns_mcp.tool_search import _shared_words
+        from nextdns_mcp.tool_search_rank import _shared_words
 
         small = {f"tool{i}": ({"denylist"} if i < 2 else set()) for i in range(4)}
         large = {f"tool{i}": ({"denylist"} if i < 2 else set()) for i in range(40)}
@@ -76,7 +76,7 @@ class TestNameAwareRanking:
         assert "denylist" not in _shared_words(large)
 
     def test_a_word_the_whole_catalog_carries_is_still_shared(self):
-        from nextdns_mcp.tool_search import _shared_words
+        from nextdns_mcp.tool_search_rank import _shared_words
 
         every = {f"tool{i}": {"profile"} for i in range(40)}
         assert "profile" in _shared_words(every)
@@ -91,7 +91,7 @@ class TestNameAwareRanking:
         """
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getDenylist"),
@@ -105,7 +105,7 @@ class TestNameAwareRanking:
     def test_rank_prefers_name_overlap_and_keeps_underlying_order_on_ties(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getAnalyticsDomains"),
@@ -157,23 +157,23 @@ class TestMorphologicalQueryExpansion:
     """
 
     def test_variant_words_adds_catalog_partners(self):
-        from nextdns_mcp.tool_search import _variant_words
+        from nextdns_mcp.tool_search_rank import _variant_words
 
         vocabulary = {"category", "categories", "native", "natives"}
         assert _variant_words("categories natives", vocabulary) == {"category", "native"}
 
     def test_variant_words_ignores_partners_the_catalog_never_wrote(self):
-        from nextdns_mcp.tool_search import _variant_words
+        from nextdns_mcp.tool_search_rank import _variant_words
 
         assert _variant_words("categories aa", {"categories"}) == set()
 
     def test_variant_words_adds_plural_of_a_singular_word(self):
-        from nextdns_mcp.tool_search import _variant_words
+        from nextdns_mcp.tool_search_rank import _variant_words
 
         assert _variant_words("category entry", {"categories", "entries"}) == {"categories", "entries"}
 
     def test_variant_words_skips_words_that_name_every_tool(self):
-        from nextdns_mcp.tool_search import _variant_words
+        from nextdns_mcp.tool_search_rank import _variant_words
 
         vocabulary = {"profile", "profiles", "category", "categories"}
         assert _variant_words("delete profile categories", vocabulary, exclude={"profile"}) == {"category"}
@@ -317,7 +317,7 @@ class TestSearchPathGuards:
     def test_a_query_with_no_words_leaves_the_order_as_it_was(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getDenylist"),
@@ -328,7 +328,7 @@ class TestSearchPathGuards:
 
     def test_a_name_with_no_words_has_no_leading_word(self):
         """The verb is the first word; a name that has none has nothing to score."""
-        from nextdns_mcp.tool_search import _leading_word
+        from nextdns_mcp.tool_search_rank import _leading_word
 
         assert _leading_word("") == ""
         assert _leading_word("---") == ""
@@ -343,7 +343,7 @@ class TestSearchPathGuards:
         """
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import _scope_words
+        from nextdns_mcp.tool_search_rank import _scope_words
 
         assert _scope_words([]) == set()
         assert _scope_words([Tool.from_function(lambda: None, name="getDenylist")]) == set()
@@ -723,7 +723,9 @@ class TestRankingOnTheWordsTheCatalogOwns:
             Tool.from_function(lambda profile_id, metric: None, name="getAnalyticsDestinationsSeries"),
             Tool.from_function(lambda profile_id, name: None, name="updateProfile"),
         ]
-        scope = ts._scope_words(tools)
+        from nextdns_mcp.tool_search_rank import _scope_words
+
+        scope = _scope_words(tools)
         assert "profile" in scope
         assert "metric" not in scope
 
@@ -880,7 +882,7 @@ class TestTheGenericVerbGate:
     """
 
     def test_a_generic_verb_alone_scores_nothing(self):
-        from nextdns_mcp.tool_search import _words_score
+        from nextdns_mcp.tool_search_rank import _words_score
 
         args = (
             {"get", "rewrite"},
@@ -897,7 +899,7 @@ class TestTheGenericVerbGate:
         assert _words_score(*args) == 3
 
     def test_a_second_word_the_tool_carries_restores_the_verb(self):
-        from nextdns_mcp.tool_search import _words_score
+        from nextdns_mcp.tool_search_rank import _words_score
 
         score = _words_score(
             {"get", "privacy"},
@@ -912,13 +914,13 @@ class TestTheGenericVerbGate:
 
     def test_a_verb_unique_to_one_name_is_that_tool_word_not_a_generic(self):
         """dohLookup leads with `doh`; no other name does - the gate never fires."""
-        from nextdns_mcp.tool_search import _generic_leading_words
+        from nextdns_mcp.tool_search_rank import _generic_leading_words
 
         names = {"dohLookup": {"doh", "lookup"}, "getProfile": {"get", "profile"}, "getLogs": {"get", "log"}}
         assert _generic_leading_words(names) == {"get"}
 
     def test_a_tool_with_no_name_words_scores_nothing(self):
-        from nextdns_mcp.tool_search import _words_score
+        from nextdns_mcp.tool_search_rank import _words_score
 
         assert _words_score({"x"}, None, None, set(), set(), "") == 0
 
@@ -935,7 +937,7 @@ class TestTieBreakOnUndiscountedNameOverlap:
     def test_a_tie_breaks_for_the_tool_whose_name_holds_more_query_words(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="deleteRewrite"),
