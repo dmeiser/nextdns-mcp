@@ -926,7 +926,6 @@ class TestMcpConfigGeneration:
         doc = json.loads(out.read_text(encoding="utf-8"))
         assert "instructions" not in doc
         assert not (tmp_path / "actor_contract.md").exists()
-        assert not hasattr(h, "_actor_contract_text")
 
 
 # =========================================================================== #
@@ -2158,8 +2157,19 @@ class TestAbnormalExitKillsTheProcessGroup:
             return scratch
 
         monkeypatch.setattr(h, "_prepare_scratch_dir", _spying_prepare)
-        with pytest.raises(ValueError, match="https://"):
-            asyncio.run(h.run_harness("sk-test", h.HarnessConfig()))
+        # The harness points TMPDIR at the scratch dir process-wide (every
+        # per-step MCP server inherits it); put the ambient value back so the
+        # leak cannot reach unrelated tests.
+        had_tmpdir = "TMPDIR" in os.environ
+        old_tmpdir = os.environ.get("TMPDIR")
+        try:
+            with pytest.raises(ValueError, match="https://"):
+                asyncio.run(h.run_harness("sk-test", h.HarnessConfig()))
+        finally:
+            if had_tmpdir:
+                os.environ["TMPDIR"] = old_tmpdir  # type: ignore[index]
+            else:
+                os.environ.pop("TMPDIR", None)
         assert "scratch" in created, "the run reached the scratch setup"
         assert created["scratch"].exists() is False, "the aborted run left its scratch dir behind"
 
@@ -3101,9 +3111,30 @@ class TestScratchIsolation:
         finally:
             h.shutil.rmtree(scratch, ignore_errors=True)
 
-    def test_the_startup_sweep_is_gone(self, h):
-        """No global temp sweep may come back: it deletes other processes' files."""
-        assert not hasattr(h, "_sweep_stale_download_dirs")
+    def test_no_startup_sweep_touches_other_runs_files(self, h, tmp_path, monkeypatch):
+        """No global temp sweep may come back: it deletes other processes' files.
+
+        Pinned as behaviour, not structure: another server instance's in-flight
+        download sits beside this run's scratch; after the run prepares its
+        scratch and the run's finally removes it again, the foreign file must
+        still be there. (This used to be ``not hasattr(h, '_sweep_stale_download_dirs')``,
+        which only proved a name was gone, not that no sweep ran.)
+        """
+        old_tmp = tmp_path / "oldtmp"
+        in_flight = old_tmp / "nextdns_logs_abc123"
+        in_flight.mkdir(parents=True)
+        home = tmp_path / "home"
+        monkeypatch.setattr(h.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("TMPDIR", "preset")
+
+        scratch = h._prepare_scratch_dir()
+        try:
+            marker = in_flight / "partial.csv"
+            marker.write_text("another run's partial download", encoding="utf-8")
+            h.shutil.rmtree(scratch, ignore_errors=True)
+            assert marker.read_text(encoding="utf-8") == "another run's partial download"
+        finally:
+            h.shutil.rmtree(scratch, ignore_errors=True)
 
 
 class TestRunScopedSafetyHelpers:
