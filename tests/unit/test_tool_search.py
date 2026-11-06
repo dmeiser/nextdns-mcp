@@ -499,10 +499,16 @@ class TestSearchFallback:
         assert names, "an unmatchable query returned nothing"
         assert set(names) <= set(published_tool_names())
         assert set(names) & set(spec_tool_names())
-        # The fallback answers with the catalog itself, not a six-entry sample
-        # (which used to be six add* writes - a page of mutations). The
-        # whole-answer byte budget (SEARCH_ANSWER_MAX_BYTES) is what bounds it.
-        assert len(names) > ts.CATALOG_MAX_RESULTS
+        # The fallback answers with the WHOLE catalog, not a six-entry sample
+        # (which used to be six add* writes - a page of mutations) and not a
+        # byte-bounded slice that silently dropped entries: the caller that
+        # matched nothing needs the entire surface, reads first. The
+        # fallback's own ceiling (SEARCH_FALLBACK_MAX_BYTES, larger than the
+        # ranked-answer 8 KB) is what bounds it.
+        assert set(names) == set(published_tool_names()), "the fallback dropped catalog entries"
+        answer_bytes = len(json.dumps(found.data, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+        assert answer_bytes <= ts.SEARCH_FALLBACK_MAX_BYTES
+        assert answer_bytes > ts.SEARCH_ANSWER_MAX_BYTES, "the whole catalog cannot fit the ranked 8 KB budget"
 
     def test_build_transform_types(self):
         from fastmcp.server.transforms.search import BM25SearchTransform
@@ -1300,3 +1306,26 @@ def test_the_fallback_reads_a_name_off_the_map_like_the_composites():
         assert ranked.index("plotAnalytics") < ranked.index("addToDenylist")
 
     asyncio.run(main())
+
+
+class TestQueryLengthCap:
+    """Regression: the scope-strip regex backtracks quadratically on unbounded
+    queries (measured: 8 KB ~1.4 s, 64 KB ~88 s, synchronously on every search).
+    The query is capped at 512 characters before any scoring runs."""
+
+    @pytest.mark.asyncio
+    async def test_a_huge_query_scores_like_its_capped_prefix(self, monkeypatch):
+        from fastmcp import Client
+
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        server = build_mcp_server()
+        huge = "profiles settings privacy " + "z" * 100_000
+        async with Client(server) as client:
+            # Uncapped, the quadratic regex alone needs minutes for 100 KB;
+            # this completing at all is the regression signal.
+            big = await client.call_tool("search_tools", {"query": huge}, raise_on_error=False)
+            capped = await client.call_tool("search_tools", {"query": huge[:512]}, raise_on_error=False)
+        assert [t.get("name") for t in big.data] == [t.get("name") for t in capped.data]

@@ -514,6 +514,12 @@ class HarnessAbortError(RuntimeError):
     """
 
 
+# A listing that yields this many cursors without ending is a runaway
+# pagination loop (the API hands back fresh unique cursors forever), not a
+# real account: unique cursors would otherwise spin the probe forever.
+_MAX_PROFILE_PAGES = 10_000
+
+
 def _profile_protection_probe(cfg: HarnessConfig) -> None:
     """Protect every profile that already exists on the account; FAIL CLOSED.
 
@@ -521,10 +527,13 @@ def _profile_protection_probe(cfg: HarnessConfig) -> None:
     profile. A probe that "fails open" (logs and continues) leaves the run
     holding NEXTDNS_WRITABLE_PROFILES=ALL with an incomplete protected list —
     the exact misconfiguration this step exists to prevent. So every failure
-    mode is fatal: a missing httpx, a transport error, a non-2xx answer, or an
-    unparseable body each raise :class:`HarnessAbortError` and ``main``
-    reports the aborted run with a non-zero exit. A run that never starts
-    cannot write to a profile it was never told to protect.
+    mode is fatal: a missing httpx, a transport error, a non-2xx answer, an
+    unparseable body, a malformed page (missing/null/non-list ``data``, a row
+    that is not an object with an ``id``, a cursor that is present but not a
+    non-empty string), a cursor that repeats, or a listing that never ends —
+    each raises :class:`HarnessAbortError` and ``main`` reports the aborted
+    run with a non-zero exit. A run that never starts cannot write to a
+    profile it was never told to protect.
     """
     api_key = os.environ.get("NEXTDNS_API_KEY")
     if not api_key:
@@ -538,13 +547,13 @@ def _profile_protection_probe(cfg: HarnessConfig) -> None:
         ) from exc
     # The ProfileList contract paginates, so one GET protects only the first
     # page and every pre-existing profile on later pages stays writable. Follow
-    # the cursor to exhaustion; any page's transport/HTTP/JSON failure aborts,
-    # the same fail-closed contract the first page is held to.
-    rows = []
+    # the cursor to exhaustion; any page's transport/HTTP/JSON/shape failure
+    # aborts, the same fail-closed contract the first page is held to.
+    rows: list[dict[str, Any]] = []
     cursor: str | None = None
     seen_cursors: set[str] = set()
     try:
-        while True:
+        for _page in range(_MAX_PROFILE_PAGES):
             # api_base() validates https before any request is built (see
             # ai_e2e_common.api_base); the ValueError it raises on a plaintext
             # base propagates unchanged — it is the same loud refusal.
@@ -553,12 +562,23 @@ def _profile_protection_probe(cfg: HarnessConfig) -> None:
                 f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, params=params, timeout=10.0
             )
             resp.raise_for_status()
-            payload = resp.json()
-            rows.extend(payload.get("data") or [])
-            cursor = _profile_list_cursor(payload)
-            if not cursor or cursor in seen_cursors:
+            page_rows, cursor = _validated_profile_page(resp.json())
+            rows.extend(page_rows)
+            if cursor is None:
                 break
+            if cursor in seen_cursors:
+                raise HarnessAbortError(
+                    f"profile-protection probe pagination looped (cursor {cursor!r} repeated); refusing to "
+                    "run with an unknown pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES "
+                    "explicitly or fix the API"
+                )
             seen_cursors.add(cursor)
+        else:
+            raise HarnessAbortError(
+                f"profile-protection probe did not exhaust the listing within {_MAX_PROFILE_PAGES} pages; "
+                "refusing to run with an unknown pre-existing profile set — set "
+                "NEXTDNS_PROTECTED_PROFILES explicitly or fix the API"
+            )
     except HarnessAbortError:
         raise
     except Exception as exc:
@@ -568,24 +588,63 @@ def _profile_protection_probe(cfg: HarnessConfig) -> None:
             "profile set — set NEXTDNS_PROTECTED_PROFILES explicitly or fix the API reachability"
         ) from exc
     for row in rows:
-        if isinstance(row, dict) and row.get("id"):
-            _protect_server_profile(cfg, str(row["id"]))
+        _protect_server_profile(cfg, str(row["id"]))
 
 
-def _profile_list_cursor(payload: object) -> str | None:
-    """The next-page cursor of a ProfileList body, or None when the list ended."""
+def _validated_profile_page(payload: object) -> tuple[list[dict[str, Any]], str | None]:
+    """One ProfileList page, shape-validated; malformed pages abort the probe.
+
+    A page whose ``data`` is missing, null, or not a list, or whose rows are
+    not all objects carrying an ``id``, cannot be trusted to enumerate the
+    account's pre-existing profiles: accepting it silently (skipping the odd
+    row) would leave whatever it hid writable. Raises :class:`HarnessAbortError`
+    on any malformed shape. Returns ``(rows, next_cursor)`` where ``next_cursor``
+    is None when the listing ended.
+    """
     if not isinstance(payload, dict):
-        return None
-    cursor = payload.get("cursor")
-    if isinstance(cursor, str) and cursor:
-        return cursor
+        raise HarnessAbortError(
+            f"profile-protection probe got a non-object ProfileList page ({type(payload).__name__}); refusing "
+            "to run with an unknown pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES explicitly"
+        )
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise HarnessAbortError(
+            "profile-protection probe got a ProfileList page whose 'data' is missing, null, or not a list; "
+            "refusing to run with an unknown pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES explicitly"
+        )
+    rows: list[dict[str, Any]] = []
+    for row in data:
+        if not isinstance(row, dict) or not row.get("id"):
+            raise HarnessAbortError(
+                "profile-protection probe got a malformed profile row (not an object with an id); refusing "
+                "to run with an unknown pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES explicitly"
+            )
+        rows.append(row)
+    return rows, _profile_list_cursor(payload)
+
+
+def _profile_list_cursor(payload: dict[str, Any]) -> str | None:
+    """The next-page cursor of a ProfileList body, or None when the list ended.
+
+    A cursor that is ABSENT or null ends the listing. A cursor that is present
+    but not a non-empty string is malformed: it is refused rather than
+    masquerading as the end of the list (a 0 that silently ended pagination
+    would leave every later page's profiles writable).
+    """
+    candidates: list[Any] = [payload.get("cursor")]
     meta = payload.get("meta")
-    if isinstance(meta, dict):
-        pagination = meta.get("pagination")
-        if isinstance(pagination, dict):
-            nested = pagination.get("cursor")
-            if isinstance(nested, str) and nested:
-                return nested
+    pagination = meta.get("pagination") if isinstance(meta, dict) else None
+    if isinstance(pagination, dict):
+        candidates.append(pagination.get("cursor"))
+    for value in candidates:
+        if value is None:
+            continue
+        if isinstance(value, str) and value:
+            return value
+        raise HarnessAbortError(
+            f"profile-protection probe got a malformed cursor ({value!r}); refusing to run with an unknown "
+            "pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES explicitly"
+        )
     return None
 
 
@@ -972,9 +1031,16 @@ async def _collect_streams(proc: asyncio.subprocess.Process, timeout_s: float) -
         raise
     # The pipes close when the process does, so the drains finish on their own;
     # bounded so a child that leaves a grandchild holding a pipe cannot hang the
-    # harness here.
-    with _suppress():
-        await asyncio.wait_for(asyncio.gather(*drains, return_exceptions=True), timeout=10)
+    # harness here. Cancellation arriving DURING this drain used to be swallowed
+    # by ``_suppress`` and vanish: the run kept going while the actor's process
+    # group stayed alive. It now propagates - after the same group teardown as
+    # any other abnormal exit.
+    try:
+        with _suppress():
+            await asyncio.wait_for(asyncio.gather(*drains, return_exceptions=True), timeout=10)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        _kill_process_group(proc)
+        raise
     return out, err, timed_out
 
 
@@ -1043,11 +1109,14 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
         # produced, so the one question that matters most on a timeout - where
         # did the model stop? - was the one the report could not answer.
         out_lines, err_chunks, timed_out = await _collect_streams(proc, config.timeout_s)
-        # An abnormal actor exit (non-zero code, including a crash that already
-        # reaped the direct child) gets the same process-group teardown as a
-        # timeout: nothing the actor spawned outlives the attempt.
-        if timed_out or proc.returncode not in (0, None):
-            _kill_process_group(proc)
+        # Nothing the actor spawned outlives the attempt - on EVERY exit shape,
+        # not only abnormal ones. Reproduced live: an actor that exits 0 can
+        # leave the MCP server it spawned running, and the nonzero-exit-only
+        # cleanup below used to let that whole process group leak; a
+        # cancellation arriving mid-drain was swallowed by _suppress the same
+        # way. killpg on an already-gone group is a no-op (ProcessLookupError),
+        # so unconditional teardown costs nothing on the clean path.
+        _kill_process_group(proc)
 
         err_text = b"".join(err_chunks).decode("utf-8", errors="replace").strip()
         run.stderr = err_text
@@ -1084,11 +1153,20 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
 
 
 class _suppress:
+    """Best-effort cleanup guard: swallow ordinary errors, never cancellation.
+
+    Regular exceptions from a best-effort step are swallowed so cleanup cannot
+    mask the original error. ``BaseException`` subclasses propagate:
+    ``CancelledError`` arriving during the drain gather used to be swallowed
+    here, which cancelled the run's cancellation and left the actor's process
+    group alive.
+    """
+
     def __enter__(self) -> None:
         return None
 
-    def __exit__(self, *exc: object) -> bool:
-        return True
+    def __exit__(self, exc_type: type[BaseException] | None, *exc: object) -> bool:
+        return exc_type is not None and issubclass(exc_type, Exception)
 
 
 # =========================================================================== #
@@ -2924,7 +3002,24 @@ def _prepare_scratch_dir() -> Path:
     return scratch
 
 
+# Serializes run_harness invocations within one process. The run mutates
+# process globals (TMPDIR, tempfile.tempdir) for its whole lifetime; two
+# concurrent in-process runs raced on them, and one run's tempfile calls
+# landed in the other run's scratch, which that run then deleted. An asyncio
+# lock: the realistic in-process concurrency is tasks on one event loop, and
+# a threading lock cannot serialize that (its ownership is per-thread, so a
+# second task on the same thread would sail through). A run on a DIFFERENT
+# loop/thread is refused loudly rather than silently interleaving.
+_RUN_HARNESS_LOCK = asyncio.Lock()
+
+
 async def run_harness(api_key: str, config: HarnessConfig) -> Report:
+    """Run the harness; in-process runs serialize on the scratch-dir globals."""
+    async with _RUN_HARNESS_LOCK:
+        return await _run_harness_scoped(api_key, config)
+
+
+async def _run_harness_scoped(api_key: str, config: HarnessConfig) -> Report:
     tag = common._random_tag()
     resolved_profile_name = common._resolve_profile_name(config.profile_name or None)
     targets = TaskTargets(profile_name=resolved_profile_name, tag=tag)
@@ -2951,6 +3046,9 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
     # exception).
     had_tmpdir = "TMPDIR" in os.environ
     old_tmpdir = os.environ.get("TMPDIR")
+    # Save tempfile's own resolved-dir cache too: restoring it to None on
+    # cleanup lost a pre-existing explicit tempdir an earlier caller had set.
+    old_tempfile_tempdir = tempfile.tempdir
     scratch = _prepare_scratch_dir()
     try:
         workdir = Path(config.workdir) if config.workdir else Path(tempfile.mkdtemp(prefix="nextdns_e2e_"))
@@ -3004,9 +3102,7 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                     # there any other way is not this run's to delete, and the run says
                     # so in its notes instead of destroying it.
                     if pid and not _deletable_by_this_run(pid, created_ids):
-                        note = (
-                            f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
-                        )
+                        note = f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
                         report.notes.append(note)
                         _progress(f"  NOTE    : {note}")
                         pid = ""
@@ -3143,7 +3239,9 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                             )
 
                     prompt_pid = pid
-                    if (step.section == "plots" or step.id == "logs.download") and os.environ.get("NEXTDNS_PLOT_PROFILE"):
+                    if (step.section == "plots" or step.id == "logs.download") and os.environ.get(
+                        "NEXTDNS_PLOT_PROFILE"
+                    ):
                         prompt_pid = os.environ["NEXTDNS_PLOT_PROFILE"]
                     prompt = step.prompt.replace("{profile_id}", prompt_pid)
                     run: ActorRun | None = None
@@ -3313,11 +3411,13 @@ async def run_harness(api_key: str, config: HarnessConfig) -> Report:
                 os.environ["TMPDIR"] = old_tmpdir  # type: ignore[index]
             else:
                 os.environ.pop("TMPDIR", None)
-        # Also clear the resolved-cache tempfile pinned at the scratch: it
+        # Also restore the resolved-cache tempfile pinned at the scratch: it
         # takes precedence over TMPDIR, so leaving it dangling would keep
-        # routing later mktemp calls at the deleted directory.
+        # routing later mktemp calls at the deleted directory. Restore the
+        # value that was in force before this run - not unconditionally None,
+        # which silently dropped a pre-existing explicit tempdir.
         if tempfile.tempdir == str(scratch):
-            tempfile.tempdir = None
+            tempfile.tempdir = old_tempfile_tempdir
     report.actor_tool_calls = total_events
     report.actor_tools_used = tools_used
     report.actor_stderr = last_stderr[:4000]

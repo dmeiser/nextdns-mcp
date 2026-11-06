@@ -30,6 +30,7 @@ local inconsistency to rename.
 SPDX-License-Identifier: MIT
 """
 
+import contextvars
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -71,6 +72,22 @@ SEARCH_DESCRIPTION_CHARS = 1400
 # Budget for the whole answer. Four fully-described tools still measured ~10 KB,
 # and the run that carried 10-18 KB per discovery stalled 27 times in 29 steps.
 SEARCH_ANSWER_MAX_BYTES = 8000
+
+# Budget for the full-catalog fallback answer (a query that matched nothing).
+# The fallback IS the catalog: the caller found nothing and needs the whole
+# surface, so it must never silently drop an entry the way the ranked-answer
+# budget can. Measured against the real 78-tool catalog with descriptions at
+# the per-result cut, the whole-catalog answer is ~100 KB, so the fallback
+# gets its own ceiling well above that rather than sharing the ranked 8 KB.
+# (FastMCP also sends the answer twice, text + structured, so the wire size is
+# ~2x the content size on every path - see _compact_entry.)
+SEARCH_FALLBACK_MAX_BYTES = 131_072
+
+# Whether the search currently being rendered took the full-catalog fallback.
+# Set by _search, consumed by _serialize_results. A context var, not an
+# instance attribute: concurrent searches in one process must not see each
+# other's mode, and asyncio copies the context per task.
+_fallback_answer: contextvars.ContextVar[bool] = contextvars.ContextVar("nextdns_fallback_answer", default=False)
 
 # camelCase / snake_case / non-word splitter, used for both tool names and
 # queries so 'queryTimeSeries' and 'query time series' compare equal.
@@ -197,14 +214,16 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
             # The fallback IS the catalog: an unmatchable query gets every tool
             # (reads first), not a six-entry sample - a small model that finds
             # nothing needs the surface, and six entries of it taught it the
-            # catalog was six add* writes. Serialization still enforces the
-            # whole-answer byte budget, so the answer stays readable.
+            # catalog was six add* writes. Serialization holds the fallback to
+            # its own whole-catalog budget (SEARCH_FALLBACK_MAX_BYTES) instead
+            # of the ranked-answer 8 KB, which silently dropped most entries.
             fell_back = True
         else:
             fell_back = False
         merged = _merge_named_results(results, tools, named)
         shared = (catalog.name_shared, catalog.vocab_shared)
         ranked = _rank_by_name_overlap(merged, stripped, catalog.names, catalog.vocabulary, shared)
+        _fallback_answer.set(fell_back)
         return ranked if fell_back else ranked[: self._max_results]
 
     def _make_search_tool(self) -> Tool:
@@ -238,12 +257,22 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         return self._serialize_results(tools)
 
     def _serialize_results(self, tools: Sequence[Tool]) -> list[dict[str, Any]]:
-        """FastMCP's search shape, from the cache, under the whole-answer budget.
+        """FastMCP's search shape, from the cache, under the mode's byte budget.
 
+        Ranked answers are held to SEARCH_ANSWER_MAX_BYTES; the full-catalog
+        fallback (every tool, reads first) is held to SEARCH_FALLBACK_MAX_BYTES
+        and must contain every catalog entry - a fallback that dropped entries
+        silently taught the caller the catalog was smaller than it is.
         Each kept entry is a shallow copy: the cached dict is never handed to a
         caller, so nothing downstream can mutate the cache through an answer.
         """
-        return [dict(dumped) for dumped in _budget_results([self._cached_compaction(tool) for tool in tools])]
+        budget = SEARCH_FALLBACK_MAX_BYTES if _fallback_answer.get() else SEARCH_ANSWER_MAX_BYTES
+        try:
+            return [
+                dict(dumped) for dumped in _budget_results([self._cached_compaction(tool) for tool in tools], budget)
+            ]
+        finally:
+            _fallback_answer.set(False)
 
     def _cached_compaction(self, tool: Tool) -> tuple[dict[str, Any], int]:
         """One tool's compacted payload and byte cost, cached per Tool instance.
@@ -320,9 +349,11 @@ failed call returns a JSON payload with an error `code` and, when available, a
 def _truncate_description(dumped: dict[str, Any]) -> None:
     """Cut one dumped tool definition's description to the per-result budget.
 
-    The cut lands on a line boundary, never mid-sentence; a description with no
-    usable early line boundary is cut at the budget itself. The input schema,
-    which decides whether a call is valid, is never touched.
+    The cut lands on a line boundary when one falls inside the first half of
+    the budget; a description with no usable early line boundary (a hard-
+    wrapped docstring can wrap mid-sentence) is cut at the budget itself, so
+    the cut CAN be mid-sentence. The input schema, which decides whether a
+    call is valid, is never touched.
     """
     description = str(dumped.get("description") or "")
     if len(description) <= SEARCH_DESCRIPTION_CHARS:
@@ -336,32 +367,45 @@ def _truncate_description(dumped: dict[str, Any]) -> None:
 def _compact_entry(tool: Tool) -> tuple[dict[str, Any], int]:
     """FastMCP's dump of one tool, description cut, with its whole-answer byte cost.
 
-    The cost is measured on UTF-8 BYTES, not characters: the budget bounds what
-    crosses the wire, and a non-ASCII description costs more bytes than the
-    ``len(json.dumps(...))`` character count reported.
+    The cost is measured on UTF-8 BYTES, not characters: the budget bounds the
+    answer's CONTENT size, and a non-ASCII description costs more bytes than
+    the ``len(json.dumps(...))`` character count reported. (The content budget
+    is not the wire size: FastMCP serializes the answer as both text and
+    structured content, so roughly 2x the content crosses the wire.)
     """
     dumped = tool.to_mcp_tool().model_dump(mode="json", by_alias=True, exclude_none=True)
     _truncate_description(dumped)
     return dumped, len(json.dumps(dumped, sort_keys=True, ensure_ascii=False).encode("utf-8"))
 
 
-def _budget_results(entries: Sequence[tuple[dict[str, Any], int]]) -> list[dict[str, Any]]:
-    """Assemble a search answer under SEARCH_ANSWER_MAX_BYTES.
+def _budget_results(entries: Sequence[tuple[dict[str, Any], int]], budget: int | None = None) -> list[dict[str, Any]]:
+    """Assemble a search answer under ``budget`` bytes of answer content.
 
     The accounting is skip-and-continue, not break: a result that does not fit
     is skipped and the scan goes on, so one oversized early result cannot
     suppress every smaller one after it (breaking at the first overflow was
     what it did, and the smaller later candidates were the ones the caller
     still needed). The FIRST result is always kept, even when it alone
-    overflows the budget - an empty answer is worse than a big one. Framing is
-    counted too: every result after the first rides in the JSON array behind a
-    comma, so it carries that ``len(",")`` byte of overhead.
+    overflows the budget - an empty answer is worse than a big one. Ranked
+    answers rely on that skip; the full-catalog fallback uses a budget that
+    holds every entry (SEARCH_FALLBACK_MAX_BYTES), so nothing is skipped there.
+    Framing is counted too: every result after the first rides in the JSON
+    array behind a comma, so it carries that ``len(",")`` byte of overhead.
+    ``budget`` defaults to the ranked-answer ceiling, resolved as a module
+    global at call time so tests can monkeypatch it.
     """
+    if budget is None:
+        budget = SEARCH_ANSWER_MAX_BYTES
+    return _fit_under_budget(entries, budget)
+
+
+def _fit_under_budget(entries: Sequence[tuple[dict[str, Any], int]], budget: int) -> list[dict[str, Any]]:
+    """The skip-and-continue scan itself (see _budget_results for the contract)."""
     results: list[dict[str, Any]] = []
     spent = 0
     for dumped, cost in entries:
         framing = len(",") if results else 0
-        if results and spent + framing + cost > SEARCH_ANSWER_MAX_BYTES:
+        if results and spent + framing + cost > budget:
             continue
         spent += framing + cost
         results.append(dumped)
@@ -376,7 +420,8 @@ def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
     the biggest thing the model has to hold per discovery: with the full text
     and four results it measured 10-18 KB for a one-line task, and the run that
     did that stalled 27 times across 29 steps. So the search payload carries a
-    bounded excerpt - cut at a line boundary, never mid-sentence - and the
+    bounded excerpt - cut at a line boundary when one exists early enough,
+    otherwise hard-cut at the budget, which can land mid-sentence - and the
     input schema, which is the part that decides whether the call is valid, is
     never cut. The transform's cached serializer (see _cached_compaction) is
     the mounted one; this module-level form is the uncached reference version.

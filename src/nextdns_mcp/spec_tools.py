@@ -57,7 +57,7 @@ from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
 from .tools import logs as _logs
 from .tools.plots import _now, _resolve_time_point, _series_budget_error
-from .transport import _api_request_payload
+from .transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload
 from .utils import is_safe_profile_id, normalize_partials, normalize_time_value, resolve_profile_id, schema_required
 
 logger = logging.getLogger(__name__)
@@ -73,12 +73,6 @@ WITHHELD_OPERATIONS = frozenset({"streamLogs"})
 _UNINTERVALLED_FINEST_DEFAULT = 10800
 _UNINTERVALLED_FINEST_WINDOW = 7 * 86400
 _UNINTERVALLED_COARSEST_DEFAULT = 86400
-
-# Ceiling on a generated ``;series`` tool result, measured as JSON bytes. The
-# request-side point budgets bound one series; the endpoint's upstream top-N
-# bounds its rows; this is the whole-response backstop, generous enough that
-# a budgeted answer (10 rows x 2000 points ~ 200 KB) always fits.
-MAX_SERIES_RESPONSE_BYTES = 512_000
 
 
 def _delegate_download_logs(profile_id: str) -> Awaitable[dict[str, Any]]:
@@ -370,13 +364,17 @@ class SpecApiTool(Tool):
         transport: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         method = str(route.method).upper()
+        # readOnlyHint is derived from the HTTP method, with one override:
+        # downloadLogs answers a GET but WRITES a CSV to disk, so marking it
+        # read-only would tell callers a call has no side effects it has.
+        read_only = method in {"GET", "HEAD"} and route.operation_id != "downloadLogs"
         super().__init__(
             name=str(route.operation_id),
             description=describe(route),
             parameters=route.flat_param_schema,
             tags={"nextdns", "spec"},
             annotations=ToolAnnotations(
-                read_only_hint=method in {"GET", "HEAD"},
+                read_only_hint=read_only,
                 destructive_hint=method in {"DELETE", "PUT", "PATCH"},
             ),
         )

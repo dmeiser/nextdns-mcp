@@ -1032,3 +1032,41 @@ def test_empty_write_run_path():
         assert res.is_error
 
     asyncio.run(main())
+
+
+class TestToolAnnotations:
+    """readOnlyHint mirrors side effects, not just the HTTP method."""
+
+    def test_downloadLogs_is_not_annotated_read_only(self):
+        """downloadLogs answers a GET but WRITES a CSV to disk: readOnlyHint must
+        be False, or a caller scanning for side-effect-free tools is misled."""
+        routes = {route.operation_id: route for route in spec_tools.spec_routes()}
+        download = spec_tools.SpecApiTool(routes["downloadLogs"])
+        assert download.annotations is not None
+        assert download.annotations.read_only_hint is False
+        # The GET sibling, which writes nothing, stays read-only - the override
+        # is per-operation, not per-method.
+        get_logs = spec_tools.SpecApiTool(routes["getLogs"])
+        assert get_logs.annotations is not None
+        assert get_logs.annotations.read_only_hint is True
+
+
+class TestPlotsSpecToolsImportCycle:
+    """tools.plots must not import spec_tools (the cycle was deferred, not removed)."""
+
+    def test_importing_plots_does_not_import_spec_tools(self):
+        import subprocess
+        import sys
+
+        code = (
+            "import sys; import nextdns_mcp.tools.plots; sys.exit(1 if 'nextdns_mcp.spec_tools' in sys.modules else 0)"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+        assert result.returncode == 0, (
+            "tools.plots pulled in spec_tools again (import cycle restored): " + result.stderr
+        )
+
+    def test_the_series_ceiling_lives_in_transport(self):
+        from nextdns_mcp import transport
+
+        assert transport.MAX_SERIES_RESPONSE_BYTES == spec_tools.MAX_SERIES_RESPONSE_BYTES == 512_000

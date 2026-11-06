@@ -7,9 +7,11 @@ import inspect
 import logging
 import os
 import sys
+from functools import wraps
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.tools.base import ToolResult
 from mcp.types import ToolAnnotations
 
 from .client import get_api_client
@@ -21,7 +23,13 @@ from .config import (
     validate_configuration,
 )
 from .openapi import create_mcp_server
-from .spec_tools import endpoints_for_routes, register_spec_tools, spec_routes, spec_tool_names
+from .spec_tools import (
+    _payload_is_error,
+    endpoints_for_routes,
+    register_spec_tools,
+    spec_routes,
+    spec_tool_names,
+)
 from .tools.doh import dohLookup
 from .tools.plots import plotAnalytics
 
@@ -40,6 +48,29 @@ _COMPOSITE_TOOLS = (plotAnalytics, dohLookup)
 # no endpoint, so the hints are stated here — without them a caller scanning for
 # destructive tools gets no signal either way.
 _COMPOSITE_ANNOTATIONS = ToolAnnotations(read_only_hint=True, destructive_hint=False)
+
+
+def _with_error_flag(tool_fn: Any) -> Any:
+    """Wrap a composite tool so its typed error payloads surface as ``isError``.
+
+    The composites answer failures as typed payload dicts, exactly like the
+    generated tools - but a bare dict return is wrapped by FastMCP as a
+    SUCCESSFUL result, so every one of those failure payloads used to reach
+    callers with ``isError=False``. The generated SpecApiTool sets the flag
+    explicitly via ``_payload_is_error``; this wrapper applies the same rule
+    to the two hand-written tools, so a refusal or failure never masquerades
+    as a normal answer.
+    """
+
+    @wraps(tool_fn)
+    async def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        payload = await tool_fn(*args, **kwargs)
+        if _payload_is_error(payload):
+            return ToolResult(structured_content=payload, is_error=True)
+        return payload
+
+    return _wrapped
+
 
 _mcp_server: FastMCP | None = None
 
@@ -82,7 +113,7 @@ def build_mcp_server() -> FastMCP:
         server.tool(
             description=inspect.getdoc(tool) or "",
             annotations=_COMPOSITE_ANNOTATIONS,
-        )(tool)
+        )(_with_error_flag(tool))
     return server
 
 

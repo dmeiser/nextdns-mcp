@@ -2125,8 +2125,13 @@ class TestProtectionProbeFollowsPagination:
         protected = cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"]
         assert "pre1" in protected and "pre2" in protected
 
-    def test_a_repeated_cursor_ends_the_walk(self, h, monkeypatch):
-        """A cursor that never exhausts must not spin the probe forever."""
+    def test_a_repeated_cursor_aborts_the_run(self, h, monkeypatch):
+        """A cursor that never exhausts is a broken API, not an empty list.
+
+        Accepting the repeat as the end of the listing would protect only the
+        profiles seen so far and leave every later page's profile writable,
+        so the probe fails closed instead of ending the walk as success.
+        """
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
         calls = self._paging_get(
@@ -2136,10 +2141,66 @@ class TestProtectionProbeFollowsPagination:
                 {"data": [{"id": "pre2"}], "cursor": "c2"},
             ],
         )
-        cfg = h.HarnessConfig.load(None)
+        with pytest.raises(h.HarnessAbortError, match="looped"):
+            h.HarnessConfig.load(None)
         assert len(calls) == 2
-        protected = cfg.server["env"]["NEXTDNS_PROTECTED_PROFILES"]
-        assert "pre1" in protected and "pre2" in protected
+        # Fail closed: protection is applied only after the walk completes, so
+        # the pages seen before the loop protected nothing.
+
+    @pytest.mark.parametrize(
+        "page",
+        [
+            {"data": None},
+            {"data": "not-a-list"},
+            {"cursor": "c2"},  # data missing entirely
+            {"data": [{"id": "pre1"}, "not-a-dict"]},
+            {"data": [{"id": "pre1"}, {}]},  # row without an id
+            {"data": [{"id": "pre1"}], "cursor": 0},
+            {"data": [{"id": "pre1"}], "cursor": ""},
+            {"data": [{"id": "pre1"}], "meta": {"pagination": {"cursor": 7}}},
+            ["not", "an", "object"],
+        ],
+        ids=[
+            "null-data",
+            "non-list-data",
+            "missing-data",
+            "non-dict-row",
+            "idless-row",
+            "numeric-cursor",
+            "empty-cursor",
+            "malformed-nested-cursor",
+            "non-object-page",
+        ],
+    )
+    def test_a_malformed_page_aborts_the_run(self, h, monkeypatch, page):
+        """Missing/null/non-list data, malformed rows and cursors all fail closed."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        self._paging_get(monkeypatch, [page])
+        with pytest.raises(h.HarnessAbortError):
+            h.HarnessConfig.load(None)
+
+    def test_a_neverending_listing_aborts_instead_of_looping(self, h, monkeypatch):
+        """Fresh unique cursors forever are a runaway loop, not a huge account."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.delenv("NEXTDNS_PROTECTED_PROFILES", raising=False)
+        calls: list = []
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"data": [{"id": f"p{len(calls)}"}], "cursor": f"c{len(calls)}"}
+
+        def _get(url, **kw):
+            calls.append(kw.get("params") or {})
+            return _Resp()
+
+        monkeypatch.setattr("httpx.get", _get)
+        with pytest.raises(h.HarnessAbortError, match="exhaust"):
+            h.HarnessConfig.load(None)
+        assert len(calls) == h._MAX_PROFILE_PAGES
 
     def test_a_later_page_failure_still_aborts(self, h, monkeypatch):
         import httpx
@@ -2241,6 +2302,160 @@ class TestAbnormalExitKillsTheProcessGroup:
             self._assert_group_reaped(proc.pid)
 
         asyncio.run(go())
+
+    def test_zero_exit_actor_with_a_live_child_still_loses_its_group(self, h, tmp_path):
+        """run_actor tears the group down on EVERY exit shape.
+
+        Reproduced leak: an actor that exits 0 while the server it spawned
+        keeps running used to skip the nonzero-exit-only cleanup, leaving the
+        whole process group alive. The background sleep detaches from the
+        actor's pipes (so the drain ends at the actor's exit, not the 10s
+        bound) but stays in the actor's process group.
+        """
+        marker = tmp_path / "actor-pgid"
+        cfg = h.HarnessConfig(command=["sh", "-c", f"sleep 30 >/dev/null 2>&1 & echo $$ > {marker}; exit 0"])
+        run = asyncio.run(h.run_actor(cfg, "prompt", tmp_path))
+        assert run.ok is True
+        self._assert_group_reaped(int(marker.read_text().strip()))
+
+    def test_suppress_swallows_exceptions_but_never_cancellation(self, h):
+        """``_suppress`` is a best-effort guard, not a cancellation eater.
+
+        Swallowing ``CancelledError`` (a BaseException since 3.8) inside the
+        drain gather used to make a cancelled run keep going with the actor's
+        process group still alive. Ordinary cleanup errors stay swallowed;
+        cancellation and KeyboardInterrupt propagate.
+        """
+        with h._suppress():
+            raise RuntimeError("ordinary cleanup noise")
+        with pytest.raises(asyncio.CancelledError), h._suppress():
+            raise asyncio.CancelledError
+        with pytest.raises(KeyboardInterrupt), h._suppress():
+            raise KeyboardInterrupt
+
+    def test_cancellation_during_the_drain_is_not_swallowed(self, h, monkeypatch):
+        """Cancel arriving while the drain gather runs must reap the group AND propagate.
+
+        The drain gather used to run inside ``_suppress``, so a cancellation
+        in that window vanished: ``_collect_streams`` returned normally and
+        the actor's process group leaked. The same repro at the KeyboardInterrupt
+        shape stayed loud; this pins the cancel shape.
+        """
+        import asyncio
+
+        real_wait_for = asyncio.wait_for
+        calls = {"n": 0}
+
+        async def _wait_for(coro, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return await real_wait_for(coro, *args, **kwargs)
+            if hasattr(coro, "close"):
+                coro.close()  # a coroutine body we never started
+            # gather() hands wait_for a Future, which has no close(): abandon it
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(asyncio, "wait_for", _wait_for)
+
+        async def go():
+            proc = await self._spawn()
+            with pytest.raises(asyncio.CancelledError):
+                await h._collect_streams(proc, 60)
+            await real_wait_for(proc.wait(), 5)  # the patched wait_for is still in force here
+            self._assert_group_reaped(proc.pid)
+
+        asyncio.run(go())
+
+    def test_scratch_cleanup_restores_a_preexisting_explicit_tempdir(self, h, monkeypatch, tmp_path):
+        """The scratch restore used to reset ``tempfile.tempdir`` to None.
+
+        A caller that had pinned an explicit tempdir before the run lost the
+        pin: every later mktemp in the process re-resolved from TMPDIR. The
+        restore must put the pre-run value back. An http API base aborts the
+        run at the measuring client's first use - after the scratch exists.
+        """
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_API_BASE", "http://plain.example.test")
+        sentinel = str(tmp_path / "explicit-tempdir")
+        prior = tempfile.tempdir
+        had_tmpdir = "TMPDIR" in os.environ
+        old_tmpdir = os.environ.get("TMPDIR")
+        tempfile.tempdir = sentinel
+        try:
+            with pytest.raises(ValueError, match="https://"):
+                asyncio.run(h.run_harness("sk-test", h.HarnessConfig()))
+        finally:
+            if had_tmpdir:
+                os.environ["TMPDIR"] = old_tmpdir  # type: ignore[index]
+            else:
+                os.environ.pop("TMPDIR", None)
+        assert tempfile.tempdir == sentinel, "the run must not reset an explicit tempdir to None"
+        tempfile.tempdir = prior
+
+    def test_concurrent_in_process_runs_serialize_on_the_scratch_globals(self, h, monkeypatch):
+        """Two overlapping run_harness calls in one process must not interleave.
+
+        The run mutates process globals (TMPDIR, tempfile.tempdir) for its
+        whole lifetime; unserialized, one run's tempfile calls landed in the
+        other run's scratch and were deleted with it. The first run parks
+        inside its scratch window (the sync wait blocks the run's own event
+        loop, so a second run that was NOT serialized could never even enter
+        its window before the first exited); the main test thread verifies
+        from outside that the second window stays closed, then releases.
+        """
+        import threading
+        import time as _time
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_API_BASE", "http://plain.example.test")
+        entered = threading.Event()
+        release = threading.Event()
+        windows: list[str] = []
+        real_prepare = h._prepare_scratch_dir
+
+        def _gated_prepare():
+            windows.append("enter")
+            entered.set()
+            if not release.wait(30):
+                pytest.fail("the first run was never released")
+            try:
+                return real_prepare()
+            finally:
+                windows.append("exit")
+
+        monkeypatch.setattr(h, "_prepare_scratch_dir", _gated_prepare)
+        had_tmpdir = "TMPDIR" in os.environ
+        old_tmpdir = os.environ.get("TMPDIR")
+
+        async def run_one():
+            with pytest.raises(ValueError, match="https://"):
+                await h.run_harness("sk-test", h.HarnessConfig())
+
+        def drive():
+            async def go():
+                await asyncio.gather(run_one(), run_one())
+
+            asyncio.run(go())
+
+        runner = threading.Thread(target=drive)
+        runner.start()
+        try:
+            assert entered.wait(10)
+            _time.sleep(0.5)
+            # The first run is parked inside its scratch window: the lock must
+            # keep the second run's window closed until the first has exited.
+            assert windows == ["enter"], windows
+            release.set()
+            runner.join(60)
+            assert not runner.is_alive(), "the serialized runs did not finish"
+            assert windows == ["enter", "exit", "enter", "exit"], windows
+        finally:
+            release.set()
+            runner.join(10)
+            if had_tmpdir:
+                os.environ["TMPDIR"] = old_tmpdir  # type: ignore[index]
+            else:
+                os.environ.pop("TMPDIR", None)
 
     def test_abnormal_actor_exit_reaps_the_spawned_server(self, h, tmp_path):
         """run_actor kills the group when the actor exits non-zero.

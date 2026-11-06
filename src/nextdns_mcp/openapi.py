@@ -58,7 +58,7 @@ from .constants import SYNTHETIC_TOOL_NAMES
 from .spec_tools import endpoints_for_routes
 from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import close_doh_client
-from .tools.logs import cleanup_successful_downloads
+from .tools.logs import _download_registry, cleanup_successful_downloads
 from .usage import server_instructions
 from .utils import _BARE_NEGATIVE_RE, _NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
@@ -566,6 +566,13 @@ class StripExtraFieldsMiddleware(Middleware):
 @asynccontextmanager
 async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage server lifespan: clients on shutdown, and the downloads they left (issue #277)."""
+    # Own the downloads THIS server hands out: registration goes through the
+    # context var (see nextdns_mcp.tools.logs), so shutdown below reclaims only
+    # this lifespan's registry. The registries used to be one process-global
+    # set that every embedded server's lifespan emptied, deleting a live
+    # sibling server's tracked CSVs mid-read.
+    owned_downloads: dict[str, None] = {}
+    registry_token = _download_registry.set(owned_downloads)
     try:
         yield {}
     finally:
@@ -575,7 +582,10 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             await close_doh_client()
             # Successful downloadLogs CSVs are kept after their call (the caller
             # reads the path post-call); shutdown is the first safe reclaim point.
+            # The context var still names this lifespan's registry, so only this
+            # server's downloads are reclaimed - then the var is released.
             cleanup_successful_downloads()
+            _download_registry.reset(registry_token)
 
 
 def create_mcp_server(

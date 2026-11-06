@@ -58,6 +58,13 @@ from .errors import (
 
 logger = logging.getLogger(__name__)
 
+# Response ceiling for `;series` time-series endpoints, enforced while
+# streaming by `_request_capped`. Lives here - the module that enforces it -
+# rather than in `spec_tools`, because `tools.plots` needs it too and
+# importing it from `spec_tools` kept a plots<->spec_tools import cycle alive
+# (issue review, cycle finding).
+MAX_SERIES_RESPONSE_BYTES = 512_000
+
 
 def access_denied_payload(code: str, message: str, profile_id: str) -> dict[str, Any]:
     """Build the standardized error payload for an access denial (issue #178).
@@ -170,6 +177,40 @@ async def _api_request_json(
     return data
 
 
+async def read_body_capped(response: httpx.Response, max_bytes: int) -> bytes:
+    """Read a (possibly streaming) response's decoded body up to ``max_bytes``.
+
+    ``aiter_bytes`` yields decoded bytes, so the result is what would be
+    parsed - at most ``max_bytes`` of it, read no further once the cap is
+    reached. Shared by the capped-request path and the download guard's
+    bounded error-body read, which used to carry its own copy of this loop.
+    """
+    parts: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        parts.append(chunk)
+        total += len(chunk)
+        if total >= max_bytes:
+            break
+    return b"".join(parts)
+
+
+def buffered_response(status_code: int, headers: httpx.Headers, body: bytes, request: httpx.Request) -> httpx.Response:
+    """Rebuild a buffered response around decoded body bytes, stripping stale headers.
+
+    The body bytes are already decoded, so the copied headers must not keep
+    ``content-encoding`` (or the now-wrong ``content-length``): an
+    :class:`httpx.Response` built with ``content=`` runs its decoder at
+    construction, and leaving the header would decompress the plain body a
+    second time and die with a zlib "incorrect header check" (real-world:
+    the NextDNS edge gzips larger ``;series`` answers).
+    """
+    stripped = httpx.Headers(headers)
+    stripped.pop("content-encoding", None)
+    stripped.pop("content-length", None)
+    return httpx.Response(status_code, headers=stripped, content=body, request=request)
+
+
 async def _request_capped(
     method: str, url: str, params: dict[str, Any] | None, json_body: Any, max_response_bytes: int
 ) -> httpx.Response:
@@ -179,13 +220,7 @@ async def _request_capped(
     returned - which ``aiter_bytes`` yields after undoing any content
     encoding, and the boundary is exact: a body of exactly
     ``max_response_bytes`` passes, and a longer one is refused before the
-    chunk that crosses the cap is ever appended. ``aiter_bytes`` already
-    decompressed them, so the copied headers must not keep
-    ``content-encoding`` (or the now-wrong ``content-length``): an
-    :class:`httpx.Response` built with ``content=`` runs its decoder at
-    construction, and leaving the header would decompress the plain body a
-    second time and die with a zlib "incorrect header check" (real-world:
-    the NextDNS edge gzips larger ``;series`` answers).
+    chunk that crosses the cap is ever appended.
     """
     async with client.api_client.stream(method, url, params=params, json=json_body) as streamed:
         body = bytearray()
@@ -199,10 +234,7 @@ async def _request_capped(
                     max_response_bytes=max_response_bytes,
                 )
             body += chunk
-        headers = httpx.Headers(streamed.headers)
-        headers.pop("content-encoding", None)
-        headers.pop("content-length", None)
-        return httpx.Response(streamed.status_code, headers=headers, content=bytes(body), request=streamed.request)
+        return buffered_response(streamed.status_code, streamed.headers, bytes(body), streamed.request)
 
 
 def _http_error_parts(error: Exception) -> tuple[int | None, Any]:

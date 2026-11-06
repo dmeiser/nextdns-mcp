@@ -1,7 +1,9 @@
 """Unit tests for MCP server creation (openapi.py create_mcp_server)."""
 
 import logging
+from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from fastmcp import Client, FastMCP
 
@@ -221,3 +223,110 @@ class TestServerLifespan:
         assert doh_client.is_closed
         assert client_module._client is None
         assert doh_module._doh_client is None
+
+
+class TestCompositeErrorResultsAreFlagged:
+    """The hand-written composites must surface typed failures as ``isError``.
+
+    A bare dict return is wrapped by FastMCP as a SUCCESSFUL result, so every
+    typed error payload the composites build used to reach callers with
+    ``isError=False`` - a refusal masquerading as a normal answer. The
+    generated tools set the flag explicitly; the composites now do too.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dohLookup_denial_is_an_error_result(self, mock_api_key, monkeypatch):
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "zzz999")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "zzz999")
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "dohLookup", {"domain": "example.com", "profile_id": "abc123"}, raise_on_error=False
+            )
+
+        assert result.is_error is True, "a read-access denial must surface as isError, not a success"
+        assert result.structured_content["code"] == "read_access_denied"
+
+    @pytest.mark.asyncio
+    async def test_plotAnalytics_argument_refusal_is_an_error_result(self, mock_api_key, monkeypatch):
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            # A partials value the endpoint does not accept is refused by the
+            # tool itself, after the schema check: the refusal is a typed error
+            # payload, not a successful result.
+            result = await client.call_tool(
+                "plotAnalytics", {"metric": "status", "partials": "bogus"}, raise_on_error=False
+            )
+
+        assert result.is_error is True, "an argument refusal must surface as isError, not a success"
+        assert "code" in result.structured_content
+
+    @pytest.mark.asyncio
+    async def test_dohLookup_success_stays_a_normal_result(self, mock_api_key, monkeypatch, mock_doh_client=None):
+        """The wrapper must not flag successful payloads - only typed errors."""
+        from nextdns_mcp.server import build_mcp_server
+        from nextdns_mcp.tools import doh as doh_module
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "Status": 0,
+            "Question": [{"name": "example.com.", "type": 1}],
+            "Answer": [{"name": "example.com.", "type": 1, "TTL": 300, "data": "142.250.190.46"}],
+        }
+        mock_client.get.return_value = mock_response
+        monkeypatch.setattr(doh_module, "_doh_client", mock_client)
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool("dohLookup", {"domain": "example.com"}, raise_on_error=False)
+
+        assert result.is_error is False
+        assert result.structured_content["data"]["Answer"][0]["data"] == "142.250.190.46"
+
+
+class TestDownloadOwnershipIsPerServer:
+    """One embedded server's shutdown must not delete another live server's CSVs."""
+
+    @staticmethod
+    async def _noop() -> None:
+        return None
+
+    @pytest.mark.asyncio
+    async def test_a_sibling_servers_shutdown_leaves_this_servers_downloads_alive(
+        self, mock_api_key, monkeypatch, tmp_path
+    ):
+        from nextdns_mcp import openapi as openapi_module
+        from nextdns_mcp.tools import logs as logs_module
+
+        monkeypatch.setattr(openapi_module, "close_api_client", self._noop)
+        monkeypatch.setattr(openapi_module, "close_doh_client", self._noop)
+
+        server_a_csv = tmp_path / "a" / "download.csv"
+        server_b_csv = tmp_path / "b" / "download.csv"
+        for csv in (server_a_csv, server_b_csv):
+            csv.parent.mkdir(parents=True)
+            csv.write_text("csv")
+
+        async with openapi_module._server_lifespan(None):  # type: ignore[arg-type]
+            logs_module._note_successful_download(str(server_a_csv), True)
+            # Server B starts and finishes WHILE server A is live:
+            async with openapi_module._server_lifespan(None):  # type: ignore[arg-type]
+                logs_module._note_successful_download(str(server_b_csv), True)
+            # B's shutdown reclaims only B's registry:
+            assert not server_b_csv.exists()
+            assert server_a_csv.exists(), "a sibling server's shutdown deleted this server's tracked CSV"
+
+        # A's own shutdown reclaims its own file:
+        assert not server_a_csv.exists()

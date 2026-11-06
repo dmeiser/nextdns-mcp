@@ -17,7 +17,7 @@ from fastmcp.utilities.types import Image
 
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
-from ..transport import _api_request_payload
+from ..transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload
 from ..utils import (
     PARTIALS_VALUES,
     _build_series_params,
@@ -444,8 +444,6 @@ async def _fetch_series_payload(
     a ``code`` and an ``error`` and never a ``data`` key; a 2xx body that
     merely happens to carry an ``error`` key is data.
     """
-    from ..spec_tools import MAX_SERIES_RESPONSE_BYTES
-
     payload = await _api_request_payload("GET", url, params=params, max_response_bytes=MAX_SERIES_RESPONSE_BYTES)
     if isinstance(payload, dict) and "code" in payload and "error" in payload and "data" not in payload:
         return None, payload
