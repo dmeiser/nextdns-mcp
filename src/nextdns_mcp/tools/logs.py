@@ -16,6 +16,7 @@ the request the way it issues every other one.
 import asyncio
 import codecs
 import contextlib
+import contextvars
 import ipaddress
 import logging
 import os
@@ -35,7 +36,7 @@ from ..errors import (
     error_payload,
     http_error_payload,
 )
-from ..transport import access_denied_payload_for
+from ..transport import access_denied_payload_for, buffered_response, read_body_capped
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,98 @@ def _unlink_temp_file(path: str) -> None:
         os.rmdir(os.path.dirname(path))  # the mkdtemp() parent is empty once the CSV is gone
     except OSError:
         pass
+
+
+# Successful downloads this process has handed out. The CSV must outlive the
+# tool call - the caller reads the file at the returned path after the call
+# returns - so it cannot be removed when the call ends. Registration is what
+# bounds total disk use: the owning server's lifespan removes everything in
+# its registry at shutdown, so successful downloads no longer accumulate on
+# disk for the life of the container.
+#
+# Ownership is PER SERVER, not per process. The registry a download registers
+# with is the one the current server lifespan owns (the ``_download_registry``
+# context var, set by ``nextdns_mcp.openapi._server_lifespan``); a download
+# handled outside any lifespan falls back to the process-global registry
+# below. The registries used to be one process-global set that EVERY server's
+# lifespan emptied, so one embedded server deleted another live server's
+# tracked CSVs mid-read. Insertion-ordered, so the oldest entry is always
+# first: that order is the eviction order (see ``_note_successful_download``).
+_SUCCESSFUL_DOWNLOADS: dict[str, None] = {}
+_download_registry: contextvars.ContextVar[dict[str, None] | None] = contextvars.ContextVar(
+    "nextdns_download_registry", default=None
+)
+
+# A long-lived server would otherwise keep every CSV it ever handed out until
+# shutdown - and shutdown never runs at all under SIGKILL. Retaining at most
+# the newest N bounds disk use between those two reclaim points; the oldest
+# download is evicted (unlinked) past the cap.
+MAX_RETAINED_DOWNLOADS = 8
+
+
+def _current_registry() -> dict[str, None]:
+    """The registry downloads register with now: the owning lifespan's, else the process-global."""
+    owned = _download_registry.get()
+    return owned if owned is not None else _SUCCESSFUL_DOWNLOADS
+
+
+def _remove_downloaded_file(path: str) -> bool:
+    """Remove a finished download's temp file and its mkdtemp parent.
+
+    Returns True when the file is gone (or never existed) and the path may be
+    unregistered; False when the unlink failed, so the caller KEEPS the path
+    registered and a later cleanup can retry. (The old cleanup popped each
+    path before unlinking and only logged an ``OSError``, so one failed
+    deletion was forgotten forever.)
+    """
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        # Nothing was ever written (e.g. the ACL refused before the file was
+        # opened), so there is nothing to remove and nothing to report.
+        pass
+    except OSError:
+        logger.warning(f"Failed to remove temp log file: {path}")
+        return False
+    try:
+        os.rmdir(os.path.dirname(path))  # the mkdtemp() parent is empty once the CSV is gone
+    except OSError:
+        pass
+    return True
+
+
+def cleanup_successful_downloads() -> None:
+    """Remove every registered temp file and its directory.
+
+    Called once at the owning server's shutdown. A downloadLogs CSV can be
+    hundreds of MB; without this the file outlived the process that created
+    it. Best effort and idempotent: a second call has nothing registered and
+    does nothing. Because registration is per-lifespan, this reclaims only
+    the calling server's own downloads.
+    """
+    registry = _current_registry()
+    for path in list(registry):
+        if _remove_downloaded_file(path):
+            registry.pop(path, None)
+
+
+def _note_successful_download(path: str, downloaded: bool) -> None:
+    """Register a fully-written CSV for lifespan reclaim; failures stay unregistered.
+
+    Registration is insertion-ordered, and past ``MAX_RETAINED_DOWNLOADS`` the
+    oldest CSV is evicted and unlinked, so disk use stays bounded across a
+    long server lifetime even when shutdown (the other reclaim point) is far
+    away or never comes (SIGKILL).
+    """
+    if not downloaded:
+        return
+    registry = _current_registry()
+    registry[path] = None
+    while len(registry) > MAX_RETAINED_DOWNLOADS:
+        oldest = next(iter(registry))
+        if not _remove_downloaded_file(oldest):
+            break  # cannot evict: leave the overflow for shutdown reclaim rather than spin
+        registry.pop(oldest, None)
 
 
 # Caps for log downloads: the CSV is streamed to a temp file (never buffered
@@ -186,7 +279,8 @@ def _pinned_dns(host: str | None, infos: list[Any] | None) -> Iterator[None]:
     real = socket.getaddrinfo
 
     def pinned(name: Any, *args: Any, **kwargs: Any) -> Any:
-        if str(name) == host:
+        resolved_name = name.decode() if isinstance(name, (bytes, bytearray)) else str(name)
+        if resolved_name == host:
             return infos
         return real(name, *args, **kwargs)
 
@@ -258,17 +352,6 @@ def _append_preview(preview: list[str], preview_bytes: int, text: str) -> int:
 _ERROR_BODY_READ_BYTES = BODY_SLICE_BYTES
 
 
-async def _bounded_error_body(response: httpx.Response) -> bytes:
-    parts: list[bytes] = []
-    total = 0
-    async for chunk in response.aiter_bytes():
-        parts.append(chunk)
-        total += len(chunk)
-        if total >= _ERROR_BODY_READ_BYTES:
-            break
-    return b"".join(parts)
-
-
 async def _raise_for_streamed_status(response: httpx.Response) -> None:
     """``raise_for_status`` that leaves the failed response's body readable.
 
@@ -277,20 +360,16 @@ async def _raise_for_streamed_status(response: httpx.Response) -> None:
     download handlers build from the raised error - reads both. Before this, a
     mid-download 503 escaped as ``ResponseNotRead`` instead of the typed
     payload. The bounded error document is read here and re-raised around a
-    buffered copy of the response, so the payload carries what upstream said
-    without buffering an unbounded body.
+    buffered copy of the response (both shared with ``transport``, which owns
+    the capped-read and buffered-rebuild helpers), so the payload carries what
+    upstream said without buffering an unbounded body.
     """
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
         if not e.response.is_stream_consumed:
-            body = await _bounded_error_body(e.response)
-            e.response = httpx.Response(
-                status_code=e.response.status_code,
-                headers=e.response.headers,
-                content=body,
-                request=e.response.request,
-            )
+            body = await read_body_capped(e.response, _ERROR_BODY_READ_BYTES)
+            e.response = buffered_response(e.response.status_code, e.response.headers, body, e.response.request)
         raise
 
 
@@ -449,30 +528,35 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
     redirects = 0
     unauthenticated = httpx.AsyncClient(timeout=client.get_http_timeout(), follow_redirects=False)
     try:
-        async with _PIN_FETCH_LOCK:
-            while True:
-                # Checked before every fetch, so the first ``Location`` is covered
-                # by the same rule as the rest of the chain; the fetch then dials
-                # the vetted addresses rather than re-resolving the name.
-                infos = await _check_download_redirect_target(next_url)
-                with _pinned_dns(next_url.host, infos):
-                    async with unauthenticated.stream("GET", next_url) as response:
-                        if response.has_redirect_location:
-                            redirects += 1
-                            if redirects > _MAX_DOWNLOAD_REDIRECTS:
-                                raise httpx.TooManyRedirects(
-                                    f"Exceeded {_MAX_DOWNLOAD_REDIRECTS} redirects", request=response.request
-                                )
-                            next_url = response.request.url.join(response.headers["location"])
-                            continue
-                        return await _write_stream_to_tempfile(response, path)
+        async with asyncio.timeout(client.get_http_timeout() * (_MAX_DOWNLOAD_REDIRECTS + 1)):
+            async with _PIN_FETCH_LOCK:
+                while True:
+                    # Checked before every fetch, so the first ``Location`` is covered
+                    # by the same rule as the rest of the chain; the fetch then dials
+                    # the vetted addresses rather than re-resolving the name.
+                    infos = await _check_download_redirect_target(next_url)
+                    with _pinned_dns(next_url.host, infos):
+                        async with unauthenticated.stream(
+                            "GET", next_url, headers={"Accept-Encoding": "identity"}
+                        ) as response:
+                            if response.has_redirect_location:
+                                redirects += 1
+                                if redirects > _MAX_DOWNLOAD_REDIRECTS:
+                                    raise httpx.TooManyRedirects(
+                                        f"Exceeded {_MAX_DOWNLOAD_REDIRECTS} redirects", request=response.request
+                                    )
+                                next_url = response.request.url.join(response.headers["location"])
+                                continue
+                            return await _write_stream_to_tempfile(response, path)
     finally:
         await unauthenticated.aclose()
 
 
 async def _stream_download_to_path(profile_id: str, path: str) -> dict[str, Any]:
     """Stream the log download for ``profile_id`` into ``path`` and return the payload."""
-    async with client.api_client.stream("GET", f"/profiles/{profile_id}/logs/download") as initial:
+    async with client.api_client.stream(
+        "GET", f"/profiles/{profile_id}/logs/download", headers={"Accept-Encoding": "identity"}
+    ) as initial:
         # A non-redirect response is written straight to disk;
         # _write_stream_to_tempfile surfaces any HTTP error via
         # raise_for_status.
@@ -520,6 +604,36 @@ async def _download_logs_controlled(profile_id: str, path: str) -> tuple[dict[st
         return error_payload(ErrorCode.DOWNLOAD_TOO_LARGE, str(e)), False
 
 
+def _download_error_details(error: Exception) -> tuple[Any, Any, Any]:
+    """Best-effort (status, scheme, host) from an httpx error, without raising."""
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    url = None
+    try:
+        request = getattr(error, "request", None)
+    except RuntimeError:
+        request = None
+    if request is not None:
+        try:
+            url = getattr(request, "url", None)
+        except Exception:  # noqa: BLE001
+            url = None
+    scheme = getattr(url, "scheme", None)
+    host = getattr(url, "host", None)
+    return status, scheme, host
+
+
+def _download_error_detail(status: Any, scheme: Any, host: Any) -> str:
+    """Render the parts of the failed request that exist, space-joined; skip the rest."""
+    return " ".join(
+        part
+        for part in (
+            str(status) if status is not None else "",
+            f"{scheme}://{host}" if scheme else "",
+        )
+        if part
+    )
+
+
 async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     """Stream a log CSV download to a temp file without double-buffering.
 
@@ -545,10 +659,19 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     downloaded = False
     try:
         payload, downloaded = await _download_logs_controlled(profile_id, path)
+        # The file must survive until the caller has read it; the server
+        # lifespan reclaims it at shutdown (see cleanup_successful_downloads).
+        _note_successful_download(path, downloaded)
         return payload
     except httpx.HTTPError as e:
         logger.error(f"HTTP error downloading logs: {_log_safe_error(e)}")
-        return http_error_payload(f"HTTP error while downloading logs: {e}", e, fallback_code=ErrorCode.HTTP_ERROR)
+        status, scheme, host = _download_error_details(e)
+        detail = _download_error_detail(status, scheme, host)
+        return http_error_payload(
+            "HTTP error while downloading logs" + (f": {detail}" if detail else ""),
+            e,
+            fallback_code=ErrorCode.HTTP_ERROR,
+        )
     except Exception as e:  # noqa: BLE001
         logger.error(f"Unexpected error downloading logs: {_log_safe_error(e)}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")

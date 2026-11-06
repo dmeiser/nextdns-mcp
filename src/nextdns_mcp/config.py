@@ -534,6 +534,9 @@ def validate_configuration() -> None:
 
     get_http_timeout()
     get_download_max_bytes()
+    base_url = os.getenv("NEXTDNS_API_BASE", "https://api.nextdns.io").rstrip("/")
+    if not base_url.lower().startswith("https://"):
+        raise ConfigurationError("NEXTDNS_API_BASE must use https://")
     _log_access_control_settings()
 
 

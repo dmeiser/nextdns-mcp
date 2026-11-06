@@ -84,7 +84,7 @@ async def mcp_client() -> AsyncIterator[Client]:
 
 async def test_numeric_profile_name_reaches_api_as_string(mcp_client: Client, recorder: _RecordingClient) -> None:
     """A profile name made only of digits is not turned into a number (issue #273)."""
-    result = await mcp_client.call_tool("createProfile", {"name": "315244"})
+    result = await mcp_client.call_tool("createProfile", {"name": "315244"}, raise_on_error=False)
     assert result.data == {"id": "newprofile", "name": "ok"}
 
     sent = recorder.body()
@@ -165,7 +165,9 @@ async def test_integer_shape_helper_is_live_in_the_mcp_call_path(
     ``retention`` is an enum of allowed seconds, so the digit string stands
     for a valid member (2592000 - 30 days), not an arbitrary integer.
     """
-    result = await mcp_client.call_tool("updateLogsSettings", {"profile_id": "abc123", "retention": "٢٥٩٢٠٠٠"})
+    result = await mcp_client.call_tool(
+        "updateLogsSettings", {"profile_id": "abc123", "retention": "٢٥٩٢٠٠٠"}, raise_on_error=False
+    )
     assert result.data == {"data": []}
 
     sent = recorder.body()

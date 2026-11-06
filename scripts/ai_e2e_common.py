@@ -48,8 +48,18 @@ def api_base() -> str:
     out of both the MCP server's environment and the measuring client — the two
     halves would then talk to different hosts and every contract check would come
     back looking like a server fault rather than an env fault.
+
+    Raises:
+        ValueError: If the configured base is not ``https://``. This function is
+            the choke point every path that sends ``X-Api-Key`` passes through
+            (the profile-protection probe, the measuring client, the MCP server's
+            env default), so refusing here keeps the key off a plaintext wire:
+            an ``http`` base fails before any request is constructed.
     """
-    return os.environ.get("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
+    base = os.environ.get("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
+    if not base.lower().startswith("https://"):
+        raise ValueError(f"NEXTDNS_API_BASE must use https:// — refusing to send the API key to {base!r}")
+    return base
 
 
 # Checklist coverage, grouped into run sections. A section maps 1:1 onto an

@@ -91,7 +91,7 @@ class TestEndpointRecord:
         monkeypatch.setenv(CALL_LOG_ENV, str(path))
 
         async with Client(build_mcp_server()) as client:
-            await client.call_tool("getDenylist", {"profile_id": "abc123"})
+            await client.call_tool("getDenylist", {"profile_id": "abc123"}, raise_on_error=False)
 
         rows = _rows(path)
         assert rows[0]["tool"] == "getDenylist"
@@ -117,8 +117,8 @@ class TestEndpointRecord:
         monkeypatch.setenv(CALL_LOG_ENV, str(path))
 
         async with Client(build_mcp_server()) as client:
-            await client.call_tool("addToDenylist", {"profile_id": "abc123", "id": "example.com"})
-            await client.call_tool("getDenylist", {"profile_id": "abc123"})
+            await client.call_tool("addToDenylist", {"profile_id": "abc123", "id": "example.com"}, raise_on_error=False)
+            await client.call_tool("getDenylist", {"profile_id": "abc123"}, raise_on_error=False)
 
         rows = _rows(path)
         assert [r["write"] for r in rows] == [True, False]
@@ -143,7 +143,7 @@ class TestLoggingIsOffUnlessConfigured:
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
 
         async with Client(build_mcp_server()) as client:
-            result = await client.call_tool("getDenylist", {"profile_id": "abc123"})
+            result = await client.call_tool("getDenylist", {"profile_id": "abc123"}, raise_on_error=False)
 
         assert list(tmp_path.iterdir()) == []
         # The call itself still answers in the contract's shape.
@@ -196,7 +196,7 @@ class TestALocalOperationHasNoEndpoint:
         monkeypatch.setattr(plots_module, "_api_request_payload", empty_series)
 
         async with Client(build_mcp_server()) as client:
-            await client.call_tool("plotAnalytics", {"metric": "status", "profile_id": "abc123"})
+            await client.call_tool("plotAnalytics", {"metric": "status", "profile_id": "abc123"}, raise_on_error=False)
 
         rows = _rows(path)
         assert rows[0]["tool"] == "plotAnalytics"
@@ -219,8 +219,8 @@ class TestCallLogMiddleware:
         monkeypatch.setenv(CALL_LOG_ENV, str(path))
 
         async with Client(build_mcp_server()) as client:
-            await client.call_tool("search_tools", {"query": "list profiles"})
-            await client.call_tool("call_tool", {"name": "listProfiles", "arguments": {}})
+            await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
+            await client.call_tool("call_tool", {"name": "listProfiles", "arguments": {}}, raise_on_error=False)
 
         rows = _rows(path)
         assert [r["tool"] for r in rows] == ["listProfiles"]
@@ -278,7 +278,7 @@ class TestCallLogMiddleware:
         monkeypatch.setenv(CALL_LOG_ENV, str(path))
         server = build_mcp_server()
         async with Client(server) as client:
-            await client.call_tool("listProfiles", {})
+            await client.call_tool("listProfiles", {}, raise_on_error=False)
         assert _rows(path)
 
     def test_middleware_without_path_is_inert(self, tmp_path):

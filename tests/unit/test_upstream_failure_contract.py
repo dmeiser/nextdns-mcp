@@ -195,7 +195,7 @@ class TestToolsReportUpstreamFailuresAsPayloads:
 
         async with Client(build_mcp_server()) as client:
             for tool, args in self._CALLS:
-                result = await client.call_tool(tool, args)
+                result = await client.call_tool(tool, args, raise_on_error=False)
                 payload = result.structured_content
                 assert payload.get("code") == "http_error", f"{tool} did not report http_error: {payload}"
                 assert payload.get("status_code") == status, f"{tool} lost the upstream status: {payload}"
@@ -205,8 +205,8 @@ class TestToolsReportUpstreamFailuresAsPayloads:
     async def test_tools_still_succeed_when_upstream_is_healthy(self, stub_nextdns_api):
         """The failure handling above must not swallow a good response."""
         async with Client(build_mcp_server()) as client:
-            profiles = await client.call_tool("listProfiles", {})
-            denylist = await client.call_tool("getDenylist", {"profile_id": "abc123"})
+            profiles = await client.call_tool("listProfiles", {}, raise_on_error=False)
+            denylist = await client.call_tool("getDenylist", {"profile_id": "abc123"}, raise_on_error=False)
         assert profiles.structured_content == {"data": [{"id": "abc123", "name": "Home Network"}]}
         assert denylist.structured_content == {"data": []}
 
@@ -297,3 +297,53 @@ async def test_a_single_chunk_one_byte_over_the_cap_refuses_without_the_overshoo
     payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=len(body) - 1)
     assert payload["code"] == "response_too_large"
     assert payload["max_response_bytes"] == len(body) - 1
+
+
+class TestSharedBufferedBodyHelpers:
+    """``read_body_capped`` / ``buffered_response`` are the one copy of the
+    decoded-body buffering the capped path and the download guard share."""
+
+    @pytest.mark.asyncio
+    async def test_read_body_capped_stops_at_the_cap(self):
+        import httpx
+
+        request = httpx.Request("GET", "https://example.test/f.csv")
+
+        class _Chunks:
+            def __init__(self):
+                self._chunks = [b"a" * 100, b"b" * 100, b"c" * 100]
+
+            def __aiter__(self):
+                async def gen():
+                    for chunk in self._chunks:
+                        yield chunk
+
+                return gen()
+
+        response = httpx.Response(503, request=request)
+        response.aiter_bytes = lambda: _Chunks()  # type: ignore[method-assign]
+        body = await transport.read_body_capped(response, 150)
+        # The read stops once the cap is crossed: the crossing chunk rides along,
+        # no further chunk is read. (Same bounded-read semantics the download
+        # guard always had.)
+        assert body == b"a" * 100 + b"b" * 100
+
+    @pytest.mark.asyncio
+    async def test_buffered_response_strips_stale_encoding_headers(self):
+        import httpx
+
+        request = httpx.Request("GET", "https://example.test/x")
+        response = transport.buffered_response(
+            503,
+            httpx.Headers({"content-encoding": "gzip", "content-length": "999", "x-keep": "yes"}),
+            b"plain",
+            request,
+        )
+        assert response.status_code == 503
+        assert response.content == b"plain"
+        assert "content-encoding" not in response.headers
+        # httpx re-derives content-length from the buffered body; what matters
+        # is that the STALE upstream length is gone.
+        assert int(response.headers["content-length"]) == len(b"plain")
+        assert response.headers["x-keep"] == "yes"
+        assert response.request is request

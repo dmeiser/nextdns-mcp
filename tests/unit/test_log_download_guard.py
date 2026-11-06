@@ -490,6 +490,29 @@ class TestDownloadTool:
         assert os.path.exists(payload["file_path"])
         assert payload["preview"]["text"].startswith("host,reason")
 
+    async def test_a_successful_download_is_reclaimed_at_shutdown(self, monkeypatch, unauthenticated):
+        """The kept CSV is bounded: the lifespan cleanup removes it and its dir.
+
+        The file must outlive the call (the caller reads the returned path),
+        so the reclaim point is server shutdown - without it, every successful
+        download accumulated for the life of the container.
+        """
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        monkeypatch.setattr(
+            client_module,
+            "api_client",
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)]),
+        )
+        unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+
+        payload = await logs_module._download_logs_to_tempfile("abc123")
+        assert os.path.exists(payload["file_path"])
+        assert payload["file_path"] in logs_module._SUCCESSFUL_DOWNLOADS
+        logs_module.cleanup_successful_downloads()
+        assert not os.path.exists(payload["file_path"])
+        assert not os.path.exists(os.path.dirname(payload["file_path"]))
+        logs_module.cleanup_successful_downloads()  # idempotent: nothing registered, nothing to do
+
     async def test_an_acl_denial_is_typed_and_leaves_no_temp_file(self, monkeypatch):
         class Denied:
             def stream(self, method, url, **kwargs):
@@ -616,11 +639,11 @@ class TestStreamedFailureIsTyped:
         """
         reads: list = []
 
-        async def watch_body(response):
+        async def watch_body(response, max_bytes):
             reads.append(response)
             return b""
 
-        monkeypatch.setattr(logs_module, "_bounded_error_body", watch_body)
+        monkeypatch.setattr(logs_module, "read_body_capped", watch_body)
         response = _FakeResponse("https://x/f.csv", status_code=502, chunks=["bad gateway"])
         async for _ in response.aiter_bytes():  # consume it, exactly as a completed download would
             pass
@@ -711,35 +734,61 @@ class TestDiallingTheVettedAddress:
             await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
         assert [url for _, url in follower.calls] == [signed], "the poisoned second hop was fetched"
 
-    async def test_the_pinned_resolver_is_installed_while_the_hop_is_fetched(self, tmp_path, monkeypatch):
-        signed = "https://storage.example/file.csv"
+    async def test_a_real_httpx_connection_dials_the_vetted_address(self):
+        """The pin owns the dial: a real connection through a real httpx client.
 
-        def public(host: str, port: Any, **kwargs: Any) -> list[Any]:
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_IP, 0))]
+        The previous version of this test used a fake client that merely
+        recorded which resolver was installed - it proved the swap existed,
+        not that httpcore's real resolution path dials the vetted address.
+        Here a real TCP server stands in for the storage host: the URL names
+        a public hostname, the pin answers it with the listener's address,
+        and the request must actually arrive - Host header still the
+        hostname, and a bytes name (the shape anyio hands httpcore) decoded
+        before the compare.
+        """
+        hits: list[tuple[bytes, bytes]] = []
+        body = b"host,reason\na.example,blocked\n"
 
-        monkeypatch.setattr(socket, "getaddrinfo", public)
-        observed: dict[str, Any] = {}
+        async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            request_line = await reader.readline()
+            headers = b""
+            while True:
+                line = await reader.readline()
+                if line in (b"\r\n", b""):
+                    break
+                headers += line
+            hits.append((request_line, headers))
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Length: "
+                + str(len(body)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+            writer.close()
 
-        class _ProbeClient:
-            def __init__(self, *args: Any, **kwargs: Any) -> None:
-                pass
-
-            def stream(self, method: str, url: Any) -> Any:
-                observed["resolver"] = socket.getaddrinfo
-                observed["url"] = str(url)
-                return _FakeResponse(str(url), chunks=["a\n"])
-
-            async def aclose(self) -> None:
-                pass
-
-        monkeypatch.setattr(httpx, "AsyncClient", _ProbeClient)
-        await logs_module._follow_redirects_to_tempfile(httpx.URL(signed), str(tmp_path / "d.csv"))
-
-        pinned = observed["resolver"]
-        assert pinned is not public, "the fetch ran with the process resolver, not the pinned one"
-        assert pinned("storage.example", None)[0][4][0] == PUBLIC_IP
-        assert pinned("other.example", None)[0][4][0] == PUBLIC_IP, "other names fall through to the real resolver"
-        assert observed["url"] == signed, "the request URL stays hostname-based (SNI, Host, cert)"
+        server = await asyncio.start_server(_serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        # anyio dials (vetted address, URL port): the port must come from the
+        # URL, only the address comes from the pin (production: always 443).
+        vetted = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+        try:
+            async with logs_module._PIN_FETCH_LOCK:
+                with logs_module._pinned_dns("pin.example", vetted):
+                    # anyio passes bytes names to getaddrinfo: the pin must
+                    # decode before comparing, or it never matches.
+                    assert socket.getaddrinfo(b"pin.example", None, type=socket.SOCK_STREAM) == vetted
+                    async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+                        response = await client.get(f"http://pin.example:{port}/file.csv")
+            assert response.status_code == 200
+            assert response.content == body
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert len(hits) == 1, "exactly one real connection arrived"
+        request_line, headers = hits[0]
+        assert request_line.startswith(b"GET /file.csv ")
+        assert b"host: pin.example" in headers.lower(), "the dialled IP is the vetted one; the Host stays the hostname"
 
     def test_pinned_dns_answers_only_for_the_vetted_host(self, monkeypatch):
         vetted = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_IP, 0))]
@@ -917,3 +966,112 @@ class TestOversizedRecordAtEof:
         assert payload["preview"]["line_count"] == 0
         assert payload["row_count"] == 1
         assert payload["size"] == 33
+
+
+def test_download_error_details_url_raises():
+    from types import SimpleNamespace
+
+    from nextdns_mcp.tools.logs import _download_error_details
+
+    class Req:
+        @property
+        def url(self):
+            raise RuntimeError("boom")
+
+    e = Exception()
+    e.response = SimpleNamespace(status_code=500)
+    e.request = Req()
+    status, scheme, host = _download_error_details(e)
+    assert status == 500
+    assert scheme is None
+    assert host is None
+
+
+class TestSuccessfulDownloadLifecycle:
+    """Registration bounds disk use and never forgets a failed deletion."""
+
+    def _register(self, tmp_path: Path, tag: str) -> str:
+        path = tmp_path / tag / "download.csv"
+        path.parent.mkdir(parents=True)
+        path.write_text("csv")
+        logs_module._note_successful_download(str(path), True)
+        return str(path)
+
+    def test_retention_is_bounded_by_evicting_the_oldest_download(self, tmp_path, monkeypatch):
+        """A long-lived server must not keep every CSV it ever handed out."""
+        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
+        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
+        cap = logs_module.MAX_RETAINED_DOWNLOADS
+        paths = [self._register(tmp_path, f"dl{i}") for i in range(cap + 2)]
+        # The two oldest were evicted and unlinked; the newest `cap` stay.
+        assert not (tmp_path / "dl0" / "download.csv").exists()
+        assert not (tmp_path / "dl1" / "download.csv").exists()
+        for tag in range(2, cap + 2):
+            assert (tmp_path / f"dl{tag}" / "download.csv").exists()
+        registered = logs_module._current_registry()
+        assert set(registered) == set(paths[2:])
+        logs_module.cleanup_successful_downloads()
+        assert logs_module._current_registry() == {}
+
+    def test_a_failed_deletion_stays_registered_for_a_later_retry(self, tmp_path, monkeypatch, caplog):
+        """The old cleanup popped each path BEFORE unlinking: one OSError and the
+        CSV leaked forever with no record it had ever existed. A failed removal
+        must keep the path registered so a later cleanup can retry it."""
+        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
+        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
+        blocker = tmp_path / "blocker"
+        blocker.mkdir()
+        blocked = str(blocker)  # a directory at the registered path: unlink fails with OSError
+        logs_module._note_successful_download(blocked, True)
+        gone = self._register(tmp_path, "gone")
+
+        with caplog.at_level("WARNING"):
+            logs_module.cleanup_successful_downloads()
+
+        assert "Failed to remove temp log file" in caplog.text
+        # The removable file was unregistered; the failed one is still registered.
+        registered = logs_module._current_registry()
+        assert blocked in registered
+        assert gone not in registered
+
+    def test_registration_goes_to_the_owning_lifespan_registry(self, tmp_path, monkeypatch):
+        """Outside a lifespan the process-global registry is the fallback."""
+        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
+        owned: dict[str, None] = {}
+        token = logs_module._download_registry.set(owned)
+        try:
+            path = self._register(tmp_path, "owned")
+            assert owned == {path: None}
+            assert logs_module._SUCCESSFUL_DOWNLOADS == {}
+        finally:
+            logs_module._download_registry.reset(token)
+
+    def test_a_never_written_path_is_removed_without_a_trace(self, tmp_path):
+        """FileNotFoundError means there is nothing to remove and nothing to report."""
+        missing = str(tmp_path / "nope" / "download.csv")
+        assert logs_module._remove_downloaded_file(missing) is True
+
+    def test_a_shared_parent_directory_survives_removal(self, tmp_path):
+        """The mkdtemp parent is removed only when empty; a parent another file
+        still lives in must not be rmdir'd (or its removal failure reported)."""
+        parent = tmp_path / "shared"
+        parent.mkdir()
+        registered = parent / "download.csv"
+        registered.write_text("csv")
+        (parent / "other").write_text("still here")
+        assert logs_module._remove_downloaded_file(str(registered)) is True
+        assert not registered.exists()
+        assert parent.exists(), "a parent another file lives in must survive"
+
+    def test_an_unevictable_oldest_download_stops_the_eviction_sweep(self, tmp_path, monkeypatch):
+        """When the oldest registered path cannot be unlinked, the sweep stops
+        instead of spinning; the overflow stays registered for shutdown reclaim."""
+        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
+        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
+        blocker = tmp_path / "blocker"
+        blocker.mkdir()  # a directory: unlink fails with OSError, cannot be evicted
+        logs_module._note_successful_download(str(blocker), True)
+        survivors = [self._register(tmp_path, f"dl{i}") for i in range(logs_module.MAX_RETAINED_DOWNLOADS + 1)]
+        registered = logs_module._current_registry()
+        assert str(blocker) in registered, "the failed eviction must stay registered"
+        assert set(survivors) <= set(registered), "an unevictable oldest must stop the sweep, not drop the rest"

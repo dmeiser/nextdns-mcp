@@ -454,9 +454,8 @@ class TestPlotAndDohErrorContract:
     @pytest.mark.asyncio
     async def test_plot_no_data(self, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        response = MagicMock()
-        response.json.return_value = {"meta": {"series": {"times": []}}, "data": []}
-        mock_api_client.request.return_value = response
+        wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
+        monkeypatch.setattr("nextdns_mcp.tools.plots._api_request_payload", wrapped)
         result = await _plot_analytics_series_impl("status")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.NO_DATA
@@ -464,7 +463,8 @@ class TestPlotAndDohErrorContract:
     @pytest.mark.asyncio
     async def test_plot_http_error(self, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.request.side_effect = _http_error(500)
+        wrapped = AsyncMock(return_value={"error": "boom", "code": ErrorCode.HTTP_ERROR, "status_code": 500})
+        monkeypatch.setattr("nextdns_mcp.tools.plots._api_request_payload", wrapped)
         result = await server.plotAnalytics("status")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.HTTP_ERROR

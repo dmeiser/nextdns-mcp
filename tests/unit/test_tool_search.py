@@ -48,7 +48,7 @@ class TestNameAwareRanking:
     """The caller's own words should surface the tool whose NAME says them."""
 
     def test_words_splits_camel_case_and_singularizes(self):
-        from nextdns_mcp.tool_search import _words
+        from nextdns_mcp.tool_search_rank import _words
 
         assert _words("queryTimeSeries") == {"query", "time", "sery"}
         # "analytics" loses its trailing s the same way "Domains" does, which is what
@@ -68,7 +68,7 @@ class TestNameAwareRanking:
         noun has a second carrier, which cancelled the words that actually say which
         tool is meant and left the ordering to alphabetical ties.
         """
-        from nextdns_mcp.tool_search import _shared_words
+        from nextdns_mcp.tool_search_rank import _shared_words
 
         small = {f"tool{i}": ({"denylist"} if i < 2 else set()) for i in range(4)}
         large = {f"tool{i}": ({"denylist"} if i < 2 else set()) for i in range(40)}
@@ -76,7 +76,7 @@ class TestNameAwareRanking:
         assert "denylist" not in _shared_words(large)
 
     def test_a_word_the_whole_catalog_carries_is_still_shared(self):
-        from nextdns_mcp.tool_search import _shared_words
+        from nextdns_mcp.tool_search_rank import _shared_words
 
         every = {f"tool{i}": {"profile"} for i in range(40)}
         assert "profile" in _shared_words(every)
@@ -91,7 +91,7 @@ class TestNameAwareRanking:
         """
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getDenylist"),
@@ -105,7 +105,7 @@ class TestNameAwareRanking:
     def test_rank_prefers_name_overlap_and_keeps_underlying_order_on_ties(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getAnalyticsDomains"),
@@ -122,7 +122,7 @@ class TestNameAwareRanking:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "generate analytics plot"})
+            found = await client.call_tool("search_tools", {"query": "generate analytics plot"}, raise_on_error=False)
             names = [t.get("name") for t in found.data]
             assert names[0] == "plotAnalytics"
 
@@ -133,7 +133,7 @@ class TestNameAwareRanking:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "doh"})
+            found = await client.call_tool("search_tools", {"query": "doh"}, raise_on_error=False)
             assert found.data[0].get("name") == "dohLookup"
 
     @pytest.mark.asyncio
@@ -144,7 +144,7 @@ class TestNameAwareRanking:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "doh"})
+            found = await client.call_tool("search_tools", {"query": "doh"}, raise_on_error=False)
         assert "dohLookup" in [tool.get("name") for tool in found.data]
 
 
@@ -157,23 +157,23 @@ class TestMorphologicalQueryExpansion:
     """
 
     def test_variant_words_adds_catalog_partners(self):
-        from nextdns_mcp.tool_search import _variant_words
+        from nextdns_mcp.tool_search_rank import _variant_words
 
         vocabulary = {"category", "categories", "native", "natives"}
         assert _variant_words("categories natives", vocabulary) == {"category", "native"}
 
     def test_variant_words_ignores_partners_the_catalog_never_wrote(self):
-        from nextdns_mcp.tool_search import _variant_words
+        from nextdns_mcp.tool_search_rank import _variant_words
 
         assert _variant_words("categories aa", {"categories"}) == set()
 
     def test_variant_words_adds_plural_of_a_singular_word(self):
-        from nextdns_mcp.tool_search import _variant_words
+        from nextdns_mcp.tool_search_rank import _variant_words
 
         assert _variant_words("category entry", {"categories", "entries"}) == {"categories", "entries"}
 
     def test_variant_words_skips_words_that_name_every_tool(self):
-        from nextdns_mcp.tool_search import _variant_words
+        from nextdns_mcp.tool_search_rank import _variant_words
 
         vocabulary = {"profile", "profiles", "category", "categories"}
         assert _variant_words("delete profile categories", vocabulary, exclude={"profile"}) == {"category"}
@@ -182,14 +182,14 @@ class TestMorphologicalQueryExpansion:
         from nextdns_mcp.tool_search import FallbackBM25SearchTransform
 
         assert (
-            FallbackBM25SearchTransform()._augment_query("parental categories", {"category"})
+            FallbackBM25SearchTransform(endpoints={})._augment_query("parental categories", {"category"})
             == "parental categories category"
         )
 
     def test_augmentation_without_variants_leaves_the_query_alone(self):
         from nextdns_mcp.tool_search import FallbackBM25SearchTransform
 
-        assert FallbackBM25SearchTransform()._augment_query("natives", set()) == "natives"
+        assert FallbackBM25SearchTransform(endpoints={})._augment_query("natives", set()) == "natives"
 
     @pytest.mark.asyncio
     async def test_a_plural_noun_query_reaches_the_singular_named_tool(self, monkeypatch):
@@ -197,7 +197,7 @@ class TestMorphologicalQueryExpansion:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "parental categories"})
+            found = await client.call_tool("search_tools", {"query": "parental categories"}, raise_on_error=False)
         assert "updateParentalControlCategoryEntry" in [tool.get("name") for tool in found.data]
 
     @pytest.mark.asyncio
@@ -206,7 +206,9 @@ class TestMorphologicalQueryExpansion:
 
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "update profile privacy_natives"})
+            found = await client.call_tool(
+                "search_tools", {"query": "update profile privacy_natives"}, raise_on_error=False
+            )
         assert "replacePrivacyNatives" in [tool.get("name") for tool in found.data]
 
 
@@ -247,7 +249,7 @@ class TestPublishedDescriptions:
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "denylist entry"})
+            found = await client.call_tool("search_tools", {"query": "denylist entry"}, raise_on_error=False)
         result = next(tool for tool in found.data if tool.get("name") == "updateDenylistEntry")
         description = " ".join((result.get("description") or "").split())
         for marker in ("denylist", "entry_id", "NextDNS API: PATCH"):
@@ -272,7 +274,7 @@ class TestPublishedDescriptions:
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
         async with Client(build_mcp_server()) as client:
             for query in ("add entry to allowlist", "analytics top domains", "query logs last hour"):
-                found = await client.call_tool("search_tools", {"query": query})
+                found = await client.call_tool("search_tools", {"query": query}, raise_on_error=False)
                 assert len(json.dumps(found.data)) < 8500, query
                 assert len(found.data) <= ts.CATALOG_MAX_RESULTS, query
 
@@ -315,7 +317,7 @@ class TestSearchPathGuards:
     def test_a_query_with_no_words_leaves_the_order_as_it_was(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getDenylist"),
@@ -326,7 +328,7 @@ class TestSearchPathGuards:
 
     def test_a_name_with_no_words_has_no_leading_word(self):
         """The verb is the first word; a name that has none has nothing to score."""
-        from nextdns_mcp.tool_search import _leading_word
+        from nextdns_mcp.tool_search_rank import _leading_word
 
         assert _leading_word("") == ""
         assert _leading_word("---") == ""
@@ -341,7 +343,7 @@ class TestSearchPathGuards:
         """
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import _scope_words
+        from nextdns_mcp.tool_search_rank import _scope_words
 
         assert _scope_words([]) == set()
         assert _scope_words([Tool.from_function(lambda: None, name="getDenylist")]) == set()
@@ -464,7 +466,7 @@ class TestToolSearchServerWiring:
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         server = build_mcp_server()
         async with Client(server) as client:
-            found = await client.call_tool("search_tools", {"query": "addToDenylist"})
+            found = await client.call_tool("search_tools", {"query": "addToDenylist"}, raise_on_error=False)
             assert any(t.get("name") == "addToDenylist" for t in found.data)
 
             # The hidden tool is still resolvable server-side (call path),
@@ -491,28 +493,34 @@ class TestSearchFallback:
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         server = build_mcp_server()
         async with Client(server) as client:
-            found = await client.call_tool("search_tools", {"query": "updateProfileZzz"})
+            found = await client.call_tool("search_tools", {"query": "updateProfileZzz"}, raise_on_error=False)
             names = [t.get("name") for t in found.data]
 
         assert names, "an unmatchable query returned nothing"
-        # Everything it falls back to is a tool this server will actually run, and
-        # at least some of it is generated from the spec: the fallback has to
-        # surface the API surface, not just the two hand-written tools.
         assert set(names) <= set(published_tool_names())
         assert set(names) & set(spec_tool_names())
-        assert len(names) <= ts.CATALOG_MAX_RESULTS
+        # The fallback answers with the WHOLE catalog, not a six-entry sample
+        # (which used to be six add* writes - a page of mutations) and not a
+        # byte-bounded slice that silently dropped entries: the caller that
+        # matched nothing needs the entire surface, reads first. The
+        # fallback's own ceiling (SEARCH_FALLBACK_MAX_BYTES, larger than the
+        # ranked-answer 8 KB) is what bounds it.
+        assert set(names) == set(published_tool_names()), "the fallback dropped catalog entries"
+        answer_bytes = len(json.dumps(found.data, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+        assert answer_bytes <= ts.SEARCH_FALLBACK_MAX_BYTES
+        assert answer_bytes > ts.SEARCH_ANSWER_MAX_BYTES, "the whole catalog cannot fit the ranked 8 KB budget"
 
     def test_build_transform_types(self):
         from fastmcp.server.transforms.search import BM25SearchTransform
 
         from nextdns_mcp.tool_search import FallbackBM25SearchTransform, build_search_transform
 
-        assert isinstance(build_search_transform("bm25"), FallbackBM25SearchTransform)
+        assert isinstance(build_search_transform("bm25", endpoints={}), FallbackBM25SearchTransform)
         # The fold is direct: FallbackBM25SearchTransform subclasses FastMCP's
         # transform itself (no untyped mixin in between, PRIN-1/ARCH-3).
-        assert isinstance(build_search_transform("bm25"), BM25SearchTransform)
+        assert isinstance(build_search_transform("bm25", endpoints={}), BM25SearchTransform)
         assert FallbackBM25SearchTransform.__mro__[1] is BM25SearchTransform
-        assert build_search_transform("off") is None
+        assert build_search_transform("off", endpoints={}) is None
 
     def test_an_unimplemented_mode_raises_rather_than_silencing_disclosure(self):
         """A mode the factory has not implemented must fail, not mean 'off' (PRIN-9).
@@ -522,7 +530,7 @@ class TestSearchFallback:
         discovery off. The raise is the seam where they cannot drift quietly.
         """
         with pytest.raises(ValueError, match="tool-search"):
-            ts.build_search_transform("regex")
+            ts.build_search_transform("regex", endpoints={})
 
 
 class TestSearchAnswerAsName:
@@ -544,17 +552,17 @@ class TestSearchAnswerAsName:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "list profiles"})
+            found = await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
             assert found.data[0]["name"] == "listProfiles"
-            result = await client.call_tool("call_tool", {"name": found.data, "arguments": {}})
+            result = await client.call_tool("call_tool", {"name": found.data, "arguments": {}}, raise_on_error=False)
         assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
 
     async def test_one_result_object_resolves_to_its_name(self):
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "list profiles"})
-            result = await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}})
+            found = await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
+            result = await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}}, raise_on_error=False)
         assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
 
     async def test_a_name_that_says_nothing_still_fails_the_schema(self):
@@ -573,7 +581,9 @@ class TestSearchAnswerAsName:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            result = await client.call_tool("call_tool", {"name": "listProfiles", "arguments": {}})
+            result = await client.call_tool(
+                "call_tool", {"name": "listProfiles", "arguments": {}}, raise_on_error=False
+            )
         assert "/profiles" in json.dumps(getattr(result, "structured_content", None) or {})
 
 
@@ -611,7 +621,7 @@ class TestMistypedToolName:
 
         async with Client(build_mcp_server()) as client:
             result = await client.call_tool(
-                "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}
+                "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
             )
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
@@ -645,7 +655,9 @@ class TestParametersSentBesideTheName:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            result = await client.call_tool("call_tool", {"name": "getDenylist", "profile_id": "abc123"})
+            result = await client.call_tool(
+                "call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False
+            )
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
 
@@ -657,6 +669,7 @@ class TestParametersSentBesideTheName:
             result = await client.call_tool(
                 "call_tool",
                 {"name": "getDenylist", "profile_id": "zzz999", "arguments": {"profile_id": "abc123"}},
+                raise_on_error=False,
             )
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
@@ -667,7 +680,7 @@ class TestParametersSentBesideTheName:
 
         async with Client(build_mcp_server()) as client:
             result = await client.call_tool(
-                "call_tool", {"name": "getDenylist", "profile_id": "abc123", "totally_made_up": 1}
+                "call_tool", {"name": "getDenylist", "profile_id": "abc123", "totally_made_up": 1}, raise_on_error=False
             )
         assert "totally_made_up" in json.dumps(getattr(result, "structured_content", None) or {})
 
@@ -716,7 +729,9 @@ class TestRankingOnTheWordsTheCatalogOwns:
             Tool.from_function(lambda profile_id, metric: None, name="getAnalyticsDestinationsSeries"),
             Tool.from_function(lambda profile_id, name: None, name="updateProfile"),
         ]
-        scope = ts._scope_words(tools)
+        from nextdns_mcp.tool_search_rank import _scope_words
+
+        scope = _scope_words(tools)
         assert "profile" in scope
         assert "metric" not in scope
 
@@ -773,7 +788,7 @@ class TestRankingOnTheWordsTheCatalogOwns:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": query})
+            found = await client.call_tool("search_tools", {"query": query}, raise_on_error=False)
         assert next(tool["name"] for tool in found.data) == first
 
     async def test_a_bare_verb_query_ranks_on_its_object_word_not_the_verb(self, monkeypatch):
@@ -790,7 +805,7 @@ class TestRankingOnTheWordsTheCatalogOwns:
         from fastmcp import Client
 
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "get rewrites"})
+            found = await client.call_tool("search_tools", {"query": "get rewrites"}, raise_on_error=False)
         names = [tool["name"] for tool in found.data]
         assert "listRewrites" in names
         if "getPrivacySettings" in names:
@@ -873,7 +888,7 @@ class TestTheGenericVerbGate:
     """
 
     def test_a_generic_verb_alone_scores_nothing(self):
-        from nextdns_mcp.tool_search import _words_score
+        from nextdns_mcp.tool_search_rank import _words_score
 
         args = (
             {"get", "rewrite"},
@@ -890,7 +905,7 @@ class TestTheGenericVerbGate:
         assert _words_score(*args) == 3
 
     def test_a_second_word_the_tool_carries_restores_the_verb(self):
-        from nextdns_mcp.tool_search import _words_score
+        from nextdns_mcp.tool_search_rank import _words_score
 
         score = _words_score(
             {"get", "privacy"},
@@ -905,13 +920,13 @@ class TestTheGenericVerbGate:
 
     def test_a_verb_unique_to_one_name_is_that_tool_word_not_a_generic(self):
         """dohLookup leads with `doh`; no other name does - the gate never fires."""
-        from nextdns_mcp.tool_search import _generic_leading_words
+        from nextdns_mcp.tool_search_rank import _generic_leading_words
 
         names = {"dohLookup": {"doh", "lookup"}, "getProfile": {"get", "profile"}, "getLogs": {"get", "log"}}
         assert _generic_leading_words(names) == {"get"}
 
     def test_a_tool_with_no_name_words_scores_nothing(self):
-        from nextdns_mcp.tool_search import _words_score
+        from nextdns_mcp.tool_search_rank import _words_score
 
         assert _words_score({"x"}, None, None, set(), set(), "") == 0
 
@@ -928,7 +943,7 @@ class TestTieBreakOnUndiscountedNameOverlap:
     def test_a_tie_breaks_for_the_tool_whose_name_holds_more_query_words(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="deleteRewrite"),
@@ -951,7 +966,7 @@ class TestMemoizedCatalogStructures:
     def test_catalog_words_are_memoized_by_tool_names(self):
         from fastmcp.tools.base import Tool
 
-        transform = ts.FallbackBM25SearchTransform()
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
         tools = [
             Tool.from_function(lambda: None, name="aTool"),
             Tool.from_function(lambda: None, name="bTool"),
@@ -966,7 +981,7 @@ class TestMemoizedCatalogStructures:
         """The cache is never handed out by reference; a caller cannot mutate it."""
         from fastmcp.tools.base import Tool
 
-        transform = ts.FallbackBM25SearchTransform()
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
         tool = Tool.from_function(lambda: None, name="aTool", description="does a thing")
         first = await transform._render_results([tool])
         first[0]["name"] = "mutated-through-the-answer"
@@ -976,7 +991,7 @@ class TestMemoizedCatalogStructures:
 
     def test_synthetic_tools_are_built_once(self):
         """FastMCP rebuilds them per listing; they are constants of the transform."""
-        transform = ts.FallbackBM25SearchTransform()
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
         assert transform._make_search_tool() is transform._make_search_tool()
         assert transform._make_call_tool() is transform._make_call_tool()
         assert transform._make_search_tool() is not transform._make_call_tool()
@@ -1105,7 +1120,7 @@ class TestShapeRepairAnnouncesItself:
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
                 result = await client.call_tool(
-                    "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}
+                    "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
                 )
         content = json.dumps(getattr(result, "structured_content", None) or {})
         assert "/profiles/abc123/denylist" in content, content
@@ -1121,7 +1136,7 @@ class TestShapeRepairAnnouncesItself:
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
                 result = await client.call_tool(
-                    "call_tool", {"name": "getDenylist", "arguments": {"profile_id": "abc123"}}
+                    "call_tool", {"name": "getDenylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
                 )
         assert "resolved_from" not in (getattr(result, "structured_content", None) or {})
         assert not [r for r in caplog.records if r.name == "nextdns_mcp.tool_search" and r.levelno >= logging.WARNING]
@@ -1133,7 +1148,9 @@ class TestShapeRepairAnnouncesItself:
 
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
-                await client.call_tool("call_tool", {"name": "getDenylist", "profile_id": "abc123"})
+                await client.call_tool(
+                    "call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False
+                )
         assert any(r.levelno == logging.WARNING and "beside name" in r.getMessage() for r in caplog.records)
 
     async def test_a_search_answer_name_repair_logs_at_warning(self, caplog):
@@ -1143,8 +1160,8 @@ class TestShapeRepairAnnouncesItself:
 
         with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
-                found = await client.call_tool("search_tools", {"query": "list profiles"})
-                await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}})
+                found = await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
+                await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}}, raise_on_error=False)
         assert any(r.levelno == logging.WARNING and "top-ranked" in r.getMessage() for r in caplog.records)
 
     def test_a_non_dict_payload_passes_the_annotation_through_unchanged(self):
@@ -1182,3 +1199,133 @@ class TestCatalogReadFailure:
         transform = SimpleNamespace(get_tool_catalog=exploding_catalog)
         context = SimpleNamespace(fastmcp_context=object())
         assert await ts.CallToolShapeMiddleware(transform)._catalog(context) == ()
+
+
+class TestFastMCPPrivateSurface:
+    def test_overridden_private_methods_still_exist(self):
+        import fastmcp
+        from fastmcp.server.transforms.search import BM25SearchTransform
+
+        for name in ("_search", "_make_search_tool", "_make_call_tool", "_render_results"):
+            assert hasattr(BM25SearchTransform, name), name
+        assert fastmcp.__version__ == "4.1.2"
+
+
+def test_a_loosely_matched_write_name_is_refused_with_the_catalog(monkeypatch):
+    """A write runs only under its exact name: a loose match is refused, not run.
+
+    Executing a write the caller never singled out is kept inside the reads:
+    the refusal names what the words matched so the caller re-sends the exact
+    name. The module's real helpers do the resolving — only the endpoint map
+    is supplied, as the server wires it.
+    """
+    import asyncio
+
+    from fastmcp.tools.base import Tool
+
+    import nextdns_mcp.tool_search as ts
+
+    tools = [Tool.from_function(lambda: None, name="deleteProfile")]
+    middleware = ts.CallToolShapeMiddleware(endpoints={"deleteProfile": ("DELETE", "/profiles/{profile_id}")})
+
+    async def main():
+        with pytest.raises(ts.ToolError) as excinfo:
+            await middleware._resolve_tool_name("profiles_delete", tools)
+        message = str(excinfo.value)
+        assert "'profiles_delete' is not a tool of this server" in message
+        assert "deleteProfile takes" in message
+        # The exact name still resolves: only the loose write is refused.
+        resolved, target = await middleware._resolve_tool_name("deleteProfile", tools)
+        assert resolved == "deleteProfile"
+        assert target is tools[0]
+
+    asyncio.run(main())
+
+
+def test_the_fallback_classifies_writes_from_the_endpoint_map():
+    """The no-match fallback sorts reads first using the spec's own methods.
+
+    The name-shape heuristic it replaces read every list* tool as a write, so
+    a model that found nothing got a page of mutations. build_search_transform
+    wires the route parse into the transform; the fallback answers with the
+    GETs ahead of the writes.
+    """
+    import asyncio
+
+    from fastmcp.tools.base import Tool
+
+    import nextdns_mcp.tool_search as ts
+
+    tools = [
+        Tool.from_function(lambda: None, name="addToDenylist"),
+        Tool.from_function(lambda: None, name="deleteProfile"),
+        Tool.from_function(lambda: None, name="listProfiles"),
+        Tool.from_function(lambda: None, name="listRewrites"),
+    ]
+    endpoints = {
+        "addToDenylist": ("POST", "/profiles/{profile_id}/denylist"),
+        "deleteProfile": ("DELETE", "/profiles/{profile_id}"),
+        "listProfiles": ("GET", "/profiles"),
+        "listRewrites": ("GET", "/profiles/{profile_id}/rewrites"),
+    }
+    transform = ts.build_search_transform("bm25", endpoints=endpoints)
+    assert transform is not None
+    assert transform._endpoints == endpoints
+
+    async def main():
+        ranked = [t.name for t in await transform._search(tools, "qxqv zzxj no such tool words")]
+        assert ranked.index("listProfiles") < ranked.index("addToDenylist")
+        assert ranked.index("listProfiles") < ranked.index("deleteProfile")
+        assert ranked.index("listRewrites") < ranked.index("addToDenylist")
+        assert ranked.index("listRewrites") < ranked.index("deleteProfile")
+
+    asyncio.run(main())
+
+
+def test_the_fallback_reads_a_name_off_the_map_like_the_composites():
+    """A name the map does not carry (plotAnalytics, dohLookup) sorts as a read."""
+    import asyncio
+
+    from fastmcp.tools.base import Tool
+
+    import nextdns_mcp.tool_search as ts
+
+    tools = [
+        Tool.from_function(lambda: None, name="addToDenylist"),
+        Tool.from_function(lambda: None, name="dohLookup"),
+        Tool.from_function(lambda: None, name="plotAnalytics"),
+    ]
+    transform = ts.build_search_transform(
+        "bm25", endpoints={"addToDenylist": ("POST", "/profiles/{profile_id}/denylist")}
+    )
+    assert transform is not None
+
+    async def main():
+        ranked = [t.name for t in await transform._search(tools, "qxqv zzxj no such tool words")]
+        assert ranked.index("dohLookup") < ranked.index("addToDenylist")
+        assert ranked.index("plotAnalytics") < ranked.index("addToDenylist")
+
+    asyncio.run(main())
+
+
+class TestQueryLengthCap:
+    """Regression: the scope-strip regex backtracks quadratically on unbounded
+    queries (measured: 8 KB ~1.4 s, 64 KB ~88 s, synchronously on every search).
+    The query is capped at 512 characters before any scoring runs."""
+
+    @pytest.mark.asyncio
+    async def test_a_huge_query_scores_like_its_capped_prefix(self, monkeypatch):
+        from fastmcp import Client
+
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        server = build_mcp_server()
+        huge = "profiles settings privacy " + "z" * 100_000
+        async with Client(server) as client:
+            # Uncapped, the quadratic regex alone needs minutes for 100 KB;
+            # this completing at all is the regression signal.
+            big = await client.call_tool("search_tools", {"query": huge}, raise_on_error=False)
+            capped = await client.call_tool("search_tools", {"query": huge[:512]}, raise_on_error=False)
+        assert [t.get("name") for t in big.data] == [t.get("name") for t in capped.data]

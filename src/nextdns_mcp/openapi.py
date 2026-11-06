@@ -55,10 +55,12 @@ from .call_log import CallLogMiddleware, call_log_path
 from .client import close_api_client, get_api_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
 from .constants import SYNTHETIC_TOOL_NAMES
+from .spec_tools import endpoints_for_routes
 from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import close_doh_client
+from .tools.logs import _download_registry, cleanup_successful_downloads
 from .usage import server_instructions
-from .utils import is_float_shaped, is_integer_shaped
+from .utils import _BARE_NEGATIVE_RE, _NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +344,11 @@ def _coerce_float_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
     return False, s
 
 
+def _preserves_time_string(value: str, schema_types: set[str]) -> bool:
+    """Whether a string time value must survive coercion untouched."""
+    return "string" in schema_types and bool(_BARE_NEGATIVE_RE.match(value) or _NOW_OFFSET_RE.match(value))
+
+
 class StripExtraFieldsMiddleware(Middleware):
     """Middleware that strips unknown fields and coerces types in tool arguments.
 
@@ -422,6 +429,8 @@ class StripExtraFieldsMiddleware(Middleware):
         that type. Identifier-like strings (e.g. profile IDs, entry IDs) declared
         as ``string`` are left untouched.
         """
+        if _preserves_time_string(s, schema_types):
+            return s
         for coerce in (_coerce_bool_value, _coerce_int_value, _coerce_float_value):
             handled, value = coerce(s, schema_types)
             if handled:
@@ -556,7 +565,14 @@ class StripExtraFieldsMiddleware(Middleware):
 
 @asynccontextmanager
 async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """Manage server lifespan, closing long-lived HTTP clients on shutdown (issue #277)."""
+    """Manage server lifespan: clients on shutdown, and the downloads they left (issue #277)."""
+    # Own the downloads THIS server hands out: registration goes through the
+    # context var (see nextdns_mcp.tools.logs), so shutdown below reclaims only
+    # this lifespan's registry. The registries used to be one process-global
+    # set that every embedded server's lifespan emptied, deleting a live
+    # sibling server's tracked CSVs mid-read.
+    owned_downloads: dict[str, None] = {}
+    registry_token = _download_registry.set(owned_downloads)
     try:
         yield {}
     finally:
@@ -564,6 +580,12 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             await close_api_client()
         finally:
             await close_doh_client()
+            # Successful downloadLogs CSVs are kept after their call (the caller
+            # reads the path post-call); shutdown is the first safe reclaim point.
+            # The context var still names this lifespan's registry, so only this
+            # server's downloads are reclaimed - then the var is released.
+            cleanup_successful_downloads()
+            _download_registry.reset(registry_token)
 
 
 def create_mcp_server(
@@ -582,15 +604,50 @@ def create_mcp_server(
             initialize instructions can describe a small catalog directly.
         endpoints: ``tool name -> (method, path template)`` for the call log,
             built once from the parsed routes by the server, so the log and the
-            tool surface are two views of one parse.
+            tool surface are two views of one parse. ``None`` falls back to the
+            shipped document's own parse; a caller registering tools from a
+            modified document must pass the parse it registered from.
 
     Returns:
         FastMCP: Configured MCP server instance
     """
     logger.info("Creating NextDNS MCP server...")
+    mcp, endpoints = _build_fastmcp_instance(tool_names, endpoints)
+
+    # Add middleware to strip unknown fields from tool arguments
+    # This allows AI clients (like OpenAI) that send extra fields to work properly
+    mcp.add_middleware(StripExtraFieldsMiddleware(tool_names=tool_names))
+
+    _add_call_log_middleware(mcp, endpoints)
+
+    logger.info("MCP server created successfully")
+    default_profile = get_default_profile()
+    if default_profile:
+        logger.info(f"Default profile: {default_profile}")
+
+    _register_health_endpoint(mcp)
+
+    return mcp
+
+
+def _build_fastmcp_instance(
+    tool_names: Sequence[str],
+    endpoints: Mapping[str, tuple[str, str]] | None,
+) -> tuple[FastMCP, Mapping[str, tuple[str, str]]]:
+    """Build the ``FastMCP`` instance with progressive disclosure wired.
+
+    Constructing the instance and the shape middleware stay one step because
+    the middleware must exist on the instance before any tool call is served.
+    The resolved endpoint map is returned beside the instance so the caller can
+    add the strip and call-log middlewares between/after the shape middleware
+    without re-deriving the map (or deriving one that disagrees with it).
+    """
+    if endpoints is None:
+        endpoints = endpoints_for_routes()
+
     transforms: list[Any] = []
     tool_search_mode = get_tool_search_mode()
-    search_transform = build_search_transform(tool_search_mode)
+    search_transform = build_search_transform(tool_search_mode, endpoints=endpoints)
     if search_transform is not None:
         transforms.append(search_transform)
         logger.info(
@@ -615,31 +672,25 @@ def create_mcp_server(
     if search_transform is not None:
         mcp.add_middleware(CallToolShapeMiddleware(transform=search_transform, endpoints=endpoints))
 
-    # Add middleware to strip unknown fields from tool arguments
-    # This allows AI clients (like OpenAI) that send extra fields to work properly
-    mcp.add_middleware(StripExtraFieldsMiddleware(tool_names=tool_names))
+    return mcp, endpoints
 
-    # Record what this server actually executed (see nextdns_mcp.call_log). A
-    # read leaves no trace in the API, so a harness that verifies over REST
-    # cannot tell "the model read it" from "the model did nothing and the state
-    # was already right". The server can say, and it does so here. The path is
-    # read from the environment once and passed in, so the middleware cannot
-    # disagree with the "enabled" line logged beside it, and the endpoint map
-    # arrives from the server's single route parse rather than a registry this
-    # module would have to import and populate.
+
+def _add_call_log_middleware(mcp: FastMCP, endpoints: Mapping[str, tuple[str, str]]) -> None:
+    """Attach the call log when a path is configured (see ``nextdns_mcp.call_log``).
+
+    Record what this server actually executed. A read leaves no trace in the
+    API, so a harness that verifies over REST cannot tell "the model read it"
+    from "the model did nothing and the state was already right". The server
+    can say, and it does so here. The path is read from the environment once
+    and passed in, so the middleware cannot disagree with the "enabled" line
+    logged beside it, and the endpoint map arrives from the server's single
+    route parse rather than a registry this module would have to import and
+    populate.
+    """
     log_path = call_log_path()
     if log_path:
         mcp.add_middleware(CallLogMiddleware(path=log_path, endpoints=endpoints))
         logger.info("Call log enabled: %s", log_path)
-
-    logger.info("MCP server created successfully")
-    default_profile = get_default_profile()
-    if default_profile:
-        logger.info(f"Default profile: {default_profile}")
-
-    _register_health_endpoint(mcp)
-
-    return mcp
 
 
 def _register_health_endpoint(mcp: FastMCP) -> None:

@@ -133,11 +133,11 @@ def result_error(res: Any) -> str:
     The server's error contract returns ``{"error": ...}`` bodies rather than
     raising, so ``is_error`` alone is not enough to tell success from failure.
     """
-    if getattr(res, "is_error", False):
-        return "tool reported an error"
     structured = getattr(res, "structured_content", None)
     if isinstance(structured, dict) and structured.get("error"):
         return str(structured["error"])
+    if getattr(res, "is_error", False):
+        return "tool reported an error"
     return ""
 
 

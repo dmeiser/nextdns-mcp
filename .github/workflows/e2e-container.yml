@@ -18,7 +18,7 @@ on:
     tags:
       - 'v*.*.*'  # Also run on version tags
   pull_request:
-    branches: [ main ]  # Run on all PRs to main
+    branches: [ main, "fm/*" ]  # Run on all PRs to main and to stacked feature branches
   merge_group:
 
 permissions:

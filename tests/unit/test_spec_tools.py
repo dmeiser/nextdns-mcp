@@ -188,7 +188,9 @@ class TestToolCall:
 
     async def test_an_unfilled_path_argument_names_the_endpoint_and_the_id(self, monkeypatch, calls):
         tool = self._tool(monkeypatch, calls, "getDenylist")
-        payload = (await tool.run({"profile_id": ""})).structured_content
+        result = await tool.run({"profile_id": ""})
+        payload = result.structured_content
+        assert result.is_error, "a missing required argument is an error, not a result"
         assert payload["code"] == "missing_required_argument"
         assert "profile_id" in payload["error"]
         assert "GET /profiles/{profile_id}/denylist" in payload["error"]
@@ -208,7 +210,9 @@ class TestToolCall:
         authorized for. Nothing upstream can be assumed to reject it.
         """
         tool = self._tool(monkeypatch, calls, "deleteRewrite")
-        payload = (await tool.run({"profile_id": "abc123", "entry_id": entry_id})).structured_content
+        result = await tool.run({"profile_id": "abc123", "entry_id": entry_id})
+        payload = result.structured_content
+        assert result.is_error, "an unsafe path value is an error, not a result"
         assert payload["code"] == "invalid_entry_id"
         assert "must not contain a slash" in payload["error"]
         assert calls == []
@@ -216,7 +220,9 @@ class TestToolCall:
     @pytest.mark.parametrize("profile_id", ["abc/def", "..", "ab?c", "ab c"])
     async def test_a_profile_id_that_could_address_another_endpoint_is_refused(self, monkeypatch, calls, profile_id):
         tool = self._tool(monkeypatch, calls, "getDenylist")
-        payload = (await tool.run({"profile_id": profile_id})).structured_content
+        result = await tool.run({"profile_id": profile_id})
+        payload = result.structured_content
+        assert result.is_error, "an unsafe path value is an error, not a result"
         assert payload["code"] == "invalid_profile_id"
         assert "listProfiles()" in payload["hint"]
         assert calls == []
@@ -233,7 +239,9 @@ class TestToolCall:
 
     async def test_a_missing_entry_argument_says_where_entry_ids_come_from(self, monkeypatch, calls):
         tool = self._tool(monkeypatch, calls, "removeFromDenylist")
-        payload = (await tool.run({"profile_id": "abc123"})).structured_content
+        result = await tool.run({"profile_id": "abc123"})
+        payload = result.structured_content
+        assert result.is_error
         assert "entry id" in payload["hint"]
 
     async def test_an_unnamed_missing_argument_lists_what_the_endpoint_needs(self, monkeypatch, calls):
@@ -247,7 +255,9 @@ class TestToolCall:
             parameter_map={},
         )
 
-        payload = (await spec_tools.SpecApiTool(route).run({})).structured_content
+        result = await spec_tools.SpecApiTool(route).run({})
+        payload = result.structured_content
+        assert result.is_error
         assert payload["error"].startswith("weirdEndpoint needs thing_id")
         assert payload["hint"] == "required by this endpoint: thing_id"
 
@@ -262,11 +272,14 @@ class TestToolCall:
         tool = self._tool(monkeypatch, calls, "downloadLogs")
         result = await tool.run({"profile_id": "abc123"})
         assert result.structured_content == {"path": "/tmp/x.csv", "bytes": 10}
+        assert result.is_error is False, "a successful download payload is a result, not an error"
         assert calls == [{"profile_id": "abc123"}]
 
     async def test_the_download_endpoint_still_needs_a_profile(self, monkeypatch, calls):
         tool = self._tool(monkeypatch, calls, "downloadLogs")
-        payload = (await tool.run({"profile_id": ""})).structured_content
+        result = await tool.run({"profile_id": ""})
+        payload = result.structured_content
+        assert result.is_error
         assert payload["code"] == "missing_required_argument"
         assert calls == []
 
@@ -341,9 +354,11 @@ class TestRegistration:
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
-            found = await client.call_tool("search_tools", {"query": "DNS-over-HTTPS lookup"})
+            found = await client.call_tool("search_tools", {"query": "DNS-over-HTTPS lookup"}, raise_on_error=False)
             hits = [hit["name"] for hit in (found.structured_content or {})["result"]]
-            charted = await client.call_tool("search_tools", {"query": "render a chart of analytics over time"})
+            charted = await client.call_tool(
+                "search_tools", {"query": "render a chart of analytics over time"}, raise_on_error=False
+            )
             chart_hits = [hit["name"] for hit in (charted.structured_content or {})["result"]]
         assert hits[0] == "dohLookup"
         assert chart_hits[0] == "plotAnalytics"
@@ -361,7 +376,9 @@ class TestRegistration:
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
-            await client.call_tool("getLogs", {"profile_id": "abc123", "limit": "20", "raw": "true"})
+            await client.call_tool(
+                "getLogs", {"profile_id": "abc123", "limit": "20", "raw": "true"}, raise_on_error=False
+            )
         assert calls[0]["params"] == {"limit": 20, "raw": True}
 
     async def test_disclosure_and_call_tool_work_on_generated_tools(self, monkeypatch):
@@ -377,7 +394,9 @@ class TestRegistration:
         async with Client(build_mcp_server()) as client:
             listed = await client.list_tools()
             assert [tool.name for tool in listed] == ["search_tools", "call_tool"]
-            found = await client.call_tool("search_tools", {"query": "add a domain to the denylist"})
+            found = await client.call_tool(
+                "search_tools", {"query": "add a domain to the denylist"}, raise_on_error=False
+            )
             hits = [hit["name"] for hit in (found.structured_content or {})["result"]]
             assert "addToDenylist" in hits
             called = await client.call_tool(
@@ -410,7 +429,9 @@ class TestRefusalsBeforeTransport:
     async def test_a_value_beyond_the_published_bound_is_refused_locally(self, monkeypatch, calls):
         """``LogsLimit`` caps at 1000; a larger limit never reaches the API."""
         tool = self._tool(monkeypatch, calls, "getLogs")
-        payload = (await tool.run({"profile_id": "abc123", "limit": 99999})).structured_content
+        result = await tool.run({"profile_id": "abc123", "limit": 99999})
+        payload = result.structured_content
+        assert result.is_error, "a schema refusal is an error, not a result"
         assert payload["code"] == "invalid_argument"
         assert "limit" in payload["error"]
         assert calls == [], "an argument the published schema rejects must not be sent upstream"
@@ -424,7 +445,9 @@ class TestRefusalsBeforeTransport:
         offending entry - is what docs/troubleshooting.md promises.
         """
         tool = self._tool(monkeypatch, calls, "replaceDenylist")
-        payload = (await tool.run({"profile_id": "abc123", "body": [{"wrong": "x"}]})).structured_content
+        result = await tool.run({"profile_id": "abc123", "body": [{"wrong": "x"}]})
+        payload = result.structured_content
+        assert result.is_error
         assert payload["code"] == "invalid_argument"
         assert "body.0" in payload["error"], payload["error"]
         assert calls == []
@@ -444,7 +467,9 @@ class TestRefusalsBeforeTransport:
     async def test_a_deep_setting_value_outside_the_published_enum_is_refused(self, monkeypatch, calls):
         """Nested enums bind too: Settings.logs.retention is an enum of seconds."""
         tool = self._tool(monkeypatch, calls, "updateSettings")
-        payload = (await tool.run({"profile_id": "abc123", "logs": {"retention": 30}})).structured_content
+        result = await tool.run({"profile_id": "abc123", "logs": {"retention": 30}})
+        payload = result.structured_content
+        assert result.is_error
         assert payload["code"] == "invalid_argument"
         assert "logs.retention" in payload["error"], payload["error"]
         assert calls == []
@@ -456,7 +481,9 @@ class TestRefusalsBeforeTransport:
         the character closes both, and no legal NextDNS id contains it.
         """
         tool = self._tool(monkeypatch, calls, "getDenylist")
-        payload = (await tool.run({"profile_id": "ab%cd"})).structured_content
+        result = await tool.run({"profile_id": "ab%cd"})
+        payload = result.structured_content
+        assert result.is_error
         assert payload["code"] == "invalid_profile_id"
         assert calls == []
 
@@ -464,7 +491,9 @@ class TestRefusalsBeforeTransport:
     async def test_a_brace_in_a_path_value_is_refused(self, monkeypatch, calls, value):
         """A brace is the shape of a path placeholder; an id may not carry one."""
         tool = self._tool(monkeypatch, calls, "getDenylist")
-        payload = (await tool.run({"profile_id": value})).structured_content
+        result = await tool.run({"profile_id": value})
+        payload = result.structured_content
+        assert result.is_error
         assert payload["code"] == "invalid_profile_id"
         assert calls == []
 
@@ -477,7 +506,9 @@ class TestRefusalsBeforeTransport:
         about the request when the honest answer names the id.
         """
         tool = self._tool(monkeypatch, calls, "getDenylist")
-        payload = (await tool.run({"profile_id": "abcdefg123456"})).structured_content
+        result = await tool.run({"profile_id": "abcdefg123456"})
+        payload = result.structured_content
+        assert result.is_error
         assert payload["code"] == "invalid_profile_id"
         assert "listProfiles()" in payload["hint"]
         assert calls == []
@@ -485,7 +516,9 @@ class TestRefusalsBeforeTransport:
     async def test_a_null_path_value_is_missing_not_the_text_none(self, monkeypatch, calls):
         """An explicit null for a path parameter means "not filled in"."""
         tool = self._tool(monkeypatch, calls, "getDenylist")
-        payload = (await tool.run({"profile_id": None})).structured_content
+        result = await tool.run({"profile_id": None})
+        payload = result.structured_content
+        assert result.is_error
         assert payload["code"] == "missing_required_argument"
         assert "None" not in payload["error"]
         assert calls == []
@@ -558,14 +591,18 @@ class TestDelegationGuardsRunFirst:
 
     async def test_an_unsafe_profile_id_never_reaches_the_downloader(self, monkeypatch, calls):
         tool = self._downloader(monkeypatch, calls)
-        payload = (await tool.run({"profile_id": "a/b"})).structured_content
+        result = await tool.run({"profile_id": "a/b"})
+        payload = result.structured_content
+        assert result.is_error
         assert payload["code"] == "invalid_profile_id"
         assert calls == [], "delegation must not run ahead of the unsafe-path guard"
 
     @pytest.mark.parametrize("bad", ["nope", "TOOLONG1PROFILE", "ab cd"])
     async def test_a_malformed_profile_id_is_refused_typed(self, monkeypatch, calls, bad):
         tool = self._downloader(monkeypatch, calls)
-        payload = (await tool.run({"profile_id": bad})).structured_content
+        result = await tool.run({"profile_id": bad})
+        payload = result.structured_content
+        assert result.is_error
         assert payload["code"] == "invalid_profile_id"
         assert calls == []
 
@@ -573,6 +610,22 @@ class TestDelegationGuardsRunFirst:
         tool = self._downloader(monkeypatch, calls)
         result = await tool.run({"profile_id": "abc123"})
         assert result.structured_content == {"ok": True}
+        assert result.is_error is False, "a successful download payload is a result, not an error"
+        assert calls == [{"profile_id": "abc123"}]
+
+    async def test_a_download_failure_payload_is_flagged_as_an_error(self, monkeypatch, calls):
+        """The delegated handler answers failures as typed payloads; they carry isError."""
+        from nextdns_mcp.tools import logs as logs_module
+
+        async def failing_download(profile_id):
+            calls.append({"profile_id": profile_id})
+            return {"code": "http_error", "error": "HTTP error while downloading logs"}
+
+        monkeypatch.setattr(logs_module, "_download_logs_to_tempfile", failing_download)
+        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"])
+        result = await tool.run({"profile_id": "abc123"})
+        assert result.is_error is True
+        assert result.structured_content["code"] == "http_error"
         assert calls == [{"profile_id": "abc123"}]
 
     async def test_a_resolver_error_that_is_not_missing_is_forwarded_typed(self, monkeypatch, calls):
@@ -587,7 +640,9 @@ class TestDelegationGuardsRunFirst:
         tool = self._downloader(monkeypatch, calls)
         denial = {"code": "access_denied", "error": "profile abcdef is not readable"}
         monkeypatch.setattr(spec_tools, "resolve_profile_id", lambda pid, **kwargs: (None, denial))
-        payload = (await tool.run({"profile_id": "abcdef"})).structured_content
+        result = await tool.run({"profile_id": "abcdef"})
+        payload = result.structured_content
+        assert result.is_error, "a resolver denial is an error, not a result"
         assert payload == denial
         assert calls == [], "the delegation must not run when the resolver refused"
 
@@ -629,7 +684,9 @@ class TestGeneratedSeriesBudget:
     async def test_a_generated_series_range_beyond_the_budget_is_refused(self, monkeypatch, calls):
         """30 days at 60s intervals would answer ~43k points against a 2000 cap."""
         tool = self._tool(monkeypatch, calls)
-        payload = (await tool.run({"profile_id": "abc123", "from": "-30d", "interval": 60})).structured_content
+        result = await tool.run({"profile_id": "abc123", "from": "-30d", "interval": 60})
+        payload = result.structured_content
+        assert result.is_error, "a budget refusal is an error, not a result"
         assert payload["code"] == "invalid_argument"
         assert "2000" in payload["error"]
         assert calls == []
@@ -834,3 +891,182 @@ def test_a_big_non_series_payload_is_not_refused_by_the_series_backstop():
     route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getDenylist")
     big = {"data": [{"id": f"entry-{i}", "name": "x" * 40} for i in range(30_000)]}
     assert spec_tools._series_refusal(route, big) is None
+
+
+def test_truncate_description_no_boundary():
+    from nextdns_mcp import spec_tools
+
+    out = spec_tools._truncate_description("a" * 2000, 100)
+    assert len(out) == 100
+
+
+def test_truncate_description_prefers_boundary():
+    from nextdns_mcp import spec_tools
+
+    text = "x" * 30 + "\n" + "y" * 30
+    out = spec_tools._truncate_description(text, 40)
+    assert len(out) <= 40
+    assert out.endswith("x")
+
+
+def test_empty_write_refusal_branches():
+    from types import SimpleNamespace
+
+    from nextdns_mcp import spec_tools
+
+    route = SimpleNamespace(
+        method="PATCH",
+        operation_id="updateSecuritySettings",
+        description="",
+        path="/x",
+        flat_param_schema={},
+        summary="",
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    # None body
+    res = tool._empty_write_refusal("PATCH", None)
+    assert res is not None and res.is_error
+    # empty dict
+    res2 = tool._empty_write_refusal("PATCH", {})
+    assert res2 is not None and res2.is_error
+    # non-empty body
+    assert tool._empty_write_refusal("PATCH", {"a": 1}) is None
+    # non-write method
+    assert tool._empty_write_refusal("GET", None) is None
+
+
+def test_create_profile_guard_all_protected(monkeypatch):
+
+    from nextdns_mcp import config, spec_tools
+
+    monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1"})
+    monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
+    from types import SimpleNamespace
+
+    route = SimpleNamespace(
+        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    res = tool._create_profile_guard()
+    assert res is not None and res.is_error
+
+
+def test_create_profile_guard_not_all_protected(monkeypatch):
+
+    from nextdns_mcp import config, spec_tools
+
+    monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1", "p2"})
+    monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
+    from types import SimpleNamespace
+
+    route = SimpleNamespace(
+        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    assert tool._create_profile_guard() is None
+
+
+import asyncio
+
+
+def test_split_body_drops_none():
+
+    from nextdns_mcp import spec_tools
+
+    # located body prop with None
+    located = [("typoSquatting", "typoSquatting", "body")]
+    args = {"typoSquatting": None}
+    body = spec_tools._split_body_arguments(located, args)
+    # should be None (no body props)
+    assert body is None
+
+
+def test_create_profile_guard_run_path(monkeypatch):
+    from types import SimpleNamespace
+
+    from nextdns_mcp import spec_tools
+    from nextdns_mcp.tools import logs as _logs  # noqa
+
+    route = SimpleNamespace(
+        method="POST",
+        operation_id="createProfile",
+        description="",
+        path="/profiles",
+        flat_param_schema={"type": "object", "properties": {}},
+        summary="",
+        parameter_map={},
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    tool._request_refusal = lambda args: None
+    tool._create_profile_guard = lambda: spec_tools.ToolResult(
+        structured_content={"code": "invalid_argument", "error": "x"}, is_error=True
+    )
+
+    async def main():
+        res = await tool.run({})
+        assert res.is_error
+
+    asyncio.run(main())
+
+
+def test_empty_write_run_path():
+    from types import SimpleNamespace
+
+    from nextdns_mcp import spec_tools
+
+    route = SimpleNamespace(
+        method="PATCH",
+        operation_id="updateSecuritySettings",
+        description="",
+        path="/x",
+        flat_param_schema={"type": "object", "properties": {}},
+        summary="",
+        parameter_map={},
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    tool._request_refusal = lambda args: None
+    tool._create_profile_guard = lambda: None
+
+    async def main():
+        res = await tool.run({})
+        assert res.is_error
+
+    asyncio.run(main())
+
+
+class TestToolAnnotations:
+    """readOnlyHint mirrors side effects, not just the HTTP method."""
+
+    def test_downloadLogs_is_not_annotated_read_only(self):
+        """downloadLogs answers a GET but WRITES a CSV to disk: readOnlyHint must
+        be False, or a caller scanning for side-effect-free tools is misled."""
+        routes = {route.operation_id: route for route in spec_tools.spec_routes()}
+        download = spec_tools.SpecApiTool(routes["downloadLogs"])
+        assert download.annotations is not None
+        assert download.annotations.read_only_hint is False
+        # The GET sibling, which writes nothing, stays read-only - the override
+        # is per-operation, not per-method.
+        get_logs = spec_tools.SpecApiTool(routes["getLogs"])
+        assert get_logs.annotations is not None
+        assert get_logs.annotations.read_only_hint is True
+
+
+class TestPlotsSpecToolsImportCycle:
+    """tools.plots must not import spec_tools (the cycle was deferred, not removed)."""
+
+    def test_importing_plots_does_not_import_spec_tools(self):
+        import subprocess
+        import sys
+
+        code = (
+            "import sys; import nextdns_mcp.tools.plots; sys.exit(1 if 'nextdns_mcp.spec_tools' in sys.modules else 0)"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+        assert result.returncode == 0, (
+            "tools.plots pulled in spec_tools again (import cycle restored): " + result.stderr
+        )
+
+    def test_the_series_ceiling_lives_in_transport(self):
+        from nextdns_mcp import transport
+
+        assert transport.MAX_SERIES_RESPONSE_BYTES == spec_tools.MAX_SERIES_RESPONSE_BYTES == 512_000

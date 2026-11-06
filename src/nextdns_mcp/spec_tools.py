@@ -51,12 +51,13 @@ import yaml
 from fastmcp import FastMCP
 from fastmcp.tools.base import Tool, ToolResult
 from fastmcp.utilities.openapi import HTTPRoute, parse_openapi_to_http_routes
+from mcp.types import ToolAnnotations
 
 from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
 from .tools import logs as _logs
 from .tools.plots import _now, _resolve_time_point, _series_budget_error
-from .transport import _api_request_payload
+from .transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload
 from .utils import is_safe_profile_id, normalize_partials, normalize_time_value, resolve_profile_id, schema_required
 
 logger = logging.getLogger(__name__)
@@ -72,12 +73,6 @@ WITHHELD_OPERATIONS = frozenset({"streamLogs"})
 _UNINTERVALLED_FINEST_DEFAULT = 10800
 _UNINTERVALLED_FINEST_WINDOW = 7 * 86400
 _UNINTERVALLED_COARSEST_DEFAULT = 86400
-
-# Ceiling on a generated ``;series`` tool result, measured as JSON bytes. The
-# request-side point budgets bound one series; the endpoint's upstream top-N
-# bounds its rows; this is the whole-response backstop, generous enough that
-# a budgeted answer (10 rows x 2000 points ~ 200 KB) always fits.
-MAX_SERIES_RESPONSE_BYTES = 512_000
 
 
 def _delegate_download_logs(profile_id: str) -> Awaitable[dict[str, Any]]:
@@ -142,8 +137,8 @@ _QUERY_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
 # value is substituted into the request path, and the access-control layer authorizes
 # the request by reading the profile id back out of that path, so an unvetted value
 # can move the call somewhere the caller was not authorized for. Nothing upstream can
-# be assumed to reject it. A domain is a legal entry id, so a lone dot is not refused
-# — only ``..``, which no domain contains.
+# be assumed to reject it. ``..`` walks up and a lone dot (or a bare run of
+# dots) is refused outright — no domain is either.
 #
 # ``%`` is refused outright, not just when followed by a recognizable escape: it is
 # the one character whose *meaning* depends on what decodes the URL. ``%2e%2e`` is
@@ -153,7 +148,7 @@ _QUERY_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
 # ``{``/``}`` are refused for the same reason in the other direction: they are the
 # shape of a path placeholder, and an id carrying one must not be able to name a
 # different parameter.
-_UNSAFE_PATH_VALUE = re.compile(r"[\s/?#\\{}%]|\.\.|[^\x21-\x7e]")
+_UNSAFE_PATH_VALUE = re.compile(r"[\s/?#\\{}%]|\.\.|^\.{1,}$|[^\x21-\x7e]")
 
 
 def load_spec(path: Path = SPEC_PATH) -> dict[str, Any]:
@@ -207,6 +202,18 @@ def endpoints_for_routes(routes: list[HTTPRoute] | None = None) -> dict[str, tup
     }
 
 
+def _truncate_description(text: str, limit: int) -> str:
+    """Truncate ``text`` to ``limit`` chars, preferring a sentence/paragraph boundary."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    boundary = max(cut.rfind("\n"), cut.rfind(". "))
+    if boundary < limit // 2:
+        return cut.rstrip()
+    step = 1 if cut[boundary] == "\n" else 2
+    return cut[: boundary + step].rstrip()
+
+
 def describe(route: HTTPRoute) -> str:
     """The published description: the spec's words, plus the endpoint it binds.
 
@@ -219,7 +226,8 @@ def describe(route: HTTPRoute) -> str:
     detail = (route.description or "").strip()
     parts = [part for part in (summary, detail) if part]
     parts.append(f"NextDNS API: {route.method} {route.path}")
-    return "\n\n".join(parts)[:DESCRIPTION_MAX_CHARS]
+    text = "\n\n".join(parts)
+    return _truncate_description(text, DESCRIPTION_MAX_CHARS)
 
 
 def split_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> tuple[str, dict[str, Any], Any]:
@@ -305,7 +313,8 @@ def _split_body_arguments(located: list[tuple[str, str, str]], arguments: dict[s
         if openapi_name == WHOLE_BODY_ARG:
             whole_body = arguments[name]
         else:
-            body_properties[openapi_name] = arguments[name]
+            if arguments[name] is not None:
+                body_properties[openapi_name] = arguments[name]
     return _request_body(whole_body, body_properties)
 
 
@@ -354,11 +363,20 @@ class SpecApiTool(Tool):
         route: HTTPRoute,
         transport: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
+        method = str(route.method).upper()
+        # readOnlyHint is derived from the HTTP method, with one override:
+        # downloadLogs answers a GET but WRITES a CSV to disk, so marking it
+        # read-only would tell callers a call has no side effects it has.
+        read_only = method in {"GET", "HEAD"} and route.operation_id != "downloadLogs"
         super().__init__(
             name=str(route.operation_id),
             description=describe(route),
             parameters=route.flat_param_schema,
             tags={"nextdns", "spec"},
+            annotations=ToolAnnotations(
+                read_only_hint=read_only,
+                destructive_hint=method in {"DELETE", "PUT", "PATCH"},
+            ),
         )
         self._route = route
         self._transport = transport
@@ -385,7 +403,11 @@ class SpecApiTool(Tool):
         args = arguments or {}
         refused = self._request_refusal(args)
         if refused is not None:
-            return ToolResult(structured_content=refused)
+            # Path-safety and malformed-id refusals are errors, not results.
+            return ToolResult(structured_content=refused, is_error=True)
+        create_refusal = self._create_profile_guard()
+        if create_refusal is not None:
+            return create_refusal
         if self.name in DELEGATED_OPERATIONS:
             return await self._run_delegated(args)
         path, query, body = split_arguments(self._route, args)
@@ -398,17 +420,46 @@ class SpecApiTool(Tool):
             return self._unsafe_path_payload(unsafe)
         return _malformed_profile_id_payload(self._route, args)
 
+    def _create_profile_guard(self) -> ToolResult | None:
+        """Refuse createProfile when every writable profile is also protected."""
+        if self.name != "createProfile":
+            return None
+        from . import config as _config
+
+        writable = _config.get_writable_profiles_set()
+        protected = _config.get_protected_profiles()
+        if writable is not None and writable and writable.issubset(protected):
+            return ToolResult(
+                structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no writable profile available"),
+                is_error=True,
+            )
+        return None
+
     async def _dispatch_rendered(self, path: str, query: dict[str, Any], body: Any, args: dict[str, Any]) -> ToolResult:
         unfilled = _PATH_PLACEHOLDER.findall(path)
         if unfilled:
-            return ToolResult(structured_content=self._missing_payload(unfilled))
+            return ToolResult(structured_content=self._missing_payload(unfilled), is_error=True)
         invalid = _schema_validation_payload(self._validator, self.name, _normalized_for_validation(self._route, args))
         if invalid is not None:
-            return ToolResult(structured_content=invalid)
+            return ToolResult(structured_content=invalid, is_error=True)
         budget = _series_budget_for_generated_call(self._route, query)
         if budget is not None:
-            return ToolResult(structured_content=budget)
+            return ToolResult(structured_content=budget, is_error=True)
+        empty = self._empty_write_refusal(self._route.method, body)
+        if empty is not None:
+            return empty
         return await self._call_endpoint(path, query, body)
+
+    def _empty_write_refusal(self, method: Any, body: Any) -> ToolResult | None:
+        """A PATCH/PUT with nothing to apply is an error, not a silent success."""
+        if str(method).upper() not in {"PATCH", "PUT"}:
+            return None
+        if body is not None and body != {}:
+            return None
+        return ToolResult(
+            structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no applicable fields to update"),
+            is_error=True,
+        )
 
     async def _call_endpoint(self, path: str, query: dict[str, Any], body: Any) -> ToolResult:
         """Send the request this route describes and wrap its payload.
@@ -429,10 +480,14 @@ class SpecApiTool(Tool):
             json_body=body,
             **_capped_transport_kwargs(self._route, request),
         )
+        return self._wrap_call_result(payload)
+
+    def _wrap_call_result(self, payload: Any) -> ToolResult:
+        """Turn a transport payload into a typed ToolResult."""
         refused = _series_refusal(self._route, payload)
         if refused is not None:
-            return ToolResult(structured_content=refused)
-        return ToolResult(structured_content=payload)
+            return ToolResult(structured_content=refused, is_error=True)
+        return ToolResult(structured_content=payload, is_error=_payload_is_error(payload))
 
     async def _run_delegated(self, arguments: dict[str, Any]) -> ToolResult:
         """Serve a delegated operation with its own guarded handler.
@@ -446,10 +501,14 @@ class SpecApiTool(Tool):
         profile_id = arguments.get("profile_id")
         resolved, error = resolve_profile_id("" if profile_id is None else str(profile_id).strip(), allow_default=False)
         if error is not None and error.get("code") == ErrorCode.MISSING_PROFILE_ID:
-            return ToolResult(structured_content=self._missing_payload(["profile_id"]))
+            return ToolResult(structured_content=self._missing_payload(["profile_id"]), is_error=True)
         if error is not None:
-            return ToolResult(structured_content=error)
-        return ToolResult(structured_content=await DELEGATED_HANDLERS[self.name](str(resolved)))
+            return ToolResult(structured_content=error, is_error=True)
+        payload = await DELEGATED_HANDLERS[self.name](str(resolved))
+        # The delegated handler (downloadLogs) answers errors as typed payloads;
+        # they must surface as errors, while a successful download payload must
+        # not. Detection is the same rule _wrap_call_result uses.
+        return ToolResult(structured_content=payload, is_error=_payload_is_error(payload))
 
     def _unsafe_path_payload(self, names: list[str]) -> dict[str, Any]:
         """A typed error refusing to put an id-shaped argument anywhere but a path segment."""
@@ -478,6 +537,20 @@ class SpecApiTool(Tool):
             f"{self.name} needs {', '.join(missing)} for {self._route.method} {self._route.path}",
             hint=hints.get(missing[0], "required by this endpoint: " + ", ".join(_required(self._route))),
         )
+
+
+def _payload_is_error(payload: Any) -> bool:
+    """Whether a structured payload is a typed error rather than a result.
+
+    Every refusal and failure this module renders goes through
+    :func:`nextdns_mcp.errors.error_payload` (``{"error": ..., "code": ...}``),
+    and a successful API answer carries ``data``; a payload with an
+    ``error``/``code`` key and no ``data`` is therefore an error whatever door
+    produced it. MCP clients surface ``isError`` to the model, so every one of
+    those doors must set the flag — a refusal reported as a successful result
+    teaches the caller the refusal shape is a normal answer.
+    """
+    return isinstance(payload, dict) and ("error" in payload or "code" in payload) and "data" not in payload
 
 
 def _mapped_path_name(name: str, mapped: dict[str, Any] | None) -> tuple[str, str] | None:

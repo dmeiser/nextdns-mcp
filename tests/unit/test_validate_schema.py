@@ -572,3 +572,19 @@ def test_a_type_union_accepts_any_member():
     assert validate_field_type("text/csv", ["string", "null"]) is True
     assert validate_field_type(None, ["string", "null"]) is True
     assert validate_field_type(7, ["string", "null"]) is False
+
+
+def test_the_logs_status_enum_matches_the_live_api():
+    """`relayed` is a real NextDNS status: live-verified 2026-11-05 against the
+    production API (status=relayed returned HTTP 200 with rows whose status is
+    'relayed', while allowlisted/denylisted/cached/refused/forwarded were all
+    rejected with the enum error). The vendored document must not refuse a value
+    the API accepts."""
+    from scripts.validate_schema import load_openapi_spec
+
+    spec = load_openapi_spec(str(REAL_SPEC_PATH))
+    status_param = spec["components"]["parameters"]["Status"]
+    assert "relayed" in status_param["schema"]["enum"]
+    logs_get = spec["paths"]["/profiles/{profile_id}/logs"]["get"]
+    inline = next(p for p in logs_get["parameters"] if isinstance(p, dict) and p.get("name") == "status")
+    assert "relayed" in inline["schema"]["enum"]
