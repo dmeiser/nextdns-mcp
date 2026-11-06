@@ -1,31 +1,21 @@
-"""Shared validation and API request utilities for NextDNS MCP Server.
+"""Shared validation and normalization helpers for NextDNS MCP Server.
 
 SPDX-License-Identifier: MIT
+
+This module validates and normalizes values - profile ids, time ranges,
+``partials`` spellings, query-param shapes - and nothing else. It imports no
+network layer: the request path lives in ``transport``, the access control in
+``client``, and the names those layers share (the profile-id shape, the hint
+its failures repeat) live in ``constants`` so no module here has to import a
+transport to describe an id.
 """
 
-import logging
 import re
 from typing import Any
 
-import httpx
-
-from . import client
-from .client import SAFE_PROFILE_ID_PATTERN, AccessDeniedError, _log_safe_error, _redacted
 from .config import get_default_profile
-from .errors import (
-    ErrorCode,
-    NextDNSAuthError,
-    NextDNSError,
-    NextDNSRateLimitError,
-    NextDNSServerError,
-    error_payload,
-    http_error_payload,
-)
-
-logger = logging.getLogger(__name__)
-
-# Entry IDs are domain-like identifiers with a looser safe-character set.
-SAFE_ENTRY_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.\-]+$")
+from .constants import PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
+from .errors import ErrorCode, error_payload
 
 
 def is_safe_profile_id(value: str | int) -> bool:
@@ -36,21 +26,6 @@ def is_safe_profile_id(value: str | int) -> bool:
     upstream.
     """
     return bool(SAFE_PROFILE_ID_PATTERN.match(str(value)))
-
-
-def is_safe_entry_id(value: str) -> bool:
-    """Return True if value is a safe entry_id segment (allows domain-like IDs).
-
-    Rejects path separators and parent-directory sequences that could be used
-    for path traversal when the ID is embedded in a URL path.
-    """
-    # "." is an allowed character (domain-like entry IDs contain dots), so a
-    # regex-only traversal guard would need a negative lookahead such as
-    # "^(?!.*\.\.)..."; keep the explicit check instead. Empty values and path
-    # separators are already rejected by the character class below.
-    if ".." in value:
-        return False
-    return bool(SAFE_ENTRY_ID_PATTERN.match(value))
 
 
 def is_integer_shaped(value: str) -> bool:
@@ -78,6 +53,15 @@ def is_float_shaped(value: str) -> bool:
     return value.replace(".", "", 1).replace("-", "", 1).isdecimal()
 
 
+def _missing_profile_payload() -> dict[str, Any]:
+    """The payload for a call that named no profile id at all."""
+    return error_payload(
+        ErrorCode.MISSING_PROFILE_ID,
+        "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
+        hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
+    )
+
+
 def resolve_profile_id(
     profile_id: str | int | None = None,
     *,
@@ -98,22 +82,22 @@ def resolve_profile_id(
         is a standardized error payload dict.
     """
     if allow_default:
-        target_profile: str | int | None = profile_id
+        target_profile: str | int | None = profile_id or get_default_profile()
         if not target_profile:
-            target_profile = get_default_profile()
-        if not target_profile:
-            return None, error_payload(
-                ErrorCode.MISSING_PROFILE_ID,
-                "No profile_id provided and NEXTDNS_DEFAULT_PROFILE not set",
-                hint="Provide profile_id parameter or set NEXTDNS_DEFAULT_PROFILE environment variable",
-            )
+            return None, _missing_profile_payload()
         if not is_safe_profile_id(target_profile):
             return None, error_payload(
                 ErrorCode.INVALID_PROFILE_ID,
                 f"Invalid profile_id format: {target_profile}",
+                hint=PROFILE_ID_HINT,
             )
         return str(target_profile), None
 
+    return _resolve_required_profile_id(profile_id)
+
+
+def _resolve_required_profile_id(profile_id: str | int | None) -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve a mandatory profile_id: no NEXTDNS_DEFAULT_PROFILE fallback."""
     if not profile_id:
         return None, error_payload(
             ErrorCode.MISSING_PROFILE_ID,
@@ -123,39 +107,9 @@ def resolve_profile_id(
         return None, error_payload(
             ErrorCode.INVALID_PROFILE_ID,
             f"Invalid profile_id format: {profile_id}",
+            hint=PROFILE_ID_HINT,
         )
     return str(profile_id), None
-
-
-def _validate_entry_id(entry_id: str) -> dict[str, Any] | None:
-    """Return an error dict if entry_id is not a safe identifier."""
-    if not is_safe_entry_id(entry_id):
-        return error_payload(ErrorCode.INVALID_ENTRY_ID, f"Invalid entry_id format: {entry_id}")
-    return None
-
-
-def _optional_entry_id_error(entry_id: str | None) -> dict[str, Any] | None:
-    """Validate an entry id that is only required by some operations."""
-    if entry_id is None:
-        return None
-    return _validate_entry_id(entry_id)
-
-
-def _cap_limit(value: int | None, cap: int) -> int | None:
-    """Clamp a caller-supplied limit to the server-side range ``[1, cap]``.
-
-    Returns the clamped value, or None when the caller supplied no limit.
-    Values above the cap are clamped down to it and non-positive values are
-    raised to 1, so a bad caller value can never be forwarded upstream as
-    ``?limit=-1`` (issue #267).
-    """
-    if value is None:
-        return None
-    if value < 1:
-        return 1
-    if value > cap:
-        return cap
-    return value
 
 
 def _build_series_params(
@@ -186,98 +140,95 @@ def _build_series_params(
     )
 
 
+# The spellings of a relative range that the analytics endpoints do NOT accept
+# but callers reach for: `now-1d` (Grafana/Prometheus) and a bare negative
+# number, which upstream reads as an absolute Unix timestamp.
+_NOW_OFFSET_RE = re.compile(r"^now\s*(?:-\s*(\d+\s*[smhdwy]))?$", re.IGNORECASE)
+_BARE_NEGATIVE_RE = re.compile(r"^-\d+$")
+
+
+def normalize_time_value(value: Any) -> Any:
+    """Rewrite a ``from``/``to`` argument into a form the API accepts.
+
+    Two shapes arrive live and both fail silently or obscurely upstream:
+
+    - A bare negative number, ``from_time=-86400``. As an absolute Unix
+      timestamp that is 1969, so the endpoint answers 200 with no rows and the
+      caller has nothing to correct: across three runs the model retried that
+      call ~40 times, varying the interval each time. A negative absolute time
+      is not a thing, so it is read as the offset it means, in the API's own
+      relative-seconds spelling (``-86400s``, verified accepted).
+    - ``now-1d``, the Grafana/Prometheus spelling. Upstream answers "`from` must
+      be number"; the same span in its own spelling (``-1d``) works.
+
+    Anything else - a Unix timestamp, ISO 8601, ``now``, ``-1d`` - is returned
+    unchanged.
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return f"{value}s" if value < 0 else value
+    return _normalize_time_text(value)
+
+
+def _normalize_time_text(value: Any) -> Any:
+    """Rewrite the two text spellings the API reads wrongly (see normalize_time_value)."""
+    text = str(value).strip()
+    match = _NOW_OFFSET_RE.match(text)
+    if match:
+        return "now" if match.group(1) is None else f"-{match.group(1).replace(' ', '')}"
+    if _BARE_NEGATIVE_RE.match(text):
+        return f"{text}s"
+    return value
+
+
+# The two values the `;series` endpoints accept for `partials` (probed live:
+# `none` and `all` answer 200, everything else answers 400 enum without naming
+# the allowed set). Callers send a boolean instead.
+PARTIALS_VALUES = ("none", "all")
+_PARTIALS_ALIASES = {
+    "false": "none",
+    "0": "none",
+    "no": "none",
+    "off": "none",
+    "true": "all",
+    "1": "all",
+    "yes": "all",
+    "on": "all",
+}
+
+
+def normalize_partials(value: Any) -> Any:
+    """Map a boolean-ish ``partials`` onto the value the API means by it.
+
+    ``partials=false`` was sent live and answered 400 with an enum error that
+    names no allowed values. "no partials" is ``none`` and "partials" is ``all``;
+    anything else is left as sent so the tool can reject it by name.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return _PARTIALS_ALIASES.get(text, text)
+
+
+def _query_bool(value: Any) -> Any:
+    """Render a bool the way the API reads it; every other value passes through."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return value
+
+
 def _build_query_params(**kwargs: Any) -> dict[str, Any]:
     """Build a query-param dict, dropping None values and normalizing booleans."""
-    params = {k: v for k, v in kwargs.items() if v is not None}
-    return {k: ("true" if v else "false") if isinstance(v, bool) else v for k, v in params.items()}
+    return {k: _query_bool(v) for k, v in kwargs.items() if v is not None}
 
 
-def access_denied_payload(exc: AccessDeniedError) -> dict[str, Any]:
-    """Build the standardized error payload for an ACL denial (issue #178).
+def schema_required(schema: dict[str, Any] | None) -> list[str]:
+    """The ``required`` list of a JSON-Schema object, as strings ([] if absent).
 
-    Carries the typed denial ``code`` (``read_access_denied`` /
-    ``write_access_denied`` / ``access_denied``) and the full denial reason in
-    ``error``, with a nominal ``status_code`` of 403 for caller compatibility.
+    One reading of the one contract: the tools publish their parameter schema
+    with a ``required`` list, and both the generated-tool layer and the
+    disclosure layer name those arguments to callers. Two hand-rolled reads
+    of the same field would be two chances to read it differently.
     """
-    payload = error_payload(exc.code, exc.message, status_code=403)
-    payload["profile_id"] = exc.profile_id
-    return payload
-
-
-def _handle_api_error(e: NextDNSError) -> dict[str, Any]:
-    """Convert a NextDNSError into a standardized error payload.
-
-    If the exception wraps an httpx.HTTPError, use http_error_payload to
-    preserve the original error structure. For any other case, fall back to a
-    generic internal error.
-    """
-    cause = getattr(e, "__cause__", None)
-    if cause is not None and isinstance(cause, httpx.HTTPError):
-        return http_error_payload(str(e), cause)
-    return error_payload(ErrorCode.INTERNAL_ERROR, str(e))
-
-
-async def _api_request(
-    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
-) -> dict[str, Any]:
-    """Make an HTTP request through the access-controlled client and return JSON.
-
-    Access-control denials raised by the ACL layer are reported as standardized
-    error payloads (see ``errors.py``) rather than raised exceptions, so callers
-    get a consistent, typed failure shape:
-    ``{"error": ..., "code": "read_access_denied" | "write_access_denied" | "access_denied", "status_code": 403, ...}``.
-
-    All other failures are raised as typed exceptions with status_code and response_body attributes, so callers can implement retry-with-backoff for 429 or circuit-breaking for 5xx.
-    ``NextDNSError`` is the base exception, with subclasses ``NextDNSAuthError`` (401/403), ``NextDNSRateLimitError`` (429), and ``NextDNSServerError`` (5xx).
-    For non-HTTP failures, a ``NextDNSError`` is raised with status_code=None.
-    Tools that report failures as payloads should await ``_api_request_payload``,
-    which applies this conversion.
-    """
-    try:
-        response = await client.api_client.request(method, url, params=params, json=json_body)
-        response.raise_for_status()
-        if response.status_code == 204 or not response.content:
-            return {"success": True}
-        return response.json()
-    except AccessDeniedError as e:
-        # Raised by the ACL layer before any network request. Kept out of the
-        # httpx.HTTPError branch: a real upstream 403 (raise_for_status) must
-        # keep its existing http_error path.
-        logger.warning(f"Access denied in {method} {_redacted(url)}: {_log_safe_error(e)}")
-        return access_denied_payload(e)
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error in {method} {_redacted(url)}: {_log_safe_error(e)}")
-        message = f"HTTP error in {method} {url}: {e}"
-        response = getattr(e, "response", None)
-        status_code = getattr(response, "status_code", None) if response is not None else None
-        response_body = getattr(response, "text", None) if response is not None else None
-        raise _typed_http_error(message, status_code, response_body) from e
-    except Exception as e:
-        logger.error(f"Unexpected error in {method} {_redacted(url)}: {_log_safe_error(e)}")
-        raise NextDNSError(f"Unexpected error in {method} {url}: {e}", status_code=None) from e
-
-
-def _typed_http_error(message: str, status_code: int | None, response_body: str | None) -> NextDNSError:
-    """Build the NextDNSError subclass matching an upstream HTTP status."""
-    if status_code in (401, 403):
-        return NextDNSAuthError(message, status_code=status_code, response_body=response_body)
-    if status_code == 429:
-        return NextDNSRateLimitError(message, status_code=status_code, response_body=response_body)
-    if status_code is not None and 500 <= status_code < 600:
-        return NextDNSServerError(message, status_code=status_code, response_body=response_body)
-    return NextDNSError(message, status_code=status_code, response_body=response_body)
-
-
-async def _api_request_payload(
-    method: str, url: str, params: dict[str, Any] | None = None, json_body: Any = None
-) -> dict[str, Any]:
-    """Perform an API request, reporting typed upstream failures as error payloads.
-
-    Equivalent to awaiting ``_api_request`` and passing any raised
-    ``NextDNSError`` through ``_handle_api_error``, so every tool reports the
-    same standardized failure shape.
-    """
-    try:
-        return await _api_request(method, url, params=params, json_body=json_body)
-    except NextDNSError as e:
-        return _handle_api_error(e)
+    return [str(name) for name in ((schema or {}).get("required") or [])]

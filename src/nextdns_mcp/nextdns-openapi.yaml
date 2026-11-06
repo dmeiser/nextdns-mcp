@@ -23,6 +23,35 @@ servers:
 security:
   - ApiKeyAuth: []
 
+# Where this server's behaviour is not a pure proxy of this document, recorded
+# here so the YAML stays the single place to learn what the tool surface does
+# (docs/architecture/0001-openapi-spec-generated-tools.md, "parser, not
+# transport"). Each entry names the implementing module; the keys are
+# informational to OpenAPI consumers.
+x-mcp-divergences:
+  query-normalizers:
+    # Rewritten on the way out rather than sent as given - two spellings
+    # callers reach for fail silently upstream; see _QUERY_NORMALIZERS in
+    # nextdns_mcp/spec_tools.py and the normalizers in nextdns_mcp/utils.py.
+    from: normalize_time_value
+    to: normalize_time_value
+    partials: normalize_partials
+  withheld-operations:
+    # Server-Sent Events; an MCP tool call is request/response, so the
+    # transport cannot carry it (nextdns_mcp.spec_tools.WITHHELD_OPERATIONS).
+    streamLogs: SSE transport
+  delegated-operations:
+    # Served by a guarded implementation instead of the raw redirect: signed
+    # URL chain, unauthenticated follow-up fetch, size cap, SSRF checks
+    # (nextdns_mcp.tools.logs; spec_tools.DELEGATED_HANDLERS).
+    downloadLogs: nextdns_mcp.tools.logs
+  composite-tools:
+    # Hand-written operations with no API endpoint to describe - the declared
+    # exceptions to full derivability from this document
+    # (nextdns_mcp/server.py _COMPOSITE_TOOLS).
+    plotAnalytics: renders a chart from an analytics series
+    dohLookup: resolves a name through the profile's DoH resolver
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -49,7 +78,7 @@ components:
       properties:
         id:
           type: string
-          description: Unique profile identifier (6 characters, alphanumeric)
+          description: Unique profile identifier (6 or 10 lowercase alphanumeric characters)
           example: abc123
         name:
           type: string
@@ -106,8 +135,8 @@ components:
               description: Enable query logging
             retention:
               type: integer
-              description: Log retention period in days
-              enum: [1, 7, 30, 90, 180, 365]
+              description: Log retention period in seconds (86400=1d, 604800=7d, 2592000=30d, 7776000=90d, 15552000=180d, 31536000=365d)
+              enum: [86400, 604800, 2592000, 7776000, 15552000, 31536000]
         performance:
           type: object
           properties:
@@ -153,7 +182,7 @@ components:
           description: DNS query type (A, AAAA, etc.)
         status:
           type: string
-          description: Response status (default, blocked, allowed)
+          description: Response status (default, blocked, allowed, relayed)
         timestamp:
           type: string
           format: date-time
@@ -169,7 +198,7 @@ components:
             properties:
               status:
                 type: string
-                description: Query status (default, blocked, allowed)
+                description: Query status (default, blocked, allowed, relayed)
               queries:
                 type: integer
                 description: Number of queries with this status
@@ -381,11 +410,20 @@ components:
       name: profile_id
       in: path
       required: true
-      description: Profile ID (6-character alphanumeric identifier)
+      # No example: a concrete id here gets copied. Live runs showed a model
+      # sending the example value verbatim, and because a NextDNS profile id is
+      # six or ten short alphanumeric characters, `abc123` reads as a real one -
+      # the request then 404s and the caller has to work out that the id was
+      # never a profile. The pattern says the shape; the profile-listing
+      # endpoint gives the values.
+      description: >-
+        Profile ID (6 or 10 lowercase alphanumeric characters - legacy profiles
+        use 6, current ones 10). Not the profile's name and not derived from
+        it; the profile-listing endpoint returns the identifiers this API key
+        can reach.
       schema:
         type: string
-        pattern: '^[a-z0-9]{6}$'
-      example: abc123
+        pattern: '^(?:[a-z0-9]{6}|[a-z0-9]{10})$'
 
     EntryId:
       name: entry_id
@@ -399,19 +437,75 @@ components:
     From:
       name: from
       in: query
-      required: true
-      description: Start timestamp for analytics (Unix timestamp or ISO 8601)
+      # Optional upstream for the operations that use it (aggregates and
+      # logs): an omitted `from` covers the last day (-1d), which is the
+      # window docs/usage.md documents and the E2E harness prompts for
+      # ("recent logs, no time window"). Publishing it required was a
+      # contract the API does not have there. The `;series` endpoints DO
+      # demand it - probed live 2026-11-02, they answer
+      # 400 {"errors":[{"code":"required","source":{"parameter":"from"}}]} -
+      # so every series operation references the SeriesFrom sibling below
+      # instead of this component.
+      required: false
+      # The narrow wording ("Unix timestamp or ISO 8601") was not the contract
+      # this API actually honours: a relative offset works, and it is the only
+      # spelling that expresses a window measured from now. Verified against the
+      # live API, and already what the grouped analytics tool sends
+      # (tools/analytics.py SERIES_DEFAULT_FROM = "-1d").
+      x-mcp-normalizer: normalize_time_value
+      description: >-
+        Start of the time window. Accepted spellings: epoch seconds
+        (1762000000, as a number or its string form), ISO 8601
+        (2026-10-30T00:00:00Z), a bare date (2026-10-30), the literal `now`,
+        or a relative offset from now (-1d, -12h, -30d). For a window
+        measured from now use the relative offset: the last day is -1d, and
+        omitting `from` entirely covers exactly that - the last day. The
+        Grafana spelling now-1d is rejected upstream (``from`` must be
+        number); this server rewrites it to -1d before sending.
       schema:
-        type: string
-      example: '2024-01-01T00:00:00Z'
+        oneOf:
+          - type: string
+          - type: number
+      example: '-1d'
+
+    SeriesFrom:
+      name: from
+      in: query
+      # The `;series` endpoints demand a start time the aggregate endpoints
+      # do not: probed live 2026-11-02, a series request without `from`
+      # answers 400 naming the parameter, while the same request without it
+      # succeeds on the aggregate endpoint. Publishing `from` optional for
+      # series turned a working call into a guaranteed 400, so the series
+      # operations carry this required sibling; everything about its shape is
+      # the From component's.
+      required: true
+      x-mcp-normalizer: normalize_time_value
+      description: >-
+        Start of the time window; required here, because a series request
+        without it is refused upstream. Accepted spellings: epoch seconds
+        (1762000000, as a number or its string form), ISO 8601
+        (2026-10-30T00:00:00Z), a bare date (2026-10-30), the literal `now`,
+        or a relative offset from now (-1d, -12h, -30d). For the last day
+        write -1d. The Grafana spelling now-1d is rejected upstream (``from``
+        must be number); this server rewrites it to -1d before sending.
+      schema:
+        oneOf:
+          - type: string
+          - type: number
+      example: '-1d'
 
     To:
       name: to
       in: query
-      description: End timestamp for analytics (Unix timestamp or ISO 8601)
+      x-mcp-normalizer: normalize_time_value
+      description: >-
+        End of the time window, in any spelling `from` accepts (`now` is a
+        value, not a default); omit it to end at now.
       schema:
-        type: string
-      example: '2024-01-31T23:59:59Z'
+        oneOf:
+          - type: string
+          - type: number
+      example: now
 
     Cursor:
       name: cursor
@@ -433,7 +527,7 @@ components:
       description: Filter results by query status
       schema:
         type: string
-        enum: [default, blocked, allowed]
+        enum: [default, blocked, allowed, relayed]
 
     Root:
       name: root
@@ -453,9 +547,15 @@ components:
     Interval:
       name: interval
       in: query
-      description: Time-series window size in seconds
+      # The same 60-86400 band the plot path validates (PLOT_INTERVAL_MAX and
+      # the minimum in _validate_interval_and_limit); publishing it lets
+      # schema-aware callers, and this server's own schema check, refuse an
+      # out-of-band window before a request goes out.
+      description: Time-series window size in seconds (60-86400)
       schema:
         type: integer
+        minimum: 60
+        maximum: 86400
 
     Alignment:
       name: alignment
@@ -475,10 +575,17 @@ components:
     Partials:
       name: partials
       in: query
-      description: Whether to include partial tumbling windows at the start/end of the range
+      # Probed live: `none` and `all` answer 200; anything else (including
+      # `start`/`end`, which the document used to advertise) answers a 400
+      # enum that names no allowed values. Boolean-ish input is mapped to
+      # these two before sending (utils.normalize_partials).
+      x-mcp-normalizer: normalize_partials
+      description: >-
+        Whether to include partial tumbling windows at the edges of the
+        range: `none` excludes them, `all` includes them.
       schema:
         type: string
-        enum: [none, start, end, all]
+        enum: [none, all]
 
     AnalyticsLimit:
       name: limit
@@ -964,7 +1071,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1043,7 +1150,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1095,7 +1202,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1147,7 +1254,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1198,7 +1305,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1249,7 +1356,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1300,7 +1407,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1351,7 +1458,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1410,7 +1517,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1469,7 +1576,7 @@ paths:
         - Analytics
       parameters:
         - $ref: '#/components/parameters/ProfileId'
-        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/SeriesFrom'
         - $ref: '#/components/parameters/To'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Device'
@@ -1531,7 +1638,7 @@ paths:
     put:
       summary: Replace denylist
       description: |
-        Replaces the entire denylist with the provided list of domains.
+        Replaces the entire denylist with the provided list of domains. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
         **Warning**: This operation removes all existing entries and replaces them.
         **Safety Note**: Only use with designated test profiles.
@@ -1570,7 +1677,7 @@ paths:
     patch:
       summary: Update denylist entry
       description: |
-        Updates properties of a denylist entry (e.g., enable/disable).
+        Updates properties of a denylist entry — one of the profile's denylist entries/domains — (e.g., enable or disable one entry).
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateDenylistEntry
@@ -1661,7 +1768,7 @@ paths:
     put:
       summary: Replace allowlist
       description: |
-        Replaces the entire allowlist with the provided list of domains.
+        Replaces the entire allowlist with the provided list of domains. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
         **Warning**: This operation removes all existing entries and replaces them.
         **Safety Note**: Only use with designated test profiles.
@@ -1700,7 +1807,7 @@ paths:
     patch:
       summary: Update allowlist entry
       description: |
-        Updates properties of an allowlist entry (e.g., enable/disable).
+        Updates properties of an allowlist entry — one of the profile's allowlist entries/domains — (e.g., enable or disable one entry).
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateAllowlistEntry
@@ -1768,7 +1875,7 @@ paths:
     put:
       summary: Replace parental control services
       description: |
-        Replaces the entire list of blocked services.
+        Replaces the entire list of blocked services. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
       operationId: replaceParentalControlServices
       security:
@@ -1822,7 +1929,7 @@ paths:
     patch:
       summary: Update parental control service entry
       description: |
-        Updates properties of a parental control service entry (e.g., enable/disable).
+        Updates properties of a parental control service entry — one of the profile's blocked services, a parental-control services entry — (e.g., enable or disable one entry).
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateParentalControlServiceEntry
@@ -1900,7 +2007,7 @@ paths:
     put:
       summary: Replace parental control categories
       description: |
-        Replaces the entire list of blocked categories.
+        Replaces the entire list of blocked categories. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
       operationId: replaceParentalControlCategories
       security:
@@ -1954,7 +2061,7 @@ paths:
     patch:
       summary: Update parental control category entry
       description: |
-        Updates properties of a parental control category entry (e.g., enable/disable).
+        Updates properties of a parental control category entry — one of the profile's blocked categories, a parental-control categories entry — (e.g., enable or disable one category entry).
 
         **Safety Note**: Only use with designated test profiles.
       operationId: updateParentalControlCategoryEntry
@@ -2274,7 +2381,7 @@ paths:
     put:
       summary: Replace security TLD blocklist
       description: |
-        Replaces the entire security TLD blocklist with the provided list.
+        Replaces the entire security TLD blocklist with the provided list. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
         **Warning**: This operation removes all existing entries and replaces them.
         **Safety Note**: Only use with designated test profiles.
@@ -2373,7 +2480,7 @@ paths:
     put:
       summary: Replace privacy blocklists
       description: |
-        Replaces the entire privacy blocklists collection with the provided list.
+        Replaces the entire privacy blocklists collection with the provided list. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
         **Warning**: This operation removes all existing entries and replaces them.
         **Safety Note**: Only use with designated test profiles.
@@ -2472,7 +2579,7 @@ paths:
     put:
       summary: Replace native tracking protection
       description: |
-        Replaces the entire native tracking protection collection with the provided list.
+        Replaces the entire native tracking protection collection with the provided list. Use this to update or set the entire collection in one call, instead of adding or removing entries one at a time.
 
         **Warning**: This operation removes all existing entries and replaces them.
         **Safety Note**: Only use with designated test profiles.
@@ -2552,7 +2659,7 @@ paths:
           description: Filter by query status
           schema:
             type: string
-            enum: [default, blocked, allowed]
+            enum: [default, blocked, allowed, relayed]
         - name: search
           in: query
           description: Search query for domain names

@@ -1,5 +1,6 @@
 """Tests for the analytics plotting helpers and tool wrappers."""
 
+import json
 import struct
 import threading
 from datetime import datetime, timedelta
@@ -9,7 +10,7 @@ import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import server
+from nextdns_mcp import server, spec_tools
 from nextdns_mcp.tools import plots as plots_module
 
 
@@ -308,16 +309,45 @@ def now():
     return 1_700_000_000.0
 
 
+class _StreamedResponse:
+    """Async-CM stand-in for a streaming httpx response (the capped path)."""
+
+    def __init__(self, status_code: int, body: bytes, request: httpx.Request) -> None:
+        self.status_code = status_code
+        self.headers = httpx.Headers()
+        self.request = request
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    async def aiter_bytes(self):
+        yield self._body
+
+
 @pytest.fixture
 def mock_api_client(monkeypatch):
     """Replace the module-level api_client with an AsyncMock.
 
-    The plot fetch routes through ``_api_request`` (issue #183), which issues
-    requests via ``client.api_client.request``; tests therefore drive the mock
-    through ``.request``.
+    The plot fetch routes through the payload wrapper (issue #183), which
+    issues uncapped requests via ``client.api_client.request``; the generated
+    ``;series`` tools run under the response cap and therefore STREAM - so
+    ``.stream`` returns a real async-CM over a canned body (``stream_state``)
+    and records the call. Tests drive the uncapped path through ``.request``.
     """
     monkeypatch.setenv("NEXTDNS_API_KEY", "test-api-key")
     client = AsyncMock()
+    client.stream_state = {"body": json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()}
+    client.stream_calls: list[dict] = []
+
+    def _stream(method, url, params=None, json=None, **kwargs):
+        client.stream_calls.append({"method": method, "url": url, "params": params})
+        return _StreamedResponse(200, client.stream_state["body"], httpx.Request(method, url))
+
+    client.stream = _stream
     monkeypatch.setattr(client_module, "api_client", client)
     return client
 
@@ -363,49 +393,67 @@ class TestPlotAnalyticsSeriesImpl:
         """A request that already fits the point budget is sent exactly as asked."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
-        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
         # -1d at a 1-hour interval is 24 points, well inside the budget.
         await plots_module._plot_analytics_series_impl("status", from_time="-1d", interval=3600)
-        params = mock_api_client.request.call_args.kwargs["params"]
+        params = mock_api_client.stream_calls[-1]["params"]
         assert params["interval"] == 3600
         assert params["from"] == "-1d"
         # The ;series endpoint takes no limit parameter, so none is invented.
         assert "limit" not in params
 
     @pytest.mark.asyncio
-    async def test_plot_and_query_series_send_the_same_series_params(self, clean_env, mock_api_client, monkeypatch):
+    async def test_the_plot_and_the_generated_series_tool_ask_for_the_same_window(
+        self, clean_env, mock_api_client, monkeypatch
+    ):
         """Both ``;series`` callers put identical query params on the wire (issue #267).
 
-        ``plotAnalytics`` and ``queryAnalytics(series=True)`` read the same
-        endpoint, so a shared builder keeps them from drifting; this asserts the
-        observable request both tools actually issue.
+        Two paths read that endpoint now: ``plotAnalytics``, which builds the series
+        query itself, and the generated tool, which passes the caller's arguments
+        through. A chart and the numbers under it have to be answers to the same
+        question, so this asserts the observable request each one actually issues.
         """
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
-        shared = {
+        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
+        window = {
             # Absolute timestamps, so the request is deterministic without a clock patch.
-            "from_time": 1_700_000_000 - 86_400,
-            "to_time": 1_700_000_000,
-            "interval": 3600,
-            "alignment": "start",
-            "timezone": "UTC",
-            "partials": "both",
-        }
-
-        await plots_module._plot_analytics_series_impl("status", profile_id="abc123", **shared)
-        plot_call = mock_api_client.request.call_args
-        await server.queryAnalytics("status", "abc123", series=True, **shared)
-        query_call = mock_api_client.request.call_args
-
-        assert plot_call.args[1] == query_call.args[1] == "/profiles/abc123/analytics/status;series"
-        assert plot_call.kwargs["params"] == query_call.kwargs["params"]
-        assert plot_call.kwargs["params"] == {
+            # `partials` is `all`, not `both`: the endpoint answers 400 for `both`,
+            # and the tool now rejects that value by name instead of forwarding it.
             "from": 1_700_000_000 - 86_400,
             "to": 1_700_000_000,
             "interval": 3600,
             "alignment": "start",
             "timezone": "UTC",
-            "partials": "both",
+            "partials": "all",
+        }
+
+        await plots_module._plot_analytics_series_impl(
+            "status",
+            profile_id="abc123",
+            from_time=window["from"],
+            to_time=window["to"],
+            interval=window["interval"],
+            alignment=window["alignment"],
+            timezone=window["timezone"],
+            partials=window["partials"],
+        )
+        plot_call = mock_api_client.stream_calls[-1] if mock_api_client.stream_calls else None
+
+        route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
+        await spec_tools.SpecApiTool(route).run({"profile_id": "abc123", **window})
+        # The generated call is capped, so it arrives on the STREAM path, not request.
+        assert mock_api_client.stream_calls, "the capped series call must stream, not buffer"
+        series_call = mock_api_client.stream_calls[-1]
+
+        assert plot_call["url"] == series_call["url"] == "/profiles/abc123/analytics/status;series"
+        assert plot_call["params"] == series_call["params"]
+        assert plot_call["params"] == {
+            "from": 1_700_000_000 - 86_400,
+            "to": 1_700_000_000,
+            "interval": 3600,
+            "alignment": "start",
+            "timezone": "UTC",
+            "partials": "all",
         }
 
     @pytest.mark.asyncio
@@ -417,14 +465,14 @@ class TestPlotAnalyticsSeriesImpl:
         """
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
-        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", from_time="-1y", interval=60)
 
         assert result["code"] == "invalid_argument"
         assert result["max_points"] == plots_module.PLOT_MAX_POINTS
         assert result["interval"] == 60
-        mock_api_client.request.assert_not_called()
+        assert not mock_api_client.stream_calls
 
     @pytest.mark.asyncio
     async def test_coarse_request_is_never_refined(self, clean_env, mock_api_client, monkeypatch):
@@ -437,23 +485,23 @@ class TestPlotAnalyticsSeriesImpl:
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         now = 1_700_000_000.0
         monkeypatch.setattr(plots_module, "_now", lambda: now)
-        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", from_time="-10y", interval=2592000)
 
         assert result["code"] == "invalid_argument"
         assert result["max_interval"] == plots_module.PLOT_INTERVAL_MAX
         assert result["interval"] == 2592000
-        mock_api_client.request.assert_not_called()
+        assert not mock_api_client.stream_calls
 
     @pytest.mark.asyncio
     async def test_interval_at_ceiling_is_accepted(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
-        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
         # -1y at the 86400s ceiling is 365 points, inside the budget.
         await plots_module._plot_analytics_series_impl("status", from_time="-1y", interval=86400)
-        assert mock_api_client.request.call_args.kwargs["params"]["interval"] == 86400
+        assert mock_api_client.stream_calls[-1]["params"]["interval"] == 86400
 
     @pytest.mark.parametrize(
         ("from_time", "to_time", "interval", "over_budget"),
@@ -507,13 +555,13 @@ class TestPlotAnalyticsSeriesImpl:
     ):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
-        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", from_time="-1M", to_time="now", interval=60)
 
         assert result["code"] == "invalid_argument"
         assert "Could not interpret the requested time range" in result["error"]
-        mock_api_client.request.assert_not_called()
+        assert not mock_api_client.stream_calls
 
     @pytest.mark.parametrize("tz", ["UTC", "Asia/Tokyo", "America/New_York"])
     def test_naive_iso_timestamp_is_read_as_utc(self, tz, monkeypatch):
@@ -539,25 +587,25 @@ class TestPlotAnalyticsSeriesImpl:
         """
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
-        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", limit=501)
 
         assert result["code"] == "invalid_argument"
         assert result["max_limit"] == plots_module.PLOT_LIMIT_MAX
         assert result["limit"] == 501
-        mock_api_client.request.assert_not_called()
+        assert not mock_api_client.stream_calls
 
     @pytest.mark.asyncio
     async def test_limit_at_cap_is_accepted_and_not_forwarded(self, clean_env, mock_api_client, monkeypatch):
         """A valid ``limit`` is accepted and never reaches the ``;series`` endpoint."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
-        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         await plots_module._plot_analytics_series_impl("status", from_time="-1d", limit=plots_module.PLOT_LIMIT_MAX)
 
-        params = mock_api_client.request.call_args.kwargs["params"]
+        params = mock_api_client.stream_calls[-1]["params"]
         assert "limit" not in params
 
     @pytest.mark.asyncio
@@ -570,13 +618,13 @@ class TestPlotAnalyticsSeriesImpl:
         """
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
-        mock_api_client.request.return_value = _make_response({"meta": {"series": {"times": []}}, "data": []})
+        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", from_time="-1 month", to_time="now")
 
         assert result["code"] == "invalid_argument"
         assert "Could not interpret the requested time range" in result["error"]
-        mock_api_client.request.assert_not_called()
+        assert not mock_api_client.stream_calls
 
     @pytest.mark.parametrize(
         ("from_time", "to_time", "interval"),
@@ -600,6 +648,20 @@ class TestPlotAnalyticsSeriesImpl:
         assert error["code"] == "invalid_argument"
         assert "must end after it starts" in error["error"]
 
+    def test_series_budget_error_names_the_range_it_resolved(self, now):
+        """A bare number is absolute, and the error has to say so.
+
+        Seen live: the model passed from_time=-86400 meaning "a day ago", the
+        budget check read it as 1969 and rejected a 57-year span, and nothing
+        in the message said which argument was at fault - so it retried three
+        different intervals with the same broken range.
+        """
+        error = plots_module._series_budget_error(-86400, "now", 3600, now=now)
+        assert error is not None
+        assert "1969-12-31" in error["error"]
+        assert "absolute Unix timestamp" in error["error"]
+        assert error["resolved_from"].startswith("1969-12-31")
+
     @pytest.mark.asyncio
     async def test_no_profile_returns_error(self, clean_env):
         result = await plots_module._plot_analytics_series_impl("status")
@@ -609,23 +671,23 @@ class TestPlotAnalyticsSeriesImpl:
     @pytest.mark.asyncio
     async def test_http_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.request.side_effect = httpx.HTTPError("boom")
+        wrapped = AsyncMock(return_value={"error": "boom", "code": "http_error"})
+        monkeypatch.setattr(plots_module, "_api_request_payload", wrapped)
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "http_error"
 
     @pytest.mark.asyncio
     async def test_unexpected_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.request.side_effect = RuntimeError("unexpected")
+        wrapped = AsyncMock(return_value={"error": "boom", "code": "internal_error"})
+        monkeypatch.setattr(plots_module, "_api_request_payload", wrapped)
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
     async def test_empty_data_returns_error(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        response = MagicMock()
-        response.json.return_value = {"meta": {"series": {"times": []}}, "data": []}
-        mock_api_client.request.return_value = response
+        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
         result = await plots_module._plot_analytics_series_impl("status")
         assert "error" in result
         assert "No time-series data available" in result["error"]
@@ -646,9 +708,7 @@ class TestPlotAnalyticsSeriesImpl:
         # ``meta.get(...)`` raise AttributeError out of the tool, breaking the
         # standardized {"error", "code"} contract every other failure path uses.
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        response = MagicMock()
-        response.json.return_value = payload
-        mock_api_client.request.return_value = response
+        mock_api_client.stream_state["body"] = json.dumps(payload).encode()
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "no_data"
 
@@ -657,24 +717,24 @@ class TestPlotAnalyticsSeriesImpl:
         # A future upstream schema change must degrade to the same typed error
         # payload rather than escaping as a raw exception (issue #286).
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        response = MagicMock()
-        response.json.return_value = {
-            "meta": ["not-a-mapping"],
-            "data": [{"name": "x", "queries": [1]}],
-        }
-        mock_api_client.request.return_value = response
+        mock_api_client.stream_state["body"] = json.dumps(
+            {
+                "meta": ["not-a-mapping"],
+                "data": [{"name": "x", "queries": [1]}],
+            }
+        ).encode()
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "internal_error"
 
     @pytest.mark.asyncio
     async def test_rendering_error_returns_error(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        response = MagicMock()
-        response.json.return_value = {
-            "meta": {"series": {"times": ["bad-timestamp"]}},
-            "data": [{"name": "x", "queries": [1]}],
-        }
-        mock_api_client.request.return_value = response
+        mock_api_client.stream_state["body"] = json.dumps(
+            {
+                "meta": {"series": {"times": ["bad-timestamp"]}},
+                "data": [{"name": "x", "queries": [1]}],
+            }
+        ).encode()
         result = await plots_module._plot_analytics_series_impl("status")
         assert "error" in result
         assert "Error rendering chart" in result["error"]
@@ -682,9 +742,7 @@ class TestPlotAnalyticsSeriesImpl:
     @pytest.mark.asyncio
     async def test_success_returns_image_content(self, clean_env, mock_api_client, sample_series_payload, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        response = MagicMock()
-        response.json.return_value = sample_series_payload
-        mock_api_client.request.return_value = response
+        mock_api_client.stream_state["body"] = json.dumps(sample_series_payload).encode()
 
         result = await plots_module._plot_analytics_series_impl("status")
 
@@ -708,7 +766,8 @@ class TestPlotAnalyticsToolWrapper:
     @pytest.mark.asyncio
     async def test_plot_analytics_wrapper_with_default_profile(self, clean_env, monkeypatch, mock_api_client):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        mock_api_client.request.side_effect = httpx.HTTPError("boom")
+        wrapped = AsyncMock(return_value={"error": "boom", "code": "http_error"})
+        monkeypatch.setattr("nextdns_mcp.tools.plots._api_request_payload", wrapped)
         result = await server.plotAnalytics("status")
         assert result["code"] == "http_error"
 
@@ -742,8 +801,7 @@ class TestPlotAnalyticsEndToEndRendering:
         # Real series payloads are not guaranteed to carry fractional seconds:
         # a mix of whole-second, timezone-offset, fractional and 'Z' stamps
         # must all render a chart rather than surfacing a parse error.
-        response = MagicMock()
-        response.json.return_value = {
+        _payload = {
             "meta": {
                 "series": {
                     "times": [
@@ -759,7 +817,7 @@ class TestPlotAnalyticsEndToEndRendering:
                 {"status": "allowed", "queries": [88, 80, 85, 91]},
             ],
         }
-        mock_api_client.request.return_value = response
+        mock_api_client.stream_state["body"] = json.dumps(_payload).encode()
 
         result = await server.plotAnalytics("status")
 
@@ -775,12 +833,12 @@ class TestPlotAnalyticsEndToEndRendering:
         # ValueError from deep inside the tool: the user gets a structured
         # error payload back.
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        response = MagicMock()
-        response.json.return_value = {
-            "meta": {"series": {"times": ["15 January 2024"]}},
-            "data": [{"status": "blocked", "queries": [1]}],
-        }
-        mock_api_client.request.return_value = response
+        mock_api_client.stream_state["body"] = json.dumps(
+            {
+                "meta": {"series": {"times": ["15 January 2024"]}},
+                "data": [{"status": "blocked", "queries": [1]}],
+            }
+        ).encode()
 
         result = await server.plotAnalytics("status")
 
@@ -790,11 +848,12 @@ class TestPlotAnalyticsEndToEndRendering:
 
 
 class TestPlotFetchUsesSharedWrapper:
-    """Regression (issue #183): the plot series fetch must route through ``_api_request``.
+    """Regression (issue #183): the plot series fetch must route through the payload wrapper.
 
     Before the fix ``_fetch_series_payload`` called the raw
-    ``client.api_client.get(...)`` directly, bypassing ``_api_request`` and its
-    error handling/logging (and any future retry/rate-limit/telemetry). These
+    ``client.api_client.get(...)`` directly, bypassing the transport's payload
+    wrapper (``_api_request_payload``) and its error handling/logging - a
+    parallel wrapper of its own stayed a second copy of that contract. (and any future retry/rate-limit/telemetry). These
     mock-level assertions pin the wrapped path so a raw-client regression is
     caught: the shared wrapper is awaited and the raw transport is not.
     """
@@ -804,34 +863,30 @@ class TestPlotFetchUsesSharedWrapper:
         self, clean_env, monkeypatch, mock_api_client, sample_series_payload
     ):
         wrapped = AsyncMock(return_value=sample_series_payload)
-        monkeypatch.setattr(plots_module, "_api_request", wrapped)
+        monkeypatch.setattr(plots_module, "_api_request_payload", wrapped)
 
         params = {"from": "-1d", "to": "now", "interval": 3600}
-        payload, error = await plots_module._fetch_series_payload(
-            "/profiles/abc123/analytics/status;series", params, "status"
-        )
+        payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", params)
 
-        wrapped.assert_awaited_once_with("GET", "/profiles/abc123/analytics/status;series", params=params)
+        wrapped.assert_awaited_once_with(
+            "GET", "/profiles/abc123/analytics/status;series", params=params, max_response_bytes=512000
+        )
         # Routing moved off the raw client: the underlying transport must not be hit.
         mock_api_client.request.assert_not_awaited()
         assert error is None
         assert payload is sample_series_payload
 
     @pytest.mark.asyncio
-    async def test_fetch_series_payload_surfaces_wrapper_error(self, clean_env, mock_api_client):
-        upstream = httpx.HTTPError("boom")
-        upstream.response = httpx.Response(500, text="upstream exploded")
-        mock_api_client.request.side_effect = upstream
+    async def test_fetch_series_payload_surfaces_wrapper_error(self, clean_env, monkeypatch, mock_api_client):
+        wrapped = AsyncMock(return_value={"error": "upstream failure", "code": "http_error", "status_code": 500})
+        monkeypatch.setattr(plots_module, "_api_request_payload", wrapped)
 
-        payload, error = await plots_module._fetch_series_payload(
-            "/profiles/abc123/analytics/status;series", {}, "status"
-        )
+        payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", {})
 
         assert payload is None
         assert error is not None
         assert error["code"] == "http_error"
         assert error["status_code"] == 500
-        mock_api_client.request.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_plot_analytics_series_impl_uses_api_request(self, clean_env, monkeypatch):
@@ -839,7 +894,7 @@ class TestPlotFetchUsesSharedWrapper:
         # Empty series so the impl returns before rendering; the fetch has already
         # run, which is what we are asserting on.
         wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
-        monkeypatch.setattr(plots_module, "_api_request", wrapped)
+        monkeypatch.setattr(plots_module, "_api_request_payload", wrapped)
 
         # Drive the impl end-to-end; the fetch must go through the shared
         # wrapper rather than the raw client.
@@ -851,3 +906,85 @@ class TestPlotFetchUsesSharedWrapper:
         assert args[0] == "GET"
         assert args[1] == "/profiles/abc123/analytics/status;series"
         assert kwargs["params"]["interval"] == 3600
+
+
+class TestRangeReportingAndProfileGuard:
+    """What a rejected range says, and what happens when no profile comes back."""
+
+    def test_an_unresolved_time_point_is_named_as_unresolved(self):
+        """The budget error names the range it computed.
+
+        A point that could not be parsed has to read as unresolved rather than as a
+        timestamp invented from None, or the error blames the wrong argument.
+        """
+        assert plots_module._format_resolved(None) == "unresolved"
+        assert plots_module._format_resolved(1_700_000_000).endswith("+00:00")
+
+    @pytest.mark.asyncio
+    async def test_a_plot_with_no_resolved_profile_does_not_request_a_series(self, clean_env, monkeypatch):
+        """``(None, None)`` from the resolver would otherwise build /profiles//analytics/..."""
+        monkeypatch.setattr(plots_module, "resolve_profile_id", lambda profile_id, **kwargs: (None, None))
+
+        wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
+        monkeypatch.setattr(plots_module, "_api_request_payload", wrapped)
+
+        result = await plots_module._plot_analytics_series_impl("status", profile_id="abc123")
+        assert result["code"] == "internal_error"
+        assert "profile resolution failed" in result["error"].lower()
+        wrapped.assert_not_awaited()
+
+
+class TestReporterIsTotal:
+    """The error paths of the plotter answer as payloads, never as crashes.
+
+    Two shapes used to escape as exceptions instead of typed errors: a time
+    value outside the platform's convertible range (the reporter formats the
+    very value it is reporting a refusal about), and a fetcher that returns
+    neither payload nor error (the old code trusted its own contract and
+    would have plotted None). Both are pinned here as payloads.
+    """
+
+    def test_a_time_point_beyond_the_platform_range_is_named_not_formatted(self):
+        """``fromtimestamp`` raises on the value; the reporter names it instead.
+
+        1e30 is a valid float but no platform can turn it into a date; an
+        error path that crashes with OverflowError while describing a bad
+        timestamp turns the caller's typed error into an internal one. The
+        value must appear in the string exactly as the caller sent it.
+        """
+        assert plots_module._format_resolved(1e30) == "out of range (1e+30)"
+        # The negative side overflows too on this platform.
+        assert plots_module._format_resolved(-1e30).startswith("out of range (")
+
+    @pytest.mark.asyncio
+    async def test_a_fetch_returning_nothing_at_all_is_an_internal_error(self, clean_env, monkeypatch):
+        """``(None, None)`` from the fetcher must not reach the renderer.
+
+        The fetcher's contract is payload-or-error; a violation answers as
+        the typed internal error naming the metric, rather than a TypeError
+        on None inside the chart renderer several frames away from the truth.
+        """
+        monkeypatch.setattr(plots_module, "_fetch_series_payload", AsyncMock(return_value=(None, None)))
+
+        result = await plots_module._plot_analytics_series_impl("status", profile_id="abc123")
+        assert result["code"] == "internal_error"
+        assert "status" in result["error"]
+        assert "no payload" in result["error"].lower()
+
+
+class TestUnresolvableExtremeTimes:
+    """Time resolution is total: an extreme value answers None, never OverflowError.
+
+    A 400-digit timestamp and a 400-digit relative offset both used to raise out
+    of the resolution helpers - a crash where the typed "unresolved range"
+    refusal is the contract (issue #267 range bounding).
+    """
+
+    def test_an_absolute_int_past_the_float_range_is_unresolved(self):
+        assert plots_module._resolve_time_point(10**400, now=1_700_000_000.0) is None
+
+    def test_a_relative_offset_past_the_float_range_is_unresolved(self):
+        assert plots_module._resolve_time_point("-" + "9" * 400 + "d", now=1_700_000_000.0) is None
+
+    def test_a_numeric_string_past_the_float_range_is_unresolved(self):
+        assert plots_module._resolve_time_point("1" + "0" * 400, now=1_700_000_000.0) is None

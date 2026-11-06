@@ -2,7 +2,7 @@ name: Version Guard
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ main, "fm/*" ]  # stacked feature branches (openapi-only stack)
     types: [opened, synchronize, reopened, labeled, unlabeled]
   merge_group:
 

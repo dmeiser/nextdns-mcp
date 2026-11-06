@@ -1,18 +1,18 @@
 """Doc-surface tests for the early-access security toggles (issue: spec discoverability).
 
 The five keys below are community-reported NextDNS dashboard toggles that the
-official API docs do not list yet. They are reachable at runtime because
-``manageSettings`` PATCHes whatever the caller sends, so the only thing that can
-regress is their discoverability: the vendored OpenAPI schema and the tool /
-prompt documentation. These tests pin that surface. No live API is involved.
+official API docs do not list yet. They are reachable because
+``updateSecuritySettings`` PATCHes whatever the caller sends, and the document
+is the tool contract: the only thing that can regress is their discoverability
+in the vendored OpenAPI schema and the tool schema the server serves from it.
+These tests pin that surface. No live API is involved.
 """
 
 from pathlib import Path
 
 import yaml
 
-from nextdns_mcp.tools.settings import manageSettings
-from nextdns_mcp.usage import nextdns_usage_guide
+from nextdns_mcp.spec_tools import spec_routes
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPEC_PATH = REPO_ROOT / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
@@ -93,15 +93,11 @@ def test_early_access_toggles_are_flagged_as_undocumented():
             assert "not yet" in description, f"{key} description must state it is undocumented ({operation})"
 
 
-def test_manage_settings_docstring_surfaces_toggles():
-    """The manageSettings docstring (the tool schema an LLM reads) names all five toggles."""
-    docstring = manageSettings.__doc__ or ""
+def test_served_update_tool_schema_surfaces_toggles():
+    """The generated tool schema the server publishes — what an LLM actually reads —
+    carries all five toggles as arguments, flattened from the document's body."""
+    routes = {route.operation_id: route for route in spec_routes()}
+    properties = routes["updateSecuritySettings"].flat_param_schema["properties"]
     for key in EARLY_ACCESS_TOGGLES:
-        assert key in docstring, f"manageSettings docstring must mention {key}"
-
-
-def test_usage_guide_surfaces_toggles():
-    """The usage guide served as the server prompt names all five toggles too."""
-    guide = nextdns_usage_guide()
-    for key in EARLY_ACCESS_TOGGLES:
-        assert key in guide, f"usage guide must mention {key}"
+        assert key in properties, f"updateSecuritySettings schema must expose {key}"
+        assert properties[key]["type"] == "boolean", f"{key} must be boolean in the served schema"

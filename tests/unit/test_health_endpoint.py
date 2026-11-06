@@ -261,3 +261,28 @@ async def test_health_served_by_http_app_reports_failures(monkeypatch, mock_api_
 
     assert response.status_code == 503
     assert response.json()["class"] == "auth"
+
+
+async def test_concurrent_pollers_share_one_probe(monkeypatch, mock_api_key):
+    """The cache bounds steady polling; the lock bounds the first miss.
+
+    Concurrent pollers that all miss an empty cache used to each fire their
+    own request - a thundering herd against the cheapest authenticated
+    endpoint, which is what the cache exists to prevent. Single-flight makes
+    one request go upstream; everyone else waits on it and reads the result
+    that probe filled, rather than a duplicate or a stale one.
+    """
+    import asyncio
+
+    calls: list[int] = []
+
+    async def slow_probe() -> None:
+        calls.append(1)
+        await asyncio.sleep(0.05)  # let the other poller arrive and wait on the lock
+
+    monkeypatch.setattr(openapi, "_run_health_probe", slow_probe)
+    openapi._health_probe_cache = None
+
+    first, second = await asyncio.gather(openapi.check_nextdns_readiness(), openapi.check_nextdns_readiness())
+    assert len(calls) == 1, "the simultaneous first miss must issue exactly one probe"
+    assert first is None and second is None

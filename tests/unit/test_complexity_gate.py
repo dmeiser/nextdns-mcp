@@ -1,10 +1,12 @@
 """Behavioral tests for the CI complexity gate.
 
 The `complexity` job in `.github/workflows/unit-tests.yml` is the machine
-consumption of the documented complexity contract (radon grade B ceiling per
-function, grade A project average). These tests execute the gate's own shell
-script against synthetic source trees and assert whether CI would pass or fail,
-which is what a developer pushing a pull request actually experiences.
+consumption of the documented complexity contract: every block must be radon
+grade A (cyclomatic complexity <= 5), enforced by xenon with
+``--max-absolute A --max-modules A --max-average A``. These tests execute the
+gate's own shell script against synthetic source trees and assert whether CI
+would pass or fail, which is what a developer pushing a pull request actually
+experiences.
 
 The script under test is taken verbatim from the workflow and is not modified
 here; only the `uv` launcher is shimmed so it can run against a temporary
@@ -15,6 +17,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import yaml
@@ -26,8 +29,8 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
 def _gate_script() -> str:
     """Return the shell script the complexity job executes in CI."""
     workflow = yaml.safe_load(WORKFLOW.read_text())
-    run_scripts = [step["run"] for step in workflow["jobs"]["complexity"]["steps"] if "radon" in step.get("run", "")]
-    assert len(run_scripts) == 1, f"expected one radon step, found {len(run_scripts)}"
+    run_scripts = [step["run"] for step in workflow["jobs"]["complexity"]["steps"] if "xenon" in step.get("run", "")]
+    assert len(run_scripts) == 1, f"expected one xenon step, found {len(run_scripts)}"
     return run_scripts[0]
 
 
@@ -42,11 +45,6 @@ def _function(name: str, branches: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _padding(count: int = 10) -> str:
-    """Trivial grade A functions that keep the project average at grade A."""
-    return "".join(f"def helper_{i}(x):\n    return x\n\n" for i in range(count))
-
-
 def _run_gate(tmp_path: Path, sources: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Run the real CI gate script against a throwaway source tree."""
     src = tmp_path / "src"
@@ -54,15 +52,15 @@ def _run_gate(tmp_path: Path, sources: dict[str, str]) -> subprocess.CompletedPr
     for filename, body in sources.items():
         (src / filename).write_text(body)
 
-    # Shim `uv run radon ...` onto the interpreter that has radon installed, so
+    # Shim `uv run xenon ...` onto the interpreter that has xenon installed, so
     # the gate script runs unmodified against the throwaway tree.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     shim = bin_dir / "uv"
     shim.write_text(
         "#!/bin/sh\n"
-        'shift 2  # drop "run" and the radon launcher; use the module below\n'
-        f'exec "{sys.executable}" -m radon "$@"\n'
+        'shift 2  # drop "run" and the xenon launcher; use the module below\n'
+        f'exec "{sys.executable}" -m xenon "$@"\n'
     )
     shim.chmod(shim.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
@@ -77,30 +75,38 @@ def _run_gate(tmp_path: Path, sources: dict[str, str]) -> subprocess.CompletedPr
 
 
 def test_gate_passes_for_compliant_code(tmp_path):
-    """Code entirely within the documented grade B ceiling passes CI."""
+    """Code entirely within the documented grade A ceiling passes CI."""
     result = _run_gate(tmp_path, {"clean.py": _function("simple", 1)})
     assert result.returncode == 0, f"gate rejected compliant code:\n{result.stdout}{result.stderr}"
 
 
-def test_gate_passes_at_grade_b_boundary(tmp_path):
-    """Complexity 10 is the documented ceiling (grade B) and is accepted."""
-    sources = {"boundary_b.py": _function("at_limit", 9) + _padding()}
-    result = _run_gate(tmp_path, sources)
-    assert result.returncode == 0, f"gate rejected complexity 10 (grade B):\n{result.stdout}{result.stderr}"
+def test_gate_passes_at_grade_a_boundary(tmp_path):
+    """Complexity 5 is the documented ceiling (grade A) and is accepted."""
+    result = _run_gate(tmp_path, {"boundary_a.py": _function("at_limit", 4)})
+    assert result.returncode == 0, f"gate rejected complexity 5 (grade A):\n{result.stdout}{result.stderr}"
 
 
-def test_gate_blocks_function_above_grade_b(tmp_path):
-    """Complexity 11 is grade C; CI must fail and name the offending function."""
-    sources = {"boundary_c.py": _function("over_limit", 10) + _padding()}
-    result = _run_gate(tmp_path, sources)
-    assert result.returncode != 0, "gate accepted complexity 11 (grade C)"
-    assert "over_limit" in result.stdout, f"gate did not report the offending function:\n{result.stdout}"
-    assert "exceeding Grade B" in result.stdout
+def test_gate_blocks_function_above_grade_a(tmp_path):
+    """Complexity 6 is grade B; CI must fail and name the offending function."""
+    result = _run_gate(tmp_path, {"boundary_b.py": _function("over_limit", 5)})
+    assert result.returncode != 0, "gate accepted complexity 6 (grade B)"
+    output = result.stdout + result.stderr
+    assert "over_limit" in output, f"gate did not report the offending function:\n{output}"
+    assert "rank of B" in output, f"gate did not grade the offending block:\n{output}"
 
 
-def test_gate_blocks_when_project_average_is_not_grade_a(tmp_path):
-    """No function above grade B, but a grade B project average still fails CI."""
-    sources = {"avg_only.py": _function("one", 7) + _function("two", 7) + _function("three", 7)}
-    result = _run_gate(tmp_path, sources)
-    assert result.returncode != 0, "gate accepted a grade B project average"
-    assert "grade B, Grade A required" in result.stdout, result.stdout
+def test_gate_blocks_method_above_grade_a_inside_class(tmp_path):
+    """A grade B method inside a class is a block too; the class shape must not hide it."""
+    method = textwrap.indent(_function("method", 5), "    ")
+    result = _run_gate(tmp_path, {"inside_class.py": f"class Wrapper:\n{method}"})
+    assert result.returncode != 0, "gate accepted a grade B method inside a class"
+    output = result.stdout + result.stderr
+    assert "inside_class.py:2 method" in output, f"gate did not report the offending method:\n{output}"
+
+
+def test_gate_command_pins_grade_a():
+    """The gate command itself is the contract; loosening it to B must fail here."""
+    script = _gate_script()
+    assert "--max-absolute A" in script
+    assert "--max-modules A" in script
+    assert "--max-average A" in script

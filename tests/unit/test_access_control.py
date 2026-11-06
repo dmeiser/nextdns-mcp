@@ -12,7 +12,7 @@ from nextdns_mcp.config import (
     get_writable_profiles,
     parse_profile_list,
 )
-from nextdns_mcp.utils import is_safe_entry_id, is_safe_profile_id
+from nextdns_mcp.utils import is_safe_profile_id
 
 
 @pytest.fixture
@@ -261,6 +261,44 @@ class TestCanWriteProfile:
         assert can_write_profile("xyz999") is False
 
 
+class TestProtectedProfiles:
+    """NEXTDNS_PROTECTED_PROFILES: a write denylist that overrides even ALL."""
+
+    def test_unset_protects_nothing(self, clean_env):
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        assert can_write_profile("abc123") is True
+
+    def test_protected_denies_write_even_when_all_writable(self, clean_env):
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "aa11aa")
+        assert can_write_profile("aa11aa") is False
+        assert can_write_profile("abc123") is True
+
+    def test_protected_denies_write_even_when_explicitly_writable(self, clean_env):
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "aa11aa,abc123")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "aa11aa")
+        assert can_write_profile("aa11aa") is False
+        assert can_write_profile("abc123") is True
+
+    def test_protected_is_case_insensitive(self, clean_env):
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "2F4A9B")
+        assert can_write_profile("2f4a9b") is False
+        assert can_write_profile("2F4A9B") is False
+
+    def test_reads_are_unaffected(self, clean_env):
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "aa11aa")
+        assert can_read_profile("aa11aa") is True
+
+    def test_multiple_protected_ids(self, clean_env):
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "aa11aa, ff66ff ,")
+        assert can_write_profile("aa11aa") is False
+        assert can_write_profile("ff66ff") is False
+        assert can_write_profile("abc123") is True
+
+
 class TestExtractProfileIdFromUrl:
     """Test the extract_profile_id_from_url function."""
 
@@ -363,17 +401,10 @@ class TestSafeIdValidation:
         assert is_safe_profile_id("abc/def") is False
         assert is_safe_profile_id("") is False
 
-    def test_is_safe_entry_id_allows_domains(self):
-        assert is_safe_entry_id("example.com") is True
-        assert is_safe_entry_id("nextdns-recommended") is True
-        assert is_safe_entry_id("a.b") is True  # single dots are fine
-
-    def test_is_safe_entry_id_rejects_path_traversal(self):
-        assert is_safe_entry_id("../settings") is False
-        assert is_safe_entry_id("foo/bar") is False
-        assert is_safe_entry_id("") is False
-        assert is_safe_entry_id("a..b") is False  # embedded parent-directory sequence
-        assert is_safe_entry_id("foo\\bar") is False  # backslash separator
+    # The entry-id traversal guard lives where the value is used: the generated tool
+    # refuses an id that could address another endpoint (spec_tools._UNSAFE_PATH_VALUE),
+    # which is the only place an entry id is ever put into a URL. See
+    # tests/unit/test_spec_tools.py for that guard's cases.
 
 
 class TestExtractProfileIdFromUrlValidation:

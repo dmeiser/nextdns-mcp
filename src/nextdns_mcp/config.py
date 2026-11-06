@@ -11,6 +11,8 @@ import math
 import os
 from dataclasses import dataclass
 
+from .constants import SAFE_PROFILE_ID_PATTERN
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,8 +48,14 @@ def configure_logging() -> None:
         logging.getLogger(library_logger).setLevel(logging.WARNING)
 
 
-# Core API configuration
-NEXTDNS_BASE_URL = "https://api.nextdns.io"
+# Core API configuration. Overridable via NEXTDNS_API_BASE - the name the
+# harness and container-E2E scripts already pass into the server's
+# environment; before this the override reached the child process and was
+# simply ignored, so a custom base configured the harness's REST checks but
+# not the MCP server under test. Read once at import: the ACL client's
+# base_url, the DoH allowlist host and the startup banner all resolve from
+# this constant, so the override configures every one of them.
+NEXTDNS_BASE_URL = os.getenv("NEXTDNS_API_BASE", "https://api.nextdns.io").rstrip("/")
 
 # Default HTTP request timeout in seconds
 DEFAULT_HTTP_TIMEOUT: float = 30.0
@@ -176,6 +184,46 @@ def get_writable_profiles() -> set[str] | None:
     return parse_profile_list(profiles)
 
 
+# Tool-search modes accepted by NEXTDNS_TOOL_SEARCH. "bm25" (the default)
+# replaces the listing with FastMCP's synthetic search_tools/call_tool pair
+# (progressive disclosure); "off" advertises the full tool catalog. FastMCP
+# also offers a regex transform; it was dropped before shipping because it
+# ranks nothing (registration order within a pattern match) and none of the
+# live model validations that shaped this feature ran under it.
+TOOL_SEARCH_MODES: tuple[str, ...] = ("off", "bm25")
+
+# What an unset (or empty) NEXTDNS_TOOL_SEARCH resolves to. bm25 is what
+# every live-model validation of this contract ran under, so the full
+# 80-tool listing is the explicit opt-out rather than the default everyone
+# trips over.
+DEFAULT_TOOL_SEARCH_MODE = "bm25"
+
+
+def get_tool_search_mode() -> str:
+    """Get the tool-search (progressive disclosure) mode from the environment.
+
+    Reads ``NEXTDNS_TOOL_SEARCH``: ``"bm25"`` (the default) enables FastMCP's
+    search transform, which hides the real tool catalog behind a
+    ``search_tools`` + ``call_tool`` pair; ``"off"`` keeps the normal full
+    listing. Unset or empty means ``"bm25"``.
+
+    Returns:
+        str: One of ``"off"`` or ``"bm25"`` (default ``"bm25"``).
+
+    Raises:
+        ConfigurationError: If NEXTDNS_TOOL_SEARCH is not one of the accepted
+            values.
+    """
+    raw = os.getenv("NEXTDNS_TOOL_SEARCH", "").strip().lower()
+    if not raw:
+        return DEFAULT_TOOL_SEARCH_MODE
+    if raw not in TOOL_SEARCH_MODES:
+        raise ConfigurationError(
+            f"Invalid NEXTDNS_TOOL_SEARCH: {raw!r}. Expected one of: {', '.join(TOOL_SEARCH_MODES)}."
+        )
+    return raw
+
+
 def _is_empty_profile_list(profile_str: str) -> bool:
     """Check if profile string is empty or whitespace."""
     return not profile_str or not profile_str.strip()
@@ -186,22 +234,41 @@ def _is_allow_all(profile_str: str) -> bool:
     return profile_str.strip().upper() == "ALL"
 
 
-def parse_profile_list(profile_str: str) -> set[str] | None:
-    """Parse a comma-separated list of profile IDs.
+def _normalized_profile_ids(raw: str) -> set[str]:
+    """The comma-separated profile ids in ``raw``, stripped and lowercased.
 
-    Args:
-        profile_str: Comma-separated string of profile IDs
+    The one parsing rule every profile list in the environment goes through,
+    so the writable/readable lists and the protected denylist cannot parse
+    the same string differently.
+    """
+    return {p.strip().lower() for p in raw.split(",") if p.strip()}
+
+
+def parse_profile_list(profile_str: str) -> set[str] | None:
+    """Parse a comma-separated list of profile IDs into an access decision.
 
     Returns:
-        Set of profile IDs normalized to lowercase (profile IDs are hex and
-        matched case-insensitively), None if string is empty/unset (deny all),
-        or empty set if "ALL"/"all" specified (allow all)
+        None - deny everything (unset, empty, or a list that names no profile:
+        ``",,,"`` is punctuation, not a grant);
+        the empty set - allow everything (the literal ``ALL``/``all``);
+        a non-empty set - exactly those ids, lowercased.
+
+        The None/set() sentinel is the shape every caller in this module and
+        the client consumes; the distinction is documented here and pinned by
+        tests rather than re-shaped per call site.
     """
     if _is_empty_profile_list(profile_str):
         return None  # Empty/unset = deny all
     if _is_allow_all(profile_str):
         return set()  # Empty set = allow all
-    return {p.strip().lower() for p in profile_str.split(",") if p.strip()}
+    ids = _normalized_profile_ids(profile_str)
+    if not ids:
+        # Non-blank input that parses to no ids (e.g. ",,," or ", ,"): it is
+        # neither unset nor ALL, and it names nothing - fail closed. Reading a
+        # malformed allowlist as "allow all" inverts a typo into the widest
+        # possible grant.
+        return None
+    return ids
 
 
 @dataclass(frozen=True)
@@ -222,6 +289,7 @@ class ProfileAccessControl:
     read_only: bool
     readable: frozenset[str] | None
     writable: frozenset[str] | None
+    protected: frozenset[str] = frozenset()
 
     def can_read(self, profile_id: str) -> bool:
         """Return whether the snapshot allows reading ``profile_id``."""
@@ -234,6 +302,8 @@ class ProfileAccessControl:
     def can_write(self, profile_id: str) -> bool:
         """Return whether the snapshot allows writing ``profile_id``."""
         if self.read_only or self.writable is None:
+            return False
+        if profile_id.lower() in self.protected:
             return False
         if not self.writable:
             return True
@@ -250,12 +320,44 @@ class ProfileAccessControl:
         return not self.read_only and self.writable is not None
 
 
+def get_protected_profiles() -> frozenset[str]:
+    """Get the protected-profile denylist from ``NEXTDNS_PROTECTED_PROFILES``.
+
+    Protected profiles are never writable, even when ``NEXTDNS_WRITABLE_PROFILES``
+    is ``ALL``; reads are unaffected (writes-only by design, documented in
+    docs/safety.md). Intended for data-bearing or production profiles that a
+    test agent must not modify or delete.
+
+    A denylist entry that cannot match any profile id is a configuration
+    error, not an ignored entry: a typo in a *protection* list silently
+    protects nothing, which is the worst possible failure mode for a
+    denylist. The check runs at startup (``validate_configuration`` reads the
+    access-control snapshot) and on each snapshot load, and says what the
+    valid shape is.
+
+    Returns:
+        frozenset[str]: Lowercased profile IDs (empty when unset/empty).
+
+    Raises:
+        ConfigurationError: If any entry is not a valid profile-id shape.
+    """
+    raw = os.getenv("NEXTDNS_PROTECTED_PROFILES", "")
+    ids = _normalized_profile_ids(raw)
+    invalid = sorted(pid for pid in ids if not SAFE_PROFILE_ID_PATTERN.match(pid))
+    if invalid:
+        raise ConfigurationError(
+            f"NEXTDNS_PROTECTED_PROFILES contains entries that cannot match any profile id: {', '.join(invalid)}. "
+            "Profile ids are 6 or 10 lowercase alphanumeric characters."
+        )
+    return frozenset(ids)
+
+
 def load_profile_access_control() -> ProfileAccessControl:
     """Read the profile ACL environment exactly once and return a snapshot.
 
-    Each of NEXTDNS_READ_ONLY, NEXTDNS_READABLE_PROFILES and
-    NEXTDNS_WRITABLE_PROFILES is read once, so all decisions derived from the
-    returned snapshot agree with each other.
+    Each of NEXTDNS_READ_ONLY, NEXTDNS_READABLE_PROFILES,
+    NEXTDNS_WRITABLE_PROFILES and NEXTDNS_PROTECTED_PROFILES is read once, so
+    all decisions derived from the returned snapshot agree with each other.
 
     The snapshot is deliberately not cached across requests: it is a
     per-request value, so the next request re-reads the environment and no
@@ -270,6 +372,7 @@ def load_profile_access_control() -> ProfileAccessControl:
         read_only=read_only,
         readable=_combine_readable(readable, writable),
         writable=None if writable is None else frozenset(writable),
+        protected=get_protected_profiles(),
     )
 
 
@@ -288,15 +391,18 @@ def _combine_readable(readable: set[str] | None, writable: set[str] | None) -> f
     if readable is None:
         return frozenset(writable)
 
-    # If readable is empty set (ALL), allow all
-    if not readable:
-        return frozenset(ALLOW_ALL_PROFILES)
+    return _combine_set_readable(readable, writable)
 
-    # Writable ALL implies readable ALL
-    if not writable:
-        return frozenset(ALLOW_ALL_PROFILES)
 
-    # Readable is set: combine with writable (write implies read)
+def _combine_set_readable(readable: set[str], writable: set[str]) -> frozenset[str]:
+    """Combine two explicitly configured sets.
+
+    An empty set means ALL on either side, and ALL on either side makes every
+    profile readable; otherwise the combination is readable plus writable
+    (write implies read).
+    """
+    if not readable or not writable:
+        return frozenset(ALLOW_ALL_PROFILES)
     return frozenset(readable | writable)
 
 
@@ -380,6 +486,19 @@ def _log_profile_access(profile_set: set[str] | None, access_type: str) -> None:
         logger.info(f"{access_type.capitalize()} profiles restricted to: {sorted(profile_set)}")
 
 
+def _log_protected_profiles(access: ProfileAccessControl) -> None:
+    """Say at startup which profiles the write denylist actually holds.
+
+    The denylist is the operator's safety net for ``WRITABLE=ALL`` with a
+    production profile on the same key; naming its members means a typo
+    cannot sit silently unprotected. The entries are shape-validated by
+    ``get_protected_profiles`` before this line is ever reached (see
+    ``validate_configuration``).
+    """
+    if access.protected:
+        logger.info(f"Protected profiles (writes denied even under ALL): {', '.join(sorted(access.protected))}")
+
+
 def _log_access_control_settings() -> None:
     """Log current access control configuration."""
     access = load_profile_access_control()
@@ -393,6 +512,7 @@ def _log_access_control_settings() -> None:
     _log_profile_access(readable, "readable")
     if not read_only:
         _log_profile_access(writable, "writable")
+    _log_protected_profiles(access)
 
 
 def validate_configuration() -> None:
@@ -414,6 +534,9 @@ def validate_configuration() -> None:
 
     get_http_timeout()
     get_download_max_bytes()
+    base_url = os.getenv("NEXTDNS_API_BASE", "https://api.nextdns.io").rstrip("/")
+    if not base_url.lower().startswith("https://"):
+        raise ConfigurationError("NEXTDNS_API_BASE must use https://")
     _log_access_control_settings()
 
 

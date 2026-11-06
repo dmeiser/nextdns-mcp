@@ -6,7 +6,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import coercion, config, openapi, server
+from nextdns_mcp import config, openapi, server
 from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools import doh as doh_module
 
@@ -18,26 +18,34 @@ def allow_doh_read_access(monkeypatch):
     monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
 
 
-def test_coercion_module_exposes_no_blind_json_type_coercion():
-    """The blind JSON type-coercion subtree was removed (issue #273).
+def test_identifier_like_strings_are_never_type_coerced():
+    """The blind JSON type-coercion subtree is gone (issue #273); pinned as the
+    behaviour, not as the absence of its helpers: an identifier-shaped string
+    with leading zeros must survive the schema-aware path unchanged."""
+    assert utils_module.is_integer_shaped("0012") is True
 
-    It had no production caller and it corrupted identifier-like strings
-    (``{"password": "0012"}`` -> ``{"password": 12}``), the exact hazard the
-    live schema-aware coercion in StripExtraFieldsMiddleware avoids.
+
+@pytest.mark.asyncio
+async def test_middleware_leaves_leading_zero_identifiers_alone():
+    """`{"password": "0012"}` was the live corruption (string -> int 12).
+
+    Through StripExtraFieldsMiddleware the value must come back still a string.
     """
-    for name in (
-        "coerce_json_types",
-        "_coerce_dict",
-        "_coerce_list",
-        "_coerce_string",
-        "_coerce_string_to_bool",
-        "_coerce_string_to_number",
-        "_try_parse_float",
-        "_is_integer",
-    ):
-        assert not hasattr(coercion, name), f"coercion.{name} should have been removed"
-    assert not hasattr(openapi, "_is_integer")
-    assert not hasattr(openapi, "coerce_json_types")
+    mw = openapi.StripExtraFieldsMiddleware()
+
+    class StringDummyTool:
+        parameters: ClassVar[dict[str, object]] = {"properties": {"password": {"type": "string"}}}
+
+    class StringToolManager:
+        async def get_tool(self, name):
+            return StringDummyTool()
+
+    context = DummyContext("tool", {})
+    context.fastmcp_context.fastmcp = SimpleNamespace(get_tool=StringToolManager().get_tool, list_tools=_no_tools)
+    context.message.arguments = {"password": "0012"}
+    result = await mw.on_call_tool(context, _dummy_call_next)
+    assert result == {"password": "0012"}
+    assert isinstance(result["password"], str)
 
 
 def test_shape_helpers():
@@ -58,12 +66,6 @@ def test_shape_helpers():
     assert utils_module.is_float_shaped("") is False
 
 
-def test_coerce_json_arg_invalid_json_returns_value():
-    # String that looks like JSON but fails to parse should be returned as-is.
-    assert coercion._coerce_json_arg('{"broken": ') == '{"broken": '
-    assert coercion._coerce_json_arg("[1, 2, ") == "[1, 2, "
-
-
 class DummyTool:
     parameters: ClassVar[dict[str, object]] = {"properties": {"keep": {"type": "boolean"}}}
 
@@ -78,9 +80,16 @@ class DummyToolManager:
         return DummyTool()
 
 
+async def _no_tools(**_: object) -> list:
+    """The catalog a minimal dummy server lists: nothing, so the owner hint stays generic."""
+    return []
+
+
 class DummyFastMCPContext:
     def __init__(self, raise_exc=False):
-        self.fastmcp = SimpleNamespace(get_tool=DummyToolManager(raise_exc=raise_exc).get_tool)
+        # A real FastMCP server answers get_tool and list_tools; the owner hint
+        # builds its index from list_tools, so the dummy must carry both.
+        self.fastmcp = SimpleNamespace(get_tool=DummyToolManager(raise_exc=raise_exc).get_tool, list_tools=_no_tools)
 
 
 class DummyMessage:
@@ -118,7 +127,9 @@ async def test_strip_extra_fields_middleware_basic_and_exception():
             return StringDummyTool()
 
     string_context = DummyContext("tool", {})
-    string_context.fastmcp_context.fastmcp = SimpleNamespace(get_tool=StringToolManager().get_tool)
+    string_context.fastmcp_context.fastmcp = SimpleNamespace(
+        get_tool=StringToolManager().get_tool, list_tools=_no_tools
+    )
     string_context.message.arguments = {"profile_id": "315244"}
     result = await mw.on_call_tool(string_context, _dummy_call_next)
     assert result == {"profile_id": "315244"}

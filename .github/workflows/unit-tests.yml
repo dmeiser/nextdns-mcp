@@ -15,7 +15,9 @@ on:
     tags:
       - 'v*.*.*'  # Also run on version tags
   pull_request:
-    branches: [ main ]  # Run on all PRs to main
+    # main plus the stacked-feature branches: PRs stacked on fm/* (the
+    # openapi-only stack) get real CI instead of none (see PR #384).
+    branches: [ main, "fm/*" ]  # Run on all PRs to main and to stacked feature branches
   workflow_dispatch:
   merge_group:
 
@@ -95,21 +97,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --all-extras
 
-      - name: Run radon complexity check
+      - name: Run xenon complexity gate
         run: |
-          # Project average complexity must stay at Grade A.
-          AVERAGE=$(uv run radon cc src/ scripts/run_container_e2e.py -a --total-average | tail -1 | awk '{print $3}')
-          if [ "$AVERAGE" != "A" ]; then
-            echo "Project average complexity is grade $AVERAGE, Grade A required."
-            exit 1
-          fi
-          # No individual function may exceed Grade B.
-          OUTPUT=$(uv run radon cc src/ scripts/run_container_e2e.py -nc)
-          if [ -n "$OUTPUT" ]; then
-            echo "Radon found functions exceeding Grade B:"
-            echo "$OUTPUT"
-            exit 1
-          fi
+          # Every block must be grade A (cyclomatic complexity <= 5), and the
+          # project average must be grade A. xenon fails on any block above the
+          # max-absolute grade, so no function can sit at grade B or worse.
+          uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/run_container_e2e.py
 
   unit-tests:
     runs-on: ubuntu-latest

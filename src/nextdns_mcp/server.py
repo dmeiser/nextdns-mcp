@@ -1,14 +1,18 @@
-"""NextDNS MCP Server - FastMCP-based implementation built from grouped CRUD tools.
+"""NextDNS MCP Server - FastMCP-based implementation built from the NextDNS OpenAPI document.
 
 SPDX-License-Identifier: MIT
 """
 
+import inspect
 import logging
 import os
 import sys
+from functools import wraps
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.tools.base import ToolResult
+from mcp.types import ToolAnnotations
 
 from .client import get_api_client
 from .config import (
@@ -19,53 +23,97 @@ from .config import (
     validate_configuration,
 )
 from .openapi import create_mcp_server
-from .tools.analytics import queryAnalytics
+from .spec_tools import (
+    _payload_is_error,
+    endpoints_for_routes,
+    register_spec_tools,
+    spec_routes,
+    spec_tool_names,
+)
 from .tools.doh import dohLookup
-from .tools.lists import manageLists
-from .tools.logs import manageLogs
 from .tools.plots import plotAnalytics
-from .tools.profiles import manageProfiles
-from .tools.rewrites import manageRewrites
-from .tools.settings import manageSettings
-from .usage import nextdns_usage_guide
 
 logger = logging.getLogger(__name__)
 
-# Grouped MCP tools to register on the server instance
-_GROUPED_TOOLS = (
-    manageProfiles,
-    manageSettings,
-    manageLists,
-    manageRewrites,
-    manageLogs,
-    queryAnalytics,
-    plotAnalytics,
-    dohLookup,
-)
+# Operations the server performs itself instead of calling one API endpoint for:
+# `dohLookup` resolves a name through a DNS-over-HTTPS resolver, and `plotAnalytics`
+# renders a chart from an analytics query. Neither has an endpoint for the spec to
+# describe, so they are the two hand-written tools published beside the generated
+# ones — and a caller would otherwise have no way to know they exist.
+_COMPOSITE_TOOLS = (plotAnalytics, dohLookup)
+
+# Neither composite tool mutates anything: dohLookup answers a DNS question and
+# plotAnalytics renders a chart from analytics already collected. The generated
+# SpecApiTool derives these hints from the endpoint method; the composites have
+# no endpoint, so the hints are stated here — without them a caller scanning for
+# destructive tools gets no signal either way.
+_COMPOSITE_ANNOTATIONS = ToolAnnotations(read_only_hint=True, destructive_hint=False)
+
+
+def _with_error_flag(tool_fn: Any) -> Any:
+    """Wrap a composite tool so its typed error payloads surface as ``isError``.
+
+    The composites answer failures as typed payload dicts, exactly like the
+    generated tools - but a bare dict return is wrapped by FastMCP as a
+    SUCCESSFUL result, so every one of those failure payloads used to reach
+    callers with ``isError=False``. The generated SpecApiTool sets the flag
+    explicitly via ``_payload_is_error``; this wrapper applies the same rule
+    to the two hand-written tools, so a refusal or failure never masquerades
+    as a normal answer.
+    """
+
+    @wraps(tool_fn)
+    async def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        payload = await tool_fn(*args, **kwargs)
+        if _payload_is_error(payload):
+            return ToolResult(structured_content=payload, is_error=True)
+        return payload
+
+    return _wrapped
+
 
 _mcp_server: FastMCP | None = None
 
 
+def published_tool_names() -> list[str]:
+    """Every tool name this server publishes, before any of them is registered.
+
+    The ``initialize`` instructions describe the catalog, and they are written when
+    the server is constructed — before the tools exist — so the names have to be
+    derivable without registering anything.
+    """
+    return [*spec_tool_names(), *(tool.__name__ for tool in _COMPOSITE_TOOLS)]
+
+
 def build_mcp_server() -> FastMCP:
-    """Create the MCP server and register the grouped tools and usage prompt.
+    """Create the MCP server: one tool per NextDNS API operation, plus the two local ones.
+
+    The catalog is generated from the shipped OpenAPI document by ``spec_tools`` — a
+    tool per operation, named by its ``operationId``, with the spec's own description
+    and parameter schemas. Registered on top of it are the two operations this server
+    performs itself (``plotAnalytics``, ``dohLookup``), which the document cannot
+    describe because there is no endpoint to describe.
 
     Returns:
         FastMCP: Configured MCP server instance with all tools registered
     """
     logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
-    server = create_mcp_server()
-    for tool in _GROUPED_TOOLS:
-        server.tool()(tool)
-    server.prompt(name="nextdns-usage-guide", description="Comprehensive guide for using the NextDNS MCP server tools")(
-        nextdns_usage_guide
-    )
-    # Also expose the guide as an MCP *resource* so models that discover tools
-    # by enumerating resources find actionable documentation, not an empty list.
-    server.resource(
-        "nextdns://usage",
-        name="nextdns-usage-guide",
-        description="Comprehensive guide for using the NextDNS MCP server tools",
-    )(nextdns_usage_guide)
+    # One parse of the shipped document feeds all three views of it: the tool
+    # surface, the call-log endpoint map, and the published-name list in the
+    # initialize instructions (spec_tool_names hits the process-wide route
+    # cache). Each used to parse the YAML independently.
+    routes = spec_routes()
+    server = create_mcp_server(tool_names=published_tool_names(), endpoints=endpoints_for_routes(routes))
+    register_spec_tools(server, routes)
+    for tool in _COMPOSITE_TOOLS:
+        # FastMCP publishes only the first text section of a docstring as the tool
+        # description, so the accepted values and the worked example further down
+        # would never reach a caller — and for these two tools that is exactly the
+        # part a caller needs (a chart's interval range, a lookup's record types).
+        server.tool(
+            description=inspect.getdoc(tool) or "",
+            annotations=_COMPOSITE_ANNOTATIONS,
+        )(_with_error_flag(tool))
     return server
 
 

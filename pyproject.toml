@@ -1,6 +1,6 @@
 [project]
 name = "nextdns-mcp"
-version = "3.2.14"
+version = "4.0.0"
 description = "NextDNS MCP Server - Model Context Protocol server for NextDNS API built with FastMCP"
 authors = [{name = "NextDNS MCP Contributors"}]
 license = {text = "MIT"}
@@ -17,6 +17,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "python-dotenv>=1.2.2",
     "matplotlib>=3.10.0",
+    "jsonschema>=4.23",
 ]
 
 [project.optional-dependencies]
@@ -69,3 +70,9 @@ files = ["src"]
 # last 7 days so the community can vet them first. Matches the Dependabot
 # `cooldown` in .github/dependabot.yml.
 exclude-newer = "1 week"
+
+[dependency-groups]
+dev = [
+    "types-jsonschema>=4.26.0.20261006",
+    "xenon>=0.9.3",
+]

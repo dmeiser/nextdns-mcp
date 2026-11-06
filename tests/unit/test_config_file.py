@@ -1,6 +1,8 @@
 """Unit tests for file-based configuration."""
 
 import logging
+import subprocess
+import sys
 from unittest.mock import Mock, patch
 
 import pytest
@@ -85,8 +87,8 @@ def test_parse_profile_list_empty(active_config):
     """Test parsing empty profile lists."""
     assert active_config.parse_profile_list("") is None
     assert active_config.parse_profile_list("  ") is None
-    assert active_config.parse_profile_list(",") == set()
-    assert active_config.parse_profile_list("  ,  ,  ") == set()
+    assert active_config.parse_profile_list(",") is None
+    assert active_config.parse_profile_list("  ,  ,  ") is None
 
 
 @pytest.mark.parametrize(
@@ -100,7 +102,7 @@ def test_parse_profile_list_empty(active_config):
         ("profile1,profile2", {"profile1", "profile2"}),  # Multiple profiles
         ("  profile1  ,  profile2  ", {"profile1", "profile2"}),  # Extra whitespace
         ("profile1,,profile2", {"profile1", "profile2"}),  # Empty entries
-        (",,,", set()),  # Only commas
+        (",,,", None),  # Only commas: punctuation is not a grant, deny all
         ("profile1,profile1,profile2", {"profile1", "profile2"}),  # Duplicates
     ],
 )
@@ -114,3 +116,21 @@ def test_get_api_key_from_env(monkeypatch, active_config):
     monkeypatch.setenv("NEXTDNS_API_KEY", "env-key")
     monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
     assert active_config.get_api_key() == "env-key"
+
+
+def test_nextdns_api_base_env_configures_the_server_base_url():
+    """The base URL the harness scripts pass as NEXTDNS_API_BASE configures the server.
+
+    Checked in a fresh interpreter with the environment in place - exactly
+    what the child MCP process gets when the harness sets the variable in its
+    environment. (Reloading the module in-process would rebind class
+    identities and poison unrelated tests that hold module references.)
+    """
+    code = (
+        "import os;"
+        "os.environ['NEXTDNS_API_BASE'] = 'https://api.example.test/v1/';"
+        "import nextdns_mcp.config as c;"
+        "print(c.NEXTDNS_BASE_URL)"
+    )
+    result = subprocess.run([sys.executable, "-c", code], check=False, capture_output=True, text=True)
+    assert result.stdout.strip() == "https://api.example.test/v1", result.stderr

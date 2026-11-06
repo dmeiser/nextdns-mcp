@@ -20,18 +20,10 @@ from .config import (
     get_http_timeout,
     load_profile_access_control,
 )
+from .constants import SAFE_PROFILE_ID_PATTERN, is_write_operation
 from .errors import ErrorCode
 
 logger = logging.getLogger(__name__)
-
-# Safe identifier patterns to prevent path traversal and ACL bypass.
-# Profile IDs must match what api.nextdns.io actually issues, not the stale
-# nextdns-openapi.yaml ProfileId parameter (which still claims 6 characters).
-# The live API returns 10-character IDs for newly created profiles (observed
-# 2026-10-03 in CI run 37139687479) while legacy profiles keep 6-character IDs,
-# so both shapes are accepted and everything else still fails fast locally
-# instead of 404ing upstream.
-SAFE_PROFILE_ID_PATTERN = re.compile(r"^(?:[a-z0-9]{6}|[a-z0-9]{10})$")
 
 # Hosts this client is allowed to send a request to. Every request carries the
 # X-Api-Key client header, so without a destination allow-list the account's API
@@ -151,18 +143,6 @@ def extract_profile_id_from_url(url: str) -> str | None:
     return _extract_profile_id_from_path(_normalized_request_path(url))
 
 
-def is_write_operation(method: str) -> bool:
-    """Check if an HTTP method is a write operation.
-
-    Args:
-        method: HTTP method (GET, POST, PUT, PATCH, DELETE)
-
-    Returns:
-        True if it's a write operation, False otherwise
-    """
-    return method.upper() in ("POST", "PUT", "PATCH", "DELETE")
-
-
 class AccessDeniedError(Exception):
     """Raised when the profile access-control layer denies a request (issue #178).
 
@@ -181,7 +161,7 @@ class AccessDeniedError(Exception):
         self.message = message
 
 
-def _is_unclassifiable_profiles_path(path: str | None) -> bool:
+def _is_unclassifiable_profiles_path(path: str) -> bool:
     """Return True when a /profiles/... path names no safe, spec-shaped profile id.
 
     Classification is case-insensitive, so ``/PROFILES/def456/settings`` is
@@ -191,13 +171,28 @@ def _is_unclassifiable_profiles_path(path: str | None) -> bool:
     the global any_readable/any_writable gates and never per-profile
     membership, silently bypassing the profile ACL (issue #285).
 
-    Called from the single ``_authorize()`` decision point that both
-    ``request()`` and ``stream()`` go through, so the two entry points cannot
-    diverge again.
+    Called from ``_unmatchable_profile_url``, itself part of the single
+    ``_authorize()`` decision point that both ``request()`` and ``stream()``
+    go through, so the two entry points cannot diverge again. A missing path is
+    not classified here: ``_unmatchable_profile_url`` denies it before this is
+    reached, so ``path`` is always a real normalized path.
     """
-    if path is None:
-        return False
     return _PROFILE_ROOT.search(path.rstrip("/")) is not None
+
+
+def _unmatchable_profile_url(request_path: str | None) -> bool:
+    """True when a request cannot be classified against the profile ACL.
+
+    An absolute/authority-bearing URL (no normalized path), a traversal
+    payload, or a /profiles path that names something after the prefix but
+    carries no safe, extractable profile id (e.g. /profiles/abc.def/settings)
+    cannot be matched to a profile id, so _authorize denies it outright.
+    """
+    if request_path is None:
+        return True
+    if ".." in request_path:
+        return True
+    return _is_unclassifiable_profiles_path(request_path)
 
 
 class AccessControlledClient(httpx.AsyncClient):
@@ -210,6 +205,8 @@ class AccessControlledClient(httpx.AsyncClient):
 
         if access.read_only:
             error_msg = "Write operation denied: server is in read-only mode"
+        elif profile_id.lower() in access.protected:
+            error_msg = f"Write access denied: profile {profile_id} is protected (NEXTDNS_PROTECTED_PROFILES)"
         else:
             error_msg = f"Write access denied for profile: {profile_id}"
 
@@ -341,11 +338,6 @@ class AccessControlledClient(httpx.AsyncClient):
 
         url_str = str(url)
         request_path = _normalized_request_path(url_str)
-        is_absolute_url = request_path is None
-        contains_traversal = request_path is not None and ".." in request_path
-        # /profiles paths that name something after the prefix but do not carry a
-        # safe, extractable profile id (e.g. /profiles/abc.def/settings).
-        unclassifiable_profiles_path = _is_unclassifiable_profiles_path(request_path)
         profile_id = _extract_profile_id_from_path(request_path)
 
         # One snapshot per request: every check below, and the decision to send
@@ -355,14 +347,11 @@ class AccessControlledClient(httpx.AsyncClient):
 
         if profile_id:
             self._check_access(profile_id, method, url_str, access)
-        elif is_absolute_url or contains_traversal or unclassifiable_profiles_path:
-            # Fail closed: absolute/authority-bearing URLs, traversal payloads, and
-            # unclassifiable /profiles paths cannot be matched against the profile
-            # ACL, so deny them instead of letting them bypass the check entirely.
+        elif _unmatchable_profile_url(request_path):
+            # Fail closed: a URL whose profile cannot be classified is denied
+            # instead of being allowed to bypass the profile ACL check.
             logger.warning(f"Forbidden URL: {_redacted(url_str)} (method={method})")
-            raise AccessDeniedError(
-                f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id=profile_id or ""
-            )
+            raise AccessDeniedError(f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id="")
         else:
             self._check_collection_access(method, url_str, access)
 

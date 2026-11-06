@@ -1,31 +1,60 @@
 # NextDNS MCP Server
 
-A Model Context Protocol (MCP) server for the NextDNS API, built with FastMCP and a small set of grouped CRUD tools.
+A Model Context Protocol (MCP) server for the NextDNS API, built with FastMCP and generated from a bundled OpenAPI document.
 
 ## Overview
 
-This project provides an MCP server that exposes NextDNS API operations as tools that can be used by AI assistants and other MCP clients. The server registers a small set of domain-grouped CRUD tools directly; it does not generate tools from an OpenAPI spec.
+This project provides an MCP server that exposes NextDNS API operations as tools that can be used by AI assistants and other MCP clients. The bundled OpenAPI document is the tool contract: the server generates one tool per operation in it, named for the operation itself (`getAllowlist`, `addToDenylist`, `getAnalyticsDevices`) and taking that endpoint's own arguments, plus the two operations no endpoint describes — `plotAnalytics` and `dohLookup`.
+
+By default the server discloses those tools progressively: `tools/list` returns only
+the synthetic `search_tools` + `call_tool` pair, and a client discovers the catalog by
+searching it and calls what the search returned. The operation tools stay callable
+either way — the listing is what changes, not the access. Set
+`NEXTDNS_TOOL_SEARCH=off` to advertise all 80 tools in `tools/list` instead (see
+[configuration](docs/configuration.md)).
 
 ## Features
 
-- **Domain-grouped CRUD tools** exposing the full NextDNS API surface through ~8 high-level tools
+- **One tool per API operation** — 78 tools named for the operation itself, each taking that endpoint's own arguments, so the name says what the call does and there is no operation argument to choose
+- **Progressive tool disclosure** — by default `tools/list` exposes only `search_tools` + `call_tool` and the model finds the operation tools by searching; `NEXTDNS_TOOL_SEARCH=off` advertises the full catalog
 - **Profile Management**: Full CRUD operations - create, read, update, and delete profiles
-- **Profile Access Control**: Fine-grained read/write restrictions per profile, with read-only mode support
+- **Profile Access Control**: Fine-grained read/write restrictions per profile, read-only mode, and a protected-profile denylist that refuses writes to named profiles even under `ALL`
 - **DNS-over-HTTPS Testing**: Perform DoH lookups to test DNS resolution through profiles
-- **Settings Configuration**: Comprehensive grouped settings management including logs, block page, and performance
+- **Settings Configuration**: Comprehensive settings management including logs, block page, and performance
 - **Logs**: Query log retrieval, download, and clearing
 - **Analytics**: Comprehensive DNS query analytics and statistics, including time-series and plotting
 - **Content Lists**: Manage denylist, allowlist, privacy blocklists, native tracking, security TLDs, and parental control
 - **Security**: Complete security settings and TLD blocking configuration
 - **Privacy**: Privacy settings, blocklists, and native tracking protection management
 - **Parental Control**: Settings management with safe search and YouTube restrictions
-- **Reference OpenAPI spec**: The bundled [nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml) documents the NextDNS API surface for validation tooling
+- **OpenAPI document as the tool contract**: The bundled [nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml) generates every published tool and drives the validation tooling
 - **Docker Support**: Containerized deployment with proper OCI labels
 - **Safety Mechanisms**: Write operation protections and validation
 
 ## Documentation
 
 Complete documentation can be found in [docs/index.md](docs/index.md).
+
+## 4.0.0 upgrade notes
+
+- **One tool per operation.** The grouped tools of 3.x are gone. Every published tool is
+  one operation of the bundled document, named for its `operationId`, taking that
+  endpoint's own arguments; there is no operation to choose, and the two composite
+  operations (`plotAnalytics`, `dohLookup`) are named for what they do.
+- **Disclosure is on by default.** `NEXTDNS_TOOL_SEARCH` defaults to `bm25`, so
+  `tools/list` answers with only `search_tools` + `call_tool`. A client that expects to
+  see every tool in the listing needs `NEXTDNS_TOOL_SEARCH=off`.
+- **Two error codes are gone.** `UNSUPPORTED_OPERATION` and `UNSUPPORTED_PARAMETER` were
+  removed with the surface that produced them. Nothing the server can no longer do is
+  addressable as a tool any more, and a rejected argument value answers
+  `invalid_argument` (or `missing_required_argument` when a required one is absent) while
+  an upstream refusal answers `http_error` with the upstream error document. Extra
+  top-level arguments are not an error at all: they are dropped and named back in
+  `ignored_arguments`. Client code branching on the removed names should branch on these.
+- **Write scope has three independent knobs.** `NEXTDNS_READ_ONLY` denies every write,
+  `NEXTDNS_WRITABLE_PROFILES` scopes which profiles are writable (`ALL` drops the
+  scoping), and `NEXTDNS_PROTECTED_PROFILES` denies writes to the profiles it lists even
+  under `ALL` — reads of them are unaffected. See [safety.md](docs/safety.md).
 
 ## Quick Start
 
@@ -46,7 +75,7 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
 2. Edit `.env` and set your NextDNS API key:
    ```env
    NEXTDNS_API_KEY=your_api_key_here
-   NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional
+   NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional; dohLookup and plotAnalytics only
 
    # Optional: Profile access control (see docs/configuration.md).
    # There is no separate test-profile variable for writes: list a dedicated
@@ -56,6 +85,9 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
    # NEXTDNS_WRITABLE_PROFILES=test_profile
    # NEXTDNS_READ_ONLY=false
    ```
+
+   `NEXTDNS_DEFAULT_PROFILE` is used only by `dohLookup` and `plotAnalytics`;
+   every generated operation tool requires an explicit `profile_id`.
 
 ### Running with Docker
 
@@ -169,14 +201,14 @@ MCP_TRANSPORT=http MCP_HOST=0.0.0.0 uv run python -m nextdns_mcp.server
 
 This server uses a modern, declarative approach:
 
-1. **OpenAPI Specification** ([nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml)): Complete NextDNS API documentation
-2. **FastMCP Foundation**: Server built from grouped CRUD tools registered in `src/nextdns_mcp/tools/`; the OpenAPI spec is a reference for validation only (issues #141/#146)
+1. **OpenAPI Specification** ([nextdns-openapi.yaml](src/nextdns_mcp/nextdns-openapi.yaml)): The tool contract — every published tool is generated from it
+2. **FastMCP Foundation**: `spec_tools` generates one tool per spec operation with FastMCP's OpenAPI parser; requests run through the server's own access-controlled HTTP client rather than `FastMCP.from_openapi()`'s transport (issues #141/#146)
 3. **HTTP Client**: Authenticated `httpx.AsyncClient` with profile-level access control for NextDNS API calls
 4. **MCP Protocol**: Tools, resources, and prompts exposed via Model Context Protocol
 
 ### Key Components
 
-- `src/nextdns_mcp/nextdns-openapi.yaml`: OpenAPI 3.0 specification for NextDNS API (reference/validation only); a Spectral lint workflow ([openapi-lint.yml](.github/workflows/openapi-lint.yml)) enforces explicit per-operation security declarations via [spectral.yaml](spectral.yaml), runnable locally with `npx @stoplight/spectral lint -r spectral.yaml src/nextdns_mcp/nextdns-openapi.yaml`
+- `src/nextdns_mcp/nextdns-openapi.yaml`: OpenAPI 3.0 specification for the NextDNS API — the document every published tool is generated from; a Spectral lint workflow ([openapi-lint.yml](.github/workflows/openapi-lint.yml)) enforces explicit per-operation security declarations via [spectral.yaml](spectral.yaml), runnable locally with `npx @stoplight/spectral lint -r spectral.yaml src/nextdns_mcp/nextdns-openapi.yaml`
 - `src/nextdns_mcp/server.py`: FastMCP server implementation
 - `Dockerfile`: Container definition with OCI labels for container metadata
 - `AGENT.md`: Development guidelines and safety rules

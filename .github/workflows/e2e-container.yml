@@ -18,7 +18,7 @@ on:
     tags:
       - 'v*.*.*'  # Also run on version tags
   pull_request:
-    branches: [ main ]  # Run on all PRs to main
+    branches: [ main, "fm/*" ]  # Run on all PRs to main and to stacked feature branches
   merge_group:
 
 permissions:
@@ -82,16 +82,33 @@ jobs:
         if: steps.check-secrets.outputs.has_secret == 'true'
         env:
           NEXTDNS_API_KEY: ${{ secrets.NEXTDNS_API_KEY }}
+          NEXTDNS_PLOT_PROFILE: ${{ secrets.NEXTDNS_PLOT_PROFILE }}
         run: |
+          # The plot/log steps read a real, data-bearing profile. Run the
+          # container with that profile on the write denylist (the same
+          # mitigation the actor harness applies to it): a suite defect that
+          # misroutes a write must not be able to touch it even though the
+          # run grants READABLE/WRITABLE=ALL.
+          PROTECTED_ENV=()
+          if [ -n "${NEXTDNS_PLOT_PROFILE}" ]; then
+            PROTECTED_ENV=(-e NEXTDNS_PROTECTED_PROFILES="${NEXTDNS_PLOT_PROFILE}")
+          fi
+          # Disclosure now defaults to bm25 (only search_tools + call_tool are
+          # listed); this suite's preflight asserts tools/list equals the
+          # shipped document's full tool set, so the served container pins the
+          # full listing. The bm25 path is covered by the unit suite and the
+          # live-model harness.
           docker run -d \
             --name nextdns-container-e2e \
             -p 8000:8000 \
             -e NEXTDNS_API_KEY="${NEXTDNS_API_KEY}" \
             -e NEXTDNS_READABLE_PROFILES="ALL" \
             -e NEXTDNS_WRITABLE_PROFILES="ALL" \
+            -e NEXTDNS_TOOL_SEARCH="off" \
             -e MCP_TRANSPORT="http" \
             -e MCP_HOST="0.0.0.0" \
             -e MCP_PORT="8000" \
+            ${PROTECTED_ENV[@]+"${PROTECTED_ENV[@]}"} \
             nextdns-mcp:${{ matrix.variant }}
 
           echo "Waiting for container HTTP endpoint to be ready..."
@@ -174,12 +191,14 @@ jobs:
           # stays 'false' for them so the run summary stays honest.
           ALLOW_LIVE_WRITES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.allow_live_writes || (github.event.pull_request.head.repo.fork && 'false' || 'true') }}
         run: |
+          # No --api-key here: the script already reads NEXTDNS_API_KEY from
+          # this step's environment, and a secret passed on the command line
+          # is readable by anything that can see /proc/<pid>/cmdline.
           uv run python scripts/run_container_e2e.py \
             --endpoint http://127.0.0.1:8000/mcp \
             --variant ${{ matrix.variant }} \
             --health-url http://127.0.0.1:8000/health \
-            --expect-health ok \
-            --api-key "${NEXTDNS_API_KEY}"
+            --expect-health ok
 
       - name: Collect container logs and stop container (${{ matrix.variant }})
         if: always() && steps.check-secrets.outputs.has_secret == 'true'

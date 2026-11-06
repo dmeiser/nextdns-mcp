@@ -289,6 +289,17 @@ def test_get_download_max_bytes_invalid_raises_configuration_error(monkeypatch, 
     assert isinstance(exc_info.value, ValueError)
 
 
+def test_validate_configuration_raises_on_non_https_api_base(monkeypatch, active_config):
+    """Test validate_configuration raises when NEXTDNS_API_BASE is not https."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", "test-key")
+    monkeypatch.setenv("NEXTDNS_API_BASE", "http://api.nextdns.io")
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        active_config.validate_configuration()
+
+    assert "NEXTDNS_API_BASE" in str(exc_info.value)
+
+
 def test_validate_configuration_raises_on_invalid_download_max_bytes(monkeypatch, active_config):
     """Test validate_configuration raises ConfigurationError when the download cap is invalid."""
     monkeypatch.setenv("NEXTDNS_API_KEY", "test-key")

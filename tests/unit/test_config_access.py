@@ -167,3 +167,62 @@ def test_readonly_mode_values(monkeypatch, value, expected):
     else:
         assert get_writable_profiles() == {"profile1"}
         assert can_write_profile("profile1") is True
+
+
+class TestProtectedProfiles:
+    """``NEXTDNS_PROTECTED_PROFILES`` denies writes even under ``WRITABLE=ALL``.
+
+    A denylist entry that cannot match any profile id protects nothing, and a
+    silent no-op in a *protection* list is the worst failure mode a denylist
+    can have - so a malformed entry is a startup configuration error naming
+    the entry and the valid shape, not an ignored string.
+    """
+
+    def test_protected_denies_writes_even_when_all_are_writable(self, monkeypatch):
+        from nextdns_mcp.config import load_profile_access_control
+
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "ABCDEF")
+        access = load_profile_access_control()
+        assert access.can_write("abcdef") is False
+        assert access.can_write("zyuxyw") is True
+        # Reads are deliberately unaffected (writes-only by design, docs/safety.md).
+        assert access.can_read("abcdef") is True
+
+    def test_a_malformed_entry_is_a_configuration_error(self, monkeypatch):
+        from nextdns_mcp.config import ConfigurationError, get_protected_profiles
+
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "ok1234, oops!")
+        with pytest.raises(ConfigurationError) as raised:
+            get_protected_profiles()
+        message = str(raised.value)
+        assert "oops!" in message
+        assert "6 or 10 lowercase alphanumeric" in message
+
+    def test_a_wrong_length_entry_is_a_configuration_error(self, monkeypatch):
+        from nextdns_mcp.config import ConfigurationError, get_protected_profiles
+
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "abcde")  # 5 chars
+        with pytest.raises(ConfigurationError):
+            get_protected_profiles()
+
+    def test_validate_configuration_refuses_a_malformed_denylist(self, monkeypatch):
+        from nextdns_mcp.config import ConfigurationError, validate_configuration
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", "k")
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "too-short-to-match")
+        with pytest.raises(ConfigurationError):
+            validate_configuration()
+
+    def test_startup_names_the_profiles_the_denylist_actually_holds(self, monkeypatch, caplog):
+        """The safety net says what it holds, so a typo cannot sit unprotected."""
+        import logging
+
+        from nextdns_mcp.config import _log_access_control_settings
+
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "abcdef,7febcd")
+        with caplog.at_level(logging.INFO, logger="nextdns_mcp.config"):
+            _log_access_control_settings()
+        message = next(record.getMessage() for record in caplog.records if "Protected profiles" in record.getMessage())
+        assert "abcdef" in message and "7febcd" in message

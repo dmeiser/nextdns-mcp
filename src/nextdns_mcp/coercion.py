@@ -11,7 +11,7 @@
 SPDX-License-Identifier: MIT
 """
 
-from typing import Annotated, Any
+from typing import Annotated
 
 # Pydantic import for BeforeValidator
 try:
@@ -31,25 +31,3 @@ def _coerce_profile_id(v: object) -> object:
 
 _coerce_to_str = BeforeValidator(_coerce_profile_id) if BeforeValidator is not None else lambda x: x
 OptionalProfileId = Annotated[str | None, _coerce_to_str]
-ProfileId = Annotated[str, _coerce_to_str]
-
-
-def _coerce_json_arg(value: Any) -> Any:
-    """Parse a JSON object/array string argument into its Python equivalent.
-
-    CLI clients may pass object/array parameters as strings (e.g.
-    ``'{"key": true}'``). This helper transparently converts those strings so
-    the grouped tools can accept either a JSON string or the native Python type.
-    Primitive strings (entry IDs, domains, etc.) are left unchanged to avoid
-    silently coercing values like ``"true"`` or ``"123"`` into non-string types.
-    """
-    import json
-
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.startswith(("{", "[")):
-            try:
-                return json.loads(value)
-            except (json.JSONDecodeError, TypeError):
-                return value
-    return value

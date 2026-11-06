@@ -1,6 +1,7 @@
 """Pytest configuration and fixtures for NextDNS MCP Server tests."""
 
 import os
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -32,6 +33,37 @@ def clean_env(monkeypatch) -> None:
     for key in list(os.environ):
         if key.startswith(("NEXTDNS_", "MCP_", "FASTMCP_")):
             monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def restore_nextdns_modules() -> Iterator[None]:
+    """Put back the ``nextdns_mcp`` modules a test drops from ``sys.modules``.
+
+    Several tests delete ``nextdns_mcp.config`` (and ``nextdns_mcp.server``) to force a
+    fresh import. The deletion outlives the test, so the next import of anything that
+    touches config re-creates it as a *new module object* — and its ``ConfigurationError``
+    is then a different class from the one every test module bound at collection time, so
+    ``pytest.raises(ConfigurationError)`` in those modules stops matching and an expected
+    failure escapes instead. Which files re-import config is an accident of the run order,
+    so the suite's pass list silently depends on it. Each test gets the module set it
+    started with.
+    """
+    saved = {name: module for name, module in sys.modules.items() if name.startswith("nextdns_mcp")}
+    yield
+    for name in [name for name in sys.modules if name.startswith("nextdns_mcp") and name not in saved]:
+        del sys.modules[name]
+    sys.modules.update(saved)
+
+    # The package's own attributes have to agree with the module table. Python's
+    # ``from nextdns_mcp import config`` reads the attribute on the package, while
+    # ``patch("nextdns_mcp.config.logger")`` resolves through the import system, so
+    # restoring only ``sys.modules`` can leave the two pointing at different module
+    # objects — a test then patches a logger the code it calls never uses.
+    for name, module in ((name, module) for name, module in saved.items() if name != "nextdns_mcp"):
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None:
+            setattr(parent, child, module)
 
 
 @pytest.fixture
