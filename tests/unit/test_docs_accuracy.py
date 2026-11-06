@@ -178,3 +178,29 @@ class TestDocsNameFilesThatExist:
         text = _AGENT_DOC.read_text(encoding="utf-8")
         missing = sorted({token for token in PYTHON_PATH.findall(text) if not (_REPO_ROOT / token).exists()})
         assert not missing, f"AGENT.md names python files that do not exist: {missing}"
+
+
+class TestDocumentedDownloadAndProfileContracts:
+    def test_download_docs_describe_bounded_retention_and_shutdown_cleanup(self):
+        from nextdns_mcp.tools.logs import MAX_RETAINED_DOWNLOADS
+
+        for relative in ("docs/safety.md", "docs/usage.md", ".env.example"):
+            text = (_REPO_ROOT / relative).read_text(encoding="utf-8")
+            assert f"newest {MAX_RETAINED_DOWNLOADS}" in text, f"{relative} omits the retention bound"
+            assert "shutdown" in text, f"{relative} omits shutdown cleanup"
+        safety = (_REPO_ROOT / "docs" / "safety.md").read_text(encoding="utf-8")
+        assert "not cleaned up" not in safety
+        assert f"{MAX_RETAINED_DOWNLOADS} times `NEXTDNS_DOWNLOAD_MAX_BYTES`" in safety
+
+    def test_default_profile_docs_limit_it_to_the_composites(self):
+        row = _table_row(_CONFIGURATION_DOC.read_text(encoding="utf-8"), "NEXTDNS_DEFAULT_PROFILE")
+        assert "dohLookup" in row[4] and "plotAnalytics" in row[4]
+        assert "every generated operation tool requires" in row[4]
+
+        env_example = (_REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        assert "Default profile ID for dohLookup and plotAnalytics only" in env_example
+        assert "Generated operation tools always require an explicit profile_id" in env_example
+
+        readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        assert "`NEXTDNS_DEFAULT_PROFILE` is used only by `dohLookup` and `plotAnalytics`" in readme
+        assert "every generated operation tool requires an explicit `profile_id`" in readme

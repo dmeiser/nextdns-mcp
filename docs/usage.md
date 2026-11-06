@@ -69,7 +69,9 @@ opaque rewrite `entry_id` from `listRewrites`, not the hostname.
 ### Logs
 `getLogs` — recent entries (`raw=true` for unfiltered logs); `clearLogs` —
 delete stored logs; `downloadLogs` — CSV export streamed to a local file, the
-payload answers with the `file_path` and a bounded preview. Time values can be
+payload answers with the `file_path` and a bounded preview. The path is
+temporary: each server retains only the newest 8 downloads, evicting the
+oldest, and deletes its remaining downloads at shutdown. Time values can be
 Unix timestamps or relative strings such as `-1d`.
 
 ### Analytics

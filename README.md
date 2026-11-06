@@ -75,7 +75,7 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
 2. Edit `.env` and set your NextDNS API key:
    ```env
    NEXTDNS_API_KEY=your_api_key_here
-   NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional
+   NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional; dohLookup and plotAnalytics only
 
    # Optional: Profile access control (see docs/configuration.md).
    # There is no separate test-profile variable for writes: list a dedicated
@@ -85,6 +85,9 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
    # NEXTDNS_WRITABLE_PROFILES=test_profile
    # NEXTDNS_READ_ONLY=false
    ```
+
+   `NEXTDNS_DEFAULT_PROFILE` is used only by `dohLookup` and `plotAnalytics`;
+   every generated operation tool requires an explicit `profile_id`.
 
 ### Running with Docker
 
