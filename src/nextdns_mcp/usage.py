@@ -76,8 +76,8 @@ def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = ()) -
         "- Two tools do something other than call one endpoint: `plotAnalytics`",
         "  renders an interactive visual chart, graph, and dashboard from an analytics",
         "  time series; `dohLookup` resolves a name through a profile's DNS-over-HTTPS",
-        "  resolver. Use `plotAnalytics` for any visual display, plot, graph, or",
-        "  charting of NextDNS analytics.",
+        "  resolver. Visual tools like `plotAnalytics` and `overviewDashboard` render",
+        "  directly in the client interface where charts and tables are already visible.",
         "- A failed call returns a JSON payload with an error `code`, plus a `hint`",
         "  whenever the server can say what to send instead.",
     ]

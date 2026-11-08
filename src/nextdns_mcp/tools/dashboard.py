@@ -18,12 +18,11 @@ from prefab_ui.components import (
     DataTable,
     DataTableColumn,
     Heading,
-    Metric,
     Progress,
     Row,
     Text,
 )
-from prefab_ui.components.charts import LineChart, PieChart
+from prefab_ui.components.charts import BarChart, ChartSeries, LineChart, PieChart
 
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
@@ -95,11 +94,17 @@ def _calculate_status_kpis(data: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _build_kpi_row(kpis: dict[str, Any]) -> Row:
-    """Build the three top KPI metric cards."""
-    with Row(gap=6) as row:
-        Metric(label="Queries", value=f"{kpis['total']:,}")
-        Metric(label="Blocked Queries", value=f"{kpis['blocked']:,}")
-        Metric(label="Queries Blocked", value=f"{kpis['rate']:.2f}%")
+    """Build the three top KPI metric cards with centered and aligned styling."""
+    with Row(gap=6, css_class="w-full") as row:
+        with Card(css_class="flex-1 text-center py-6"):
+            Text(f"{kpis['total']:,}", css_class="text-3xl font-bold")
+            Text("queries", css_class="text-sm text-muted-foreground mt-1")
+        with Card(css_class="flex-1 text-center py-6"):
+            Text(f"{kpis['blocked']:,}", css_class="text-3xl font-bold text-red-500")
+            Text("blocked queries", css_class="text-sm text-muted-foreground mt-1")
+        with Card(css_class="flex-1 text-center py-6"):
+            Text(f"{kpis['rate']:.2f}%", css_class="text-3xl font-bold")
+            Text("of queries blocked", css_class="text-sm text-muted-foreground mt-1")
     return row
 
 
@@ -130,28 +135,67 @@ def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
     return card
 
 
+def _bar_chart(data: list[dict[str, Any]], key_name: str, label: str, color: str) -> BarChart:
+    """Build a horizontal bar chart."""
+    chart_data = [{key_name: str(item.get(key_name) or "-"), "queries": _item_queries(item)} for item in data]
+    return BarChart(
+        data=chart_data,
+        series=[ChartSeries(dataKey="queries", label=label, color=color)],
+        xAxis=key_name,
+        horizontal=True,
+        showLegend=True,
+        showTooltip=True,
+        showGrid=True,
+    )
+
+
+def _pie_chart(data: list[dict[str, Any]], key_name: str) -> PieChart:
+    """Build a donut pie chart."""
+    chart_data = [{key_name: str(item.get(key_name) or "-"), "queries": _item_queries(item)} for item in data]
+    return PieChart(
+        data=chart_data,
+        dataKey="queries",
+        nameKey=key_name,
+        innerRadius=50,
+        showLegend=True,
+        showTooltip=True,
+    )
+
+
+def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
+    """Build domain data table."""
+    rows: list[dict[str, Any] | Any] = [
+        {"domain": str(item.get(key_name) or "-"), "queries": f"{_item_queries(item):,}"} for item in data
+    ]
+    return DataTable(
+        columns=[
+            DataTableColumn(key="domain", header="Domain", sortable=True),
+            DataTableColumn(key="queries", header="Queries", sortable=True),
+        ],
+        rows=rows,
+    )
+
+
 def _build_domains_card(
     title: str,
     description: str,
     data: list[dict[str, Any]],
     key_name: str = "domain",
+    view_type: str = "table",
+    color: str = "#3b82f6",
 ) -> Card:
-    """Build a domain listing card with a sortable data table."""
-    rows: list[dict[str, Any] | Any] = [
-        {"domain": str(item.get(key_name) or "-"), "queries": f"{_item_queries(item):,}"} for item in data
-    ]
+    """Build a domain listing card with a sortable data table or bar chart."""
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle(title)
             CardDescription(description)
         with CardContent():
-            DataTable(
-                columns=[
-                    DataTableColumn(key="domain", header="Domain", sortable=True),
-                    DataTableColumn(key="queries", header="Queries", sortable=True),
-                ],
-                rows=rows,
-            )
+            if view_type == "bar":
+                _bar_chart(data, key_name, title, color)
+            elif view_type == "pie":
+                _pie_chart(data, key_name)
+            else:
+                _domain_table(data, key_name)
     return card
 
 
@@ -165,23 +209,33 @@ def _reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
     }
 
 
-def _build_reasons_card(data: list[dict[str, Any]]) -> Card:
-    """Build the reasons for blocking card."""
+def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
+    """Build reasons data table."""
     total = sum(_item_queries(item) for item in data)
     rows: list[dict[str, Any] | Any] = [_reason_row(item, total) for item in data]
+    return DataTable(
+        columns=[
+            DataTableColumn(key="name", header="Reason / Filter", sortable=True),
+            DataTableColumn(key="queries", header="Queries", sortable=True),
+            DataTableColumn(key="share", header="Share", sortable=True),
+        ],
+        rows=rows,
+    )
+
+
+def _build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
+    """Build the reasons for blocking card."""
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle("Reasons for Blocking")
             CardDescription("Security, Privacy and/or Parental Control settings that blocked the most queries.")
         with CardContent():
-            DataTable(
-                columns=[
-                    DataTableColumn(key="name", header="Reason / Filter", sortable=True),
-                    DataTableColumn(key="queries", header="Queries", sortable=True),
-                    DataTableColumn(key="share", header="Share", sortable=True),
-                ],
-                rows=rows,
-            )
+            if view_type in ("bar", "auto"):
+                _bar_chart(data, "name", "Blocked Queries", "#ef4444")
+            elif view_type == "pie":
+                _pie_chart(data, "name")
+            else:
+                _reasons_table(data)
     return card
 
 
@@ -202,24 +256,34 @@ def _device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
     }
 
 
-def _build_devices_card(data: list[dict[str, Any]]) -> Card:
-    """Build the devices card."""
+def _devices_table(data: list[dict[str, Any]]) -> DataTable:
+    """Build devices data table."""
     total = sum(_item_queries(item) for item in data)
     rows: list[dict[str, Any] | Any] = [_device_row(item, total) for item in data]
+    return DataTable(
+        columns=[
+            DataTableColumn(key="device", header="Device", sortable=True),
+            DataTableColumn(key="model", header="Model", sortable=True),
+            DataTableColumn(key="queries", header="Queries", sortable=True),
+            DataTableColumn(key="share", header="Share", sortable=True),
+        ],
+        rows=rows,
+    )
+
+
+def _build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
+    """Build the devices card."""
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle("Devices")
             CardDescription("Devices making the queries.")
         with CardContent():
-            DataTable(
-                columns=[
-                    DataTableColumn(key="device", header="Device", sortable=True),
-                    DataTableColumn(key="model", header="Model", sortable=True),
-                    DataTableColumn(key="queries", header="Queries", sortable=True),
-                    DataTableColumn(key="share", header="Share", sortable=True),
-                ],
-                rows=rows,
-            )
+            if view_type == "bar":
+                _bar_chart(data, "device", "Queries", "#3b82f6")
+            elif view_type == "pie":
+                _pie_chart(data, "device")
+            else:
+                _devices_table(data)
     return card
 
 
@@ -279,7 +343,19 @@ def _gafam_rows(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[
     return [p[0] for p in pairs], table_rows
 
 
-def _build_gafam_card(data: list[dict[str, Any]]) -> Card:
+def _gafam_table(table_rows: list[dict[str, Any] | Any]) -> DataTable:
+    """Build GAFAM table."""
+    return DataTable(
+        columns=[
+            DataTableColumn(key="company", header="Company", sortable=True),
+            DataTableColumn(key="queries", header="Queries", sortable=True),
+            DataTableColumn(key="share", header="Share", sortable=True),
+        ],
+        rows=table_rows,
+    )
+
+
+def _build_gafam_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the GAFAM dominance donut chart and table card."""
     chart_data, table_rows = _gafam_rows(data)
     with Card(css_class="flex-1 min-w-[300px]") as card:
@@ -288,23 +364,22 @@ def _build_gafam_card(data: list[dict[str, Any]]) -> Card:
             CardDescription(
                 "Traffic share of dominant internet companies (Google, Apple, Facebook, Amazon, Microsoft)."
             )
-        with CardContent(), Column(gap=4):
-            PieChart(
-                data=chart_data,
-                dataKey="queries",
-                nameKey="company",
-                innerRadius=50,
-                showLegend=True,
-                showTooltip=True,
-            )
-            DataTable(
-                columns=[
-                    DataTableColumn(key="company", header="Company", sortable=True),
-                    DataTableColumn(key="queries", header="Queries", sortable=True),
-                    DataTableColumn(key="share", header="Share", sortable=True),
-                ],
-                rows=table_rows,
-            )
+        with CardContent():
+            if view_type == "bar":
+                _bar_chart(chart_data, "company", "Queries", "#3b82f6")
+            elif view_type == "table":
+                _gafam_table(table_rows)
+            else:
+                with Column(gap=4):
+                    PieChart(
+                        data=chart_data,
+                        dataKey="queries",
+                        nameKey="company",
+                        innerRadius=50,
+                        showLegend=True,
+                        showTooltip=True,
+                    )
+                    _gafam_table(table_rows)
     return card
 
 
@@ -361,23 +436,33 @@ def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_destinations_card(data: list[dict[str, Any]]) -> Card:
-    """Build the destination countries card."""
+def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
+    """Build destinations table."""
     rows: list[dict[str, Any] | Any] = [_destination_row(item) for item in data]
+    return DataTable(
+        columns=[
+            DataTableColumn(key="country", header="Country", sortable=True),
+            DataTableColumn(key="code", header="Code", sortable=True),
+            DataTableColumn(key="queries", header="Queries", sortable=True),
+            DataTableColumn(key="sample_domains", header="Sample Domains"),
+        ],
+        rows=rows,
+    )
+
+
+def _build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
+    """Build the destination countries card."""
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle("Traffic Destination")
             CardDescription("Top destination countries based on DNS queries.")
         with CardContent():
-            DataTable(
-                columns=[
-                    DataTableColumn(key="country", header="Country", sortable=True),
-                    DataTableColumn(key="code", header="Code", sortable=True),
-                    DataTableColumn(key="queries", header="Queries", sortable=True),
-                    DataTableColumn(key="sample_domains", header="Sample Domains"),
-                ],
-                rows=rows,
-            )
+            if view_type == "bar":
+                _bar_chart(data, "country", "Queries", "#3b82f6")
+            elif view_type == "pie":
+                _pie_chart(data, "country")
+            else:
+                _destinations_table(data)
     return card
 
 
@@ -466,6 +551,7 @@ def _assemble_overview_layout(
     series_payload: dict[str, Any],
     resolved_data: list[dict[str, Any]],
     blocked_data: list[dict[str, Any]],
+    domain_view: str = "table",
 ) -> Column:
     """Build the main overview cards layout."""
     with Column(gap=6, css_class="p-6") as view:
@@ -473,9 +559,19 @@ def _assemble_overview_layout(
         _build_kpi_row(kpis)
         _build_queries_series_card(series_payload)
         with Row(gap=4):
-            _build_domains_card("Resolved Domains", "Domains that resolved without being blocked.", resolved_data)
             _build_domains_card(
-                "Blocked Domains", "Domains blocked by security, privacy, or parental controls.", blocked_data
+                "Resolved Domains",
+                "Domains that resolved without being blocked.",
+                resolved_data,
+                view_type=domain_view,
+                color="#3b82f6",
+            )
+            _build_domains_card(
+                "Blocked Domains",
+                "Domains blocked by security, privacy, or parental controls.",
+                blocked_data,
+                view_type=domain_view,
+                color="#ef4444",
             )
     return view
 
@@ -528,10 +624,11 @@ async def _overview_dashboard_impl(
     to_time: str | int = "now",
     limit: int = 10,
     section: Literal["overview", "all"] = "overview",
+    domain_view: Literal["table", "bar", "pie"] = "table",
 ) -> dict[str, Any] | ToolResult:
     """Construct an overview dashboard matching the NextDNS web UI."""
     pid, err = await _resolve_profile(profile_id)
-    if err:
+    if err is not None:
         return err
     assert pid is not None
 
@@ -540,12 +637,16 @@ async def _overview_dashboard_impl(
         return fetch_err
 
     kpis = _calculate_status_kpis(_payload_data(s_p))
-    view = _assemble_overview_layout(kpis, ser_p, r_data, b_data)
+    view = _assemble_overview_layout(kpis, ser_p, r_data, b_data, domain_view=domain_view)
 
     if section == "all":
         await _append_extra_dashboard_sections(pid, view, from_time, to_time, limit)
 
-    summary = f"NextDNS Dashboard: {kpis['total']:,} total queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%)"
+    summary = (
+        f"[Rendered NextDNS Dashboard: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
+        "The complete interactive dashboard is already displayed to the user in the UI above. "
+        "Do NOT repeat or resummarize these metrics or tables in your text reply.]"
+    )
     return ToolResult(content=summary, structured_content=view)
 
 
@@ -553,6 +654,7 @@ async def _gafam_analytics_impl(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
     to_time: str | int = "now",
+    view_type: Literal["auto", "pie", "bar", "table"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the GAFAM dominance donut chart and table."""
     _pid, data, err = await _fetch_card_data(
@@ -562,8 +664,11 @@ async def _gafam_analytics_impl(
         return err
     assert data is not None
     total = sum(_item_queries(item) for item in data)
-    summary = f"GAFAM Dominance: {total:,} total queries analyzed across major tech platforms"
-    return _wrap_card_result(_build_gafam_card(data), summary)
+    summary = (
+        f"[Rendered GAFAM Dominance ({total:,} queries). "
+        "The visual component is already displayed above. Do not repeat or resummarize the numbers.]"
+    )
+    return _wrap_card_result(_build_gafam_card(data, view_type=view_type), summary)
 
 
 async def _security_analytics_impl(
@@ -573,7 +678,7 @@ async def _security_analytics_impl(
 ) -> dict[str, Any] | ToolResult:
     """Render the security analytics cards (Encrypted DNS and DNSSEC rates)."""
     pid, err = await _resolve_profile(profile_id)
-    if err:
+    if err is not None:
         return err
     assert pid is not None
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
@@ -586,7 +691,11 @@ async def _security_analytics_impl(
         return first_err
 
     card = _build_security_card(_payload_data(enc_p), _payload_data(sec_p))
-    return _wrap_card_result(card, "Security Analytics: Encrypted DNS and DNSSEC status")
+    summary = (
+        "[Rendered Security Analytics: Encrypted DNS and DNSSEC rates are displayed above. "
+        "Do not repeat or resummarize the numbers in your text reply.]"
+    )
+    return _wrap_card_result(card, summary)
 
 
 async def _reasons_analytics_impl(
@@ -594,6 +703,7 @@ async def _reasons_analytics_impl(
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the reasons for blocking card."""
     _pid, data, err = await _fetch_card_data(profile_id, "reasons", from_time=from_time, to_time=to_time, limit=limit)
@@ -601,8 +711,11 @@ async def _reasons_analytics_impl(
         return err
     assert data is not None
     total = sum(_item_queries(item) for item in data)
-    summary = f"Reasons for Blocking: top {len(data)} blocklists accounted for {total:,} blocked queries"
-    return _wrap_card_result(_build_reasons_card(data), summary)
+    summary = (
+        f"[Rendered Reasons for Blocking ({len(data)} blocklists, {total:,} queries). "
+        "The visual chart is already displayed above. Do not repeat or resummarize these numbers.]"
+    )
+    return _wrap_card_result(_build_reasons_card(data, view_type=view_type), summary)
 
 
 async def _device_analytics_impl(
@@ -610,6 +723,7 @@ async def _device_analytics_impl(
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the device analytics card."""
     _pid, data, err = await _fetch_card_data(profile_id, "devices", from_time=from_time, to_time=to_time, limit=limit)
@@ -617,8 +731,11 @@ async def _device_analytics_impl(
         return err
     assert data is not None
     total = sum(_item_queries(item) for item in data)
-    summary = f"Device Analytics: top {len(data)} devices made {total:,} queries"
-    return _wrap_card_result(_build_devices_card(data), summary)
+    summary = (
+        f"[Rendered Device Analytics ({len(data)} devices, {total:,} queries). "
+        "The visual chart is already displayed above. Do not repeat or resummarize these numbers.]"
+    )
+    return _wrap_card_result(_build_devices_card(data, view_type=view_type), summary)
 
 
 async def _ip_analytics_impl(
@@ -633,7 +750,10 @@ async def _ip_analytics_impl(
         return err
     assert data is not None
     total = sum(_item_queries(item) for item in data)
-    summary = f"IP Analytics: top {len(data)} IP addresses made {total:,} queries"
+    summary = (
+        f"[Rendered IP Analytics ({len(data)} IP addresses, {total:,} queries). "
+        "The table is already displayed above. Do not repeat or resummarize these numbers.]"
+    )
     return _wrap_card_result(_build_ips_card(data), summary)
 
 
@@ -642,6 +762,7 @@ async def _root_domain_analytics_impl(
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
+    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the root domain analytics card."""
     _pid, data, err = await _fetch_card_data(
@@ -651,9 +772,16 @@ async def _root_domain_analytics_impl(
         return err
     assert data is not None
     total = sum(_item_queries(item) for item in data)
-    summary = f"Root Domain Analytics: top {len(data)} root domains made {total:,} queries"
+    summary = (
+        f"[Rendered Root Domain Analytics ({len(data)} root domains, {total:,} queries). "
+        "The visual component is already displayed above. Do not repeat or resummarize these numbers.]"
+    )
     card = _build_domains_card(
-        "Root Domains", "Aggregate queries for root domains and subdomains.", data, key_name="domain"
+        "Root Domains",
+        "Aggregate queries for root domains and subdomains.",
+        data,
+        key_name="domain",
+        view_type=view_type,
     )
     return _wrap_card_result(card, summary)
 
@@ -663,6 +791,7 @@ async def _country_analytics_impl(
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
+    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the destination countries analytics card."""
     _pid, data, err = await _fetch_card_data(
@@ -672,8 +801,11 @@ async def _country_analytics_impl(
         return err
     assert data is not None
     total = sum(_item_queries(item) for item in data)
-    summary = f"Traffic Destinations: top {len(data)} countries received {total:,} queries"
-    return _wrap_card_result(_build_destinations_card(data), summary)
+    summary = (
+        f"[Rendered Traffic Destinations ({len(data)} countries, {total:,} queries). "
+        "The visual component is already displayed above. Do not repeat or resummarize these numbers.]"
+    )
+    return _wrap_card_result(_build_destinations_card(data, view_type=view_type), summary)
 
 
 # ==============================================================================
@@ -687,15 +819,19 @@ async def overviewDashboard(
     to_time: str | int = "now",
     limit: int = 10,
     section: Literal["overview", "all"] = "overview",
+    domain_view: Literal["table", "bar", "pie"] = "table",
 ) -> dict[str, Any] | ToolResult:
     """Interactive NextDNS overview analytics dashboard.
 
     Displays an overview dashboard mirroring the NextDNS web UI:
-    - Top KPI summary cards: Total queries, blocked queries, and percentage blocked.
-    - Evolution of queries over time: interactive line chart of query volumes.
-    - Top resolved domains table.
-    - Top blocked domains table.
+    - Top KPI summary cards: Total queries, blocked queries (highlighted in red), and percentage of queries blocked.
+    - Evolution of queries over time: interactive line chart of query volumes (blue for default, red for blocked).
+    - Top resolved domains (table or bar chart).
+    - Top blocked domains (table or bar chart).
     - Setting section="all" appends blocking reasons, devices, IPs, root domains, GAFAM donut, and security metrics.
+
+    IMPORTANT: The visual dashboard is already rendered directly in the user's interface.
+    Do NOT repeat or resummarize the numbers, percentages, or domain tables in your text reply.
 
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
@@ -703,6 +839,7 @@ async def overviewDashboard(
         to_time: End time (default "now").
         limit: Maximum number of rows per domain table (default 10).
         section: "overview" (default) or "all" to include all analytics cards.
+        domain_view: Visualization style for domains: "table" (default), "bar", or "pie".
     """
     return await _overview_dashboard_impl(
         profile_id=profile_id,
@@ -710,6 +847,7 @@ async def overviewDashboard(
         to_time=to_time,
         limit=limit,
         section=section,
+        domain_view=domain_view,
     )
 
 
@@ -717,20 +855,25 @@ async def gafamAnalytics(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
     to_time: str | int = "now",
+    view_type: Literal["auto", "pie", "bar", "table"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Interactive GAFAM dominance donut chart and table.
 
     Displays the traffic share for Google, Amazon, Facebook (Meta), Apple, Microsoft, and Others.
 
+    IMPORTANT: The visual chart is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
+
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
         from_time: Start time (relative string like -30d or -1d).
         to_time: End time (default "now").
+        view_type: Visualization type: "auto" (default: donut + table), "pie", "bar", or "table".
     """
     return await _gafam_analytics_impl(
         profile_id=profile_id,
         from_time=from_time,
         to_time=to_time,
+        view_type=view_type,
     )
 
 
@@ -742,6 +885,8 @@ async def securityAnalytics(
     """Interactive security analytics for Encrypted DNS and DNSSEC rates.
 
     Displays percentage progress bars and query breakdown for DoH/DoT transport and DNSSEC validation.
+
+    IMPORTANT: The visual status is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
 
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
@@ -760,22 +905,27 @@ async def reasonsAnalytics(
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
-    """Interactive table of reasons for blocking (blocklists and filters).
+    """Interactive chart and table of reasons for blocking (blocklists and filters).
 
     Displays the security, privacy, and parental control blocklists that blocked the most queries.
+
+    IMPORTANT: The visual chart is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
 
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
         from_time: Start time (relative string like -30d or -1d).
         to_time: End time (default "now").
         limit: Maximum number of blocklists to display (default 10).
+        view_type: Visualization type: "auto" (default: bar chart), "bar", "table", or "pie".
     """
     return await _reasons_analytics_impl(
         profile_id=profile_id,
         from_time=from_time,
         to_time=to_time,
         limit=limit,
+        view_type=view_type,
     )
 
 
@@ -784,22 +934,27 @@ async def deviceAnalytics(
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
-    """Interactive device analytics table.
+    """Interactive device analytics chart and table.
 
     Displays active devices, device models, query counts, and traffic share.
+
+    IMPORTANT: The visual chart is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
 
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
         from_time: Start time (relative string like -30d or -1d).
         to_time: End time (default "now").
         limit: Maximum number of devices to display (default 10).
+        view_type: Visualization type: "auto" (default: table), "bar", "table", or "pie".
     """
     return await _device_analytics_impl(
         profile_id=profile_id,
         from_time=from_time,
         to_time=to_time,
         limit=limit,
+        view_type=view_type,
     )
 
 
@@ -812,6 +967,8 @@ async def ipAnalytics(
     """Interactive IP address analytics table.
 
     Displays IP addresses making queries, their ISP/network, and geographic location.
+
+    IMPORTANT: The visual table is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
 
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
@@ -832,22 +989,27 @@ async def rootDomainAnalytics(
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
+    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
-    """Interactive root domain analytics table.
+    """Interactive root domain analytics table or chart.
 
     Displays aggregate queries for root domains and all their subdomains.
+
+    IMPORTANT: The visual component is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
 
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
         from_time: Start time (relative string like -30d or -1d).
         to_time: End time (default "now").
         limit: Maximum number of root domains to display (default 10).
+        view_type: Visualization type: "auto" (default: table), "table", "bar", or "pie".
     """
     return await _root_domain_analytics_impl(
         profile_id=profile_id,
         from_time=from_time,
         to_time=to_time,
         limit=limit,
+        view_type=view_type,
     )
 
 
@@ -856,20 +1018,25 @@ async def countryAnalytics(
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
+    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
-    """Interactive destination countries analytics table.
+    """Interactive destination countries analytics table or chart.
 
     Displays top destination countries based on DNS queries with country codes and sample domains.
+
+    IMPORTANT: The visual component is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
 
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
         from_time: Start time (relative string like -30d or -1d).
         to_time: End time (default "now").
         limit: Maximum number of countries to display (default 10).
+        view_type: Visualization type: "auto" (default: table), "table", "bar", or "pie".
     """
     return await _country_analytics_impl(
         profile_id=profile_id,
         from_time=from_time,
         to_time=to_time,
         limit=limit,
+        view_type=view_type,
     )

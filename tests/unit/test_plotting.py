@@ -75,6 +75,16 @@ class TestExtractSeriesLabel:
         assert plots_module._extract_series_label({"queries": []}, 3) == "series_3"
 
 
+class TestSeriesColor:
+    """Tests for series color determination."""
+
+    def test_series_color(self):
+        assert plots_module._series_color({"status": "blocked"}) == "#ef4444"
+        assert plots_module._series_color({"status": "default"}) == "#3b82f6"
+        assert plots_module._series_color({"name": "allowed"}) == "#3b82f6"
+        assert plots_module._series_color({"name": "something_else"}) is None
+
+
 class TestParseSeriesTimestamp:
     """Tests for _parse_series_timestamp."""
 

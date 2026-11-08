@@ -133,12 +133,29 @@ def _build_chart_data(
     return [_build_chart_point(t, idx, series_data) for idx, t in enumerate(times)]
 
 
+_STATUS_COLORS = {
+    "blocked": "#ef4444",
+    "default": "#3b82f6",
+    "allowed": "#3b82f6",
+}
+
+
+def _series_color(series: dict[str, Any]) -> str | None:
+    """Color blocked queries red and allowed/default queries blue."""
+    for key in ("status", "name"):
+        val = str(series.get(key) or "").lower()
+        if val in _STATUS_COLORS:
+            return _STATUS_COLORS[val]
+    return None
+
+
 def _build_chart_series(series_data: list[dict[str, Any]]) -> list[ChartSeries]:
     """Build the series metadata list for the Prefab LineChart."""
     return [
         ChartSeries(
             dataKey=f"series_{idx}",
             label=_extract_series_label(series, idx),
+            color=_series_color(series),
         )
         for idx, series in enumerate(series_data)
     ]

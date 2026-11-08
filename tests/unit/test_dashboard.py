@@ -68,11 +68,15 @@ class TestDashboardHelpers:
         data = [{"domain": "example.com", "queries": 50}, {}]
         card = dash_module._build_domains_card("Title", "Desc", data)
         assert card is not None
+        assert dash_module._build_domains_card("Title", "Desc", data, view_type="bar") is not None
+        assert dash_module._build_domains_card("Title", "Desc", data, view_type="pie") is not None
 
     def test_reasons_card(self):
         data = [{"name": "List A", "queries": 50}, {"id": "list-b", "queries": 50}]
         card = dash_module._build_reasons_card(data)
         assert card is not None
+        assert dash_module._build_reasons_card(data, view_type="table") is not None
+        assert dash_module._build_reasons_card(data, view_type="pie") is not None
 
         empty_row = dash_module._reason_row({}, 0)
         assert empty_row["name"] == "Unknown"
@@ -87,6 +91,8 @@ class TestDashboardHelpers:
         ]
         card = dash_module._build_devices_card(data)
         assert card is not None
+        assert dash_module._build_devices_card(data, view_type="bar") is not None
+        assert dash_module._build_devices_card(data, view_type="pie") is not None
 
     def test_location_string_and_ips_card(self):
         assert dash_module._location_string({"city": "City", "country": "Country"}) == "City, Country"
@@ -110,6 +116,8 @@ class TestDashboardHelpers:
         data = [{"company": "google", "queries": 100}, {}]
         card = dash_module._build_gafam_card(data)
         assert card is not None
+        assert dash_module._build_gafam_card(data, view_type="bar") is not None
+        assert dash_module._build_gafam_card(data, view_type="table") is not None
 
     def test_security_card(self):
         enc = [{"encrypted": True, "queries": 90}, {"encrypted": False, "queries": 10}]
@@ -127,6 +135,8 @@ class TestDashboardHelpers:
         ]
         card = dash_module._build_destinations_card(data)
         assert card is not None
+        assert dash_module._build_destinations_card(data, view_type="bar") is not None
+        assert dash_module._build_destinations_card(data, view_type="pie") is not None
 
 
 class TestDashboardFetchAndValidation:
@@ -222,14 +232,20 @@ class TestDashboardToolsExecution:
     async def test_analytics_dashboard_overview(self, mock_all_endpoints):
         res = await dash_module.overviewDashboard(profile_id="abc123", section="overview")
         assert isinstance(res, ToolResult)
-        assert "NextDNS Dashboard:" in res.content[0].text
+        assert "Rendered NextDNS Dashboard" in res.content[0].text
+        assert "$prefab" in res.structured_content
+
+    @pytest.mark.asyncio
+    async def test_overview_dashboard_domain_view_bar(self, mock_all_endpoints):
+        res = await dash_module.overviewDashboard(profile_id="abc123", domain_view="bar")
+        assert isinstance(res, ToolResult)
         assert "$prefab" in res.structured_content
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_all_sections(self, mock_all_endpoints):
         res = await dash_module.overviewDashboard(profile_id="abc123", section="all")
         assert isinstance(res, ToolResult)
-        assert "NextDNS Dashboard:" in res.content[0].text
+        assert "Rendered NextDNS Dashboard" in res.content[0].text
         assert "$prefab" in res.structured_content
 
     @pytest.mark.asyncio
@@ -344,6 +360,14 @@ class TestDashboardToolsExecution:
         res = await dash_module.countryAnalytics()
         assert isinstance(res, ToolResult)
         assert "Traffic Destinations" in res.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_tools_view_type_arguments(self, mock_all_endpoints):
+        assert isinstance(await dash_module.reasonsAnalytics(view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.deviceAnalytics(view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.rootDomainAnalytics(view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.countryAnalytics(view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.gafamAnalytics(view_type="bar"), ToolResult)
 
     @pytest.mark.asyncio
     async def test_specialized_tools_error_paths(self, clean_env, monkeypatch):
