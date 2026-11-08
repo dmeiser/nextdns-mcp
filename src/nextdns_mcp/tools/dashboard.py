@@ -468,32 +468,16 @@ def _assemble_overview_layout(
     blocked_data: list[dict[str, Any]],
 ) -> Column:
     """Build the main overview cards layout."""
-    series_card = _build_queries_series_card(series_payload)
-    resolved_card = _build_domains_card(
-        "Resolved Domains", "Domains that resolved without being blocked.", resolved_data
-    )
-    blocked_card = _build_domains_card(
-        "Blocked Domains", "Domains blocked by security, privacy, or parental controls.", blocked_data
-    )
-
     with Column(gap=6, css_class="p-6") as view:
         Heading("NextDNS Overview Dashboard", level=1)
-        view.children.append(_build_kpi_row(kpis))
-        if series_card is not None:
-            view.children.append(series_card)
-        with Row(gap=4) as dom_row:
-            dom_row.children.append(resolved_card)
-            dom_row.children.append(blocked_card)
-        view.children.append(dom_row)
+        _build_kpi_row(kpis)
+        _build_queries_series_card(series_payload)
+        with Row(gap=4):
+            _build_domains_card("Resolved Domains", "Domains that resolved without being blocked.", resolved_data)
+            _build_domains_card(
+                "Blocked Domains", "Domains blocked by security, privacy, or parental controls.", blocked_data
+            )
     return view
-
-
-def _append_two_cards_row(view: Column, left_card: Card, right_card: Card) -> None:
-    """Append a two-card horizontal row to a view container."""
-    with Row(gap=4) as row:
-        row.children.append(left_card)
-        row.children.append(right_card)
-    view.children.append(row)
 
 
 async def _fetch_extra_payloads(
@@ -526,11 +510,16 @@ async def _append_extra_dashboard_sections(
 
     r_d, d_d, i_d, rt_d, g_d, e_d, sec_d = await _fetch_extra_payloads(profile_id, dom_params, params)
 
-    _append_two_cards_row(view, _build_reasons_card(r_d), _build_devices_card(d_d))
-    _append_two_cards_row(
-        view, _build_domains_card("Root Domains", "Aggregate root domains.", rt_d), _build_ips_card(i_d)
-    )
-    _append_two_cards_row(view, _build_gafam_card(g_d), _build_security_card(e_d, sec_d))
+    with view:
+        with Row(gap=4):
+            _build_reasons_card(r_d)
+            _build_devices_card(d_d)
+        with Row(gap=4):
+            _build_domains_card("Root Domains", "Aggregate root domains.", rt_d)
+            _build_ips_card(i_d)
+        with Row(gap=4):
+            _build_gafam_card(g_d)
+            _build_security_card(e_d, sec_d)
 
 
 async def _overview_dashboard_impl(
