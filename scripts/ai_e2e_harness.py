@@ -2334,26 +2334,26 @@ def build_steps(targets: TaskTargets) -> list[Step]:
 
     # ---- dashboard: overview and specialized widgets --------------------
     dashboard_specs = (
-        ("dashboard.overview", "overviewDashboard", "NextDNS overview dashboard mirroring web UI"),
-        ("dashboard.kpi", "kpiAnalytics", "top KPI metric summary cards"),
-        ("dashboard.domains", "domainsAnalytics", "top resolved domains"),
-        ("dashboard.blocked_domains", "blockedDomainsAnalytics", "top blocked domains"),
-        ("dashboard.reasons", "reasonsAnalytics", "block reasons breakdown"),
-        ("dashboard.devices", "deviceAnalytics", "interactive device analytics breakdown"),
-        ("dashboard.ips", "ipAnalytics", "client IP addresses analytics breakdown"),
-        ("dashboard.root_domains", "rootDomainAnalytics", "aggregate root domains"),
-        ("dashboard.countries", "countryAnalytics", "traffic by country destination/origin"),
-        ("dashboard.gafam", "gafamAnalytics", "GAFAM traffic dominance breakdown"),
-        ("dashboard.security", "securityAnalytics", "security analytics (Encrypted DNS and DNSSEC rates)"),
+        ("dashboard.overview", "overviewDashboard", "overview dashboard", "Show me an overview dashboard for profile '{profile_id}'."),
+        ("dashboard.kpi", "kpiAnalytics", "top KPI metrics", "Show me the top KPI metrics (queries, blocked queries, block rate) for profile '{profile_id}'."),
+        ("dashboard.domains", "domainsAnalytics", "top resolved domains", "Show me the top resolved domains for profile '{profile_id}'."),
+        ("dashboard.blocked_domains", "blockedDomainsAnalytics", "top blocked domains", "Show me the top blocked domains for profile '{profile_id}'."),
+        ("dashboard.reasons", "reasonsAnalytics", "block reasons", "Visualize the reasons queries were blocked for profile '{profile_id}'."),
+        ("dashboard.devices", "deviceAnalytics", "device breakdown", "Visualize the client devices making queries on profile '{profile_id}'."),
+        ("dashboard.ips", "ipAnalytics", "client IP addresses", "Show me the client IP addresses making queries on profile '{profile_id}'."),
+        ("dashboard.root_domains", "rootDomainAnalytics", "aggregate root domains", "Show me the top root domains queried on profile '{profile_id}'."),
+        ("dashboard.countries", "countryAnalytics", "traffic by country", "Show me the traffic breakdown by country for profile '{profile_id}'."),
+        ("dashboard.gafam", "gafamAnalytics", "GAFAM traffic share", "Show me the GAFAM traffic dominance breakdown for profile '{profile_id}'."),
+        ("dashboard.security", "securityAnalytics", "security analytics", "Show me the security analytics (Encrypted DNS and DNSSEC rates) for profile '{profile_id}'."),
     )
-    for step_id, tool_name, desc in dashboard_specs:
+    for step_id, tool_name, desc, task_prompt in dashboard_specs:
         steps.append(
             Step(
                 id=step_id,
                 section="dashboard",
                 tool=tool_name,
                 description=f"{tool_name} ({desc})",
-                prompt=_step_prompt(f"Display the {desc} for profile '{{profile_id}}'."),
+                prompt=_step_prompt(task_prompt),
                 verify="dashboard",
                 expect=_expect_local(tool_name, result=("$prefab",), profile=PLOT_PROFILE),
             )
