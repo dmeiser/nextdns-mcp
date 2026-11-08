@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastmcp.tools.base import ToolResult
+from prefab_ui.app import PrefabApp, Theme
 from prefab_ui.components import Column, Heading, Metric, Row
 from prefab_ui.components.charts import AreaChart, ChartSeries
 
@@ -27,6 +28,19 @@ from ..utils import (
 from .metrics import PLOT_METRICS, PlotMetric
 
 logger = logging.getLogger(__name__)
+
+DASHBOARD_THEME = Theme(
+    accent=220,
+    css="""
+:root, .dark {
+  --chart-1: #3b82f6;
+  --chart-2: #10b981;
+  --chart-3: #f59e0b;
+  --chart-4: #ef4444;
+  --chart-5: #8b5cf6;
+}
+""",
+)
 
 # Server-side ceiling on the ``interval`` parameter, and the maximum number of
 # data points a single series response may contain (issue #267). The point count
@@ -190,7 +204,8 @@ def _build_series_chart(
         )
 
     summary = f"NextDNS Analytics: {metric} ({total_queries:,} total queries across {len(times)} intervals)"
-    return ToolResult(content=summary, structured_content=view)
+    app = PrefabApp(view=view, theme=DASHBOARD_THEME)
+    return ToolResult(content=summary, structured_content=app)
 
 
 def _now() -> float:

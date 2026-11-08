@@ -8,6 +8,7 @@ import logging
 from typing import Any, Literal
 
 from fastmcp.tools.base import ToolResult
+from prefab_ui.app import PrefabApp, Theme
 from prefab_ui.components import (
     Card,
     CardContent,
@@ -31,6 +32,19 @@ from ..utils import normalize_time_value, resolve_profile_id
 from .plots import _build_chart_data, _build_chart_series, _validate_series_payload
 
 logger = logging.getLogger(__name__)
+
+DASHBOARD_THEME = Theme(
+    accent=220,
+    css="""
+:root, .dark {
+  --chart-1: #3b82f6;
+  --chart-2: #10b981;
+  --chart-3: #f59e0b;
+  --chart-4: #ef4444;
+  --chart-5: #8b5cf6;
+}
+""",
+)
 
 
 def _time_params(from_time: str | int | None, to_time: str | int | None) -> dict[str, Any]:
@@ -158,7 +172,6 @@ def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
         nameKey="label",
         innerRadius=60,
         paddingAngle=3,
-        showLabel=True,
         showLegend=True,
         showTooltip=True,
         aggregateBelow=0.03,
@@ -357,7 +370,11 @@ def _single_gafam_row(item: dict[str, Any], total: int) -> tuple[dict[str, Any],
     """Format single company entry for GAFAM donut chart and table."""
     name = str(item.get("company") or "others").capitalize()
     q = _item_queries(item)
-    return {"company": name, "queries": q}, {"company": name, "queries": f"{q:,}", "share": _format_share(q, total)}
+    return {"label": name, "company": name, "queries": q}, {
+        "company": name,
+        "queries": f"{q:,}",
+        "share": _format_share(q, total),
+    }
 
 
 def _gafam_rows(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any] | Any]]:
@@ -544,7 +561,8 @@ def _wrap_card_result(card: Card, summary_text: str) -> ToolResult:
     """Wrap a single visual card into a ToolResult."""
     with Column(gap=4, css_class="p-6") as view:
         view.children.append(card)
-    return ToolResult(content=summary_text, structured_content=view)
+    app = PrefabApp(view=view, theme=DASHBOARD_THEME)
+    return ToolResult(content=summary_text, structured_content=app)
 
 
 async def _fetch_overview_payloads(
@@ -671,7 +689,8 @@ async def _overview_dashboard_impl(
         "The complete interactive dashboard is already displayed to the user in the UI above. "
         "Do NOT repeat or resummarize these metrics or tables in your text reply.]"
     )
-    return ToolResult(content=summary, structured_content=view)
+    app = PrefabApp(view=view, theme=DASHBOARD_THEME)
+    return ToolResult(content=summary, structured_content=app)
 
 
 async def _gafam_analytics_impl(
@@ -849,7 +868,8 @@ async def _kpi_analytics_impl(
         f"[Rendered NextDNS KPI Metrics: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
         "The metrics are already displayed above in the UI. Do not repeat or resummarize these numbers.]"
     )
-    return ToolResult(content=summary, structured_content=view)
+    app = PrefabApp(view=view, theme=DASHBOARD_THEME)
+    return ToolResult(content=summary, structured_content=app)
 
 
 async def _domains_analytics_impl(
