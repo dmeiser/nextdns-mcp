@@ -356,6 +356,24 @@ class TestDashboardToolsExecution:
         assert isinstance(res, ToolResult)
 
     @pytest.mark.asyncio
+    async def test_kpi_analytics(self, mock_all_endpoints):
+        res = await dash_module.kpiAnalytics()
+        assert isinstance(res, ToolResult)
+        assert "KPI Metrics" in res.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_domains_analytics(self, mock_all_endpoints):
+        res = await dash_module.domainsAnalytics()
+        assert isinstance(res, ToolResult)
+        assert "Resolved Domains" in res.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_blocked_domains_analytics(self, mock_all_endpoints):
+        res = await dash_module.blockedDomainsAnalytics()
+        assert isinstance(res, ToolResult)
+        assert "Blocked Domains" in res.content[0].text
+
+    @pytest.mark.asyncio
     async def test_destination_analytics(self, mock_all_endpoints):
         res = await dash_module.countryAnalytics()
         assert isinstance(res, ToolResult)
@@ -363,6 +381,8 @@ class TestDashboardToolsExecution:
 
     @pytest.mark.asyncio
     async def test_tools_view_type_arguments(self, mock_all_endpoints):
+        assert isinstance(await dash_module.domainsAnalytics(view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.blockedDomainsAnalytics(view_type="bar"), ToolResult)
         assert isinstance(await dash_module.reasonsAnalytics(view_type="bar"), ToolResult)
         assert isinstance(await dash_module.deviceAnalytics(view_type="bar"), ToolResult)
         assert isinstance(await dash_module.rootDomainAnalytics(view_type="bar"), ToolResult)
@@ -377,6 +397,9 @@ class TestDashboardToolsExecution:
         )
 
         for tool_fn in (
+            dash_module.kpiAnalytics,
+            dash_module.domainsAnalytics,
+            dash_module.blockedDomainsAnalytics,
             dash_module.reasonsAnalytics,
             dash_module.deviceAnalytics,
             dash_module.ipAnalytics,

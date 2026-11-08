@@ -32,10 +32,13 @@ from .spec_tools import (
     spec_tool_names,
 )
 from .tools.dashboard import (
+    blockedDomainsAnalytics,
     countryAnalytics,
     deviceAnalytics,
+    domainsAnalytics,
     gafamAnalytics,
     ipAnalytics,
+    kpiAnalytics,
     overviewDashboard,
     reasonsAnalytics,
     rootDomainAnalytics,
@@ -53,6 +56,9 @@ _COMPOSITE_TOOLS = (
     plotAnalytics,
     dohLookup,
     overviewDashboard,
+    kpiAnalytics,
+    domainsAnalytics,
+    blockedDomainsAnalytics,
     gafamAnalytics,
     securityAnalytics,
     reasonsAnalytics,

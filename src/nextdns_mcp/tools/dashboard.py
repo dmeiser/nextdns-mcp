@@ -832,6 +832,80 @@ async def _country_analytics_impl(
     return _wrap_card_result(_build_destinations_card(data, view_type=view_type), summary)
 
 
+async def _kpi_analytics_impl(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+) -> dict[str, Any] | ToolResult:
+    """Render top KPI metric cards."""
+    _pid, data, err = await _fetch_card_data(profile_id, "status", from_time=from_time, to_time=to_time)
+    if err:
+        return err
+    assert data is not None
+    kpis = _calculate_status_kpis(data)
+    with Column(gap=4, css_class="p-6") as view:
+        _build_kpi_row(kpis)
+    summary = (
+        f"[Rendered NextDNS KPI Metrics: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
+        "The metrics are already displayed above in the UI. Do not repeat or resummarize these numbers.]"
+    )
+    return ToolResult(content=summary, structured_content=view)
+
+
+async def _domains_analytics_impl(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    """Render top resolved domains card."""
+    _pid, data, err = await _fetch_card_data(profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit)
+    if err:
+        return err
+    assert data is not None
+    card = _build_domains_card(
+        "Resolved Domains",
+        "Domains that resolved without being blocked.",
+        data,
+        view_type=view_type,
+        color="#3b82f6",
+    )
+    summary = (
+        f"[Rendered Resolved Domains ({len(data)} domains). "
+        "The visual component is already displayed above. Do not repeat or resummarize these numbers.]"
+    )
+    return _wrap_card_result(card, summary)
+
+
+async def _blocked_domains_analytics_impl(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    """Render top blocked domains card."""
+    _pid, data, err = await _fetch_card_data(
+        profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, status="blocked"
+    )
+    if err:
+        return err
+    assert data is not None
+    card = _build_domains_card(
+        "Blocked Domains",
+        "Domains blocked by security, privacy, or parental controls.",
+        data,
+        view_type=view_type,
+        color="#ef4444",
+    )
+    summary = (
+        f"[Rendered Blocked Domains ({len(data)} domains). "
+        "The visual component is already displayed above. Do not repeat or resummarize these numbers.]"
+    )
+    return _wrap_card_result(card, summary)
+
+
 # ==============================================================================
 # Public tool wrappers (re-declare signatures and forward by keyword)
 # ==============================================================================
@@ -1058,6 +1132,87 @@ async def countryAnalytics(
         view_type: Visualization type: "auto" (default: table), "table", "bar", or "pie".
     """
     return await _country_analytics_impl(
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        view_type=view_type,
+    )
+
+
+async def kpiAnalytics(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+) -> dict[str, Any] | ToolResult:
+    """Interactive NextDNS KPI summary metrics widget.
+
+    Displays the top 3 KPI cards: Total Queries, Blocked Queries (in red), and Queries Blocked percentage.
+
+    IMPORTANT: The visual metrics are already rendered in the UI. Do not repeat or resummarize these numbers.
+
+    Args:
+        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
+        from_time: Start time (relative string like -30d or -1d).
+        to_time: End time (default "now").
+    """
+    return await _kpi_analytics_impl(
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+    )
+
+
+async def domainsAnalytics(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    """Interactive top resolved domains widget.
+
+    Displays top domains that resolved without being blocked (table, bar chart, or pie chart).
+
+    IMPORTANT: The visual component is already rendered in the UI. Do not repeat or resummarize these numbers.
+
+    Args:
+        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
+        from_time: Start time (relative string like -30d or -1d).
+        to_time: End time (default "now").
+        limit: Maximum number of domains to display (default 10).
+        view_type: Visualization type: "auto" (default: table), "table", "bar", or "pie".
+    """
+    return await _domains_analytics_impl(
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        view_type=view_type,
+    )
+
+
+async def blockedDomainsAnalytics(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    """Interactive top blocked domains widget.
+
+    Displays top domains blocked by security, privacy, or parental controls (table, bar chart, or pie chart).
+
+    IMPORTANT: The visual component is already rendered in the UI. Do not repeat or resummarize these numbers.
+
+    Args:
+        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
+        from_time: Start time (relative string like -30d or -1d).
+        to_time: End time (default "now").
+        limit: Maximum number of blocked domains to display (default 10).
+        view_type: Visualization type: "auto" (default: table), "table", "bar", or "pie".
+    """
+    return await _blocked_domains_analytics_impl(
         profile_id=profile_id,
         from_time=from_time,
         to_time=to_time,

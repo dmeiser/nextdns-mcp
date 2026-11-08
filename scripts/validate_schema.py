@@ -57,6 +57,9 @@ CONTENT_TOOLS = frozenset(
     {
         "plotAnalytics",
         "overviewDashboard",
+        "kpiAnalytics",
+        "domainsAnalytics",
+        "blockedDomainsAnalytics",
         "gafamAnalytics",
         "securityAnalytics",
         "reasonsAnalytics",
