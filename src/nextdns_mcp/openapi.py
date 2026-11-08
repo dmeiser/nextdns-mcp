@@ -728,7 +728,12 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
             status_code=503,
         )
 
+    async def v1_models(_request: Request) -> JSONResponse:
+        """Answer OpenWebUI's automatic model-discovery probe to prevent noisy 404 logs."""
+        return JSONResponse({"object": "list", "data": []})
+
     mcp.custom_route("/health", methods=["GET"])(health_check)
+    mcp.custom_route("/v1/models", methods=["GET"])(v1_models)
 
 
 def _cached_readiness() -> tuple[bool, HealthFailure | None]:

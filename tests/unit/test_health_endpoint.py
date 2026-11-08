@@ -286,3 +286,18 @@ async def test_concurrent_pollers_share_one_probe(monkeypatch, mock_api_key):
     first, second = await asyncio.gather(openapi.check_nextdns_readiness(), openapi.check_nextdns_readiness())
     assert len(calls) == 1, "the simultaneous first miss must issue exactly one probe"
     assert first is None and second is None
+
+
+async def test_v1_models_endpoint_answers_empty_list():
+    """GET /v1/models answers OpenWebUI's model discovery probe with an empty list."""
+    server = get_mcp_server()
+    app = server.http_app()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/v1/models")
+
+    assert response.status_code == 200
+    assert response.json() == {"object": "list", "data": []}
