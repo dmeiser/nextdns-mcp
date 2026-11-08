@@ -78,6 +78,8 @@ def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = ()) -
         "  time series; `dohLookup` resolves a name through a profile's DNS-over-HTTPS",
         "  resolver. Visual tools like `plotAnalytics` and `overviewDashboard` render",
         "  directly in the client interface where charts and tables are already visible.",
+        "  When writing Prefab UI code, place charts in Column, Card, or Grid containers",
+        "  rather than inside Tabs to ensure proper SVG dimensions.",
         "- A failed call returns a JSON payload with an error `code`, plus a `hint`",
         "  whenever the server can say what to send instead.",
     ]
