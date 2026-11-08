@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.0]
+
+### Added
+
+- Interactive Prefab UI charts and dashboards:
+  - `overviewDashboard`: Full overview dashboard mirroring the NextDNS web UI with KPI summary cards, queries evolution chart, and resolved/blocked domain tables.
+  - Dedicated standalone visual widgets: `kpiAnalytics`, `domainsAnalytics`, `blockedDomainsAnalytics`, `reasonsAnalytics`, `deviceAnalytics`, `ipAnalytics`, `rootDomainAnalytics`, `countryAnalytics`, and `gafamAnalytics`.
+  - Flexible visualization styles (`view_type="auto" | "bar" | "table" | "pie"` and `domain_view="table" | "bar" | "pie"`).
+  - FastMCP `GenerativeUI` provider enabled by default (`generate_prefab_ui`, `search_prefab_components`), toggleable via `NEXTDNS_GENERATIVE_UI`.
+  - Added `/v1/models` route to satisfy OpenWebUI's periodic model discovery probes without 404s.
+
+### Changed
+
+- `plotAnalytics` now renders interactive Prefab UI `AreaChart` with smooth curves and soft gradient fills instead of static PNGs.
+- Replaced `matplotlib` dependency with pinned `prefab-ui==0.21.1`, eliminating its ~35MB footprint and cold import overhead.
+
 ## [4.0.0]
 
 ### Breaking
