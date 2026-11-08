@@ -135,13 +135,12 @@ def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
     return card
 
 
-def _bar_chart(data: list[dict[str, Any]], key_name: str, label: str, color: str) -> BarChart:
+def _bar_chart(chart_data: list[dict[str, Any]], label: str, color: str = "#3b82f6") -> BarChart:
     """Build a horizontal bar chart."""
-    chart_data = [{key_name: str(item.get(key_name) or "-"), "queries": _item_queries(item)} for item in data]
     return BarChart(
         data=chart_data,
         series=[ChartSeries(dataKey="queries", label=label, color=color)],
-        xAxis=key_name,
+        xAxis="label",
         horizontal=True,
         showLegend=True,
         showTooltip=True,
@@ -149,23 +148,28 @@ def _bar_chart(data: list[dict[str, Any]], key_name: str, label: str, color: str
     )
 
 
-def _pie_chart(data: list[dict[str, Any]], key_name: str) -> PieChart:
-    """Build a donut pie chart."""
-    chart_data = [{key_name: str(item.get(key_name) or "-"), "queries": _item_queries(item)} for item in data]
+def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
+    """Build a donut pie chart with slice labels, tooltips, and legend."""
     return PieChart(
         data=chart_data,
         dataKey="queries",
-        nameKey=key_name,
+        nameKey="label",
         innerRadius=50,
+        showLabel=True,
         showLegend=True,
         showTooltip=True,
     )
 
 
+def _domain_label(item: dict[str, Any], key_name: str = "domain") -> str:
+    """Extract domain label."""
+    return str(item.get(key_name) or item.get("domain") or "-")
+
+
 def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     """Build domain data table."""
     rows: list[dict[str, Any] | Any] = [
-        {"domain": str(item.get(key_name) or "-"), "queries": f"{_item_queries(item):,}"} for item in data
+        {"domain": _domain_label(item, key_name), "queries": f"{_item_queries(item):,}"} for item in data
     ]
     return DataTable(
         columns=[
@@ -190,20 +194,26 @@ def _build_domains_card(
             CardTitle(title)
             CardDescription(description)
         with CardContent():
+            chart_data = [{"label": _domain_label(item, key_name), "queries": _item_queries(item)} for item in data]
             if view_type == "bar":
-                _bar_chart(data, key_name, title, color)
+                _bar_chart(chart_data, title, color)
             elif view_type == "pie":
-                _pie_chart(data, key_name)
+                _pie_chart(chart_data)
             else:
                 _domain_table(data, key_name)
     return card
+
+
+def _reason_label(item: dict[str, Any]) -> str:
+    """Extract reason or blocklist name."""
+    return str(item.get("name") or item.get("id") or "Unknown")
 
 
 def _reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
     """Format one reasons-table row."""
     q = _item_queries(item)
     return {
-        "name": str(item.get("name") or item.get("id") or "Unknown"),
+        "name": _reason_label(item),
         "queries": f"{q:,}",
         "share": _format_share(q, total),
     }
@@ -230,10 +240,11 @@ def _build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> 
             CardTitle("Reasons for Blocking")
             CardDescription("Security, Privacy and/or Parental Control settings that blocked the most queries.")
         with CardContent():
+            chart_data = [{"label": _reason_label(item), "queries": _item_queries(item)} for item in data]
             if view_type in ("bar", "auto"):
-                _bar_chart(data, "name", "Blocked Queries", "#ef4444")
+                _bar_chart(chart_data, "Blocked Queries", "#ef4444")
             elif view_type == "pie":
-                _pie_chart(data, "name")
+                _pie_chart(chart_data)
             else:
                 _reasons_table(data)
     return card
@@ -245,11 +256,20 @@ def _device_name(item: dict[str, Any]) -> str:
     return "Unidentified" if dev_id == "__UNIDENTIFIED__" else str(item.get("name") or dev_id)
 
 
+def _device_label(item: dict[str, Any]) -> str:
+    """Extract human-readable device name and model."""
+    dev_name = _device_name(item)
+    model = str(item.get("model") or "")
+    if model and model != "-" and model != dev_name:
+        return f"{dev_name} ({model})"
+    return dev_name
+
+
 def _device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
     """Format one device row."""
     q = _item_queries(item)
     return {
-        "device": _device_name(item),
+        "device": _device_label(item),
         "model": str(item.get("model") or "-"),
         "queries": f"{q:,}",
         "share": _format_share(q, total),
@@ -278,10 +298,11 @@ def _build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> 
             CardTitle("Devices")
             CardDescription("Devices making the queries.")
         with CardContent():
+            chart_data = [{"label": _device_label(item), "queries": _item_queries(item)} for item in data]
             if view_type == "bar":
-                _bar_chart(data, "device", "Queries", "#3b82f6")
+                _bar_chart(chart_data, "Queries", "#3b82f6")
             elif view_type == "pie":
-                _pie_chart(data, "device")
+                _pie_chart(chart_data)
             else:
                 _devices_table(data)
     return card
@@ -366,19 +387,12 @@ def _build_gafam_card(data: list[dict[str, Any]], view_type: str = "auto") -> Ca
             )
         with CardContent():
             if view_type == "bar":
-                _bar_chart(chart_data, "company", "Queries", "#3b82f6")
+                _bar_chart(chart_data, "Queries", "#3b82f6")
             elif view_type == "table":
                 _gafam_table(table_rows)
             else:
                 with Column(gap=4):
-                    PieChart(
-                        data=chart_data,
-                        dataKey="queries",
-                        nameKey="company",
-                        innerRadius=50,
-                        showLegend=True,
-                        showTooltip=True,
-                    )
+                    _pie_chart(chart_data)
                     _gafam_table(table_rows)
     return card
 
@@ -425,11 +439,16 @@ def _build_security_card(
     return card
 
 
+def _destination_label(item: dict[str, Any]) -> str:
+    """Format country destination name."""
+    return str(item.get("name") or item.get("code") or "-")
+
+
 def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
     """Format one country destination row."""
     sample = ", ".join(item.get("domains") or [])[:60]
     return {
-        "country": str(item.get("name") or "-"),
+        "country": _destination_label(item),
         "code": str(item.get("code") or "-"),
         "queries": f"{_item_queries(item):,}",
         "sample_domains": sample or "-",
@@ -457,10 +476,11 @@ def _build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto"
             CardTitle("Traffic Destination")
             CardDescription("Top destination countries based on DNS queries.")
         with CardContent():
+            chart_data = [{"label": _destination_label(item), "queries": _item_queries(item)} for item in data]
             if view_type == "bar":
-                _bar_chart(data, "country", "Queries", "#3b82f6")
+                _bar_chart(chart_data, "Queries", "#3b82f6")
             elif view_type == "pie":
-                _pie_chart(data, "country")
+                _pie_chart(chart_data)
             else:
                 _destinations_table(data)
     return card
