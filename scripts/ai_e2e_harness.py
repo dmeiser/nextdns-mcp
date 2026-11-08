@@ -2339,7 +2339,7 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         ("dashboard.domains", "domainsAnalytics", "top resolved domains"),
         ("dashboard.blocked_domains", "blockedDomainsAnalytics", "top blocked domains"),
         ("dashboard.reasons", "reasonsAnalytics", "block reasons breakdown"),
-        ("dashboard.devices", "deviceAnalytics", "devices analytics breakdown"),
+        ("dashboard.devices", "deviceAnalytics", "interactive device analytics breakdown"),
         ("dashboard.ips", "ipAnalytics", "client IP addresses analytics breakdown"),
         ("dashboard.root_domains", "rootDomainAnalytics", "aggregate root domains"),
         ("dashboard.countries", "countryAnalytics", "traffic by country destination/origin"),
