@@ -3,8 +3,6 @@
 SPDX-License-Identifier: MIT
 """
 
-import asyncio
-import io
 import logging
 import math
 import re
@@ -12,8 +10,9 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-import mcp.types
-from fastmcp.utilities.types import Image
+from fastmcp.tools.base import ToolResult
+from prefab_ui.components import Column, Heading, Metric, Row
+from prefab_ui.components.charts import ChartSeries, LineChart
 
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
@@ -52,15 +51,6 @@ PLOT_LIMIT_MAX = 500
 # would size a months-long range as minutes.
 _RELATIVE_TIME_RE = re.compile(r"^(-?)(\d+)([smhdwy])$")
 _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
-
-# matplotlib is imported lazily inside _render_series_chart (issue #165): the
-# import alone costs ~2s and every stdio cold start would pay it even though
-# only the plot tool needs it. These module-level slots are filled once on the
-# first render and are only accessed from within _render_series_chart, which
-# fills them under the same lazy-import guard.
-mdates: Any = None
-Figure: Any = None
-FigureCanvasAgg: Any = None
 
 
 def _extract_series_label(series: dict[str, Any], index: int) -> str:
@@ -121,62 +111,68 @@ def _parse_series_timestamp(value: str) -> datetime:
     return parsed
 
 
-def _render_series_chart(
+def _build_chart_point(
+    time_str: str,
+    time_index: int,
+    series_data: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate timestamp and return a single time-aligned data point."""
+    _parse_series_timestamp(time_str)
+    point: dict[str, Any] = {"time": time_str}
+    for s_idx, series in enumerate(series_data):
+        queries = series.get("queries") or []
+        point[f"series_{s_idx}"] = queries[time_index] if time_index < len(queries) else 0
+    return point
+
+
+def _build_chart_data(
+    times: list[str],
+    series_data: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the list of data rows for the Prefab LineChart."""
+    return [_build_chart_point(t, idx, series_data) for idx, t in enumerate(times)]
+
+
+def _build_chart_series(series_data: list[dict[str, Any]]) -> list[ChartSeries]:
+    """Build the series metadata list for the Prefab LineChart."""
+    return [
+        ChartSeries(
+            dataKey=f"series_{idx}",
+            label=_extract_series_label(series, idx),
+        )
+        for idx, series in enumerate(series_data)
+    ]
+
+
+def _build_series_chart(
     metric: str,
     times: list[str],
     series_data: list[dict[str, Any]],
-) -> bytes:
-    """Render a PNG line chart from time-series data and return the raw bytes.
+) -> ToolResult:
+    """Build an interactive Prefab chart view and return a ToolResult with summary."""
+    chart_data = _build_chart_data(times, series_data)
+    chart_series = _build_chart_series(series_data)
+    total_queries = sum(sum(series.get("queries") or []) for series in series_data)
 
-    Uses the object-oriented Figure API rather than pyplot global state, so
-    concurrent renders from multiple threads cannot interfere with each other.
-    The figure is cleared in a finally block so a rendering exception cannot
-    leak figure state in the long-running server.
-    """
-    # Lazy imports: importing matplotlib costs ~2s, so the plot path is the only
-    # place that may pull it in (issue #165). Force the headless Agg backend
-    # before pyplot is first imported: pyplot resolves the backend at import
-    # time, so setting it later is version-fragile. FigureCanvasAgg keeps the
-    # rendering fully headless even if another backend is active.
-    global mdates, Figure, FigureCanvasAgg
-    if Figure is None:
-        import matplotlib
+    with Column(gap=4, css_class="p-4") as view:
+        Heading(f"NextDNS Analytics: {metric}", level=2)
+        with Row(gap=4):
+            Metric(label="Total Queries", value=f"{total_queries:,}")
+            Metric(label="Data Points", value=str(len(times)))
+            Metric(label="Series Count", value=str(len(series_data)))
+        LineChart(
+            data=chart_data,
+            series=chart_series,
+            xAxis="time",
+            xAxisLabel="Time",
+            yAxisLabel="Queries",
+            showLegend=True,
+            showTooltip=True,
+            showGrid=True,
+        )
 
-        matplotlib.use("Agg")
-        import matplotlib.dates as _mdates
-        from matplotlib.backends.backend_agg import FigureCanvasAgg as _FigureCanvasAgg
-        from matplotlib.figure import Figure as _Figure
-
-        mdates = _mdates
-        Figure = _Figure
-        FigureCanvasAgg = _FigureCanvasAgg
-
-    parsed_times = [_parse_series_timestamp(t) for t in times]
-    numeric_times = mdates.date2num(parsed_times)
-
-    fig = Figure(figsize=(10, 6))
-    FigureCanvasAgg(fig)
-    buffer = io.BytesIO()
-    try:
-        ax = fig.add_subplot(111)
-        for index, series in enumerate(series_data):
-            label = _extract_series_label(series, index)
-            queries = series.get("queries", [])
-            ax.plot(numeric_times, queries, label=label, marker="o", markersize=3)
-
-        ax.set_title(f"NextDNS Analytics: {metric}")
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Queries")
-        ax.legend()
-        ax.tick_params(axis="x", rotation=30)
-        fig.autofmt_xdate()
-
-        fig.savefig(buffer, format="png", bbox_inches="tight")
-    finally:
-        fig.clear()
-
-    buffer.seek(0)
-    return buffer.getvalue()
+    summary = f"NextDNS Analytics: {metric} ({total_queries:,} total queries across {len(times)} intervals)"
+    return ToolResult(content=summary, structured_content=view)
 
 
 def _now() -> float:
@@ -474,8 +470,8 @@ async def _plot_analytics_series_impl(
     timezone: str = "GMT",
     partials: str = "none",
     limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart from a NextDNS analytics time-series endpoint."""
+) -> dict[str, Any] | ToolResult:
+    """Generate an interactive chart from a NextDNS analytics time-series endpoint."""
     # Read the caller's range before bounding it: a bare negative number means
     # an offset, not 1969 (see utils.normalize_time_value).
     from_time = normalize_time_value(from_time)
@@ -515,9 +511,7 @@ def _validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:
     return partials, None
 
 
-async def _fetch_plot_series(
-    metric: str, target_profile: str, params: dict[str, Any]
-) -> dict[str, Any] | mcp.types.ImageContent:
+async def _fetch_plot_series(metric: str, target_profile: str, params: dict[str, Any]) -> dict[str, Any] | ToolResult:
     """Fetch the metric's series for the profile and plot it, or return the fetch error."""
     url = f"/profiles/{target_profile}/analytics/{metric};series"
     logger.info(f"Plotting analytics series: {metric} for profile {target_profile}")
@@ -531,13 +525,11 @@ async def _fetch_plot_series(
         # (python -O strips asserts; a stripped assert turns into a TypeError
         # on None several frames later, far from the truth).
         return error_payload(ErrorCode.INTERNAL_ERROR, f"{metric} series fetch returned no payload or error")
-    return await _plot_rendered_series(metric, target_profile, payload)
+    return _plot_rendered_series(metric, target_profile, payload)
 
 
-async def _plot_rendered_series(
-    metric: str, target_profile: str, payload: dict[str, Any]
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Validate the fetched payload has plottable data, and render the PNG off-loop.
+def _plot_rendered_series(metric: str, target_profile: str, payload: dict[str, Any]) -> dict[str, Any] | ToolResult:
+    """Validate the fetched payload has plottable data, and build the interactive chart.
 
     The try mirrors the combined implementation's: a payload whose structure
     cannot be unpacked is reported as INTERNAL_ERROR.
@@ -553,12 +545,10 @@ async def _plot_rendered_series(
                 profile_id=target_profile,
             )
 
-        png_bytes = await asyncio.to_thread(_render_series_chart, metric, times, series_data)
+        return _build_series_chart(metric, times, series_data)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error rendering chart for {metric}: {e}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Error rendering chart: {e}")
-
-    return Image(data=png_bytes, format="png").to_image_content()
 
 
 async def plotAnalytics(
@@ -571,8 +561,8 @@ async def plotAnalytics(
     timezone: str = "GMT",
     partials: str = "none",
     limit: int = 10,
-) -> dict[str, Any] | mcp.types.ImageContent:
-    """Generate a PNG line chart for a NextDNS analytics time-series metric.
+) -> dict[str, Any] | ToolResult:
+    """Generate an interactive chart for a NextDNS analytics time-series metric.
 
     Use this to visualize query trends over time. The profile should have recent
     query history; otherwise the tool returns an error explaining that no data is
@@ -611,7 +601,7 @@ async def plotAnalytics(
         - a year of data: ``plotAnalytics(metric="status", profile_id="<profile id>", from_time="-1y", interval=43200)``
 
     Returns:
-        An MCP ImageContent PNG chart, or an error dict if data is unavailable.
+        A FastMCP ToolResult containing an interactive Prefab chart, or an error dict if data is unavailable.
     """
     return await _plot_analytics_series_impl(
         metric=metric,

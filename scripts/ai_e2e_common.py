@@ -72,7 +72,7 @@ SECTIONS: dict[str, str] = {
     "analytics": "aggregate + series for every analytics metric",
     "doh": "dohLookup DNS resolution via the test profile",
     "logs": "get / download / clear query logs",
-    "plots": "9 plot-analytics metrics (PNG image)",
+    "plots": "9 plot-analytics metrics (interactive chart)",
 }
 
 # Settings categories -> REST path, "set" payload, expected read-back, "restore"

@@ -2317,17 +2317,17 @@ def build_steps(targets: TaskTargets) -> list[Step]:
                 id=f"plots.{m}",
                 section="plots",
                 tool="plotAnalytics",
-                description=f"plotAnalytics {m} (PNG)",
+                description=f"plotAnalytics {m} (chart)",
                 prompt=_step_prompt(
-                    f"Generate an analytics plot for profile '{{profile_id}}' for metric '{m}' over the last day (PNG image)."
+                    f"Generate an analytics plot for profile '{{profile_id}}' for metric '{m}' over the last day (interactive chart)."
                 ),
                 verify="plots",
                 vdata={"metric": m},
                 # The chart is the payload: the record has to say it answered
-                # with image content, not just that the tool ran. The step runs
+                # with chart content, not just that the tool ran. The step runs
                 # against the read-only data profile (falls back to the test
                 # profile when no plot profile is configured).
-                expect=_expect_local("plotAnalytics", args=(m,), result=("image",), profile=PLOT_PROFILE),
+                expect=_expect_local("plotAnalytics", args=(m,), result=("LineChart",), profile=PLOT_PROFILE),
             )
         )
 

@@ -98,8 +98,8 @@ well: a range that would return more points than that is refused with
 `invalid_argument` rather than answered with a truncated series.
 
 ### plotAnalytics
-Generate a PNG line chart for supported metrics. Use a profile with query
-history. Returns an MCP image or an error if no data is available.
+Generate an interactive chart for supported metrics. Use a profile with query
+history. Returns an interactive Prefab UI chart or an error if no data is available.
 
 A series is limited server-side to 2000 points (the requested range divided by
 `interval`) with `interval` between 60 and 86400 seconds. A request past either

@@ -110,9 +110,11 @@ def build_mcp_server() -> FastMCP:
         # description, so the accepted values and the worked example further down
         # would never reach a caller — and for these two tools that is exactly the
         # part a caller needs (a chart's interval range, a lookup's record types).
+        app_config = True if tool.__name__ == "plotAnalytics" else None
         server.tool(
             description=inspect.getdoc(tool) or "",
             annotations=_COMPOSITE_ANNOTATIONS,
+            app=app_config,
         )(_with_error_flag(tool))
     return server
 

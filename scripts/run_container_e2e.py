@@ -525,14 +525,20 @@ class ContainerE2ERunner:
         return None
 
     @staticmethod
-    def _plot_missing_image(tool_name: str, is_error: bool, has_image: bool, response_text: str) -> bool:
-        """True when a plotAnalytics call succeeded without returning image content."""
-        return (
-            tool_name == "plotAnalytics"
-            and not is_error
-            and not has_image
-            and not (isinstance(response_text, str) and "data:image" in response_text)
-        )
+    def _has_chart_content(has_image: bool, response_text: str) -> bool:
+        """True when the response carries an image block, data URI, or chart summary."""
+        if has_image:
+            return True
+        if not isinstance(response_text, str):
+            return False
+        return "data:image" in response_text or "Analytics:" in response_text
+
+    @classmethod
+    def _plot_missing_image(cls, tool_name: str, is_error: bool, has_image: bool, response_text: str) -> bool:
+        """True when a plotAnalytics call succeeded without returning image or interactive chart content."""
+        if tool_name != "plotAnalytics" or is_error:
+            return False
+        return not cls._has_chart_content(has_image, response_text)
 
     def _validate_against_schema(self, tool_name: str, parsed_json: Any) -> tuple[str, str]:
         """Validate a parsed payload against the OpenAPI spec.

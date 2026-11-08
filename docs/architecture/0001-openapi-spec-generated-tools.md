@@ -84,7 +84,7 @@ which only ever fires on a value that would not have meant this tool's operation
 
 ## The two composite tools are declared exceptions
 
-`plotAnalytics` (compose several series into a PNG) and `dohLookup` (resolve a name over
+`plotAnalytics` (compose several series into an interactive Prefab chart) and `dohLookup` (resolve a name over
 the DoH endpoint) do things no endpoint describes, so the published catalog is **not**
 fully derivable from the document: `published_tool_names()` combines the generated names
 with those two, and they are registered by hand beside them. This is the accepted cost of

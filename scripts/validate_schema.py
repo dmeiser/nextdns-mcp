@@ -50,9 +50,9 @@ from nextdns_mcp.spec_tools import SPEC_PATH, WITHHELD_OPERATIONS, load_spec, sp
 # so this cannot drift from the surface it excuses.
 LOCAL_TOOLS = frozenset(name for name in published_tool_names() if name not in set(spec_tool_names()))
 
-# Of those, the ones that answer with content instead of a JSON document. A chart is a
-# PNG, so there is no payload for a schema to describe; the runner's assertion for it
-# is that the call came back as an image, which is what run_container_e2e checks.
+# Of those, the ones that answer with content instead of a JSON document. A chart is an
+# interactive Prefab UI view, so there is no payload for a schema to describe; the runner's assertion for it
+# is that the call came back with chart content, which is what run_container_e2e checks.
 CONTENT_TOOLS = frozenset({"plotAnalytics"})
 
 # Response shapes for tools whose answer is not the document their endpoint returns.
