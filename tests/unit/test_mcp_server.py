@@ -126,7 +126,18 @@ class TestProductionServerTools:
         from nextdns_mcp.server import build_mcp_server
 
         tools = {tool.name: tool for tool in await build_mcp_server().list_tools()}
-        for name in ("plotAnalytics", "dohLookup"):
+        for name in (
+            "plotAnalytics",
+            "dohLookup",
+            "overviewDashboard",
+            "gafamAnalytics",
+            "securityAnalytics",
+            "reasonsAnalytics",
+            "deviceAnalytics",
+            "ipAnalytics",
+            "rootDomainAnalytics",
+            "countryAnalytics",
+        ):
             annotations = tools[name].annotations
             assert annotations is not None
             assert annotations.read_only_hint is True

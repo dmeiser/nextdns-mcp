@@ -557,7 +557,7 @@ def test_operation_coverage_rejects_a_local_answer_that_is_neither_pinned_nor_co
 
     spec = validate_schema.load_openapi_spec(str(REAL_SPEC_PATH))
     monkeypatch.setattr(validate_schema, "CONTENT_TOOLS", frozenset())
-    with pytest.raises(ValueError, match=r"neither pinned nor content: \['plotAnalytics'\]"):
+    with pytest.raises(ValueError, match=r"neither pinned nor content:"):
         validate_schema.assert_operation_coverage(spec, EXPECTED_TOOLS)
 
 

@@ -30,6 +30,16 @@ from .spec_tools import (
     spec_routes,
     spec_tool_names,
 )
+from .tools.dashboard import (
+    countryAnalytics,
+    deviceAnalytics,
+    gafamAnalytics,
+    ipAnalytics,
+    overviewDashboard,
+    reasonsAnalytics,
+    rootDomainAnalytics,
+    securityAnalytics,
+)
 from .tools.doh import dohLookup
 from .tools.plots import plotAnalytics
 
@@ -37,10 +47,19 @@ logger = logging.getLogger(__name__)
 
 # Operations the server performs itself instead of calling one API endpoint for:
 # `dohLookup` resolves a name through a DNS-over-HTTPS resolver, and `plotAnalytics`
-# renders a chart from an analytics query. Neither has an endpoint for the spec to
-# describe, so they are the two hand-written tools published beside the generated
-# ones — and a caller would otherwise have no way to know they exist.
-_COMPOSITE_TOOLS = (plotAnalytics, dohLookup)
+# alongside the dashboard tools render interactive Prefab UI views from analytics queries.
+_COMPOSITE_TOOLS = (
+    plotAnalytics,
+    dohLookup,
+    overviewDashboard,
+    gafamAnalytics,
+    securityAnalytics,
+    reasonsAnalytics,
+    deviceAnalytics,
+    ipAnalytics,
+    rootDomainAnalytics,
+    countryAnalytics,
+)
 
 # Neither composite tool mutates anything: dohLookup answers a DNS question and
 # plotAnalytics renders a chart from analytics already collected. The generated
@@ -110,7 +129,7 @@ def build_mcp_server() -> FastMCP:
         # description, so the accepted values and the worked example further down
         # would never reach a caller — and for these two tools that is exactly the
         # part a caller needs (a chart's interval range, a lookup's record types).
-        app_config = True if tool.__name__ == "plotAnalytics" else None
+        app_config = True if tool.__name__ != "dohLookup" else None
         server.tool(
             description=inspect.getdoc(tool) or "",
             annotations=_COMPOSITE_ANNOTATIONS,

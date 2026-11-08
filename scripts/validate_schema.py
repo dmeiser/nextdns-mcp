@@ -53,7 +53,19 @@ LOCAL_TOOLS = frozenset(name for name in published_tool_names() if name not in s
 # Of those, the ones that answer with content instead of a JSON document. A chart is an
 # interactive Prefab UI view, so there is no payload for a schema to describe; the runner's assertion for it
 # is that the call came back with chart content, which is what run_container_e2e checks.
-CONTENT_TOOLS = frozenset({"plotAnalytics"})
+CONTENT_TOOLS = frozenset(
+    {
+        "plotAnalytics",
+        "overviewDashboard",
+        "gafamAnalytics",
+        "securityAnalytics",
+        "reasonsAnalytics",
+        "deviceAnalytics",
+        "ipAnalytics",
+        "rootDomainAnalytics",
+        "countryAnalytics",
+    }
+)
 
 # Response shapes for tools whose answer is not the document their endpoint returns.
 # dohLookup queries dns.nextdns.io directly (outside the NextDNS API spec), so its

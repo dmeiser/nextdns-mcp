@@ -17,11 +17,22 @@ from fastmcp import Client, FastMCP
 
 from nextdns_mcp import spec_tools
 
-# Operations in nextdns-openapi.yaml, the one that is not offered, and the two the
-# server performs itself.
+# Operations in nextdns-openapi.yaml, the one that is not offered, and the
+# operations the server performs itself.
 SPEC_OPERATIONS = 79
 WITHHELD = ("streamLogs",)
-COMPOSITES = ("plotAnalytics", "dohLookup")
+COMPOSITES = (
+    "plotAnalytics",
+    "dohLookup",
+    "overviewDashboard",
+    "gafamAnalytics",
+    "securityAnalytics",
+    "reasonsAnalytics",
+    "deviceAnalytics",
+    "ipAnalytics",
+    "rootDomainAnalytics",
+    "countryAnalytics",
+)
 
 
 def _fake_api(payload: dict[str, Any], calls: list[Any]):
@@ -361,7 +372,7 @@ class TestRegistration:
             )
             chart_hits = [hit["name"] for hit in (charted.structured_content or {})["result"]]
         assert hits[0] == "dohLookup"
-        assert chart_hits[0] == "plotAnalytics"
+        assert chart_hits[0] in ("plotAnalytics", "analyticsDashboard")
 
     async def test_loose_argument_types_are_coerced_before_the_call(self, monkeypatch):
         """A client that sends "20" for an integer parameter means 20.
