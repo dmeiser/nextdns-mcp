@@ -73,6 +73,7 @@ SECTIONS: dict[str, str] = {
     "doh": "dohLookup DNS resolution via the test profile",
     "logs": "get / download / clear query logs",
     "plots": "9 plot-analytics metrics (interactive chart)",
+    "dashboard": "NextDNS overview dashboard & specialized analytics widgets (interactive Prefab UI)",
 }
 
 # Settings categories -> REST path, "set" payload, expected read-back, "restore"

@@ -264,7 +264,7 @@ DEFAULT_SERVER = {
     "command": sys.executable,
     "args": ["-m", "nextdns_mcp.server"],
     "cwd": str(_REPO_ROOT),
-    "env": {"PYTHONPATH": str(_REPO_ROOT / "src")},
+    "env": {"PYTHONPATH": str(_REPO_ROOT / "src"), "MCP_TRANSPORT": "stdio"},
 }
 
 # The default harness command template. ``opencode`` is the documented default
@@ -1952,7 +1952,8 @@ def _expected_call_ok(
             why = f"{label} was called without {missing_args}"
             continue
         result_text = str(record.get("result", ""))
-        missing_answer = [s for s in want_result if s not in result_text]
+        evidence_text = json.dumps(record.get("evidence", {}))
+        missing_answer = [s for s in want_result if s not in result_text and s not in evidence_text]
         if missing_answer:
             why = f"{label} answered without {missing_answer}"
             continue
@@ -2331,6 +2332,33 @@ def build_steps(targets: TaskTargets) -> list[Step]:
             )
         )
 
+    # ---- dashboard: overview and specialized widgets --------------------
+    dashboard_specs = (
+        ("dashboard.overview", "overviewDashboard", "NextDNS overview dashboard mirroring web UI"),
+        ("dashboard.kpi", "kpiAnalytics", "top KPI metric summary cards"),
+        ("dashboard.domains", "domainsAnalytics", "top resolved domains"),
+        ("dashboard.blocked_domains", "blockedDomainsAnalytics", "top blocked domains"),
+        ("dashboard.reasons", "reasonsAnalytics", "block reasons breakdown"),
+        ("dashboard.devices", "deviceAnalytics", "devices analytics breakdown"),
+        ("dashboard.ips", "ipAnalytics", "client IP addresses analytics breakdown"),
+        ("dashboard.root_domains", "rootDomainAnalytics", "aggregate root domains"),
+        ("dashboard.countries", "countryAnalytics", "traffic by country destination/origin"),
+        ("dashboard.gafam", "gafamAnalytics", "GAFAM traffic dominance breakdown"),
+        ("dashboard.security", "securityAnalytics", "security analytics (Encrypted DNS and DNSSEC rates)"),
+    )
+    for step_id, tool_name, desc in dashboard_specs:
+        steps.append(
+            Step(
+                id=step_id,
+                section="dashboard",
+                tool=tool_name,
+                description=f"{tool_name} ({desc})",
+                prompt=_step_prompt(f"Display the {desc} for profile '{{profile_id}}'."),
+                verify="dashboard",
+                expect=_expect_local(tool_name, result=("$prefab",), profile=PLOT_PROFILE),
+            )
+        )
+
     # ---- logs ------------------------------------------------------------
     steps.append(
         Step(
@@ -2680,7 +2708,7 @@ async def _verify_step(
         # decide this step at all. The server's call log does (see
         # _expected_call_ok): the lookup ran and answered.
         return ("passed", "", "", {"note": "read-only DoH lookup; verdict from the server call log"})
-    if step.verify == "plots":
+    if step.verify in {"plots", "dashboard"}:
         plot_pid = os.environ.get("NEXTDNS_PLOT_PROFILE") or pid
         rest = await _get(f"/profiles/{plot_pid}/analytics/status")
         has_data = common._analytics_has_data(rest)
@@ -2699,7 +2727,7 @@ async def _verify_step(
             {
                 "has_data": True,
                 "endpoint": f"GET /profiles/{plot_pid}/analytics/status",
-                "note": "plot generation verified by the server call log",
+                "note": "view generation verified by the server call log",
             },
         )
     if step.verify == "logs_get":
@@ -3165,9 +3193,9 @@ async def _run_harness_scoped(api_key: str, config: HarnessConfig) -> Report:
                 # Read-only plot/log steps target NEXTDNS_PLOT_PROFILE; when it is unset
                 # they would all read the empty test profile and skip as data-starved,
                 # so resolve a data-bearing one up front and say so in the report.
-                if any(step.section == "plots" or step.id == "logs.download" for _, step in selected) and (
-                    plot_note := await _ensure_plot_profile(m, pid)
-                ):
+                if any(
+                    step.section in {"plots", "dashboard"} or step.id == "logs.download" for _, step in selected
+                ) and (plot_note := await _ensure_plot_profile(m, pid)):
                     report.notes.append(plot_note)
                     _progress(f"plot profile: {plot_note}")
                     # The fallback selection must reach the child server's protected
@@ -3239,7 +3267,7 @@ async def _run_harness_scoped(api_key: str, config: HarnessConfig) -> Report:
                             )
 
                     prompt_pid = pid
-                    if (step.section == "plots" or step.id == "logs.download") and os.environ.get(
+                    if (step.section in {"plots", "dashboard"} or step.id == "logs.download") and os.environ.get(
                         "NEXTDNS_PLOT_PROFILE"
                     ):
                         prompt_pid = os.environ["NEXTDNS_PLOT_PROFILE"]

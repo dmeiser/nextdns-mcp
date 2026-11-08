@@ -525,20 +525,27 @@ class ContainerE2ERunner:
         return None
 
     @staticmethod
-    def _has_chart_content(has_image: bool, response_text: str) -> bool:
-        """True when the response carries an image block, data URI, or chart summary."""
-        if has_image:
-            return True
-        if not isinstance(response_text, str):
-            return False
-        return "data:image" in response_text or "Analytics:" in response_text
+    def _is_prefab_payload(result: Any) -> bool:
+        """True when the result object carries a Prefab UI document."""
+        structured = getattr(result, "structured_content", None) or getattr(result, "structuredContent", None)
+        return isinstance(structured, dict) and "$prefab" in structured
 
     @classmethod
-    def _plot_missing_image(cls, tool_name: str, is_error: bool, has_image: bool, response_text: str) -> bool:
-        """True when a plotAnalytics call succeeded without returning image or interactive chart content."""
-        if tool_name != "plotAnalytics" or is_error:
+    def _has_chart_content(cls, result: Any, has_image: bool, response_text: str) -> bool:
+        """True when the response carries an image block, structured Prefab UI, or chart/dashboard summary."""
+        if has_image or cls._is_prefab_payload(result):
+            return True
+        indicators = ("data:image", "Analytics:", "Rendered NextDNS", "$prefab")
+        return isinstance(response_text, str) and any(i in response_text for i in indicators)
+
+    @classmethod
+    def _content_missing_view(
+        cls, tool_name: str, is_error: bool, result: Any, has_image: bool, response_text: str
+    ) -> bool:
+        """True when an interactive visual tool succeeded without returning Prefab UI view or summary."""
+        if tool_name not in validate_schema.CONTENT_TOOLS or is_error:
             return False
-        return not cls._has_chart_content(has_image, response_text)
+        return not cls._has_chart_content(result, has_image, response_text)
 
     def _validate_against_schema(self, tool_name: str, parsed_json: Any) -> tuple[str, str]:
         """Validate a parsed payload against the OpenAPI spec.
@@ -654,9 +661,9 @@ class ContainerE2ERunner:
         if payload_error is not None:
             is_error = True
 
-        if self._plot_missing_image(tool_name, is_error, has_image, response_text):
+        if self._content_missing_view(tool_name, is_error, result, has_image, response_text):
             is_error = True
-            last_error = "plotAnalytics did not return image content"
+            last_error = f"{tool_name} did not return interactive Prefab UI content"
 
         if not is_error:
             return None
@@ -857,6 +864,33 @@ class ContainerE2ERunner:
             log_warn("NEXTDNS_PLOT_PROFILE not set; skipping plotAnalytics tools")
             for metric in plot_metrics:
                 self.record_skip("plotAnalytics", f"metric={metric}: NEXTDNS_PLOT_PROFILE not set")
+
+    async def _run_dashboard_sweep(self, session: ClientSession, plot_profile_id: str) -> None:
+        """Exercise overviewDashboard and individual dashboard widgets."""
+        dashboard_tools = (
+            "overviewDashboard",
+            "kpiAnalytics",
+            "domainsAnalytics",
+            "blockedDomainsAnalytics",
+            "gafamAnalytics",
+            "securityAnalytics",
+            "reasonsAnalytics",
+            "deviceAnalytics",
+            "ipAnalytics",
+            "rootDomainAnalytics",
+            "countryAnalytics",
+        )
+        if self.plot_profile:
+            for tool_name in dashboard_tools:
+                await self.execute_call(
+                    session,
+                    tool_name,
+                    {"profile_id": plot_profile_id, "from_time": "-1d"},
+                )
+        else:
+            log_warn("NEXTDNS_PLOT_PROFILE not set; skipping dashboard tools")
+            for tool_name in dashboard_tools:
+                self.record_skip(tool_name, "NEXTDNS_PLOT_PROFILE not set")
 
     @staticmethod
     def _fill(value: Any, profile_id: str, ts: int) -> Any:
@@ -1089,6 +1123,7 @@ class ContainerE2ERunner:
 
         await self._run_read_checks(session, profile_id, plot_profile_id)
         await self._run_plot_sweep(session, plot_profile_id)
+        await self._run_dashboard_sweep(session, plot_profile_id)
 
         if self.allow_live_writes:
             await self._run_write_checks(session, profile_id)
