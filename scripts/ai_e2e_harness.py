@@ -2327,7 +2327,7 @@ def build_steps(targets: TaskTargets) -> list[Step]:
                 # with chart content, not just that the tool ran. The step runs
                 # against the read-only data profile (falls back to the test
                 # profile when no plot profile is configured).
-                expect=_expect_local("plotAnalytics", args=(m,), result=("LineChart",), profile=PLOT_PROFILE),
+                expect=_expect_local("plotAnalytics", args=(m,), result=("AreaChart",), profile=PLOT_PROFILE),
             )
         )
 

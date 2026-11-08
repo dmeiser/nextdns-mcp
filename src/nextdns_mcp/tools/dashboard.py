@@ -22,7 +22,7 @@ from prefab_ui.components import (
     Row,
     Text,
 )
-from prefab_ui.components.charts import BarChart, ChartSeries, LineChart, PieChart
+from prefab_ui.components.charts import AreaChart, BarChart, ChartSeries, PieChart
 
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
@@ -122,12 +122,13 @@ def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
             CardTitle("Queries")
             CardDescription("Evolution of queries over time.")
         with CardContent():
-            LineChart(
+            AreaChart(
                 data=chart_data,
                 series=chart_series,
                 xAxis="time",
-                xAxisLabel="Time",
-                yAxisLabel="Queries",
+                curve="smooth",
+                showDots=False,
+                height=260,
                 showLegend=True,
                 showTooltip=True,
                 showGrid=True,
@@ -136,12 +137,13 @@ def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
 
 
 def _bar_chart(chart_data: list[dict[str, Any]], label: str, color: str = "#3b82f6") -> BarChart:
-    """Build a horizontal bar chart."""
+    """Build a horizontal bar chart with rounded pill bars."""
     return BarChart(
         data=chart_data,
         series=[ChartSeries(dataKey="queries", label=label, color=color)],
         xAxis="label",
         horizontal=True,
+        barRadius=6,
         showLegend=True,
         showTooltip=True,
         showGrid=True,
@@ -149,15 +151,17 @@ def _bar_chart(chart_data: list[dict[str, Any]], label: str, color: str = "#3b82
 
 
 def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
-    """Build a donut pie chart with slice labels, tooltips, and legend."""
+    """Build a donut pie chart with slice labels, spacing, and tooltips."""
     return PieChart(
         data=chart_data,
         dataKey="queries",
         nameKey="label",
-        innerRadius=50,
+        innerRadius=60,
+        paddingAngle=3,
         showLabel=True,
         showLegend=True,
         showTooltip=True,
+        aggregateBelow=0.03,
     )
 
 

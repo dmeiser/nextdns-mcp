@@ -12,7 +12,7 @@ from typing import Any
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.components import Column, Heading, Metric, Row
-from prefab_ui.components.charts import ChartSeries, LineChart
+from prefab_ui.components.charts import AreaChart, ChartSeries
 
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
@@ -177,12 +177,13 @@ def _build_series_chart(
             Metric(label="Total Queries", value=f"{total_queries:,}")
             Metric(label="Data Points", value=str(len(times)))
             Metric(label="Series Count", value=str(len(series_data)))
-        LineChart(
+        AreaChart(
             data=chart_data,
             series=chart_series,
             xAxis="time",
-            xAxisLabel="Time",
-            yAxisLabel="Queries",
+            curve="smooth",
+            showDots=False,
+            height=260,
             showLegend=True,
             showTooltip=True,
             showGrid=True,

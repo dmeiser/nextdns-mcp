@@ -20,6 +20,7 @@ from .config import (
     ConfigurationError,
     configure_logging,
     get_http_timeout,
+    is_generative_ui_enabled,
     validate_configuration,
 )
 from .openapi import create_mcp_server
@@ -94,6 +95,9 @@ def _with_error_flag(tool_fn: Any) -> Any:
 _mcp_server: FastMCP | None = None
 
 
+_GENERATIVE_UI_TOOLS = ("generate_prefab_ui", "search_prefab_components")
+
+
 def published_tool_names() -> list[str]:
     """Every tool name this server publishes, before any of them is registered.
 
@@ -101,7 +105,10 @@ def published_tool_names() -> list[str]:
     the server is constructed — before the tools exist — so the names have to be
     derivable without registering anything.
     """
-    return [*spec_tool_names(), *(tool.__name__ for tool in _COMPOSITE_TOOLS)]
+    names = [*spec_tool_names(), *(tool.__name__ for tool in _COMPOSITE_TOOLS)]
+    if is_generative_ui_enabled():
+        names.extend(_GENERATIVE_UI_TOOLS)
+    return names
 
 
 def build_mcp_server() -> FastMCP:
@@ -135,6 +142,10 @@ def build_mcp_server() -> FastMCP:
             annotations=_COMPOSITE_ANNOTATIONS,
             app=app_config,
         )(_with_error_flag(tool))
+    if is_generative_ui_enabled():
+        from fastmcp.apps.generative import GenerativeUI
+
+        server.add_provider(GenerativeUI())
     return server
 
 

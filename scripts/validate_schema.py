@@ -64,6 +64,8 @@ CONTENT_TOOLS = frozenset(
         "ipAnalytics",
         "rootDomainAnalytics",
         "countryAnalytics",
+        "generate_prefab_ui",
+        "search_prefab_components",
     }
 )
 

@@ -1193,7 +1193,7 @@ class TestStepEndpointExpectations:
         assert doh["result"] == ["example.com"]
         plot = steps["plots.status"].expect
         assert "endpoints" not in plot and plot["tool"] == "plotAnalytics"
-        assert plot["result"] == ["LineChart"]
+        assert plot["result"] == ["AreaChart"]
 
     def test_an_operation_renamed_in_the_document_breaks_the_checklist_at_build_time(self, h, monkeypatch):
         """The alternative is a live run where one step silently matches nothing."""

@@ -160,6 +160,16 @@ def is_read_only() -> bool:
     return _read_only_from_env()
 
 
+def is_generative_ui_enabled() -> bool:
+    """Check if Generative UI (on-the-fly Prefab UI generation) is enabled.
+
+    Enabled by default. Can be disabled by setting NEXTDNS_GENERATIVE_UI to
+    'false', '0', 'off', or 'no'.
+    """
+    value = os.getenv("NEXTDNS_GENERATIVE_UI", "on").strip().lower()
+    return value not in ("false", "0", "off", "no")
+
+
 def get_readable_profiles() -> set[str] | None:
     """Get readable profile list from environment.
 

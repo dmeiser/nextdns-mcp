@@ -32,6 +32,8 @@ COMPOSITES = (
     "ipAnalytics",
     "rootDomainAnalytics",
     "countryAnalytics",
+    "generate_prefab_ui",
+    "search_prefab_components",
 )
 
 
