@@ -1,17 +1,16 @@
 # NextDNS MCP Server Usage Guide
 
 The server publishes one tool per operation of the bundled OpenAPI document
-([nextdns-openapi.yaml](../src/nextdns_mcp/nextdns-openapi.yaml)), plus two
-operations the document cannot describe (`plotAnalytics`, `dohLookup`). A tool
-is named for the API operation it performs and takes that endpoint's own
-arguments, so the name says what the call does — there is no `operation`
-argument to choose.
+([nextdns-openapi.yaml](../src/nextdns_mcp/nextdns-openapi.yaml)), plus
+composite visual tools (`overviewDashboard`, specialized widgets, `plotAnalytics`)
+and DNS lookup (`dohLookup`). A tool is named for the operation it performs
+and takes that endpoint's own arguments, so the name says what the call does.
 
 ## Core concepts
 
 - **Profile**: A named NextDNS configuration that owns settings, lists, logs,
   analytics, and rewrites. Every profile-scoped tool requires a `profile_id`;
-  only `dohLookup` and `plotAnalytics` fall back to `NEXTDNS_DEFAULT_PROFILE`.
+  composite visual tools and `dohLookup` fall back to `NEXTDNS_DEFAULT_PROFILE`.
 - **Access control**: The server reads `NEXTDNS_READABLE_PROFILES` and
   `NEXTDNS_WRITABLE_PROFILES`. Reads/writes outside those profiles are rejected.
 - **Read-only mode**: If `NEXTDNS_READ_ONLY=true`, write operations are blocked.
@@ -106,6 +105,30 @@ A series is limited server-side to 2000 points (the requested range divided by
 limit is rejected with an `invalid_argument` error rather than silently
 adjusted. `limit` must not exceed 500 and is rejected above that; the series
 endpoints consume no `limit`, so it is validated but never sent.
+
+### overviewDashboard
+Renders an interactive Prefab UI overview dashboard mirroring the official NextDNS web interface:
+top KPI cards (`Total Queries`, `Blocked Queries`, `Queries Blocked`), an `AreaChart` queries
+evolution timeline, and sortable tables for `Resolved Domains` and `Blocked Domains`.
+Supports `section="overview" | "all"` and `domain_view="table" | "bar" | "pie"`.
+
+### Specialized Analytics Widgets
+Individual visual cards for focused metric drilldowns:
+- `kpiAnalytics`: 3-card metric summary row.
+- `domainsAnalytics`: Top resolved domains.
+- `blockedDomainsAnalytics`: Top blocked domains.
+- `reasonsAnalytics`: Block reasons breakdown with interactive format switcher (`table`, `bar`, `pie`).
+- `deviceAnalytics`: Device traffic share with format switcher (`table`, `bar`, `pie`).
+- `ipAnalytics`: Client IP addresses making queries.
+- `rootDomainAnalytics`: Top aggregate root domains.
+- `countryAnalytics`: Traffic breakdown by geographic origin/destination.
+- `gafamAnalytics`: Google, Apple, Facebook, Amazon, Microsoft traffic share.
+- `securityAnalytics`: Encrypted DNS and DNSSEC validation rates.
+
+### Generative UI
+When `NEXTDNS_GENERATIVE_UI=on` (the default), the server mounts FastMCP's Generative UI provider
+(`generate_prefab_ui` and `search_prefab_components`), enabling host apps like OpenWebUI to
+dynamically author and render ad-hoc Prefab UI layouts in Pyodide. Set `NEXTDNS_GENERATIVE_UI=off` to disable.
 
 ### dohLookup
 `dohLookup(domain="example.com", profile_id="<profile id>", record_type="A")`

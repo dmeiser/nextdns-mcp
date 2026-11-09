@@ -43,12 +43,19 @@ from nextdns_mcp.server import published_tool_names
 # decides what is actually registered.
 from nextdns_mcp.spec_tools import SPEC_PATH, WITHHELD_OPERATIONS, load_spec, spec_tool_names
 
+
 # Tools the server performs itself rather than proxying: no endpoint returns
 # their answer, so no operation schema describes them and they are excused from
 # the naming check below. Derived from the server's own catalog — anything it
 # publishes that the document's operations do not name is local by definition —
 # so this cannot drift from the surface it excuses.
-LOCAL_TOOLS = frozenset(name for name in published_tool_names() if name not in set(spec_tool_names()))
+def local_tool_names() -> frozenset[str]:
+    """Return the set of tools implemented locally on the server."""
+    return frozenset(name for name in published_tool_names() if name not in set(spec_tool_names()))
+
+
+# Initial set evaluated at import time
+LOCAL_TOOLS = local_tool_names()
 
 # Of those, the ones that answer with content instead of a JSON document. A chart is an
 # interactive Prefab UI view, so there is no payload for a schema to describe; the runner's assertion for it
@@ -265,8 +272,9 @@ def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str
     """
     operations = spec_operations(spec)
     published = set(expected_tools)
+    local_tools = local_tool_names()
 
-    unknown = sorted(published - set(operations) - LOCAL_TOOLS)
+    unknown = sorted(published - set(operations) - local_tools)
     if unknown:
         raise ValueError(f"published tools that name no operation in the spec: {unknown}")
 
@@ -275,7 +283,7 @@ def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str
         raise ValueError(f"spec operations published as no tool: {unpublished}")
 
     unpinned = sorted(
-        tool for tool in published & LOCAL_TOOLS if tool not in TOOL_RESPONSE_SCHEMAS and tool not in CONTENT_TOOLS
+        tool for tool in published & local_tools if tool not in TOOL_RESPONSE_SCHEMAS and tool not in CONTENT_TOOLS
     )
     if unpinned:
         raise ValueError(f"local tools whose answer is neither pinned nor content: {unpinned}")
@@ -523,7 +531,7 @@ def validate_tool_response(
     literal_schema = TOOL_RESPONSE_SCHEMAS.get(tool_name)
     if literal_schema is not None:
         schemas.append((tool_name, literal_schema))
-    elif tool_name not in LOCAL_TOOLS:
+    elif tool_name not in local_tool_names():
         operation_schema = get_operation_response_schema(spec, tool_name)
         if operation_schema is not None:
             schemas.append((tool_name, operation_schema))

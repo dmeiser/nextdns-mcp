@@ -60,8 +60,8 @@ operation's `application/json` or `text/csv` responses. A response is `VALID` wh
 schema, `INVALID` when it does not, and `SKIPPED` when there is no response body to check (synthetic
 `{"success": true}` payloads). The tools the server performs itself rather than proxying answer with a
 payload no endpoint returns, so they are the exception: `dohLookup` validates against a pinned literal
-schema in `TOOL_RESPONSE_SCHEMAS`, and `plotAnalytics` answers with an interactive chart (`CONTENT_TOOLS`), which the
-runner asserts as image content rather than a document.
+schema in `TOOL_RESPONSE_SCHEMAS`, and composite visual tools answer with interactive Prefab UI content (`CONTENT_TOOLS`), which the
+runner asserts as structured chart/dashboard content rather than a document.
 
 Because the strategy is a union and most vendored schemas declare no `required` fields, this is a
 drift smoke signal, not a strict conformance check; the E2E job summary labels it

@@ -5,10 +5,11 @@ SPDX-License-Identifier: MIT
 
 import asyncio
 import logging
+import time
 from typing import Any, Literal
 
 from fastmcp.tools.base import ToolResult
-from prefab_ui.app import PrefabApp, Theme
+from prefab_ui.app import PrefabApp
 from prefab_ui.components import (
     Card,
     CardContent,
@@ -29,22 +30,16 @@ from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
 from ..transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload
 from ..utils import normalize_time_value, resolve_profile_id
-from .plots import _build_chart_data, _build_chart_series, _validate_series_payload
+from .plots import (
+    DASHBOARD_THEME,
+    _build_chart_data,
+    _build_chart_series,
+    _resolve_time_point,
+    _series_budget_error,
+    _validate_series_payload,
+)
 
 logger = logging.getLogger(__name__)
-
-DASHBOARD_THEME = Theme(
-    accent=220,
-    css="""
-:root, .dark {
-  --chart-1: #3b82f6;
-  --chart-2: #10b981;
-  --chart-3: #f59e0b;
-  --chart-4: #ef4444;
-  --chart-5: #8b5cf6;
-}
-""",
-)
 
 
 def _time_params(from_time: str | int | None, to_time: str | int | None) -> dict[str, Any]:
@@ -124,12 +119,15 @@ def _build_kpi_row(kpis: dict[str, Any]) -> Row:
 
 def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
     """Build the queries evolution chart card from a time-series payload."""
-    times, series_data = _validate_series_payload(series_payload)
-    if not times or not series_data:
+    try:
+        times, series_data = _validate_series_payload(series_payload)
+        if not times or not series_data:
+            return None
+        chart_data = _build_chart_data(times, series_data)
+        chart_series = _build_chart_series(series_data)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Error preparing queries series data: {exc}")
         return None
-
-    chart_data = _build_chart_data(times, series_data)
-    chart_series = _build_chart_series(series_data)
 
     with Card(css_class="w-full") as card:
         with CardHeader():
@@ -186,15 +184,34 @@ def _domain_label(item: dict[str, Any], key_name: str = "domain") -> str:
 def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     """Build domain data table."""
     rows: list[dict[str, Any] | Any] = [
-        {"domain": _domain_label(item, key_name), "queries": f"{_item_queries(item):,}"} for item in data
+        {"domain": _domain_label(item, key_name), "queries": _item_queries(item)} for item in data
     ]
     return DataTable(
         columns=[
             DataTableColumn(key="domain", header="Domain", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True),
+            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
         ],
         rows=rows,
     )
+
+
+def _render_chart_view(chart_data: list[dict[str, Any]], title: str, color: str, view_type: str) -> None:
+    """Render either a pie chart or horizontal bar chart."""
+    if view_type == "pie":
+        _pie_chart(chart_data)
+    else:
+        _bar_chart(chart_data, title, color)
+
+
+def _render_domain_content(title: str, data: list[dict[str, Any]], key_name: str, view_type: str, color: str) -> None:
+    """Render domain card content based on chosen visualization type."""
+    if not data:
+        Text(f"No {title.lower()} available for this period.", css_class="text-sm text-muted-foreground py-4")
+    elif view_type == "table":
+        _domain_table(data, key_name)
+    else:
+        chart_data = [{"label": _domain_label(item, key_name), "queries": _item_queries(item)} for item in data]
+        _render_chart_view(chart_data, title, color, view_type)
 
 
 def _build_domains_card(
@@ -211,13 +228,7 @@ def _build_domains_card(
             CardTitle(title)
             CardDescription(description)
         with CardContent():
-            chart_data = [{"label": _domain_label(item, key_name), "queries": _item_queries(item)} for item in data]
-            if view_type == "bar":
-                _bar_chart(chart_data, title, color)
-            elif view_type == "pie":
-                _pie_chart(chart_data)
-            else:
-                _domain_table(data, key_name)
+            _render_domain_content(title, data, key_name, view_type, color)
     return card
 
 
@@ -231,7 +242,7 @@ def _reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
     q = _item_queries(item)
     return {
         "name": _reason_label(item),
-        "queries": f"{q:,}",
+        "queries": q,
         "share": _format_share(q, total),
     }
 
@@ -243,7 +254,7 @@ def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     return DataTable(
         columns=[
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True),
+            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
         rows=rows,
@@ -257,13 +268,16 @@ def _build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> 
             CardTitle("Reasons for Blocking")
             CardDescription("Security, Privacy and/or Parental Control settings that blocked the most queries.")
         with CardContent():
-            chart_data = [{"label": _reason_label(item), "queries": _item_queries(item)} for item in data]
-            if view_type in ("bar", "auto"):
-                _bar_chart(chart_data, "Blocked Queries", "#ef4444")
-            elif view_type == "pie":
-                _pie_chart(chart_data)
-            else:
+            if not data:
+                Text("No queries were blocked during this period.", css_class="text-sm text-muted-foreground py-4")
+            elif view_type == "table":
                 _reasons_table(data)
+            else:
+                chart_data = [{"label": _reason_label(item), "queries": _item_queries(item)} for item in data]
+                if view_type == "pie":
+                    _pie_chart(chart_data)
+                else:
+                    _bar_chart(chart_data, "Blocked Queries", "#ef4444")
     return card
 
 
@@ -288,7 +302,7 @@ def _device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
     return {
         "device": _device_label(item),
         "model": str(item.get("model") or "-"),
-        "queries": f"{q:,}",
+        "queries": q,
         "share": _format_share(q, total),
     }
 
@@ -301,11 +315,22 @@ def _devices_table(data: list[dict[str, Any]]) -> DataTable:
         columns=[
             DataTableColumn(key="device", header="Device", sortable=True),
             DataTableColumn(key="model", header="Model", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True),
+            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
         rows=rows,
     )
+
+
+def _render_device_content(data: list[dict[str, Any]], view_type: str) -> None:
+    """Render devices card content based on chosen visualization type."""
+    if not data:
+        Text("No device queries recorded for this period.", css_class="text-sm text-muted-foreground py-4")
+    elif view_type == "table":
+        _devices_table(data)
+    else:
+        chart_data = [{"label": _device_label(item), "queries": _item_queries(item)} for item in data]
+        _render_chart_view(chart_data, "Queries", "#3b82f6", view_type)
 
 
 def _build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
@@ -315,13 +340,7 @@ def _build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> 
             CardTitle("Devices")
             CardDescription("Devices making the queries.")
         with CardContent():
-            chart_data = [{"label": _device_label(item), "queries": _item_queries(item)} for item in data]
-            if view_type == "bar":
-                _bar_chart(chart_data, "Queries", "#3b82f6")
-            elif view_type == "pie":
-                _pie_chart(chart_data)
-            else:
-                _devices_table(data)
+            _render_device_content(data, view_type)
     return card
 
 
@@ -342,7 +361,7 @@ def _ip_row(item: dict[str, Any]) -> dict[str, Any]:
         "ip": str(item.get("ip") or "-"),
         "isp": str(network.get("isp") or "-"),
         "location": _location_string(geo),
-        "queries": f"{_item_queries(item):,}",
+        "queries": _item_queries(item),
     }
 
 
@@ -354,15 +373,18 @@ def _build_ips_card(data: list[dict[str, Any]]) -> Card:
             CardTitle("IPs")
             CardDescription("IP addresses making the queries.")
         with CardContent():
-            DataTable(
-                columns=[
-                    DataTableColumn(key="ip", header="IP Address", sortable=True),
-                    DataTableColumn(key="isp", header="ISP", sortable=True),
-                    DataTableColumn(key="location", header="Location", sortable=True),
-                    DataTableColumn(key="queries", header="Queries", sortable=True),
-                ],
-                rows=rows,
-            )
+            if not data:
+                Text("No IP queries recorded for this period.", css_class="text-sm text-muted-foreground py-4")
+            else:
+                DataTable(
+                    columns=[
+                        DataTableColumn(key="ip", header="IP Address", sortable=True),
+                        DataTableColumn(key="isp", header="ISP", sortable=True),
+                        DataTableColumn(key="location", header="Location", sortable=True),
+                        DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
+                    ],
+                    rows=rows,
+                )
     return card
 
 
@@ -372,7 +394,7 @@ def _single_gafam_row(item: dict[str, Any], total: int) -> tuple[dict[str, Any],
     q = _item_queries(item)
     return {"label": name, "company": name, "queries": q}, {
         "company": name,
-        "queries": f"{q:,}",
+        "queries": q,
         "share": _format_share(q, total),
     }
 
@@ -390,7 +412,7 @@ def _gafam_table(table_rows: list[dict[str, Any] | Any]) -> DataTable:
     return DataTable(
         columns=[
             DataTableColumn(key="company", header="Company", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True),
+            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
         rows=table_rows,
@@ -407,7 +429,9 @@ def _build_gafam_card(data: list[dict[str, Any]], view_type: str = "auto") -> Ca
                 "Traffic share of dominant internet companies (Google, Apple, Facebook, Amazon, Microsoft)."
             )
         with CardContent():
-            if view_type == "bar":
+            if not data:
+                Text("No GAFAM traffic recorded for this period.", css_class="text-sm text-muted-foreground py-4")
+            elif view_type == "bar":
                 _bar_chart(chart_data, "Queries", "#3b82f6")
             elif view_type == "table":
                 _gafam_table(table_rows)
@@ -452,11 +476,9 @@ def _build_security_card(
         with CardHeader():
             CardTitle("Security & Privacy")
             CardDescription("Encryption and DNSSEC validation rates.")
-        with CardContent(), Column(gap=4) as content_col:
-            content_col.children.append(_build_security_section("Encrypted DNS", enc_val, enc_total, enc_pct))
-            content_col.children.append(
-                _build_security_section("DNSSEC Validation", dnssec_val, dnssec_total, dnssec_pct)
-            )
+        with CardContent(), Column(gap=4):
+            _build_security_section("Encrypted DNS", enc_val, enc_total, enc_pct)
+            _build_security_section("DNSSEC Validation", dnssec_val, dnssec_total, dnssec_pct)
     return card
 
 
@@ -471,7 +493,7 @@ def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "country": _destination_label(item),
         "code": str(item.get("code") or "-"),
-        "queries": f"{_item_queries(item):,}",
+        "queries": _item_queries(item),
         "sample_domains": sample or "-",
     }
 
@@ -483,11 +505,22 @@ def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
         columns=[
             DataTableColumn(key="country", header="Country", sortable=True),
             DataTableColumn(key="code", header="Code", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True),
+            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="sample_domains", header="Sample Domains"),
         ],
         rows=rows,
     )
+
+
+def _render_destination_content(data: list[dict[str, Any]], view_type: str) -> None:
+    """Render destination countries card content based on chosen visualization type."""
+    if not data:
+        Text("No country traffic recorded for this period.", css_class="text-sm text-muted-foreground py-4")
+    elif view_type == "table":
+        _destinations_table(data)
+    else:
+        chart_data = [{"label": _destination_label(item), "queries": _item_queries(item)} for item in data]
+        _render_chart_view(chart_data, "Queries", "#3b82f6", view_type)
 
 
 def _build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
@@ -497,13 +530,7 @@ def _build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto"
             CardTitle("Traffic Destination")
             CardDescription("Top destination countries based on DNS queries.")
         with CardContent():
-            chart_data = [{"label": _destination_label(item), "queries": _item_queries(item)} for item in data]
-            if view_type == "bar":
-                _bar_chart(chart_data, "Queries", "#3b82f6")
-            elif view_type == "pie":
-                _pie_chart(chart_data)
-            else:
-                _destinations_table(data)
+            _render_destination_content(data, view_type)
     return card
 
 
@@ -525,6 +552,18 @@ async def _resolve_profile(profile_id: OptionalProfileId) -> tuple[str | None, d
 def _payload_data(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Extract list data rows from an API payload dictionary."""
     return (payload or {}).get("data") or []
+
+
+def _overview_interval(from_time: str | int, to_time: str | int) -> int:
+    """Pick interval based on span: 3600 for <= 2 days, 86400 for longer."""
+    now = time.time()
+    start = _resolve_time_point(from_time, now)
+    end = _resolve_time_point(to_time, now)
+    if start is not None and end is not None:
+        span = end - start
+        if 0 < span <= 172800:
+            return 3600
+    return 86400
 
 
 def _validate_card_data(
@@ -572,10 +611,15 @@ async def _fetch_overview_payloads(
     limit: int,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     """Fetch all datasets required for the main overview cards."""
+    interval = _overview_interval(from_time, to_time)
+    budget_err = _series_budget_error(from_time, to_time, interval)
+    if budget_err:
+        return {}, {}, [], [], budget_err
+
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
-    dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
+    dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="default")
     blk_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="blocked")
-    ser_params = {"from": normalize_time_value(from_time), "to": normalize_time_value(to_time), "interval": 86400}
+    ser_params = {"from": normalize_time_value(from_time), "to": normalize_time_value(to_time), "interval": interval}
 
     s_task = _fetch_analytics_payload(pid, "status", params)
     ser_task = _fetch_analytics_payload(pid, "status;series", ser_params)
@@ -880,7 +924,9 @@ async def _domains_analytics_impl(
     view_type: Literal["auto", "table", "bar", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render top resolved domains card."""
-    _pid, data, err = await _fetch_card_data(profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit)
+    _pid, data, err = await _fetch_card_data(
+        profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, status="default"
+    )
     if err:
         return err
     assert data is not None

@@ -535,7 +535,7 @@ class ContainerE2ERunner:
         """True when the response carries an image block, structured Prefab UI, or chart/dashboard summary."""
         if has_image or cls._is_prefab_payload(result):
             return True
-        indicators = ("data:image", "Analytics:", "Rendered NextDNS", "$prefab")
+        indicators = ("data:image", "Analytics:", "Rendered NextDNS", "[Rendered ", "$prefab")
         return isinstance(response_text, str) and any(i in response_text for i in indicators)
 
     @classmethod
@@ -885,7 +885,7 @@ class ContainerE2ERunner:
                 await self.execute_call(
                     session,
                     tool_name,
-                    {"profile_id": plot_profile_id, "from_time": "-1d"},
+                    {"profile_id": plot_profile_id, "from_time": "-30d"},
                 )
         else:
             log_warn("NEXTDNS_PLOT_PROFILE not set; skipping dashboard tools")

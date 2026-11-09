@@ -10,7 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Interactive Prefab UI charts and dashboards:
   - `overviewDashboard`: Full overview dashboard mirroring the NextDNS web UI with KPI summary cards, queries evolution chart, and resolved/blocked domain tables.
-  - Dedicated standalone visual widgets: `kpiAnalytics`, `domainsAnalytics`, `blockedDomainsAnalytics`, `reasonsAnalytics`, `deviceAnalytics`, `ipAnalytics`, `rootDomainAnalytics`, `countryAnalytics`, and `gafamAnalytics`.
+  - Dedicated standalone visual widgets: `kpiAnalytics`, `domainsAnalytics`, `blockedDomainsAnalytics`, `reasonsAnalytics`, `deviceAnalytics`, `ipAnalytics`, `rootDomainAnalytics`, `countryAnalytics`, `gafamAnalytics`, and `securityAnalytics`.
   - Flexible visualization styles (`view_type="auto" | "bar" | "table" | "pie"` and `domain_view="table" | "bar" | "pie"`).
   - FastMCP `GenerativeUI` provider enabled by default (`generate_prefab_ui`, `search_prefab_components`), toggleable via `NEXTDNS_GENERATIVE_UI`.
   - Added `/v1/models` route to satisfy OpenWebUI's periodic model discovery probes without 404s.

@@ -2334,17 +2334,72 @@ def build_steps(targets: TaskTargets) -> list[Step]:
 
     # ---- dashboard: overview and specialized widgets --------------------
     dashboard_specs = (
-        ("dashboard.overview", "overviewDashboard", "overview dashboard", "Show me an overview dashboard for profile '{profile_id}'."),
-        ("dashboard.kpi", "kpiAnalytics", "top KPI metrics", "Show me the top KPI metrics (queries, blocked queries, block rate) for profile '{profile_id}'."),
-        ("dashboard.domains", "domainsAnalytics", "top resolved domains", "Show me the top resolved domains for profile '{profile_id}'."),
-        ("dashboard.blocked_domains", "blockedDomainsAnalytics", "top blocked domains", "Show me the top blocked domains for profile '{profile_id}'."),
-        ("dashboard.reasons", "reasonsAnalytics", "block reasons", "Visualize the reasons queries were blocked for profile '{profile_id}'."),
-        ("dashboard.devices", "deviceAnalytics", "device breakdown", "Visualize the client devices making queries on profile '{profile_id}'."),
-        ("dashboard.ips", "ipAnalytics", "client IP addresses", "Show me the client IP addresses making queries on profile '{profile_id}'."),
-        ("dashboard.root_domains", "rootDomainAnalytics", "aggregate root domains", "Show me the top root domains queried on profile '{profile_id}'."),
-        ("dashboard.countries", "countryAnalytics", "traffic by country", "Show me the traffic breakdown by country for profile '{profile_id}'."),
-        ("dashboard.gafam", "gafamAnalytics", "GAFAM traffic share", "Show me the GAFAM traffic dominance breakdown for profile '{profile_id}'."),
-        ("dashboard.security", "securityAnalytics", "security analytics", "Show me the security analytics (Encrypted DNS and DNSSEC rates) for profile '{profile_id}'."),
+        (
+            "dashboard.overview",
+            "overviewDashboard",
+            "overview dashboard",
+            "Show me an overview dashboard for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.kpi",
+            "kpiAnalytics",
+            "top KPI metrics",
+            "Show me the top KPI metrics (queries, blocked queries, block rate) for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.domains",
+            "domainsAnalytics",
+            "top resolved domains",
+            "Show me the top resolved domains for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.blocked_domains",
+            "blockedDomainsAnalytics",
+            "top blocked domains",
+            "Show me the top blocked domains for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.reasons",
+            "reasonsAnalytics",
+            "block reasons",
+            "Visualize the reasons queries were blocked for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.devices",
+            "deviceAnalytics",
+            "device breakdown",
+            "Show me the device analytics (device models and traffic share) for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.ips",
+            "ipAnalytics",
+            "client IP addresses",
+            "Show me the client IP addresses making queries on profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.root_domains",
+            "rootDomainAnalytics",
+            "aggregate root domains",
+            "Show me the top root domains queried on profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.countries",
+            "countryAnalytics",
+            "traffic by country",
+            "Show me the traffic breakdown by country for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.gafam",
+            "gafamAnalytics",
+            "GAFAM traffic share",
+            "Show me the GAFAM traffic dominance breakdown for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.security",
+            "securityAnalytics",
+            "security analytics",
+            "Show me the security analytics (Encrypted DNS and DNSSEC rates) for profile '{profile_id}'.",
+        ),
     )
     for step_id, tool_name, desc, task_prompt in dashboard_specs:
         steps.append(

@@ -68,7 +68,7 @@ _COMPOSITE_TOOLS = (
     countryAnalytics,
 )
 
-# Neither composite tool mutates anything: dohLookup answers a DNS question and
+# None of the composite tools mutate anything: dohLookup answers a DNS question and
 # plotAnalytics renders a chart from analytics already collected. The generated
 # SpecApiTool derives these hints from the endpoint method; the composites have
 # no endpoint, so the hints are stated here — without them a caller scanning for
@@ -149,9 +149,9 @@ def build_mcp_server() -> FastMCP:
             app=app_config,
         )(_with_error_flag(tool))
     if is_generative_ui_enabled():
-        from fastmcp.apps.generative import GenerativeUI
+        from .generative import NextDNSGenerativeUI
 
-        server.add_provider(GenerativeUI())
+        server.add_provider(NextDNSGenerativeUI())
     return server
 
 

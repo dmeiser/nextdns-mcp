@@ -1,6 +1,6 @@
 """Unit tests for NextDNS interactive analytics dashboard and specialized UI tools."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastmcp.tools.base import ToolResult
@@ -409,3 +409,40 @@ class TestDashboardToolsExecution:
             res = await tool_fn()
             assert isinstance(res, dict)
             assert res["code"] == "err"
+
+    def test_overview_interval_and_budget(self):
+        # Short span <= 2 days uses 3600s
+        assert dash_module._overview_interval("-1d", "now") == 3600
+        # Long span > 2 days uses 86400s
+        assert dash_module._overview_interval("-30d", "now") == 86400
+
+    @pytest.mark.asyncio
+    async def test_overview_dashboard_budget_error(self, clean_env, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        res = await dash_module.overviewDashboard(from_time=1, to_time="now")
+        assert isinstance(res, dict)
+        assert res["code"] == "invalid_argument"
+
+    def test_build_queries_series_card_exception_handling(self, monkeypatch):
+        monkeypatch.setattr(dash_module, "_validate_series_payload", MagicMock(side_effect=ValueError("bad data")))
+        assert dash_module._build_queries_series_card({"meta": {}}) is None
+
+    def test_empty_cards_rendering(self):
+        # Empty cards render fallback text
+        assert dash_module._build_domains_card("Domains", "desc", [], view_type="table") is not None
+        assert dash_module._build_domains_card("Domains", "desc", [], view_type="bar") is not None
+        assert dash_module._build_reasons_card([], view_type="table") is not None
+        assert dash_module._build_reasons_card([], view_type="bar") is not None
+        assert dash_module._build_devices_card([], view_type="table") is not None
+        assert dash_module._build_devices_card([], view_type="bar") is not None
+        assert dash_module._build_devices_card([], view_type="pie") is not None
+        assert dash_module._build_devices_card([{"name": "iPhone", "queries": 10}], view_type="table") is not None
+        assert dash_module._build_ips_card([]) is not None
+        assert dash_module._build_gafam_card([], view_type="table") is not None
+        assert dash_module._build_gafam_card([], view_type="bar") is not None
+        assert dash_module._build_destinations_card([], view_type="table") is not None
+        assert dash_module._build_destinations_card([], view_type="bar") is not None
+        assert dash_module._build_destinations_card([], view_type="pie") is not None
+        assert dash_module._build_destinations_card([{"name": "US", "queries": 10}], view_type="table") is not None
+        # Interval unparseable fallback
+        assert dash_module._overview_interval("invalid", "now") == 86400

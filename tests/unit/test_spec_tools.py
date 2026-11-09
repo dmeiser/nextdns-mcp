@@ -377,7 +377,7 @@ class TestRegistration:
             )
             chart_hits = [hit["name"] for hit in (charted.structured_content or {})["result"]]
         assert hits[0] == "dohLookup"
-        assert chart_hits[0] in ("plotAnalytics", "analyticsDashboard")
+        assert chart_hits[0] in ("plotAnalytics", "overviewDashboard")
 
     async def test_loose_argument_types_are_coerced_before_the_call(self, monkeypatch):
         """A client that sends "20" for an integer parameter means 20.

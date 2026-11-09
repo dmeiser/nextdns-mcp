@@ -16,9 +16,9 @@ one line::
 
 Every tool here is bound to an endpoint, so the record names it: the tool name
 says what the caller asked for, the endpoint says what the server sent upstream,
-and the HTTP method is what makes a call a write. The two operations this server
-performs itself (``plotAnalytics``, ``dohLookup``) have no endpoint and record as
-reads.
+and the HTTP method is what makes a call a write. The composite visual and lookup
+operations this server performs itself (`overviewDashboard`, `plotAnalytics`, `dohLookup`, …)
+have no endpoint and record as reads.
 
 The search transform's synthetic tools are not recorded: the wrapper re-enters
 the middleware chain with the real tool name, so recording ``call_tool`` as well
@@ -215,8 +215,8 @@ class CallLogMiddleware(Middleware):
         # Whether the call changed state. A generated tool is bound to an
         # endpoint, so the HTTP method decides it: `POST
         # /profiles/{profile_id}/rewrites` changed state whatever the tool
-        # was named. The two local operations (plotAnalytics, dohLookup) have
-        # no endpoint and answer questions, so they are reads.
+        # was named. The local composite operations (plotAnalytics, dashboard tools, dohLookup)
+        # have no endpoint and answer questions, so they are reads.
         write = is_write_operation(endpoint[0]) if endpoint else False
         row = {
             "ts": time.time(),
