@@ -1,6 +1,6 @@
 [project]
 name = "nextdns-mcp"
-version = "4.0.1"
+version = "4.1.0"
 description = "NextDNS MCP Server - Model Context Protocol server for NextDNS API built with FastMCP"
 authors = [{name = "NextDNS MCP Contributors"}]
 license = {text = "MIT"}
@@ -16,8 +16,8 @@ dependencies = [
     "httpx>=0.28.1",
     "pyyaml>=6.0.3",
     "python-dotenv>=1.2.2",
-    "matplotlib>=3.10.0",
     "jsonschema>=4.23",
+    "prefab-ui==0.21.1",
 ]
 
 [project.optional-dependencies]

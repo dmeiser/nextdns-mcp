@@ -8,8 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from mcp.types import ImageContent, TextContent, Tool
+from mcp.types import TextContent, Tool
 
+from scripts import validate_schema
 from scripts.run_container_e2e import (
     EXPECTED_TOOLS,
     SPEC_PATH,
@@ -214,12 +215,13 @@ async def test_execute_call_retry_on_exception(runner: ContainerE2ERunner):
 
 
 @pytest.mark.asyncio
-async def test_execute_call_plot_image_content(runner: ContainerE2ERunner):
-    """Test plotAnalytics returns ImageContent."""
+async def test_execute_call_plot_prefab_content(runner: ContainerE2ERunner):
+    """Test plotAnalytics returns interactive Prefab UI content."""
     session = AsyncMock()
     mock_result = MagicMock()
     mock_result.is_error = False
-    mock_result.content = [ImageContent(type="image", data="base64data==", mimeType="image/png")]
+    mock_result.content = [TextContent(type="text", text="NextDNS Analytics: status")]
+    mock_result.structured_content = {"$prefab": {"version": "0.3"}}
     session.call_tool.return_value = mock_result
 
     ok, _ = await runner.execute_call(session, "plotAnalytics", {"metric": "status"})
@@ -320,10 +322,9 @@ async def test_run_success_read_only(runner: ContainerE2ERunner):
                     '"status_description":"NOERROR"}}',
                 )
             ]
-        elif name == "plotAnalytics":
-            # The runner treats a plot answer with no image content as a failure,
-            # so the mocked sweep has to return the image the real tool returns.
-            mock_res.content = [ImageContent(type="image", data="AA", mimeType="image/png")]
+        elif name == "plotAnalytics" or name in validate_schema.CONTENT_TOOLS:
+            mock_res.content = [TextContent(type="text", text="NextDNS Analytics: status")]
+            mock_res.structured_content = {"$prefab": {"version": "0.3"}}
         else:
             mock_res.content = [TextContent(type="text", text='{"data":[{"id":"test-profile-id"}]}')]
         return mock_res

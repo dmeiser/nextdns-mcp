@@ -264,7 +264,7 @@ DEFAULT_SERVER = {
     "command": sys.executable,
     "args": ["-m", "nextdns_mcp.server"],
     "cwd": str(_REPO_ROOT),
-    "env": {"PYTHONPATH": str(_REPO_ROOT / "src")},
+    "env": {"PYTHONPATH": str(_REPO_ROOT / "src"), "MCP_TRANSPORT": "stdio"},
 }
 
 # The default harness command template. ``opencode`` is the documented default
@@ -1952,7 +1952,8 @@ def _expected_call_ok(
             why = f"{label} was called without {missing_args}"
             continue
         result_text = str(record.get("result", ""))
-        missing_answer = [s for s in want_result if s not in result_text]
+        evidence_text = json.dumps(record.get("evidence", {}))
+        missing_answer = [s for s in want_result if s not in result_text and s not in evidence_text]
         if missing_answer:
             why = f"{label} answered without {missing_answer}"
             continue
@@ -2317,17 +2318,105 @@ def build_steps(targets: TaskTargets) -> list[Step]:
                 id=f"plots.{m}",
                 section="plots",
                 tool="plotAnalytics",
-                description=f"plotAnalytics {m} (PNG)",
+                description=f"plotAnalytics {m} (chart)",
                 prompt=_step_prompt(
-                    f"Generate an analytics plot for profile '{{profile_id}}' for metric '{m}' over the last day (PNG image)."
+                    f"Generate an analytics plot for profile '{{profile_id}}' for metric '{m}' over the last day (interactive chart)."
                 ),
                 verify="plots",
                 vdata={"metric": m},
                 # The chart is the payload: the record has to say it answered
-                # with image content, not just that the tool ran. The step runs
+                # with chart content, not just that the tool ran. The step runs
                 # against the read-only data profile (falls back to the test
                 # profile when no plot profile is configured).
-                expect=_expect_local("plotAnalytics", args=(m,), result=("image",), profile=PLOT_PROFILE),
+                expect=_expect_local("plotAnalytics", args=(m,), result=("AreaChart",), profile=PLOT_PROFILE),
+            )
+        )
+
+    # ---- dashboard: overview and specialized widgets --------------------
+    dashboard_specs = (
+        (
+            "dashboard.overview",
+            "overview",
+            "overview dashboard",
+            "Show me an overview dashboard for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.kpi",
+            "kpi",
+            "top KPI metrics",
+            "Show me the top KPI metrics dashboard widget (queries, blocked queries, block rate) for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.domains",
+            "domains",
+            "top resolved domains",
+            "Show me the top resolved domains dashboard widget for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.blocked_domains",
+            "blocked_domains",
+            "top blocked domains",
+            "Show me the top blocked domains dashboard widget for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.reasons",
+            "reasons",
+            "block reasons",
+            "Show me the block reasons dashboard widget for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.devices",
+            "devices",
+            "device breakdown",
+            "Show me the device analytics dashboard widget (device models and traffic share) for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.ips",
+            "ips",
+            "client IP addresses",
+            "Show me the client IP addresses and ISP details dashboard widget for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.root_domains",
+            "root_domains",
+            "aggregate root domains",
+            "Show me the top root domains dashboard widget for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.countries",
+            "countries",
+            "traffic by country",
+            "Show me the country traffic dashboard widget for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.gafam",
+            "gafam",
+            "GAFAM traffic share",
+            "Show me the GAFAM traffic dominance dashboard widget for profile '{profile_id}'.",
+        ),
+        (
+            "dashboard.security",
+            "security",
+            "security analytics",
+            "Show me the security analytics dashboard widget (Encrypted DNS and DNSSEC rates) for profile '{profile_id}'.",
+        ),
+    )
+    for step_id, section, desc, task_prompt in dashboard_specs:
+        expect_args = () if section == "overview" else (section,)
+        steps.append(
+            Step(
+                id=step_id,
+                section="dashboard",
+                tool="overviewDashboard",
+                description=f"overviewDashboard (section={section})",
+                prompt=_step_prompt(task_prompt),
+                verify="dashboard",
+                expect=_expect_local(
+                    "overviewDashboard",
+                    args=expect_args,
+                    result=("$prefab",),
+                    profile=PLOT_PROFILE,
+                ),
             )
         )
 
@@ -2680,7 +2769,7 @@ async def _verify_step(
         # decide this step at all. The server's call log does (see
         # _expected_call_ok): the lookup ran and answered.
         return ("passed", "", "", {"note": "read-only DoH lookup; verdict from the server call log"})
-    if step.verify == "plots":
+    if step.verify in {"plots", "dashboard"}:
         plot_pid = os.environ.get("NEXTDNS_PLOT_PROFILE") or pid
         rest = await _get(f"/profiles/{plot_pid}/analytics/status")
         has_data = common._analytics_has_data(rest)
@@ -2699,7 +2788,7 @@ async def _verify_step(
             {
                 "has_data": True,
                 "endpoint": f"GET /profiles/{plot_pid}/analytics/status",
-                "note": "plot generation verified by the server call log",
+                "note": "view generation verified by the server call log",
             },
         )
     if step.verify == "logs_get":
@@ -3165,9 +3254,9 @@ async def _run_harness_scoped(api_key: str, config: HarnessConfig) -> Report:
                 # Read-only plot/log steps target NEXTDNS_PLOT_PROFILE; when it is unset
                 # they would all read the empty test profile and skip as data-starved,
                 # so resolve a data-bearing one up front and say so in the report.
-                if any(step.section == "plots" or step.id == "logs.download" for _, step in selected) and (
-                    plot_note := await _ensure_plot_profile(m, pid)
-                ):
+                if any(
+                    step.section in {"plots", "dashboard"} or step.id == "logs.download" for _, step in selected
+                ) and (plot_note := await _ensure_plot_profile(m, pid)):
                     report.notes.append(plot_note)
                     _progress(f"plot profile: {plot_note}")
                     # The fallback selection must reach the child server's protected
@@ -3239,7 +3328,7 @@ async def _run_harness_scoped(api_key: str, config: HarnessConfig) -> Report:
                             )
 
                     prompt_pid = pid
-                    if (step.section == "plots" or step.id == "logs.download") and os.environ.get(
+                    if (step.section in {"plots", "dashboard"} or step.id == "logs.download") and os.environ.get(
                         "NEXTDNS_PLOT_PROFILE"
                     ):
                         prompt_pid = os.environ["NEXTDNS_PLOT_PROFILE"]

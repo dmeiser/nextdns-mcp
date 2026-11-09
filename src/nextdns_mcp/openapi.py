@@ -194,6 +194,23 @@ def _owner_hint(ignored: list[str], tool_name: str, index: dict[str, tuple[str, 
     return _render_owner_hint(base, grouped, unowned)
 
 
+def _annotate_structured_ignored(
+    structured: dict[str, Any],
+    ignored: list[str],
+    hint: str,
+    hint_for: Callable[[list[str]], str] | None = None,
+) -> None:
+    """Record dropped argument names and owner hint onto structured result dictionary."""
+    already = structured.get("ignored_arguments")
+    prior_names = already if isinstance(already, list) else []
+    merged = list(dict.fromkeys([*prior_names, *ignored]))
+    structured["ignored_arguments"] = merged
+    if hint_for is not None and prior_names:
+        _rerender_owner_annotation(structured, merged, hint_for)
+        return
+    _merge_ignored_hints(structured, hint)
+
+
 def _report_ignored_arguments(
     result: ToolResult,
     ignored: list[str],
@@ -225,18 +242,9 @@ def _report_ignored_arguments(
     if not isinstance(structured, dict):
         _annotate_content_only(result, ignored, hint)
         return
-    # Merge, never overwrite: under the search transform an inner call reports
-    # the names dropped from the target's own arguments, and the outer wrapper
-    # pass reports the names dropped from the wrapper it unpacked. Both are
-    # true about the same call; overwriting hides one pass behind the other.
-    already = structured.get("ignored_arguments")
-    prior_names = already if isinstance(already, list) else []
-    merged = list(dict.fromkeys([*prior_names, *ignored]))
-    structured["ignored_arguments"] = merged
-    if hint_for is not None and prior_names:
-        _rerender_owner_annotation(structured, merged, hint_for)
-        return
-    _merge_ignored_hints(structured, hint)
+    if "$prefab" in structured:
+        _annotate_content_only(result, ignored, hint)
+    _annotate_structured_ignored(structured, ignored, hint, hint_for)
 
 
 def _rerender_owner_annotation(
@@ -720,7 +728,12 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
             status_code=503,
         )
 
+    async def v1_models(_request: Request) -> JSONResponse:
+        """Answer OpenWebUI's automatic model-discovery probe to prevent noisy 404 logs."""
+        return JSONResponse({"object": "list", "data": []})
+
     mcp.custom_route("/health", methods=["GET"])(health_check)
+    mcp.custom_route("/v1/models", methods=["GET"])(v1_models)
 
 
 def _cached_readiness() -> tuple[bool, HealthFailure | None]:

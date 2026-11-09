@@ -73,9 +73,9 @@ def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = ()) -
         "plus the path, query and body fields the endpoint documents. The name says",
         "what the call does, so there is no operation to choose.",
         "",
-        "- Two tools do something other than call one endpoint: `plotAnalytics`",
-        "  renders a chart from an analytics time series, and `dohLookup` resolves a",
-        "  name through a profile's DNS-over-HTTPS resolver.",
+        "- Composite visual tools (`overviewDashboard`, `plotAnalytics`) render",
+        "  interactive charts, tables, and dashboards directly in the client interface;",
+        "  `dohLookup` resolves a name through a profile's DNS-over-HTTPS resolver.",
         "- A failed call returns a JSON payload with an error `code`, plus a `hint`",
         "  whenever the server can say what to send instead.",
     ]

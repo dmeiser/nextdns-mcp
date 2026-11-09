@@ -1,17 +1,16 @@
 # NextDNS MCP Server Usage Guide
 
 The server publishes one tool per operation of the bundled OpenAPI document
-([nextdns-openapi.yaml](../src/nextdns_mcp/nextdns-openapi.yaml)), plus two
-operations the document cannot describe (`plotAnalytics`, `dohLookup`). A tool
-is named for the API operation it performs and takes that endpoint's own
-arguments, so the name says what the call does — there is no `operation`
-argument to choose.
+([nextdns-openapi.yaml](../src/nextdns_mcp/nextdns-openapi.yaml)), plus
+composite visual tools (`overviewDashboard`, `plotAnalytics`)
+and DNS lookup (`dohLookup`). A tool is named for the operation it performs
+and takes that endpoint's own arguments, so the name says what the call does.
 
 ## Core concepts
 
 - **Profile**: A named NextDNS configuration that owns settings, lists, logs,
   analytics, and rewrites. Every profile-scoped tool requires a `profile_id`;
-  only `dohLookup` and `plotAnalytics` fall back to `NEXTDNS_DEFAULT_PROFILE`.
+  composite visual tools and `dohLookup` fall back to `NEXTDNS_DEFAULT_PROFILE`.
 - **Access control**: The server reads `NEXTDNS_READABLE_PROFILES` and
   `NEXTDNS_WRITABLE_PROFILES`. Reads/writes outside those profiles are rejected.
 - **Read-only mode**: If `NEXTDNS_READ_ONLY=true`, write operations are blocked.
@@ -30,7 +29,7 @@ document describes; endpoints whose body is an object have its properties
 flattened in beside the path parameters.
 
 Use `tools/list` — or `search_tools` under progressive disclosure — for the
-authoritative catalog; this page describes the families, not all 80 names.
+authoritative catalog; this page describes the families, not all 81 names.
 
 ## Tool families
 
@@ -98,14 +97,38 @@ well: a range that would return more points than that is refused with
 `invalid_argument` rather than answered with a truncated series.
 
 ### plotAnalytics
-Generate a PNG line chart for supported metrics. Use a profile with query
-history. Returns an MCP image or an error if no data is available.
+Generate an interactive chart for supported metrics. Use a profile with query
+history. Returns an interactive Prefab UI chart or an error if no data is available.
 
 A series is limited server-side to 2000 points (the requested range divided by
 `interval`) with `interval` between 60 and 86400 seconds. A request past either
 limit is rejected with an `invalid_argument` error rather than silently
 adjusted. `limit` must not exceed 500 and is rejected above that; the series
 endpoints consume no `limit`, so it is validated but never sent.
+
+### overviewDashboard
+Renders an interactive Prefab UI overview dashboard or individual widget card.
+Use `section` to select what to display:
+- `section="overview"` (default): Full overview layout mirroring the official NextDNS web interface (KPI cards, queries evolution chart, resolved & blocked domains).
+- `section="all"`: Complete dashboard with all analytics cards appended.
+- `section="kpi"`: Top 3 KPI metric summary cards.
+- `section="domains"`: Top resolved domains card.
+- `section="blocked_domains"`: Top blocked domains card.
+- `section="reasons"`: Block reasons breakdown.
+- `section="devices"`: Active client devices and models breakdown.
+- `section="ips"`: Client IP addresses and ISP/geo details.
+- `section="root_domains"`: Top aggregate root domains.
+- `section="countries"`: Traffic breakdown by country destination/origin.
+- `section="gafam"`: Google, Apple, Facebook, Amazon, Microsoft traffic share.
+- `section="security"`: Encrypted DNS and DNSSEC validation rates.
+
+Supports `view_type="auto" | "table" | "bar" | "pie"` and `domain_view="table" | "bar" | "pie"`.
+
+### Generative UI (Beta)
+Generative UI is an opt-in beta feature (disabled by default). When enabled by setting
+`NEXTDNS_GENERATIVE_UI=on` (or `true`, `1`, `yes`), the server mounts FastMCP's Generative UI provider
+(`generate_prefab_ui` and `search_prefab_components`), enabling host apps like OpenWebUI to
+dynamically author and render ad-hoc Prefab UI layouts in Pyodide.
 
 ### dohLookup
 `dohLookup(domain="example.com", profile_id="<profile id>", record_type="A")`

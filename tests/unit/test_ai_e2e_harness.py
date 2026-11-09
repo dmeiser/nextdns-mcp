@@ -432,7 +432,7 @@ class TestEnvAndRender:
         return rep
 
     def test_section_definitions_cover_checklist(self, h):
-        for key in ("profiles", "settings", "lists", "rewrites", "analytics", "doh", "logs", "plots"):
+        for key in ("profiles", "settings", "lists", "rewrites", "analytics", "doh", "logs", "plots", "dashboard"):
             assert key in h.SECTIONS
 
     def test_settings_categories_seven(self, h):
@@ -1193,7 +1193,7 @@ class TestStepEndpointExpectations:
         assert doh["result"] == ["example.com"]
         plot = steps["plots.status"].expect
         assert "endpoints" not in plot and plot["tool"] == "plotAnalytics"
-        assert plot["result"] == ["image"]
+        assert plot["result"] == ["AreaChart"]
 
     def test_an_operation_renamed_in_the_document_breaks_the_checklist_at_build_time(self, h, monkeypatch):
         """The alternative is a live run where one step silently matches nothing."""
@@ -3249,13 +3249,13 @@ class TestStepRangeCli:
                 "--start-step",
                 "logs.get",
                 "--end-step",
-                "88",
+                "99",
                 "--quiet",
                 "--report",
                 str(tmp_path / "r.jsonl"),
             ]
         )
-        assert seen == {"steps": "20-21,profiles.delete", "start": "logs.get", "end": "88"}
+        assert seen == {"steps": "20-21,profiles.delete", "start": "logs.get", "end": "99"}
 
 
 class TestFailureModeSummary:

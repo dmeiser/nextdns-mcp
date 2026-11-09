@@ -68,6 +68,7 @@ _TOOL_NAME_PREFIXES = (
     "download",
     "plot",
     "doh",
+    "overview",
 )
 
 
@@ -194,13 +195,15 @@ class TestDocumentedDownloadAndProfileContracts:
 
     def test_default_profile_docs_limit_it_to_the_composites(self):
         row = _table_row(_CONFIGURATION_DOC.read_text(encoding="utf-8"), "NEXTDNS_DEFAULT_PROFILE")
-        assert "dohLookup" in row[4] and "plotAnalytics" in row[4]
+        assert "overviewDashboard" in row[4] and "dohLookup" in row[4] and "plotAnalytics" in row[4]
         assert "every generated operation tool requires" in row[4]
 
         env_example = (_REPO_ROOT / ".env.example").read_text(encoding="utf-8")
-        assert "Default profile ID for dohLookup and plotAnalytics only" in env_example
+        assert "Default profile ID for overviewDashboard, dohLookup, and plotAnalytics only" in env_example
         assert "Generated operation tools always require an explicit profile_id" in env_example
 
         readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        assert "`NEXTDNS_DEFAULT_PROFILE` is used only by `dohLookup` and `plotAnalytics`" in readme
+        assert (
+            "`NEXTDNS_DEFAULT_PROFILE` is used only by `overviewDashboard`, `dohLookup`, and `plotAnalytics`" in readme
+        )
         assert "every generated operation tool requires an explicit `profile_id`" in readme

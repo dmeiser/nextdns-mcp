@@ -14,7 +14,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 |----------|------|---------|----------|-------------|
 | NEXTDNS_API_KEY | string | - | Yes | API key used for authenticated NextDNS API calls |
 | NEXTDNS_API_KEY_FILE | string (path) | - | No | Path to a file containing only the API key (e.g., Docker secret) |
-| NEXTDNS_DEFAULT_PROFILE | string | - | No | Default profile ID used only by `dohLookup` and `plotAnalytics` when they omit `profile_id`; every generated operation tool requires an explicit `profile_id` |
+| NEXTDNS_DEFAULT_PROFILE | string | - | No | Default profile ID used only by `overviewDashboard`, `dohLookup`, and `plotAnalytics` when they omit `profile_id`; every generated operation tool requires an explicit `profile_id` |
 | NEXTDNS_HTTP_TIMEOUT | number (seconds) | 30 | No | HTTP timeout for API and DoH requests. Captured at client construction; changing this setting requires a process restart |
 | NEXTDNS_DOWNLOAD_MAX_BYTES | number (bytes) | 1073741824 (1 GiB) | No | Hard cap on the total bytes a single `downloadLogs` may stream to disk; the download is aborted mid-stream when it would be exceeded |
 | NEXTDNS_READ_ONLY | bool (true/false/1/0/yes/no) | false | No | Disables all write operations when true |
@@ -22,6 +22,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 | NEXTDNS_WRITABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for writes; special value "ALL" allows writes to all profiles; empty/unset denies all writes; ignored if NEXTDNS_READ_ONLY=true |
 | NEXTDNS_PROTECTED_PROFILES | string | (unset) | No | Comma-separated profile IDs that are NEVER writable, overriding even `NEXTDNS_WRITABLE_PROFILES=ALL`; reads are unaffected — the denylist is writes-only by design, and a profile created by `createProfile` is not covered by it. Intended for data-bearing/production profiles a test agent must not modify or delete. See "Protected profiles" in safety.md |
 | NEXTDNS_TOOL_SEARCH | string (off/bm25) | bm25 | No | Progressive tool disclosure via FastMCP's BM25 search transform. `bm25` (the default) replaces `tools/list` with the synthetic `search_tools` + `call_tool` pair: the listing shows only those two, and the full catalog is read by searching it (the real tools stay callable either way, they are only hidden from the listing); `off` advertises every published tool in the listing. An invalid value fails startup with `ConfigurationError` |
+| NEXTDNS_GENERATIVE_UI | bool (true/false/1/0/on/off/yes/no) | off | No | Opt-in beta feature: mounts FastMCP's Generative UI provider (`generate_prefab_ui` and `search_prefab_components`) for dynamic Prefab UI authoring in Pyodide. Disabled by default |
 | NEXTDNS_CALL_LOG | string (path) | (unset) | No | Appends one JSON line per executed tool call to the named file: the tool name, the endpoint it executed, the `profile_id`, the arguments (bounded to ~600 characters) and up to ~2000 characters of what the call answered. The file is created mode `0600`. A harness/debug facility scoped to one run — nothing rotates or truncates it, so the operator bounds it. See "Call log" in safety.md |
 | MCP_TRANSPORT | string | stdio | No | `stdio` (default) or `http` (streamable-HTTP). Case-insensitive and trimmed. Any other value fails startup with `ConfigurationError`. See "HTTP Transport" in the README |
 | MCP_HOST | string | 127.0.0.1 | No | Bind interface for HTTP transport. Loopback-only by default; a non-loopback value is an explicit opt-in that requires reverse-proxy/auth protection |
@@ -58,7 +59,7 @@ Notes
 
 The server publishes one tool per operation of the bundled OpenAPI document (`src/nextdns_mcp/nextdns-openapi.yaml`): 78 of the document's 79 operations, each named for its own `operationId` (`getAllowlist`, `addToDenylist`, `updateBlockPageSettings`) and taking that endpoint's own arguments — `profile_id` plus the path, query and body fields the endpoint documents, with an endpoint whose body is a JSON array taking the array as one `body` argument the document describes. There is no `operation` argument: the name says what the call does. Because each tool is bound to exactly one endpoint, the call log records the method and path template a call hit and whether it was a write, taken from the HTTP method rather than from an operation name. `streamLogs` — the live query-log Server-Sent Events stream — is the one spec operation that is not published: an SSE stream cannot answer a request/response tool call.
 
-Two tools do something no endpoint describes and are registered by hand beside the generated ones: `dohLookup` resolves a name over DNS-over-HTTPS, and `plotAnalytics` renders a chart from analytics data.
+Three tools do something no endpoint describes and are registered by hand beside the generated ones: `overviewDashboard` renders interactive Prefab UI dashboards and specialized widgets, `dohLookup` resolves a name over DNS-over-HTTPS, and `plotAnalytics` renders an interactive area chart from analytics data.
 
 Everything the server says about its own catalog comes from the document it generated the catalog from:
 
@@ -66,7 +67,7 @@ Everything the server says about its own catalog comes from the document it gene
 - Error hints name a call the caller can actually make: the hint that points at profile discovery reads `listProfiles()`.
 - Each tool's description is the document's own description of the operation, so what a call accepts is stated where the caller finds the tool.
 
-`NEXTDNS_TOOL_SEARCH` composes with the catalog: with progressive disclosure on — the default, `bm25` — `tools/list` exposes only `search_tools` + `call_tool` and the search index covers the full operation set, so the catalog is read by searching it; `NEXTDNS_TOOL_SEARCH=off` restores the full listing. The instructions list the tool names only when the catalog is small enough for that to be cheaper than searching; the 80-tool catalog points at `search_tools` and leaves the names to `tools/list`.
+`NEXTDNS_TOOL_SEARCH` composes with the catalog: with progressive disclosure on — the default, `bm25` — `tools/list` exposes only `search_tools` + `call_tool` and the search index covers the full operation set, so the catalog is read by searching it; `NEXTDNS_TOOL_SEARCH=off` restores the full listing. The instructions list the tool names only when the catalog is small enough for that to be cheaper than searching; the 81-tool catalog points at `search_tools` and leaves the names to `tools/list`.
 
 ## Examples
 

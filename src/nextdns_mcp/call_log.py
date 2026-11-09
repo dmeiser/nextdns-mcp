@@ -16,9 +16,9 @@ one line::
 
 Every tool here is bound to an endpoint, so the record names it: the tool name
 says what the caller asked for, the endpoint says what the server sent upstream,
-and the HTTP method is what makes a call a write. The two operations this server
-performs itself (``plotAnalytics``, ``dohLookup``) have no endpoint and record as
-reads.
+and the HTTP method is what makes a call a write. The composite visual and lookup
+operations this server performs itself (`overviewDashboard`, `plotAnalytics`, `dohLookup`, …)
+have no endpoint and record as reads.
 
 The search transform's synthetic tools are not recorded: the wrapper re-enters
 the middleware chain with the real tool name, so recording ``call_tool`` as well
@@ -215,8 +215,8 @@ class CallLogMiddleware(Middleware):
         # Whether the call changed state. A generated tool is bound to an
         # endpoint, so the HTTP method decides it: `POST
         # /profiles/{profile_id}/rewrites` changed state whatever the tool
-        # was named. The two local operations (plotAnalytics, dohLookup) have
-        # no endpoint and answer questions, so they are reads.
+        # was named. The local composite operations (plotAnalytics, dashboard tools, dohLookup)
+        # have no endpoint and answer questions, so they are reads.
         write = is_write_operation(endpoint[0]) if endpoint else False
         row = {
             "ts": time.time(),
@@ -332,11 +332,38 @@ def _walk_identities(node: Any, out: list[dict[str, str]], seen: set[str]) -> No
     _walk_children(node, out, seen)
 
 
+def _walk_component_dict(node: dict[str, Any], types: set[str]) -> None:
+    """Extract component type from dict node and recurse."""
+    component_type = node.get("type")
+    if isinstance(component_type, str):
+        types.add(component_type)
+    for value in node.values():
+        _walk_component_types(value, types)
+
+
+def _walk_component_types(node: Any, types: set[str]) -> None:
+    """Collect all component `type` values in a Prefab UI view tree."""
+    if isinstance(node, dict):
+        _walk_component_dict(node, types)
+    elif isinstance(node, list):
+        for item in node:
+            _walk_component_types(item, types)
+
+
 def _created_id_of(data: Any) -> str:
     """The id a create answer carries, bounded; empty when it does not."""
     if isinstance(data, dict) and isinstance(data.get("id"), str):
         return data["id"][:EVIDENCE_MAX_ID_CHARS]
     return ""
+
+
+def _prefab_evidence(structured: dict[str, Any]) -> dict[str, Any]:
+    """Component facts lifted out of a Prefab UI document."""
+    if "$prefab" not in structured:
+        return {}
+    types: set[str] = set()
+    _walk_component_types(structured.get("view"), types)
+    return {"components": sorted(types)} if types else {}
 
 
 def _result_evidence(result: Any, write: bool) -> dict[str, Any]:
@@ -354,8 +381,8 @@ def _result_evidence(result: Any, write: bool) -> dict[str, Any]:
     structured = getattr(result, "structured_content", None)
     if not isinstance(structured, dict):
         return {}
+    evidence = _prefab_evidence(structured)
     data = structured.get("data")
-    evidence: dict[str, Any] = {}
     if write:
         created = _created_id_of(data)
         if created:

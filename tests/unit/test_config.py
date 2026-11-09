@@ -149,3 +149,27 @@ class TestEnvironmentConfiguration:
         from nextdns_mcp import config
 
         assert config.NEXTDNS_BASE_URL == "https://api.nextdns.io"
+
+
+class TestGenerativeUIConfig:
+    """Test is_generative_ui_enabled() function."""
+
+    def test_default_is_disabled(self, monkeypatch):
+        monkeypatch.delenv("NEXTDNS_GENERATIVE_UI", raising=False)
+        from nextdns_mcp.config import is_generative_ui_enabled
+
+        assert is_generative_ui_enabled() is False
+
+    def test_disabled_values(self, monkeypatch):
+        from nextdns_mcp.config import is_generative_ui_enabled
+
+        for val in ("false", "0", "off", "no", "FALSE", "Off"):
+            monkeypatch.setenv("NEXTDNS_GENERATIVE_UI", val)
+            assert is_generative_ui_enabled() is False
+
+    def test_enabled_values(self, monkeypatch):
+        from nextdns_mcp.config import is_generative_ui_enabled
+
+        for val in ("true", "1", "on", "yes", "ON"):
+            monkeypatch.setenv("NEXTDNS_GENERATIVE_UI", val)
+            assert is_generative_ui_enabled() is True

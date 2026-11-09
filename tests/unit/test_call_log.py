@@ -549,3 +549,24 @@ class TestEvidenceColumn:
             {"data": {"results": [{"id": "nest-1", "name": "nested-entry"}]}},
         )
         assert row["evidence"]["ids"] == [{"id": "nest-1", "name": "nested-entry"}]
+
+    def test_prefab_evidence_extracts_component_types(self):
+        prefab_app = {
+            "$prefab": {"version": "0.3"},
+            "view": {
+                "type": "Div",
+                "children": [
+                    {"type": "Heading", "content": "Dashboard"},
+                    {"type": "AreaChart", "data": []},
+                    {"children": [{"type": "Metric", "label": "Q", "value": "1"}]},
+                ],
+            },
+        }
+        row = self._row("plotAnalytics", {}, True, prefab_app)
+        assert "components" in row["evidence"]
+        assert row["evidence"]["components"] == ["AreaChart", "Div", "Heading", "Metric"]
+
+    def test_prefab_evidence_empty_when_no_components(self):
+        prefab_app = {"$prefab": {"version": "0.3"}, "view": {}}
+        row = self._row("plotAnalytics", {}, True, prefab_app)
+        assert "components" not in row.get("evidence", {})

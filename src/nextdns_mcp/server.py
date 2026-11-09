@@ -20,6 +20,7 @@ from .config import (
     ConfigurationError,
     configure_logging,
     get_http_timeout,
+    is_generative_ui_enabled,
     validate_configuration,
 )
 from .openapi import create_mcp_server
@@ -30,6 +31,7 @@ from .spec_tools import (
     spec_routes,
     spec_tool_names,
 )
+from .tools.dashboard import overviewDashboard
 from .tools.doh import dohLookup
 from .tools.plots import plotAnalytics
 
@@ -37,12 +39,14 @@ logger = logging.getLogger(__name__)
 
 # Operations the server performs itself instead of calling one API endpoint for:
 # `dohLookup` resolves a name through a DNS-over-HTTPS resolver, and `plotAnalytics`
-# renders a chart from an analytics query. Neither has an endpoint for the spec to
-# describe, so they are the two hand-written tools published beside the generated
-# ones — and a caller would otherwise have no way to know they exist.
-_COMPOSITE_TOOLS = (plotAnalytics, dohLookup)
+# alongside `overviewDashboard` render interactive Prefab UI views from analytics queries.
+_COMPOSITE_TOOLS = (
+    plotAnalytics,
+    dohLookup,
+    overviewDashboard,
+)
 
-# Neither composite tool mutates anything: dohLookup answers a DNS question and
+# None of the composite tools mutate anything: dohLookup answers a DNS question and
 # plotAnalytics renders a chart from analytics already collected. The generated
 # SpecApiTool derives these hints from the endpoint method; the composites have
 # no endpoint, so the hints are stated here — without them a caller scanning for
@@ -75,6 +79,9 @@ def _with_error_flag(tool_fn: Any) -> Any:
 _mcp_server: FastMCP | None = None
 
 
+_GENERATIVE_UI_TOOLS = ("generate_prefab_ui", "search_prefab_components")
+
+
 def published_tool_names() -> list[str]:
     """Every tool name this server publishes, before any of them is registered.
 
@@ -82,7 +89,10 @@ def published_tool_names() -> list[str]:
     the server is constructed — before the tools exist — so the names have to be
     derivable without registering anything.
     """
-    return [*spec_tool_names(), *(tool.__name__ for tool in _COMPOSITE_TOOLS)]
+    names = [*spec_tool_names(), *(tool.__name__ for tool in _COMPOSITE_TOOLS)]
+    if is_generative_ui_enabled():
+        names.extend(_GENERATIVE_UI_TOOLS)
+    return names
 
 
 def build_mcp_server() -> FastMCP:
@@ -110,10 +120,16 @@ def build_mcp_server() -> FastMCP:
         # description, so the accepted values and the worked example further down
         # would never reach a caller — and for these two tools that is exactly the
         # part a caller needs (a chart's interval range, a lookup's record types).
+        app_config = True if tool.__name__ != "dohLookup" else None
         server.tool(
             description=inspect.getdoc(tool) or "",
             annotations=_COMPOSITE_ANNOTATIONS,
+            app=app_config,
         )(_with_error_flag(tool))
+    if is_generative_ui_enabled():
+        from .generative import NextDNSGenerativeUI
+
+        server.add_provider(NextDNSGenerativeUI())
     return server
 
 

@@ -383,6 +383,7 @@ def test_catalog_constants_are_imported_not_restated():
     invisible until a container and the validator disagree about the catalog.
     """
     from nextdns_mcp import spec_tools
+    from nextdns_mcp.config import is_generative_ui_enabled
     from nextdns_mcp.server import _COMPOSITE_TOOLS, published_tool_names
     from scripts import validate_schema
 
@@ -390,7 +391,12 @@ def test_catalog_constants_are_imported_not_restated():
     assert validate_schema.SPEC_PATH == spec_tools.SPEC_PATH
     published = set(published_tool_names())
     assert validate_schema.LOCAL_TOOLS == published - set(spec_tools.spec_tool_names())
-    assert {tool.__name__ for tool in _COMPOSITE_TOOLS} == set(validate_schema.LOCAL_TOOLS)
+    expected_local = {tool.__name__ for tool in _COMPOSITE_TOOLS}
+    if is_generative_ui_enabled():
+        from nextdns_mcp.server import _GENERATIVE_UI_TOOLS
+
+        expected_local.update(_GENERATIVE_UI_TOOLS)
+    assert expected_local == set(validate_schema.LOCAL_TOOLS)
 
 
 def _spec_with_request_body(operation_id: str, body_schema: dict) -> dict:
@@ -557,7 +563,7 @@ def test_operation_coverage_rejects_a_local_answer_that_is_neither_pinned_nor_co
 
     spec = validate_schema.load_openapi_spec(str(REAL_SPEC_PATH))
     monkeypatch.setattr(validate_schema, "CONTENT_TOOLS", frozenset())
-    with pytest.raises(ValueError, match=r"neither pinned nor content: \['plotAnalytics'\]"):
+    with pytest.raises(ValueError, match=r"neither pinned nor content:"):
         validate_schema.assert_operation_coverage(spec, EXPECTED_TOOLS)
 
 

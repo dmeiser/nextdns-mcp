@@ -1,13 +1,12 @@
 """Tests for the analytics plotting helpers and tool wrappers."""
 
 import json
-import struct
-import threading
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from fastmcp.tools.base import ToolResult
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server, spec_tools
@@ -23,33 +22,15 @@ def _make_response(json_data):
     return response
 
 
-def _png_is_complete(png: bytes) -> bool:
-    """Return True if the PNG bytes end with a proper IEND chunk."""
-    return png.endswith(b"IEND\xae\x42\x60\x82")
-
-
-def _png_image_size(png: bytes) -> tuple[int, int]:
-    """Return the (width, height) encoded in a PNG's IHDR chunk."""
-    assert png.startswith(b"\x89PNG")
-    length, chunk_type = struct.unpack(">I4s", png[8:16])
-    assert chunk_type == b"IHDR" and length == 13
-    width, height = struct.unpack(">II", png[16:24])
-    return width, height
-
-
-class TestNoEagerMatplotlibImport:
-    """Regression tests (issue #165): importing the server must not import matplotlib."""
+class TestNoMatplotlibDependency:
+    """Regression tests (issue #165): matplotlib is replaced by Prefab and not imported."""
 
     def test_importing_server_does_not_import_matplotlib(self):
         # Importing the server (and thus every tool module, including the plot
-        # tool module) in a fresh interpreter must not pull matplotlib in:
-        # its ~2s cold import should only be paid by the plot tool path.
+        # tool module) in a fresh interpreter must not pull matplotlib in.
         import subprocess
         import sys
 
-        # The child interpreter imports the server and the tools package (which
-        # pulls in the plot tool module) and asserts matplotlib never made it
-        # into sys.modules: the ~2s matplotlib import is only paid on the plot path.
         code = "import sys\n"
         code += "import nextdns_mcp.server\n"
         code += "import nextdns_mcp.tools\n"
@@ -58,19 +39,6 @@ class TestNoEagerMatplotlibImport:
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "ok"
-
-    def test_plot_path_still_renders_headless(self):
-        # The lazy plot path must still render a complete PNG using the Agg
-        # backend, so headless servers keep working after making the import lazy.
-        import matplotlib
-
-        times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
-        series_data = [{"name": "blocked", "queries": [1, 2]}]
-
-        png = plots_module._render_series_chart("status", times, series_data)
-        assert png.startswith(b"\x89PNG")
-        assert _png_is_complete(png)
-        assert matplotlib.get_backend().lower() == "agg"
 
 
 class TestExtractSeriesLabel:
@@ -105,6 +73,16 @@ class TestExtractSeriesLabel:
 
     def test_fallback_index_label(self):
         assert plots_module._extract_series_label({"queries": []}, 3) == "series_3"
+
+
+class TestSeriesColor:
+    """Tests for series color determination."""
+
+    def test_series_color(self):
+        assert plots_module._series_color({"status": "blocked"}) == "#ef4444"
+        assert plots_module._series_color({"status": "default"}) == "#3b82f6"
+        assert plots_module._series_color({"name": "allowed"}) == "#3b82f6"
+        assert plots_module._series_color({"name": "something_else"}) is None
 
 
 class TestParseSeriesTimestamp:
@@ -168,139 +146,50 @@ class TestParseSeriesTimestamp:
             plots_module._parse_series_timestamp("not-a-timestamp")
 
 
-class TestRenderSeriesChart:
-    """Tests for _render_series_chart."""
+class TestBuildSeriesChart:
+    """Tests for Prefab chart construction helpers."""
 
-    def test_renders_png_bytes(self):
-        times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
+    def test_build_chart_point_validates_and_aligns(self):
         series_data = [
             {"name": "blocked", "queries": [10, 20]},
-            {"name": "allowed", "queries": [5, 8]},
+            {"name": "allowed", "queries": [5]},
         ]
-        png = plots_module._render_series_chart("status", times, series_data)
-        assert isinstance(png, bytes)
-        assert png.startswith(b"\x89PNG")
+        point0 = plots_module._build_chart_point("2024-01-15T10:00:00Z", 0, series_data)
+        assert point0 == {"time": "2024-01-15T10:00:00Z", "series_0": 10, "series_1": 5}
 
-    def test_renders_with_default_label(self):
-        times = ["2024-01-15T10:00:00Z"]
-        series_data = [{"queries": [1]}]
-        png = plots_module._render_series_chart("reasons", times, series_data)
-        assert isinstance(png, bytes)
-        assert png.startswith(b"\x89PNG")
+        # Index beyond series_1 length defaults to 0
+        point1 = plots_module._build_chart_point("2024-01-15T11:00:00Z", 1, series_data)
+        assert point1 == {"time": "2024-01-15T11:00:00Z", "series_0": 20, "series_1": 0}
 
-    def test_renders_complete_png_with_labels(self):
-        times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
-        series_data = [
-            {"name": "blocked", "queries": [10, 20]},
-            {"name": "allowed", "queries": [5, 8]},
-        ]
-        png = plots_module._render_series_chart("status", times, series_data)
-        assert _png_is_complete(png)
-        width, height = _png_image_size(png)
-        assert width > 0 and height > 0
-
-
-class TestRenderSeriesChartFigureSafety:
-    """Regression tests: rendering exceptions must not leak figure state."""
-
-    def _figure_registry_size(self) -> int:
-        # Figures registered with pyplot's global state. Rendering uses the
-        # object-oriented Figure API, so this registry must stay unchanged
-        # whether a render succeeds or raises.
-        import matplotlib
-
-        return len(matplotlib._pylab_helpers.Gcf.figs)
-
-    def test_render_exception_after_figure_creation_does_not_leak(self, monkeypatch):
-        # Force an exception inside the try block, after the Figure has been
-        # created and the axes added, so only the finally fig.clear() can
-        # keep global figure state from leaking. Patch the plots module's own
-        # global, which is where _render_series_chart resolves the name.
-        import nextdns_mcp.tools.plots as plots_module
-
-        def _raise(series, index):
-            raise RuntimeError("boom")
-
-        monkeypatch.setattr(plots_module, "_extract_series_label", _raise)
-        times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
-        series_data = [{"name": "blocked", "queries": [1, 2]}]
-
-        before = self._figure_registry_size()
-        with pytest.raises(RuntimeError, match="boom"):
-            plots_module._render_series_chart("status", times, series_data)
-        after = self._figure_registry_size()
-        assert after == before
-
-    def test_failed_render_does_not_register_figures(self):
-        # Corrupt a timestamp so the render raises before figure creation.
-        times = ["not-a-timestamp", "2024-01-15T11:00:00Z"]
-        series_data = [{"name": "blocked", "queries": [1, 2]}]
-
-        before = self._figure_registry_size()
+    def test_build_chart_point_raises_for_invalid_timestamp(self):
         with pytest.raises(ValueError):
-            plots_module._render_series_chart("status", times, series_data)
-        after = self._figure_registry_size()
-        assert after == before
+            plots_module._build_chart_point("bad-timestamp", 0, [{"queries": [1]}])
 
-    def test_successful_render_does_not_register_figures(self):
-        before = self._figure_registry_size()
+    def test_build_chart_series_extracts_labels(self):
+        series_data = [
+            {"name": "blocked", "queries": [10]},
+            {"status": "allowed", "queries": [5]},
+            {"queries": [1]},
+        ]
+        series = plots_module._build_chart_series(series_data)
+        assert len(series) == 3
+        assert series[0].data_key == "series_0" and series[0].label == "blocked"
+        assert series[1].data_key == "series_1" and series[1].label == "allowed"
+        assert series[2].data_key == "series_2" and series[2].label == "series_2"
+
+    def test_build_series_chart_returns_tool_result_with_prefab(self):
         times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
-        plots_module._render_series_chart("status", times, [{"name": "blocked", "queries": [1, 2]}])
-        after = self._figure_registry_size()
-        assert after == before
-
-
-class TestConcurrentRenderIndependence:
-    """Concurrent renders (as under asyncio.to_thread) must not corrupt each other."""
-
-    def test_concurrent_renders_are_independent(self):
-        n_threads = 8
-        iterations = 5
-        errors: list[str] = []
-
-        def worker(worker_index: int) -> None:
-            try:
-                for i in range(iterations):
-                    times = [f"2024-01-15T{10 + i}:00:00Z", f"2024-01-15T{11 + i}:00:00Z"]
-                    series_data = [
-                        {
-                            "name": f"series-{worker_index}",
-                            "queries": [worker_index * 10 + i, worker_index * 10 + i + 1],
-                        },
-                    ]
-                    png = plots_module._render_series_chart(f"metric-{worker_index}", times, series_data)
-                    if not png.startswith(b"\x89PNG") or not _png_is_complete(png):
-                        errors.append(f"worker {worker_index}: corrupt PNG")
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"worker {worker_index}: {e!r}")
-
-        threads = [threading.Thread(target=worker, args=(idx,)) for idx in range(n_threads)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert not errors
-
-    def test_no_global_figures_accumulate_under_concurrency(self):
-        import matplotlib
-
-        def worker(worker_index: int) -> None:
-            for i in range(3):
-                times = [f"2024-01-15T{10 + i}:00:00Z", f"2024-01-15T{11 + i}:00:00Z"]
-                plots_module._render_series_chart("status", times, [{"queries": [1, 2]}])
-
-        def count() -> int:
-            return len(matplotlib._pylab_helpers.Gcf.figs)
-
-        before = count()
-        threads = [threading.Thread(target=worker, args=(idx,)) for idx in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        after = count()
-        assert after == before
+        series_data = [
+            {"name": "blocked", "queries": [10, 20]},
+            {"name": "allowed", "queries": [5, 8]},
+        ]
+        result = plots_module._build_series_chart("status", times, series_data)
+        assert isinstance(result, ToolResult)
+        assert len(result.content) == 1
+        assert "NextDNS Analytics: status (43 total queries across 2 intervals)" == result.content[0].text
+        assert isinstance(result.structured_content, dict)
+        assert "$prefab" in result.structured_content
+        assert "view" in result.structured_content
 
 
 @pytest.fixture
@@ -740,18 +629,17 @@ class TestPlotAnalyticsSeriesImpl:
         assert "Error rendering chart" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_success_returns_image_content(self, clean_env, mock_api_client, sample_series_payload, monkeypatch):
+    async def test_success_returns_chart_result(self, clean_env, mock_api_client, sample_series_payload, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         mock_api_client.stream_state["body"] = json.dumps(sample_series_payload).encode()
 
         result = await plots_module._plot_analytics_series_impl("status")
 
-        assert hasattr(result, "type") or isinstance(result, dict)
-        if isinstance(result, dict):
-            # FastMCP Image.to_image_content may return a dict-like ImageContent on some versions
-            assert result.get("type") == "image"
-        else:
-            assert result.type == "image"
+        assert isinstance(result, ToolResult)
+        assert "NextDNS Analytics: status" in result.content[0].text
+        assert isinstance(result.structured_content, dict)
+        assert "$prefab" in result.structured_content
+        assert "view" in result.structured_content
 
 
 class TestPlotAnalyticsToolWrapper:
@@ -776,24 +664,9 @@ class TestPlotAnalyticsEndToEndRendering:
     """End-to-end coverage of the public ``plotAnalytics`` tool (issue #186).
 
     These drive the tool the way a user/agent does: the NextDNS API returns a
-    series payload, the tool parses the timestamps and returns a rendered PNG
-    chart. The assertion is on the user-visible result - an ``image`` result
-    whose bytes decode to a complete PNG - not on any internal detail.
+    series payload, the tool parses the timestamps and returns an interactive
+    Prefab chart in a ToolResult.
     """
-
-    @staticmethod
-    def _decode_png(result) -> bytes:
-        import base64
-
-        content = result
-        if isinstance(content, dict):
-            assert content.get("type") == "image"
-            data = content["data"]
-        else:
-            assert content.type == "image"
-            data = content.data
-        assert isinstance(data, str)
-        return base64.b64decode(data)
 
     @pytest.mark.asyncio
     async def test_renders_chart_for_non_microsecond_timestamps(self, clean_env, mock_api_client, monkeypatch):
@@ -821,11 +694,11 @@ class TestPlotAnalyticsEndToEndRendering:
 
         result = await server.plotAnalytics("status")
 
-        png = self._decode_png(result)
-        assert png.startswith(b"\x89PNG")
-        assert _png_is_complete(png)
-        width, height = _png_image_size(png)
-        assert width > 0 and height > 0
+        assert isinstance(result, ToolResult)
+        assert "NextDNS Analytics: status (400 total queries across 4 intervals)" == result.content[0].text
+        assert isinstance(result.structured_content, dict)
+        assert "$prefab" in result.structured_content
+        assert "view" in result.structured_content
 
     @pytest.mark.asyncio
     async def test_unparseable_timestamp_returns_error_not_exception(self, clean_env, mock_api_client, monkeypatch):
