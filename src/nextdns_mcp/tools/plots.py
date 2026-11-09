@@ -595,14 +595,7 @@ async def plotAnalytics(
     partials: str = "none",
     limit: int = 10,
 ) -> dict[str, Any] | ToolResult:
-    """Generate an interactive visual chart, graph, plot, or dashboard for NextDNS analytics metrics.
-
-    Use this tool ONLY when asked to plot, graph, chart, visualize, or display visual query trends or plots.
-    Do NOT call this tool when asked to query, retrieve, or inspect raw time-series data or statistics:
-    use the respective getAnalytics*Series API tools instead.
-    Avoid writing custom Python code to draw charts: this tool directly queries the
-    analytics time-series API and renders an interactive visual Prefab UI chart with tooltips, legend,
-    and summary metrics.
+    """Generate an interactive area chart for a NextDNS analytics time-series metric.
 
     Use this to visualize query trends over time. The profile should have recent
     query history; otherwise the tool returns an error explaining that no data is
