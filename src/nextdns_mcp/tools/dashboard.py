@@ -968,7 +968,7 @@ _WIDGET_DISPATCH: dict[str, Any] = {
     ),
     "reasons": lambda p, f, t, lim, v: _reasons_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
     "devices": lambda p, f, t, lim, v: _device_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
-    "ips": lambda p, f, t, lim, v: _ip_analytics_impl(p, from_time=f, to_time=t),
+    "ips": lambda p, f, t, lim, v: _ip_analytics_impl(p, from_time=f, to_time=t, limit=lim),
     "root_domains": lambda p, f, t, lim, v: _root_domain_analytics_impl(
         p, from_time=f, to_time=t, limit=lim, view_type=v
     ),
@@ -980,7 +980,7 @@ _WIDGET_DISPATCH: dict[str, Any] = {
 
 def _resolve_domain_view(
     domain_view: Literal["table", "bar", "pie"],
-    view_type: str,
+    view_type: Literal["auto", "bar", "table", "pie"],
 ) -> Literal["table", "bar", "pie"]:
     """Resolve active domain view format."""
     if view_type in ("table", "bar", "pie"):
@@ -1028,8 +1028,9 @@ async def _overview_dashboard_impl(
         return await _WIDGET_DISPATCH[section](profile_id, from_time, to_time, limit, view_type)
 
     pid, err = await _resolve_profile(profile_id)
-    if err or pid is None:
+    if err is not None:
         return err
+    assert pid is not None
 
     eff_view = _resolve_domain_view(domain_view, view_type)
     return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
