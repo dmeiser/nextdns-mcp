@@ -2,7 +2,7 @@
 
 The server publishes one tool per operation of the bundled OpenAPI document
 ([nextdns-openapi.yaml](../src/nextdns_mcp/nextdns-openapi.yaml)), plus
-composite visual tools (`overviewDashboard`, specialized widgets, `plotAnalytics`)
+composite visual tools (`overviewDashboard`, `plotAnalytics`)
 and DNS lookup (`dohLookup`). A tool is named for the operation it performs
 and takes that endpoint's own arguments, so the name says what the call does.
 
@@ -29,7 +29,7 @@ document describes; endpoints whose body is an object have its properties
 flattened in beside the path parameters.
 
 Use `tools/list` — or `search_tools` under progressive disclosure — for the
-authoritative catalog; this page describes the families, not all 80 names.
+authoritative catalog; this page describes the families, not all 81 names.
 
 ## Tool families
 

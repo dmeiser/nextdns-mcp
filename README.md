@@ -4,13 +4,13 @@ A Model Context Protocol (MCP) server for the NextDNS API, built with FastMCP an
 
 ## Overview
 
-This project provides an MCP server that exposes NextDNS API operations as tools that can be used by AI assistants and other MCP clients. The bundled OpenAPI document is the tool contract: the server generates one tool per operation in it, named for the operation itself (`getAllowlist`, `addToDenylist`, `getAnalyticsDevices`) and taking that endpoint's own arguments, plus the two operations no endpoint describes — `plotAnalytics` and `dohLookup`.
+This project provides an MCP server that exposes NextDNS API operations as tools that can be used by AI assistants and other MCP clients. The bundled OpenAPI document is the tool contract: the server generates one tool per operation in it, named for the operation itself (`getAllowlist`, `addToDenylist`, `getAnalyticsDevices`) and taking that endpoint's own arguments, plus the three composite tools — `overviewDashboard`, `plotAnalytics`, and `dohLookup`.
 
 By default the server discloses those tools progressively: `tools/list` returns only
 the synthetic `search_tools` + `call_tool` pair, and a client discovers the catalog by
 searching it and calls what the search returned. The operation tools stay callable
 either way — the listing is what changes, not the access. Set
-`NEXTDNS_TOOL_SEARCH=off` to advertise all 80 tools in `tools/list` instead (see
+`NEXTDNS_TOOL_SEARCH=off` to advertise all 81 tools in `tools/list` instead (see
 [configuration](docs/configuration.md)).
 
 ## Features
@@ -19,10 +19,11 @@ either way — the listing is what changes, not the access. Set
 - **Progressive tool disclosure** — by default `tools/list` exposes only `search_tools` + `call_tool` and the model finds the operation tools by searching; `NEXTDNS_TOOL_SEARCH=off` advertises the full catalog
 - **Profile Management**: Full CRUD operations - create, read, update, and delete profiles
 - **Profile Access Control**: Fine-grained read/write restrictions per profile, read-only mode, and a protected-profile denylist that refuses writes to named profiles even under `ALL`
+- **Interactive Dashboards & Analytics**: Native Prefab UI dashboards (`overviewDashboard`), interactive area charts (`plotAnalytics`), and comprehensive DNS query analytics and statistics
+- **Generative UI (Beta)**: Optional runtime rendering provider (`NEXTDNS_GENERATIVE_UI=on`) allowing host clients to dynamically author ad-hoc Prefab UI layouts
 - **DNS-over-HTTPS Testing**: Perform DoH lookups to test DNS resolution through profiles
 - **Settings Configuration**: Comprehensive settings management including logs, block page, and performance
 - **Logs**: Query log retrieval, download, and clearing
-- **Analytics**: Comprehensive DNS query analytics and statistics, including time-series and plotting
 - **Content Lists**: Manage denylist, allowlist, privacy blocklists, native tracking, security TLDs, and parental control
 - **Security**: Complete security settings and TLD blocking configuration
 - **Privacy**: Privacy settings, blocklists, and native tracking protection management
@@ -75,7 +76,7 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
 2. Edit `.env` and set your NextDNS API key:
    ```env
    NEXTDNS_API_KEY=your_api_key_here
-   NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional; dohLookup and plotAnalytics only
+   NEXTDNS_DEFAULT_PROFILE=your_profile_id  # Optional; overviewDashboard, dohLookup, and plotAnalytics only
 
    # Optional: Profile access control (see docs/configuration.md).
    # There is no separate test-profile variable for writes: list a dedicated
@@ -86,7 +87,7 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
    # NEXTDNS_READ_ONLY=false
    ```
 
-   `NEXTDNS_DEFAULT_PROFILE` is used only by `dohLookup` and `plotAnalytics`;
+   `NEXTDNS_DEFAULT_PROFILE` is used only by `overviewDashboard`, `dohLookup`, and `plotAnalytics`;
    every generated operation tool requires an explicit `profile_id`.
 
 ### Running with Docker
