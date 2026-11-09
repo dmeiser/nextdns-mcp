@@ -706,6 +706,30 @@ async def _append_extra_dashboard_sections(
             _build_security_card(e_d, sec_d)
 
 
+def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
+    """Format top items as 'name (count)' list."""
+    formatted = [f"{name} ({q:,})" for name, q in items[:limit]]
+    return ", ".join(formatted)
+
+
+def _format_items_summary(title: str, noun: str, items: list[tuple[str, int]], total: int) -> str:
+    """Format compact factual summary for a list-based visual card."""
+    count = len(items)
+    top_str = _format_top_items(items)
+    if top_str:
+        return f"[Rendered {title} ({count} {noun}, {total:,} queries): {top_str}]"
+    return f"[Rendered {title} ({count} {noun}, {total:,} queries)]"
+
+
+def _format_gafam_summary(chart_data: list[dict[str, Any]], total: int) -> str:
+    """Format GAFAM dominance summary."""
+    items = [(row["label"], row["queries"]) for row in chart_data]
+    top_str = _format_top_items(items)
+    if top_str:
+        return f"[Rendered GAFAM Dominance ({total:,} queries): {top_str}]"
+    return f"[Rendered GAFAM Dominance ({total:,} queries)]"
+
+
 async def _gafam_analytics_impl(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
@@ -719,11 +743,9 @@ async def _gafam_analytics_impl(
     if err:
         return err
     assert data is not None
-    total = sum(_item_queries(item) for item in data)
-    summary = (
-        f"[Rendered GAFAM Dominance ({total:,} queries). "
-        "The visual component is already displayed above. Do not repeat or resummarize the numbers.]"
-    )
+    chart_data, _ = _gafam_rows(data)
+    total = sum(r["queries"] for r in chart_data)
+    summary = _format_gafam_summary(chart_data, total)
     return _wrap_card_result(_build_gafam_card(data, view_type=view_type), summary)
 
 
@@ -746,10 +768,15 @@ async def _security_analytics_impl(
     if first_err:
         return first_err
 
-    card = _build_security_card(_payload_data(enc_p), _payload_data(sec_p))
+    enc_data = _payload_data(enc_p)
+    sec_data = _payload_data(sec_p)
+    enc_val, enc_total, enc_pct = _calc_rate(enc_data, "encrypted")
+    dnssec_val, dnssec_total, dnssec_pct = _calc_rate(sec_data, "validated")
+
+    card = _build_security_card(enc_data, sec_data)
     summary = (
-        "[Rendered Security Analytics: Encrypted DNS and DNSSEC rates are displayed above. "
-        "Do not repeat or resummarize the numbers in your text reply.]"
+        f"[Rendered Security Analytics: Encrypted DNS {enc_pct:.2f}% ({enc_val:,}/{enc_total:,}), "
+        f"DNSSEC {dnssec_pct:.2f}% ({dnssec_val:,}/{dnssec_total:,})]"
     )
     return _wrap_card_result(card, summary)
 
@@ -766,11 +793,9 @@ async def _reasons_analytics_impl(
     if err:
         return err
     assert data is not None
-    total = sum(_item_queries(item) for item in data)
-    summary = (
-        f"[Rendered Reasons for Blocking ({len(data)} blocklists, {total:,} queries). "
-        "The visual chart is already displayed above. Do not repeat or resummarize these numbers.]"
-    )
+    items = [(_reason_label(item), _item_queries(item)) for item in data]
+    total = sum(q for _, q in items)
+    summary = _format_items_summary("Reasons for Blocking", "blocklists", items, total)
     return _wrap_card_result(_build_reasons_card(data, view_type=view_type), summary)
 
 
@@ -786,12 +811,15 @@ async def _device_analytics_impl(
     if err:
         return err
     assert data is not None
-    total = sum(_item_queries(item) for item in data)
-    summary = (
-        f"[Rendered Device Analytics ({len(data)} devices, {total:,} queries). "
-        "The visual chart is already displayed above. Do not repeat or resummarize these numbers.]"
-    )
+    items = [(_device_label(item), _item_queries(item)) for item in data]
+    total = sum(q for _, q in items)
+    summary = _format_items_summary("Device Analytics", "devices", items, total)
     return _wrap_card_result(_build_devices_card(data, view_type=view_type), summary)
+
+
+def _ip_summary_items(data: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    """Format (ip, queries) pairs for IP analytics summary."""
+    return [(str(item.get("ip") or "-"), _item_queries(item)) for item in data]
 
 
 async def _ip_analytics_impl(
@@ -805,11 +833,9 @@ async def _ip_analytics_impl(
     if err:
         return err
     assert data is not None
-    total = sum(_item_queries(item) for item in data)
-    summary = (
-        f"[Rendered IP Analytics ({len(data)} IP addresses, {total:,} queries). "
-        "The table is already displayed above. Do not repeat or resummarize these numbers.]"
-    )
+    items = _ip_summary_items(data)
+    total = sum(q for _, q in items)
+    summary = _format_items_summary("IP Analytics", "IP addresses", items, total)
     return _wrap_card_result(_build_ips_card(data), summary)
 
 
@@ -827,11 +853,9 @@ async def _root_domain_analytics_impl(
     if err:
         return err
     assert data is not None
-    total = sum(_item_queries(item) for item in data)
-    summary = (
-        f"[Rendered Root Domain Analytics ({len(data)} root domains, {total:,} queries). "
-        "The visual component is already displayed above. Do not repeat or resummarize these numbers.]"
-    )
+    items = [(_domain_label(item, "domain"), _item_queries(item)) for item in data]
+    total = sum(q for _, q in items)
+    summary = _format_items_summary("Root Domains", "domains", items, total)
     card = _build_domains_card(
         "Root Domains",
         "Aggregate queries for root domains and subdomains.",
@@ -856,11 +880,9 @@ async def _country_analytics_impl(
     if err:
         return err
     assert data is not None
-    total = sum(_item_queries(item) for item in data)
-    summary = (
-        f"[Rendered Traffic Destinations ({len(data)} countries, {total:,} queries). "
-        "The visual component is already displayed above. Do not repeat or resummarize these numbers.]"
-    )
+    items = [(_destination_label(item), _item_queries(item)) for item in data]
+    total = sum(q for _, q in items)
+    summary = _format_items_summary("Traffic Destinations", "countries", items, total)
     return _wrap_card_result(_build_destinations_card(data, view_type=view_type), summary)
 
 
@@ -878,8 +900,7 @@ async def _kpi_analytics_impl(
     with Column(gap=4, css_class="p-6") as view:
         _build_kpi_row(kpis)
     summary = (
-        f"[Rendered NextDNS KPI Metrics: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
-        "The metrics are already displayed above in the UI. Do not repeat or resummarize these numbers.]"
+        f"[Rendered NextDNS KPI Metrics: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%)]"
     )
     app = PrefabApp(view=view, theme=DASHBOARD_THEME)
     return ToolResult(content=summary, structured_content=app)
@@ -906,10 +927,9 @@ async def _domains_analytics_impl(
         view_type=view_type,
         color="#3b82f6",
     )
-    summary = (
-        f"[Rendered Resolved Domains ({len(data)} domains). "
-        "The visual component is already displayed above. Do not repeat or resummarize these numbers.]"
-    )
+    items = [(_domain_label(item, "domain"), _item_queries(item)) for item in data]
+    total = sum(q for _, q in items)
+    summary = _format_items_summary("Resolved Domains", "domains", items, total)
     return _wrap_card_result(card, summary)
 
 
@@ -934,10 +954,9 @@ async def _blocked_domains_analytics_impl(
         view_type=view_type,
         color="#ef4444",
     )
-    summary = (
-        f"[Rendered Blocked Domains ({len(data)} domains). "
-        "The visual component is already displayed above. Do not repeat or resummarize these numbers.]"
-    )
+    items = [(_domain_label(item, "domain"), _item_queries(item)) for item in data]
+    total = sum(q for _, q in items)
+    summary = _format_items_summary("Blocked Domains", "domains", items, total)
     return _wrap_card_result(card, summary)
 
 
@@ -988,6 +1007,13 @@ def _resolve_domain_view(
     return domain_view
 
 
+def _overview_top_summary(r_data: list[dict[str, Any]], b_data: list[dict[str, Any]]) -> str:
+    """Summarize leading resolved and blocked domains."""
+    top_res = _format_top_items([(_domain_label(item, "domain"), _item_queries(item)) for item in r_data])
+    top_blk = _format_top_items([(_domain_label(item, "domain"), _item_queries(item)) for item in b_data])
+    return f"Top resolved: {top_res or 'none'}; Top blocked: {top_blk or 'none'}"
+
+
 async def _render_overview_page(
     pid: str,
     from_time: str | int,
@@ -1006,10 +1032,10 @@ async def _render_overview_page(
     if section == "all":
         await _append_extra_dashboard_sections(pid, view, from_time, to_time, limit)
 
+    top_summary = _overview_top_summary(r_data, b_data)
     summary = (
         f"[Rendered NextDNS Dashboard: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
-        "The complete interactive dashboard is already displayed to the user in the UI above. "
-        "Do NOT repeat or resummarize these metrics or tables in your text reply.]"
+        f"{top_summary}]"
     )
     return ToolResult(content=summary, structured_content=PrefabApp(view=view, theme=DASHBOARD_THEME))
 

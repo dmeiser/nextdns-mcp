@@ -334,7 +334,7 @@ class TestDashboardToolsExecution:
     async def test_root_domain_analytics(self, mock_all_endpoints):
         res = await dash_module.overviewDashboard(section="root_domains")
         assert isinstance(res, ToolResult)
-        assert "Root Domain Analytics" in res.content[0].text
+        assert "Root Domains" in res.content[0].text
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_profile_error(self, clean_env):
@@ -429,6 +429,10 @@ class TestDashboardToolsExecution:
         assert dash_module._build_queries_series_card({"meta": {}}) is None
 
     def test_empty_cards_rendering(self):
+        # Format summary with empty items
+        assert dash_module._format_items_summary("Test", "items", [], 0) == "[Rendered Test (0 items, 0 queries)]"
+        assert dash_module._format_gafam_summary([], 0) == "[Rendered GAFAM Dominance (0 queries)]"
+
         # Empty cards render fallback text
         assert dash_module._build_domains_card("Domains", "desc", [], view_type="table") is not None
         assert dash_module._build_domains_card("Domains", "desc", [], view_type="bar") is not None

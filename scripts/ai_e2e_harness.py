@@ -2374,7 +2374,7 @@ def build_steps(targets: TaskTargets) -> list[Step]:
             "dashboard.ips",
             "ips",
             "client IP addresses",
-            "Show me the client IP addresses dashboard widget for profile '{profile_id}'.",
+            "Show me the client IP addresses and ISP details dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.root_domains",

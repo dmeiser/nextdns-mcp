@@ -75,10 +75,7 @@ def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = ()) -
         "",
         "- Composite visual tools (`overviewDashboard`, `plotAnalytics`) render",
         "  interactive charts, tables, and dashboards directly in the client interface;",
-        "  `dohLookup` resolves a name through a profile's DNS-over-HTTPS resolver. Visual tools",
-        "  render directly where charts and tables are already visible.",
-        "  When writing Prefab UI code, place charts in Column, Card, or Grid containers",
-        "  rather than inside Tabs to ensure proper SVG dimensions.",
+        "  `dohLookup` resolves a name through a profile's DNS-over-HTTPS resolver.",
         "- A failed call returns a JSON payload with an error `code`, plus a `hint`",
         "  whenever the server can say what to send instead.",
     ]
