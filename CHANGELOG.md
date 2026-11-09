@@ -10,6 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Interactive Prefab UI charts and dashboards:
   - `overviewDashboard`: Consolidated analytics dashboard tool supporting `section` selection (`"overview"`, `"all"`, `"kpi"`, `"domains"`, `"blocked_domains"`, `"reasons"`, `"devices"`, `"ips"`, `"root_domains"`, `"countries"`, `"gafam"`, `"security"`), with flexible formatting (`view_type="auto" | "bar" | "table" | "pie"` and `domain_view="table" | "bar" | "pie"`). Consolidating sections into `overviewDashboard` keeps the published tool catalog aligned with ADR 0001 and preserves BM25 progressive disclosure rankings for raw API tools.
+  - Compact factual text summaries in `ToolResult` alongside `PrefabApp` structured content across all dashboard sections and plots, ensuring text-only clients and LLMs have actual data values without behavioral prompt steering.
   - FastMCP `GenerativeUI` provider available as an opt-in beta feature (`generate_prefab_ui`, `search_prefab_components`), disabled by default and enabled via `NEXTDNS_GENERATIVE_UI=on` (or `true`).
   - Added `/v1/models` route to satisfy OpenWebUI's periodic model discovery probes without 404s.
 
