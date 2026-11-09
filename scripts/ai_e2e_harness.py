@@ -2274,7 +2274,7 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         series_tool = _ANALYTICS_TOOLS[m] + "Series"
         vdata_s: dict[str, Any] = {"metric": m, "series": True}
         instr = (
-            f"Query the time series for profile '{{profile_id}}' for metric '{m}' "
+            f"Query the raw time series data (not a plot) for profile '{{profile_id}}' for metric '{m}' "
             "over the last day (from -1d, interval 3600)"
         )
         args_s: tuple[str, ...] = ()
