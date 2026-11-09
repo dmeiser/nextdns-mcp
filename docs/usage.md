@@ -107,23 +107,22 @@ adjusted. `limit` must not exceed 500 and is rejected above that; the series
 endpoints consume no `limit`, so it is validated but never sent.
 
 ### overviewDashboard
-Renders an interactive Prefab UI overview dashboard mirroring the official NextDNS web interface:
-top KPI cards (`Total Queries`, `Blocked Queries`, `Queries Blocked`), an `AreaChart` queries
-evolution timeline, and sortable tables for `Resolved Domains` and `Blocked Domains`.
-Supports `section="overview" | "all"` and `domain_view="table" | "bar" | "pie"`.
+Renders an interactive Prefab UI overview dashboard or individual widget card.
+Use `section` to select what to display:
+- `section="overview"` (default): Full overview layout mirroring the official NextDNS web interface (KPI cards, queries evolution chart, resolved & blocked domains).
+- `section="all"`: Complete dashboard with all analytics cards appended.
+- `section="kpi"`: Top 3 KPI metric summary cards.
+- `section="domains"`: Top resolved domains card.
+- `section="blocked_domains"`: Top blocked domains card.
+- `section="reasons"`: Block reasons breakdown.
+- `section="devices"`: Active client devices and models breakdown.
+- `section="ips"`: Client IP addresses and ISP/geo details.
+- `section="root_domains"`: Top aggregate root domains.
+- `section="countries"`: Traffic breakdown by country destination/origin.
+- `section="gafam"`: Google, Apple, Facebook, Amazon, Microsoft traffic share.
+- `section="security"`: Encrypted DNS and DNSSEC validation rates.
 
-### Specialized Analytics Widgets
-Individual visual cards for focused metric drilldowns:
-- `kpiAnalytics`: 3-card metric summary row.
-- `domainsAnalytics`: Top resolved domains.
-- `blockedDomainsAnalytics`: Top blocked domains.
-- `reasonsAnalytics`: Block reasons breakdown with interactive format switcher (`table`, `bar`, `pie`).
-- `deviceAnalytics`: Device traffic share with format switcher (`table`, `bar`, `pie`).
-- `ipAnalytics`: Client IP addresses making queries.
-- `rootDomainAnalytics`: Top aggregate root domains.
-- `countryAnalytics`: Traffic breakdown by geographic origin/destination.
-- `gafamAnalytics`: Google, Apple, Facebook, Amazon, Microsoft traffic share.
-- `securityAnalytics`: Encrypted DNS and DNSSEC validation rates.
+Supports `view_type="auto" | "table" | "bar" | "pie"` and `domain_view="table" | "bar" | "pie"`.
 
 ### Generative UI
 When `NEXTDNS_GENERATIVE_UI=on` (the default), the server mounts FastMCP's Generative UI provider

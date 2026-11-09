@@ -1329,3 +1329,35 @@ class TestQueryLengthCap:
             big = await client.call_tool("search_tools", {"query": huge}, raise_on_error=False)
             capped = await client.call_tool("search_tools", {"query": huge[:512]}, raise_on_error=False)
         assert [t.get("name") for t in big.data] == [t.get("name") for t in capped.data]
+
+
+class TestAnalyticsBM25RankingContract:
+    """Regression test: raw analytics queries must rank getAnalytics* #1 ahead of overviewDashboard."""
+
+    @pytest.mark.asyncio
+    async def test_raw_analytics_queries_rank_endpoint_tools_first(self, monkeypatch):
+        from fastmcp import Client
+
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        server = build_mcp_server()
+
+        async with Client(server) as client:
+            cases = [
+                ("aggregate analytics domains", "getAnalyticsDomains"),
+                ("analytics reasons", "getAnalyticsReasons"),
+                ("analytics devices", "getAnalyticsDevices"),
+            ]
+            for query, expected_first in cases:
+                res = await client.call_tool("search_tools", {"query": query})
+                results = (res.structured_content or {}).get("result", [])
+                assert results, f"No search results for query {query!r}"
+                assert results[0]["name"] == expected_first, (
+                    f"For query {query!r}, expected #1 to be {expected_first}, got {results[0]['name']}"
+                )
+
+            dash_res = await client.call_tool("search_tools", {"query": "show me a dashboard of my account"})
+            dash_results = (dash_res.structured_content or {}).get("result", [])
+            assert dash_results[0]["name"] == "overviewDashboard"

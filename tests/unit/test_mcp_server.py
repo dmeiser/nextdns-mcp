@@ -130,16 +130,6 @@ class TestProductionServerTools:
             "plotAnalytics",
             "dohLookup",
             "overviewDashboard",
-            "kpiAnalytics",
-            "domainsAnalytics",
-            "blockedDomainsAnalytics",
-            "gafamAnalytics",
-            "securityAnalytics",
-            "reasonsAnalytics",
-            "deviceAnalytics",
-            "ipAnalytics",
-            "rootDomainAnalytics",
-            "countryAnalytics",
         ):
             annotations = tools[name].annotations
             assert annotations is not None

@@ -9,9 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Interactive Prefab UI charts and dashboards:
-  - `overviewDashboard`: Full overview dashboard mirroring the NextDNS web UI with KPI summary cards, queries evolution chart, and resolved/blocked domain tables.
-  - Dedicated standalone visual widgets: `kpiAnalytics`, `domainsAnalytics`, `blockedDomainsAnalytics`, `reasonsAnalytics`, `deviceAnalytics`, `ipAnalytics`, `rootDomainAnalytics`, `countryAnalytics`, `gafamAnalytics`, and `securityAnalytics`.
-  - Flexible visualization styles (`view_type="auto" | "bar" | "table" | "pie"` and `domain_view="table" | "bar" | "pie"`).
+  - `overviewDashboard`: Consolidated analytics dashboard tool supporting `section` selection (`"overview"`, `"all"`, `"kpi"`, `"domains"`, `"blocked_domains"`, `"reasons"`, `"devices"`, `"ips"`, `"root_domains"`, `"countries"`, `"gafam"`, `"security"`), with flexible formatting (`view_type="auto" | "bar" | "table" | "pie"` and `domain_view="table" | "bar" | "pie"`). Consolidating sections into `overviewDashboard` keeps the published tool catalog aligned with ADR 0001 and preserves BM25 progressive disclosure rankings for raw API tools.
   - FastMCP `GenerativeUI` provider enabled by default (`generate_prefab_ui`, `search_prefab_components`), toggleable via `NEXTDNS_GENERATIVE_UI`.
   - Added `/v1/models` route to satisfy OpenWebUI's periodic model discovery probes without 404s.
 

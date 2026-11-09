@@ -31,19 +31,7 @@ from .spec_tools import (
     spec_routes,
     spec_tool_names,
 )
-from .tools.dashboard import (
-    blockedDomainsAnalytics,
-    countryAnalytics,
-    deviceAnalytics,
-    domainsAnalytics,
-    gafamAnalytics,
-    ipAnalytics,
-    kpiAnalytics,
-    overviewDashboard,
-    reasonsAnalytics,
-    rootDomainAnalytics,
-    securityAnalytics,
-)
+from .tools.dashboard import overviewDashboard
 from .tools.doh import dohLookup
 from .tools.plots import plotAnalytics
 
@@ -51,21 +39,11 @@ logger = logging.getLogger(__name__)
 
 # Operations the server performs itself instead of calling one API endpoint for:
 # `dohLookup` resolves a name through a DNS-over-HTTPS resolver, and `plotAnalytics`
-# alongside the dashboard tools render interactive Prefab UI views from analytics queries.
+# alongside `overviewDashboard` render interactive Prefab UI views from analytics queries.
 _COMPOSITE_TOOLS = (
     plotAnalytics,
     dohLookup,
     overviewDashboard,
-    kpiAnalytics,
-    domainsAnalytics,
-    blockedDomainsAnalytics,
-    gafamAnalytics,
-    securityAnalytics,
-    reasonsAnalytics,
-    deviceAnalytics,
-    ipAnalytics,
-    rootDomainAnalytics,
-    countryAnalytics,
 )
 
 # None of the composite tools mutate anything: dohLookup answers a DNS question and

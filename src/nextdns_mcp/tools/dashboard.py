@@ -706,39 +706,6 @@ async def _append_extra_dashboard_sections(
             _build_security_card(e_d, sec_d)
 
 
-async def _overview_dashboard_impl(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    section: Literal["overview", "all"] = "overview",
-    domain_view: Literal["table", "bar", "pie"] = "table",
-) -> dict[str, Any] | ToolResult:
-    """Construct an overview dashboard matching the NextDNS web UI."""
-    pid, err = await _resolve_profile(profile_id)
-    if err is not None:
-        return err
-    assert pid is not None
-
-    s_p, ser_p, r_data, b_data, fetch_err = await _fetch_overview_payloads(pid, from_time, to_time, limit)
-    if fetch_err:
-        return fetch_err
-
-    kpis = _calculate_status_kpis(_payload_data(s_p))
-    view = _assemble_overview_layout(kpis, ser_p, r_data, b_data, domain_view=domain_view)
-
-    if section == "all":
-        await _append_extra_dashboard_sections(pid, view, from_time, to_time, limit)
-
-    summary = (
-        f"[Rendered NextDNS Dashboard: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
-        "The complete interactive dashboard is already displayed to the user in the UI above. "
-        "Do NOT repeat or resummarize these metrics or tables in your text reply.]"
-    )
-    app = PrefabApp(view=view, theme=DASHBOARD_THEME)
-    return ToolResult(content=summary, structured_content=app)
-
-
 async def _gafam_analytics_impl(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
@@ -975,8 +942,97 @@ async def _blocked_domains_analytics_impl(
 
 
 # ==============================================================================
-# Public tool wrappers (re-declare signatures and forward by keyword)
+# Dispatch and Public Overview Dashboard Tool
 # ==============================================================================
+
+DashboardSection = Literal[
+    "overview",
+    "all",
+    "kpi",
+    "domains",
+    "blocked_domains",
+    "reasons",
+    "devices",
+    "ips",
+    "root_domains",
+    "countries",
+    "gafam",
+    "security",
+]
+
+_WIDGET_DISPATCH: dict[str, Any] = {
+    "kpi": lambda p, f, t, lim, v: _kpi_analytics_impl(p, from_time=f, to_time=t),
+    "domains": lambda p, f, t, lim, v: _domains_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
+    "blocked_domains": lambda p, f, t, lim, v: _blocked_domains_analytics_impl(
+        p, from_time=f, to_time=t, limit=lim, view_type=v
+    ),
+    "reasons": lambda p, f, t, lim, v: _reasons_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
+    "devices": lambda p, f, t, lim, v: _device_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
+    "ips": lambda p, f, t, lim, v: _ip_analytics_impl(p, from_time=f, to_time=t),
+    "root_domains": lambda p, f, t, lim, v: _root_domain_analytics_impl(
+        p, from_time=f, to_time=t, limit=lim, view_type=v
+    ),
+    "countries": lambda p, f, t, lim, v: _country_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
+    "gafam": lambda p, f, t, lim, v: _gafam_analytics_impl(p, from_time=f, to_time=t, view_type=v),
+    "security": lambda p, f, t, lim, v: _security_analytics_impl(p, from_time=f, to_time=t),
+}
+
+
+def _resolve_domain_view(
+    domain_view: Literal["table", "bar", "pie"],
+    view_type: str,
+) -> Literal["table", "bar", "pie"]:
+    """Resolve active domain view format."""
+    if view_type in ("table", "bar", "pie"):
+        return view_type
+    return domain_view
+
+
+async def _render_overview_page(
+    pid: str,
+    from_time: str | int,
+    to_time: str | int,
+    limit: int,
+    section: str,
+    domain_view: Literal["table", "bar", "pie"],
+) -> dict[str, Any] | ToolResult:
+    """Fetch payloads, assemble layout, and return ToolResult for overview or all."""
+    s_p, ser_p, r_data, b_data, fetch_err = await _fetch_overview_payloads(pid, from_time, to_time, limit)
+    if fetch_err:
+        return fetch_err
+
+    kpis = _calculate_status_kpis(_payload_data(s_p))
+    view = _assemble_overview_layout(kpis, ser_p, r_data, b_data, domain_view=domain_view)
+    if section == "all":
+        await _append_extra_dashboard_sections(pid, view, from_time, to_time, limit)
+
+    summary = (
+        f"[Rendered NextDNS Dashboard: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
+        "The complete interactive dashboard is already displayed to the user in the UI above. "
+        "Do NOT repeat or resummarize these metrics or tables in your text reply.]"
+    )
+    return ToolResult(content=summary, structured_content=PrefabApp(view=view, theme=DASHBOARD_THEME))
+
+
+async def _overview_dashboard_impl(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    section: DashboardSection = "overview",
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+    domain_view: Literal["table", "bar", "pie"] = "table",
+) -> dict[str, Any] | ToolResult:
+    """Construct an overview dashboard or individual widget matching the NextDNS web UI."""
+    if section in _WIDGET_DISPATCH:
+        return await _WIDGET_DISPATCH[section](profile_id, from_time, to_time, limit, view_type)
+
+    pid, err = await _resolve_profile(profile_id)
+    if err or pid is None:
+        return err
+
+    eff_view = _resolve_domain_view(domain_view, view_type)
+    return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
 
 
 async def overviewDashboard(
@@ -984,28 +1040,39 @@ async def overviewDashboard(
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
-    section: Literal["overview", "all"] = "overview",
+    section: DashboardSection = "overview",
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
     domain_view: Literal["table", "bar", "pie"] = "table",
 ) -> dict[str, Any] | ToolResult:
-    """Interactive NextDNS overview analytics dashboard.
+    """Render interactive visual Prefab UI analytics dashboards and specialized widgets.
 
-    Displays an overview dashboard mirroring the NextDNS web UI:
-    - Top KPI summary cards: Total queries, blocked queries (highlighted in red), and percentage of queries blocked.
-    - Evolution of queries over time: interactive line chart of query volumes (blue for default, red for blocked).
-    - Top resolved domains (table or bar chart).
-    - Top blocked domains (table or bar chart).
-    - Setting section="all" appends blocking reasons, devices, IPs, root domains, GAFAM donut, and security metrics.
+    Displays visual cards, charts, progress indicators, and sortable tables for NextDNS analytics.
+    Use this tool whenever the user asks for a dashboard, visual overview, or interactive widget
+    (e.g., 'show dashboard', 'visualize top domains', 'display device widget', 'show security cards').
+    For raw JSON query data without UI rendering, use the respective getAnalytics* API tools instead.
 
-    IMPORTANT: The visual dashboard is already rendered directly in the user's interface.
-    Do NOT repeat or resummarize the numbers, percentages, or domain tables in your text reply.
+    Sections available via the `section` parameter:
+    - "overview" (default): Full overview layout mirroring the NextDNS web UI (KPI cards, queries evolution chart, resolved & blocked domains).
+    - "all": Complete dashboard with overview cards plus reasons, devices, root domains, IPs, GAFAM, and security cards.
+    - "kpi": Top KPI summary cards (Total Queries, Blocked Queries in red, Queries Blocked rate).
+    - "domains": Top resolved domains card with format selection.
+    - "blocked_domains": Top blocked domains card with format selection.
+    - "reasons": Block reasons breakdown (security/privacy filters and blocklists).
+    - "devices": Active client devices and models breakdown.
+    - "ips": Client IP addresses and ISP/geo details.
+    - "root_domains": Top aggregate root domains.
+    - "countries": Traffic breakdown by country destination or origin.
+    - "gafam": Traffic dominance share of Google, Apple, Facebook, Amazon, and Microsoft.
+    - "security": Encrypted DNS (DoH/DoT) and DNSSEC validation percentage cards.
 
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d, or epoch timestamp).
-        to_time: End time (default "now").
-        limit: Maximum number of rows per domain table (default 10).
-        section: "overview" (default) or "all" to include all analytics cards.
-        domain_view: Visualization style for domains: "table" (default), "bar", or "pie".
+        from_time: Start of time window (e.g. "-30d", "-7d", "-1d", Unix timestamp).
+        to_time: End of time window (default "now").
+        limit: Maximum number of rows to display in lists and tables (default 10).
+        section: Dashboard section or widget to render (default "overview").
+        view_type: Visualization format: "auto" (default: table or card default), "bar", "table", or "pie".
+        domain_view: Visualization format for domain cards in overview mode: "table" (default), "bar", or "pie".
     """
     return await _overview_dashboard_impl(
         profile_id=profile_id,
@@ -1013,277 +1080,6 @@ async def overviewDashboard(
         to_time=to_time,
         limit=limit,
         section=section,
+        view_type=view_type,
         domain_view=domain_view,
-    )
-
-
-async def gafamAnalytics(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    view_type: Literal["auto", "pie", "bar", "table"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Interactive GAFAM dominance donut chart and table.
-
-    Displays the traffic share for Google, Amazon, Facebook (Meta), Apple, Microsoft, and Others.
-
-    IMPORTANT: The visual chart is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
-
-    Args:
-        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d).
-        to_time: End time (default "now").
-        view_type: Visualization type: "auto" (default: donut + table), "pie", "bar", or "table".
-    """
-    return await _gafam_analytics_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        view_type=view_type,
-    )
-
-
-async def securityAnalytics(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-) -> dict[str, Any] | ToolResult:
-    """Interactive security analytics for Encrypted DNS and DNSSEC rates.
-
-    Displays percentage progress bars and query breakdown for DoH/DoT transport and DNSSEC validation.
-
-    IMPORTANT: The visual status is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
-
-    Args:
-        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d).
-        to_time: End time (default "now").
-    """
-    return await _security_analytics_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-    )
-
-
-async def reasonsAnalytics(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Interactive chart and table of reasons for blocking (blocklists and filters).
-
-    Displays the security, privacy, and parental control blocklists that blocked the most queries.
-
-    IMPORTANT: The visual chart is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
-
-    Args:
-        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d).
-        to_time: End time (default "now").
-        limit: Maximum number of blocklists to display (default 10).
-        view_type: Visualization type: "auto" (default: bar chart), "bar", "table", or "pie".
-    """
-    return await _reasons_analytics_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-        view_type=view_type,
-    )
-
-
-async def deviceAnalytics(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Interactive device analytics chart and table.
-
-    Displays active devices, device models, query counts, and traffic share.
-
-    IMPORTANT: The visual chart is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
-
-    Args:
-        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d).
-        to_time: End time (default "now").
-        limit: Maximum number of devices to display (default 10).
-        view_type: Visualization type: "auto" (default: table), "bar", "table", or "pie".
-    """
-    return await _device_analytics_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-        view_type=view_type,
-    )
-
-
-async def ipAnalytics(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-) -> dict[str, Any] | ToolResult:
-    """Interactive IP address analytics table.
-
-    Displays IP addresses making queries, their ISP/network, and geographic location.
-
-    IMPORTANT: The visual table is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
-
-    Args:
-        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d).
-        to_time: End time (default "now").
-        limit: Maximum number of IP addresses to display (default 10).
-    """
-    return await _ip_analytics_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-    )
-
-
-async def rootDomainAnalytics(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Interactive root domain analytics table or chart.
-
-    Displays aggregate queries for root domains and all their subdomains.
-
-    IMPORTANT: The visual component is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
-
-    Args:
-        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d).
-        to_time: End time (default "now").
-        limit: Maximum number of root domains to display (default 10).
-        view_type: Visualization type: "auto" (default: table), "table", "bar", or "pie".
-    """
-    return await _root_domain_analytics_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-        view_type=view_type,
-    )
-
-
-async def countryAnalytics(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Interactive destination countries analytics table or chart.
-
-    Displays top destination countries based on DNS queries with country codes and sample domains.
-
-    IMPORTANT: The visual component is already rendered in the UI. Do not repeat or resummarize the numbers in your text.
-
-    Args:
-        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d).
-        to_time: End time (default "now").
-        limit: Maximum number of countries to display (default 10).
-        view_type: Visualization type: "auto" (default: table), "table", "bar", or "pie".
-    """
-    return await _country_analytics_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-        view_type=view_type,
-    )
-
-
-async def kpiAnalytics(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-) -> dict[str, Any] | ToolResult:
-    """Interactive NextDNS KPI summary metrics widget.
-
-    Displays the top 3 KPI cards: Total Queries, Blocked Queries (in red), and Queries Blocked percentage.
-
-    IMPORTANT: The visual metrics are already rendered in the UI. Do not repeat or resummarize these numbers.
-
-    Args:
-        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d).
-        to_time: End time (default "now").
-    """
-    return await _kpi_analytics_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-    )
-
-
-async def domainsAnalytics(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Interactive top resolved domains widget.
-
-    Displays top domains that resolved without being blocked (table, bar chart, or pie chart).
-
-    IMPORTANT: The visual component is already rendered in the UI. Do not repeat or resummarize these numbers.
-
-    Args:
-        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d).
-        to_time: End time (default "now").
-        limit: Maximum number of domains to display (default 10).
-        view_type: Visualization type: "auto" (default: table), "table", "bar", or "pie".
-    """
-    return await _domains_analytics_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-        view_type=view_type,
-    )
-
-
-async def blockedDomainsAnalytics(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Interactive top blocked domains widget.
-
-    Displays top domains blocked by security, privacy, or parental controls (table, bar chart, or pie chart).
-
-    IMPORTANT: The visual component is already rendered in the UI. Do not repeat or resummarize these numbers.
-
-    Args:
-        profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start time (relative string like -30d or -1d).
-        to_time: End time (default "now").
-        limit: Maximum number of blocked domains to display (default 10).
-        view_type: Visualization type: "auto" (default: table), "table", "bar", or "pie".
-    """
-    return await _blocked_domains_analytics_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-        view_type=view_type,
     )

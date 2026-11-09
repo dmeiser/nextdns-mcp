@@ -866,31 +866,31 @@ class ContainerE2ERunner:
                 self.record_skip("plotAnalytics", f"metric={metric}: NEXTDNS_PLOT_PROFILE not set")
 
     async def _run_dashboard_sweep(self, session: ClientSession, plot_profile_id: str) -> None:
-        """Exercise overviewDashboard and individual dashboard widgets."""
-        dashboard_tools = (
-            "overviewDashboard",
-            "kpiAnalytics",
-            "domainsAnalytics",
-            "blockedDomainsAnalytics",
-            "gafamAnalytics",
-            "securityAnalytics",
-            "reasonsAnalytics",
-            "deviceAnalytics",
-            "ipAnalytics",
-            "rootDomainAnalytics",
-            "countryAnalytics",
+        """Exercise overviewDashboard across all section options."""
+        dashboard_sections = (
+            "overview",
+            "kpi",
+            "domains",
+            "blocked_domains",
+            "reasons",
+            "devices",
+            "ips",
+            "root_domains",
+            "countries",
+            "gafam",
+            "security",
+            "all",
         )
         if self.plot_profile:
-            for tool_name in dashboard_tools:
+            for section in dashboard_sections:
                 await self.execute_call(
                     session,
-                    tool_name,
-                    {"profile_id": plot_profile_id, "from_time": "-30d"},
+                    "overviewDashboard",
+                    {"profile_id": plot_profile_id, "from_time": "-30d", "section": section},
                 )
         else:
             log_warn("NEXTDNS_PLOT_PROFILE not set; skipping dashboard tools")
-            for tool_name in dashboard_tools:
-                self.record_skip(tool_name, "NEXTDNS_PLOT_PROFILE not set")
+            self.record_skip("overviewDashboard", "NEXTDNS_PLOT_PROFILE not set")
 
     @staticmethod
     def _fill(value: Any, profile_id: str, ts: int) -> Any:

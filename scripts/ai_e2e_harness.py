@@ -2336,81 +2336,87 @@ def build_steps(targets: TaskTargets) -> list[Step]:
     dashboard_specs = (
         (
             "dashboard.overview",
-            "overviewDashboard",
+            "overview",
             "overview dashboard",
             "Show me an overview dashboard for profile '{profile_id}'.",
         ),
         (
             "dashboard.kpi",
-            "kpiAnalytics",
+            "kpi",
             "top KPI metrics",
-            "Show me the top KPI metrics (queries, blocked queries, block rate) for profile '{profile_id}'.",
+            "Show me the top KPI metrics dashboard widget (queries, blocked queries, block rate) for profile '{profile_id}'.",
         ),
         (
             "dashboard.domains",
-            "domainsAnalytics",
+            "domains",
             "top resolved domains",
-            "Show me the top resolved domains for profile '{profile_id}'.",
+            "Show me the top resolved domains dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.blocked_domains",
-            "blockedDomainsAnalytics",
+            "blocked_domains",
             "top blocked domains",
-            "Show me the top blocked domains for profile '{profile_id}'.",
+            "Show me the top blocked domains dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.reasons",
-            "reasonsAnalytics",
+            "reasons",
             "block reasons",
-            "Visualize the reasons queries were blocked for profile '{profile_id}'.",
+            "Show me the block reasons dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.devices",
-            "deviceAnalytics",
+            "devices",
             "device breakdown",
-            "Show me the device analytics (device models and traffic share) for profile '{profile_id}'.",
+            "Show me the device analytics dashboard widget (device models and traffic share) for profile '{profile_id}'.",
         ),
         (
             "dashboard.ips",
-            "ipAnalytics",
+            "ips",
             "client IP addresses",
-            "Show me the client IP addresses making queries on profile '{profile_id}'.",
+            "Show me the client IP addresses dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.root_domains",
-            "rootDomainAnalytics",
+            "root_domains",
             "aggregate root domains",
-            "Show me the top root domains queried on profile '{profile_id}'.",
+            "Show me the top root domains dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.countries",
-            "countryAnalytics",
+            "countries",
             "traffic by country",
-            "Show me the traffic breakdown by country for profile '{profile_id}'.",
+            "Show me the country traffic dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.gafam",
-            "gafamAnalytics",
+            "gafam",
             "GAFAM traffic share",
-            "Show me the GAFAM traffic dominance breakdown for profile '{profile_id}'.",
+            "Show me the GAFAM traffic dominance dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.security",
-            "securityAnalytics",
+            "security",
             "security analytics",
-            "Show me the security analytics (Encrypted DNS and DNSSEC rates) for profile '{profile_id}'.",
+            "Show me the security analytics dashboard widget (Encrypted DNS and DNSSEC rates) for profile '{profile_id}'.",
         ),
     )
-    for step_id, tool_name, desc, task_prompt in dashboard_specs:
+    for step_id, section, desc, task_prompt in dashboard_specs:
+        expect_args = () if section == "overview" else (section,)
         steps.append(
             Step(
                 id=step_id,
                 section="dashboard",
-                tool=tool_name,
-                description=f"{tool_name} ({desc})",
+                tool="overviewDashboard",
+                description=f"overviewDashboard (section={section})",
                 prompt=_step_prompt(task_prompt),
                 verify="dashboard",
-                expect=_expect_local(tool_name, result=("$prefab",), profile=PLOT_PROFILE),
+                expect=_expect_local(
+                    "overviewDashboard",
+                    args=expect_args,
+                    result=("$prefab",),
+                    profile=PLOT_PROFILE,
+                ),
             )
         )
 

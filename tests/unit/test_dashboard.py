@@ -264,7 +264,7 @@ class TestDashboardToolsExecution:
 
     @pytest.mark.asyncio
     async def test_gafam_analytics(self, mock_all_endpoints):
-        res = await dash_module.gafamAnalytics()
+        res = await dash_module.overviewDashboard(section="gafam")
         assert isinstance(res, ToolResult)
         assert "GAFAM Dominance" in res.content[0].text
         assert "$prefab" in res.structured_content
@@ -275,13 +275,13 @@ class TestDashboardToolsExecution:
         monkeypatch.setattr(
             dash_module, "_fetch_analytics_payload", AsyncMock(return_value=(None, {"code": "err", "error": "fail"}))
         )
-        res = await dash_module.gafamAnalytics()
+        res = await dash_module.overviewDashboard(section="gafam")
         assert isinstance(res, dict)
         assert res["code"] == "err"
 
     @pytest.mark.asyncio
     async def test_security_analytics(self, mock_all_endpoints):
-        res = await dash_module.securityAnalytics()
+        res = await dash_module.overviewDashboard(section="security")
         assert isinstance(res, ToolResult)
         assert "Security Analytics" in res.content[0].text
         assert "$prefab" in res.structured_content
@@ -289,7 +289,7 @@ class TestDashboardToolsExecution:
     @pytest.mark.asyncio
     async def test_security_analytics_error_paths(self, clean_env, monkeypatch):
         # 1. Profile error
-        res = await dash_module.securityAnalytics()
+        res = await dash_module.overviewDashboard(section="security")
         assert isinstance(res, dict)
         assert res["code"] == "missing_profile_id"
 
@@ -300,7 +300,7 @@ class TestDashboardToolsExecution:
             "_fetch_analytics_payload",
             AsyncMock(side_effect=[(None, {"code": "enc_err", "error": "enc"}), ({}, None)]),
         )
-        res = await dash_module.securityAnalytics()
+        res = await dash_module.overviewDashboard(section="security")
         assert res["code"] == "enc_err"
 
         # 3. DNSSEC error
@@ -309,30 +309,30 @@ class TestDashboardToolsExecution:
             "_fetch_analytics_payload",
             AsyncMock(side_effect=[({}, None), (None, {"code": "sec_err", "error": "sec"})]),
         )
-        res = await dash_module.securityAnalytics()
+        res = await dash_module.overviewDashboard(section="security")
         assert res["code"] == "sec_err"
 
     @pytest.mark.asyncio
     async def test_reasons_analytics(self, mock_all_endpoints):
-        res = await dash_module.reasonsAnalytics()
+        res = await dash_module.overviewDashboard(section="reasons")
         assert isinstance(res, ToolResult)
         assert "Reasons for Blocking" in res.content[0].text
 
     @pytest.mark.asyncio
     async def test_device_analytics(self, mock_all_endpoints):
-        res = await dash_module.deviceAnalytics()
+        res = await dash_module.overviewDashboard(section="devices")
         assert isinstance(res, ToolResult)
         assert "Device Analytics" in res.content[0].text
 
     @pytest.mark.asyncio
     async def test_ip_analytics(self, mock_all_endpoints):
-        res = await dash_module.ipAnalytics()
+        res = await dash_module.overviewDashboard(section="ips")
         assert isinstance(res, ToolResult)
         assert "IP Analytics" in res.content[0].text
 
     @pytest.mark.asyncio
     async def test_root_domain_analytics(self, mock_all_endpoints):
-        res = await dash_module.rootDomainAnalytics()
+        res = await dash_module.overviewDashboard(section="root_domains")
         assert isinstance(res, ToolResult)
         assert "Root Domain Analytics" in res.content[0].text
 
@@ -357,37 +357,38 @@ class TestDashboardToolsExecution:
 
     @pytest.mark.asyncio
     async def test_kpi_analytics(self, mock_all_endpoints):
-        res = await dash_module.kpiAnalytics()
+        res = await dash_module.overviewDashboard(section="kpi")
         assert isinstance(res, ToolResult)
         assert "KPI Metrics" in res.content[0].text
 
     @pytest.mark.asyncio
     async def test_domains_analytics(self, mock_all_endpoints):
-        res = await dash_module.domainsAnalytics()
+        res = await dash_module.overviewDashboard(section="domains")
         assert isinstance(res, ToolResult)
         assert "Resolved Domains" in res.content[0].text
 
     @pytest.mark.asyncio
     async def test_blocked_domains_analytics(self, mock_all_endpoints):
-        res = await dash_module.blockedDomainsAnalytics()
+        res = await dash_module.overviewDashboard(section="blocked_domains")
         assert isinstance(res, ToolResult)
         assert "Blocked Domains" in res.content[0].text
 
     @pytest.mark.asyncio
     async def test_destination_analytics(self, mock_all_endpoints):
-        res = await dash_module.countryAnalytics()
+        res = await dash_module.overviewDashboard(section="countries")
         assert isinstance(res, ToolResult)
         assert "Traffic Destinations" in res.content[0].text
 
     @pytest.mark.asyncio
     async def test_tools_view_type_arguments(self, mock_all_endpoints):
-        assert isinstance(await dash_module.domainsAnalytics(view_type="bar"), ToolResult)
-        assert isinstance(await dash_module.blockedDomainsAnalytics(view_type="bar"), ToolResult)
-        assert isinstance(await dash_module.reasonsAnalytics(view_type="bar"), ToolResult)
-        assert isinstance(await dash_module.deviceAnalytics(view_type="bar"), ToolResult)
-        assert isinstance(await dash_module.rootDomainAnalytics(view_type="bar"), ToolResult)
-        assert isinstance(await dash_module.countryAnalytics(view_type="bar"), ToolResult)
-        assert isinstance(await dash_module.gafamAnalytics(view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.overviewDashboard(section="domains", view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.overviewDashboard(section="blocked_domains", view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.overviewDashboard(section="reasons", view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.overviewDashboard(section="devices", view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.overviewDashboard(section="root_domains", view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.overviewDashboard(section="countries", view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.overviewDashboard(section="gafam", view_type="bar"), ToolResult)
+        assert isinstance(await dash_module.overviewDashboard(view_type="bar"), ToolResult)
 
     @pytest.mark.asyncio
     async def test_specialized_tools_error_paths(self, clean_env, monkeypatch):
@@ -396,17 +397,17 @@ class TestDashboardToolsExecution:
             dash_module, "_fetch_analytics_payload", AsyncMock(return_value=(None, {"code": "err", "error": "fail"}))
         )
 
-        for tool_fn in (
-            dash_module.kpiAnalytics,
-            dash_module.domainsAnalytics,
-            dash_module.blockedDomainsAnalytics,
-            dash_module.reasonsAnalytics,
-            dash_module.deviceAnalytics,
-            dash_module.ipAnalytics,
-            dash_module.rootDomainAnalytics,
-            dash_module.countryAnalytics,
+        for sec in (
+            "kpi",
+            "domains",
+            "blocked_domains",
+            "reasons",
+            "devices",
+            "ips",
+            "root_domains",
+            "countries",
         ):
-            res = await tool_fn()
+            res = await dash_module.overviewDashboard(section=sec)
             assert isinstance(res, dict)
             assert res["code"] == "err"
 
