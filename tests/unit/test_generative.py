@@ -1,10 +1,10 @@
 """Tests for NextDNSGenerativeUI provider and sizing rules."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from nextdns_mcp.generative import (
-    CHART_IN_TAB_PATTERN,
     SANDBOX_PRELUDE,
     NextDNSGenerativeUI,
     _build_renderer_resource,

@@ -152,7 +152,7 @@ def expected_tools(spec: dict[str, Any]) -> list[str]:
     server's own ``published_tool_names()``.
     """
     operations = set(validate_schema.spec_operations(spec)) - validate_schema.WITHHELD_OPERATIONS
-    return sorted(operations | set(validate_schema.LOCAL_TOOLS))
+    return sorted(operations | set(validate_schema.local_tool_names()))
 
 
 # Required query arguments a read cannot be called without. The API reads a relative

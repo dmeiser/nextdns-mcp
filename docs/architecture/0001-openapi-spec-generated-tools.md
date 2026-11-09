@@ -88,7 +88,7 @@ which only ever fires on a value that would not have meant this tool's operation
 the DoH endpoint) do things no endpoint describes, so the published catalog is **not**
 fully derivable from the document: `published_tool_names()` combines the generated names
 with the composite tools, and they are registered beside them. This is the accepted cost of
-the decision, stated rather than discovered later — the document generates 78 of the
+the decision, stated rather than discovered later — the document generates 78
 published tools and names none of the composites. Adding a new composite means touching
 the registration list and the validation script's catalog policy, which is the point at
 which a `x-mcp-composite`-style declaration in the YAML would start paying for itself.

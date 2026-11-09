@@ -30,7 +30,9 @@ from prefab_ui.components.control_flow import *
 TabsList = Div
 TabsTrigger = Tab
 TabsContent = Div
-DonutChart = PieChart
+def DonutChart(*args, **kwargs):
+    kwargs.setdefault("inner_radius", 50)
+    return PieChart(*args, **kwargs)
 
 # DataTable positional argument compatibility wrapper
 _BaseDataTable = DataTable

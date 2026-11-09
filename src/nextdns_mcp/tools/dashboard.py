@@ -207,7 +207,7 @@ def _render_domain_content(title: str, data: list[dict[str, Any]], key_name: str
     """Render domain card content based on chosen visualization type."""
     if not data:
         Text(f"No {title.lower()} available for this period.", css_class="text-sm text-muted-foreground py-4")
-    elif view_type == "table":
+    elif view_type in ("table", "auto"):
         _domain_table(data, key_name)
     else:
         chart_data = [{"label": _domain_label(item, key_name), "queries": _item_queries(item)} for item in data]
@@ -326,7 +326,7 @@ def _render_device_content(data: list[dict[str, Any]], view_type: str) -> None:
     """Render devices card content based on chosen visualization type."""
     if not data:
         Text("No device queries recorded for this period.", css_class="text-sm text-muted-foreground py-4")
-    elif view_type == "table":
+    elif view_type in ("table", "auto"):
         _devices_table(data)
     else:
         chart_data = [{"label": _device_label(item), "queries": _item_queries(item)} for item in data]
@@ -516,7 +516,7 @@ def _render_destination_content(data: list[dict[str, Any]], view_type: str) -> N
     """Render destination countries card content based on chosen visualization type."""
     if not data:
         Text("No country traffic recorded for this period.", css_class="text-sm text-muted-foreground py-4")
-    elif view_type == "table":
+    elif view_type in ("table", "auto"):
         _destinations_table(data)
     else:
         chart_data = [{"label": _destination_label(item), "queries": _item_queries(item)} for item in data]
@@ -611,6 +611,8 @@ async def _fetch_overview_payloads(
     limit: int,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     """Fetch all datasets required for the main overview cards."""
+    from_time = normalize_time_value(from_time)
+    to_time = normalize_time_value(to_time)
     interval = _overview_interval(from_time, to_time)
     budget_err = _series_budget_error(from_time, to_time, interval)
     if budget_err:
@@ -619,7 +621,7 @@ async def _fetch_overview_payloads(
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
     dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="default")
     blk_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="blocked")
-    ser_params = {"from": normalize_time_value(from_time), "to": normalize_time_value(to_time), "interval": interval}
+    ser_params = {"from": from_time, "to": to_time, "interval": interval}
 
     s_task = _fetch_analytics_payload(pid, "status", params)
     ser_task = _fetch_analytics_payload(pid, "status;series", ser_params)
