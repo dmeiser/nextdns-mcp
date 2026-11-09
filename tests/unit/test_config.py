@@ -154,11 +154,11 @@ class TestEnvironmentConfiguration:
 class TestGenerativeUIConfig:
     """Test is_generative_ui_enabled() function."""
 
-    def test_default_is_enabled(self, monkeypatch):
+    def test_default_is_disabled(self, monkeypatch):
         monkeypatch.delenv("NEXTDNS_GENERATIVE_UI", raising=False)
         from nextdns_mcp.config import is_generative_ui_enabled
 
-        assert is_generative_ui_enabled() is True
+        assert is_generative_ui_enabled() is False
 
     def test_disabled_values(self, monkeypatch):
         from nextdns_mcp.config import is_generative_ui_enabled

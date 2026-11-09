@@ -139,6 +139,13 @@ class TestProductionServerTools:
         assert tools["deleteProfile"].annotations.destructive_hint is True
 
     @pytest.mark.asyncio
+    async def test_generative_ui_tools_omitted_by_default(self, monkeypatch):
+        monkeypatch.delenv("NEXTDNS_GENERATIVE_UI", raising=False)
+        names = await self._published_names()
+        assert "generate_prefab_ui" not in names
+        assert "search_prefab_components" not in names
+
+    @pytest.mark.asyncio
     async def test_generative_ui_tools_published_when_enabled(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_GENERATIVE_UI", "on")
         names = await self._published_names()

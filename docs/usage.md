@@ -124,10 +124,11 @@ Use `section` to select what to display:
 
 Supports `view_type="auto" | "table" | "bar" | "pie"` and `domain_view="table" | "bar" | "pie"`.
 
-### Generative UI
-When `NEXTDNS_GENERATIVE_UI=on` (the default), the server mounts FastMCP's Generative UI provider
+### Generative UI (Beta)
+Generative UI is an opt-in beta feature (disabled by default). When enabled by setting
+`NEXTDNS_GENERATIVE_UI=on` (or `true`, `1`, `yes`), the server mounts FastMCP's Generative UI provider
 (`generate_prefab_ui` and `search_prefab_components`), enabling host apps like OpenWebUI to
-dynamically author and render ad-hoc Prefab UI layouts in Pyodide. Set `NEXTDNS_GENERATIVE_UI=off` to disable.
+dynamically author and render ad-hoc Prefab UI layouts in Pyodide.
 
 ### dohLookup
 `dohLookup(domain="example.com", profile_id="<profile id>", record_type="A")`

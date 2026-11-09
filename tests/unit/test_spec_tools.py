@@ -25,8 +25,6 @@ COMPOSITES = (
     "plotAnalytics",
     "dohLookup",
     "overviewDashboard",
-    "generate_prefab_ui",
-    "search_prefab_components",
 )
 
 
