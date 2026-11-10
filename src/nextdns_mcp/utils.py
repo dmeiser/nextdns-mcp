@@ -50,7 +50,8 @@ def is_float_shaped(value: str) -> bool:
     (``"1.²"``) are rejected. Parsing may still fail for an accepted shape; the
     caller is responsible for handling that.
     """
-    return value.replace(".", "", 1).replace("-", "", 1).isdecimal()
+    value = value.removeprefix("-")
+    return value.replace(".", "", 1).isdecimal()
 
 
 def _missing_profile_payload() -> dict[str, Any]:
