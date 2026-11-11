@@ -151,7 +151,7 @@ def get_default_profile() -> str | None:
 
 def _read_only_from_env() -> bool:
     """Read NEXTDNS_READ_ONLY once."""
-    value = os.getenv("NEXTDNS_READ_ONLY", "").lower()
+    value = os.getenv("NEXTDNS_READ_ONLY", "").strip().lower()
     return value in ("true", "1", "yes")
 
 
