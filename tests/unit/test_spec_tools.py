@@ -1054,6 +1054,89 @@ class TestToolAnnotations:
         assert get_logs.annotations is not None
         assert get_logs.annotations.read_only_hint is True
 
+    def test_destructive_hint_honors_x_mcp_destructive_on_post(self):
+        """A POST the spec declares `x-mcp-destructive: true` publishes as
+        destructive, so a future POST-shaped purge cannot bypass client
+        confirmation; a POST without the declaration stays non-destructive."""
+        spec: dict[str, Any] = {
+            "openapi": "3.1.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/profiles/{profile_id}/purge": {
+                    "post": {
+                        "operationId": "purgeThing",
+                        "summary": "Purge everything",
+                        "security": [{"ApiKeyAuth": []}],
+                        "responses": {"200": {"description": "ok"}},
+                        "x-mcp-destructive": True,
+                    }
+                },
+                "/profiles/{profile_id}/nudge": {
+                    "post": {
+                        "operationId": "nudgeThing",
+                        "summary": "Nudge everything",
+                        "security": [{"ApiKeyAuth": []}],
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                },
+            },
+        }
+        by_id = {route.operation_id: route for route in spec_tools.spec_routes(spec)}
+        purge = spec_tools.SpecApiTool(by_id["purgeThing"])
+        assert purge.annotations is not None
+        assert purge.annotations.destructive_hint is True
+        nudge = spec_tools.SpecApiTool(by_id["nudgeThing"])
+        assert nudge.annotations is not None
+        assert nudge.annotations.destructive_hint is False
+
+    def test_irreversible_operations_declare_x_mcp_destructive(self):
+        """Every operation whose summary or description declares irreversible
+        destruction carries `x-mcp-destructive: true` - today exactly
+        clearLogs and deleteProfile."""
+        routes = spec_tools.spec_routes()
+        irreversible = {
+            str(route.operation_id)
+            for route in routes
+            if "Permanently deletes" in f"{route.summary} {route.description}"
+            or "cannot be undone" in (route.description or "")
+        }
+        assert irreversible == {"clearLogs", "deleteProfile"}
+        for route in routes:
+            flagged = bool((getattr(route, "extensions", None) or {}).get("x-mcp-destructive"))
+            assert flagged == (str(route.operation_id) in irreversible)
+
+    def test_additive_posts_stay_non_destructive_and_known_hints_hold(self):
+        """The extension changes nothing already correct: the nine additive
+                POSTs stay non-destructive, the two irreversible operations stay
+        destructive, and the read-only hints are untouched."""
+        routes = {route.operation_id: route for route in spec_tools.spec_routes()}
+        additive_posts = [
+            "createProfile",
+            "addPrivacyBlocklist",
+            "addPrivacyNative",
+            "addRewrite",
+            "addSecurityTLD",
+            "addToAllowlist",
+            "addToDenylist",
+            "addToParentalControlCategories",
+            "addToParentalControlServices",
+        ]
+        assert len(additive_posts) == 9
+        for operation_id in additive_posts:
+            tool = spec_tools.SpecApiTool(routes[operation_id])
+            assert tool.annotations is not None
+            assert tool.annotations.destructive_hint is False, operation_id
+        for operation_id in ("clearLogs", "deleteProfile"):
+            tool = spec_tools.SpecApiTool(routes[operation_id])
+            assert tool.annotations is not None
+            assert tool.annotations.destructive_hint is True, operation_id
+        get_logs = spec_tools.SpecApiTool(routes["getLogs"])
+        assert get_logs.annotations is not None
+        assert get_logs.annotations.read_only_hint is True
+        download = spec_tools.SpecApiTool(routes["downloadLogs"])
+        assert download.annotations is not None
+        assert download.annotations.read_only_hint is False
+
 
 class TestPlotsSpecToolsImportCycle:
     """tools.plots must not import spec_tools (the cycle was deferred, not removed)."""
