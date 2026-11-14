@@ -1323,7 +1323,6 @@ def _validate_overview_dashboard_args(section: Any, view_type: Any, domain_view:
             return err
     return None
 
-
 DASHBOARD_LIMIT_MIN = 1
 DASHBOARD_LIMIT_MAX = 500
 
