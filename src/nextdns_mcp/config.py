@@ -550,28 +550,9 @@ def validate_configuration() -> None:
     _log_access_control_settings()
 
 
-# Valid DNS record types for DoH lookups
-VALID_DNS_RECORD_TYPES = [
-    "A",
-    "AAAA",
-    "CNAME",
-    "MX",
-    "NS",
-    "PTR",
-    "SOA",
-    "TXT",
-    "SRV",
-    "CAA",
-    "DNSKEY",
-    "DS",
-]
+def __getattr__(name):
+    if name in {"DNS_STATUS_CODES", "VALID_DNS_RECORD_TYPES"}:
+        from .tools.doh import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES
 
-# DNS response status codes (RFC 1035)
-DNS_STATUS_CODES = {
-    0: "NOERROR - Success",
-    1: "FORMERR - Format error",
-    2: "SERVFAIL - Server failure",
-    3: "NXDOMAIN - Non-existent domain",
-    4: "NOTIMP - Not implemented",
-    5: "REFUSED - Query refused",
-}
+        return {"DNS_STATUS_CODES": DNS_STATUS_CODES, "VALID_DNS_RECORD_TYPES": VALID_DNS_RECORD_TYPES}[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
