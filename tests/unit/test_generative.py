@@ -1,5 +1,6 @@
 """Tests for NextDNSGenerativeUI provider and sizing rules."""
 
+import ast
 import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,6 +14,7 @@ from nextdns_mcp.generative import (
     SANDBOX_PRELUDE,
     NextDNSGenerativeUI,
     _build_renderer_resource,
+    _keyword_value_in_tab,
     _parse_ui_data,
     _result_size_bytes,
     _validate_chart_placement,
@@ -122,6 +124,48 @@ def test_repeated_tab_blocks_scale_subquadratically():
     large_elapsed = time.perf_counter() - start
     assert large_elapsed < 10
     assert large_elapsed / max(small_elapsed, 1e-6) < 10
+
+
+def test_with_alias_context_is_not_a_tab():
+    """`with foo:` has a Name (not Call) context expr — charts inside are accepted."""
+    code = "with foo:\n    AreaChart(data=[], series=[])\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_attribute_tab_call_is_not_a_tab():
+    """`mod.Tab(...)` is an attribute call, not the bare Tab alias — accepted."""
+    code = "with mod.Tab('Charts'):\n    AreaChart(data=[], series=[])\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_tab_positional_chart_arg_is_rejected():
+    """A chart passed positionally to Tab(...) is still nested."""
+    code = "Tab(AreaChart(data=[], series=[]))\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_bare_tab_call_without_chart_is_accepted():
+    """A chart-free Tab(...) call leaves a later top-level chart alone."""
+    code = "Tab('Data')\nAreaChart(data=[], series=[])\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_nested_tabs_with_chart_is_rejected():
+    """A chart in a Tab inside a Tab is still nested."""
+    code = "with Tab('a'):\n    with Tab('b'):\n        AreaChart(data=[], series=[])\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_syntax_error_is_ignored():
+    """Unparseable input cannot nest anything, so it is accepted."""
+    _validate_chart_placement("with Tab('x':\n")  # should not raise
+
+
+def test_none_keyword_value_is_not_a_chart():
+    """A keyword argument with no value cannot hold a chart."""
+    assert _keyword_value_in_tab(ast.keyword(arg=None, value=None)) is False
 
 
 def test_build_renderer_resource():
