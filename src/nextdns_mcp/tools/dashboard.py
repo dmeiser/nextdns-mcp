@@ -29,7 +29,12 @@ from prefab_ui.components.charts import AreaChart, BarChart, ChartSeries, PieCha
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
 from ..transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload
-from ..utils import normalize_time_value, resolve_profile_id
+from ..utils import (
+    _build_query_params,
+    _build_series_params,
+    normalize_time_value,
+    resolve_profile_id,
+)
 from .plots import (
     DASHBOARD_THEME,
     _build_chart_data,
@@ -44,12 +49,12 @@ logger = logging.getLogger(__name__)
 
 def _time_params(from_time: str | int | None, to_time: str | int | None) -> dict[str, Any]:
     """Extract normalized time window parameters."""
-    p: dict[str, Any] = {}
-    if from_time is not None:
-        p["from"] = normalize_time_value(from_time)
-    if to_time is not None:
-        p["to"] = normalize_time_value(to_time)
-    return p
+    return _build_query_params(
+        **{
+            "from": normalize_time_value(from_time),
+            "to": normalize_time_value(to_time),
+        }
+    )
 
 
 def _build_analytics_params(
@@ -59,11 +64,14 @@ def _build_analytics_params(
     **extra: Any,
 ) -> dict[str, Any]:
     """Build normalized query parameters for analytics endpoints."""
-    params = _time_params(from_time, to_time)
-    if limit is not None:
-        params["limit"] = limit
-    params.update({k: v for k, v in extra.items() if v is not None})
-    return params
+    return _build_query_params(
+        **{
+            "from": normalize_time_value(from_time),
+            "to": normalize_time_value(to_time),
+            "limit": limit,
+            **extra,
+        }
+    )
 
 
 async def _fetch_analytics_payload(
@@ -621,7 +629,7 @@ async def _fetch_overview_payloads(
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
     dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="default")
     blk_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="blocked")
-    ser_params = {"from": from_time, "to": to_time, "interval": interval}
+    ser_params = _build_series_params(from_time=from_time, to_time=to_time, interval=interval)
 
     s_task = _fetch_analytics_payload(pid, "status", params)
     ser_task = _fetch_analytics_payload(pid, "status;series", ser_params)
