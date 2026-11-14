@@ -29,6 +29,9 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 
 from nextdns_mcp.constants import is_write_operation
 from scripts import ai_e2e_common, validate_schema
+
+# Backwards-compatible alias for the shared private-file opener.
+_private_open = ai_e2e_common.private_open
 from scripts.validate_schema import (
     assert_operation_coverage,
     load_openapi_spec,
