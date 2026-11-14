@@ -398,6 +398,7 @@ def test_catalog_constants_are_imported_not_restated():
         expected_local.update(_GENERATIVE_UI_TOOLS)
     assert expected_local == set(validate_schema.local_tool_names())
 
+
 def test_local_tool_names_reflects_generative_ui_toggle_after_import(monkeypatch):
     """local_tool_names() is evaluated dynamically, not snapshotted at import."""
     from scripts import validate_schema
