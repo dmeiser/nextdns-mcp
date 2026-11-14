@@ -11,6 +11,7 @@ from nextdns_mcp.tools import dashboard as dash_module
 class TestDashboardHelpers:
     def test_wrap_card_result_uses_documented_composition(self):
         import inspect
+
         src = inspect.getsource(dash_module._wrap_card_result)
         assert "children.append" not in src
         assert "children=[card]" in src
