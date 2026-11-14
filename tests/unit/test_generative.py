@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nextdns_mcp.generative import (
-    EXECUTION_TIMEOUT,
     MAX_CODE_BYTES,
     MAX_DATA_BYTES,
     SANDBOX_PRELUDE,
@@ -257,8 +256,7 @@ async def test_generate_ui_execution_timeout():
         patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
         patch.object(gen_ui, "_get_sandbox", return_value=sandbox_mock),
     ):
-        mock_exec.side_effect = never_resolves()
-        import asyncio
+        mock_exec.side_effect = never_resolves
         with pytest.raises(TimeoutError, match="execution exceeded"):
             await gen_tool.fn(code="print(1)")
         # sandbox reset attempted

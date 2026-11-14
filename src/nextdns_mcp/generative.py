@@ -151,11 +151,11 @@ class NextDNSGenerativeUI(GenerativeUI):
             _validate_chart_placement(code)
             if len(code.encode("utf-8")) > MAX_CODE_BYTES:
                 raise ValueError(f"code exceeds maximum size of {MAX_CODE_BYTES} bytes")
-            parsed_data = _parse_ui_data(data)
             if data is not None:
                 data_size = len(data.encode("utf-8")) if isinstance(data, str) else len(json.dumps(data).encode("utf-8"))
                 if data_size > MAX_DATA_BYTES:
                     raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
+            parsed_data = _parse_ui_data(data)
             full_code = f"{SANDBOX_PRELUDE}\n{code}"
             sandbox = sandbox_ref._get_sandbox()
             try:
@@ -164,16 +164,8 @@ class NextDNSGenerativeUI(GenerativeUI):
                     timeout=EXECUTION_TIMEOUT,
                 )
             except asyncio.TimeoutError:
-                # Best-effort reset so the lock is not held forever.
-                for attr in ("close", "terminate", "reset", "restart"):
-                    fn = getattr(sandbox, attr, None)
-                    if callable(fn):
-                        try:
-                            res = fn()
-                            if asyncio.iscoroutine(res):
-                                await res
-                        except Exception:
-                            pass
+                # asyncio.wait_for cancels the inner task; PyodideSandbox.run handles
+                # CancelledError by stopping the worker, so the lock is released.
                 raise TimeoutError(f"generate_prefab_ui execution exceeded {EXECUTION_TIMEOUT}s") from None
 
         doc = GENERATE_DOC + (_gen.execute.__doc__ or "")
