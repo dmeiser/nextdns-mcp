@@ -1285,6 +1285,31 @@ async def _render_overview_page(
     return ToolResult(content=summary, structured_content=PrefabApp(view=view, theme=DASHBOARD_THEME))
 
 
+def _validate_dashboard_arg(name: str, value: Any, allowed_literal: Any) -> dict[str, Any] | None:
+    """Return an INVALID_ARGUMENT payload when ``value`` is outside ``allowed_literal``."""
+    allowed = set(get_args(allowed_literal))
+    if value in allowed:
+        return None
+    return error_payload(
+        ErrorCode.INVALID_ARGUMENT,
+        f"Invalid '{name}': {value!r}; allowed values: {sorted(allowed)}",
+        **{name: value},
+    )
+
+
+def _validate_overview_dashboard_args(section: Any, view_type: Any, domain_view: Any) -> dict[str, Any] | None:
+    """Validate overview dashboard arguments; return an error payload or None."""
+    for name, value, allowed in (
+        ("section", section, DashboardSection),
+        ("view_type", view_type, Literal["auto", "bar", "table", "pie"]),
+        ("domain_view", domain_view, Literal["table", "bar", "pie"]),
+    ):
+        err = _validate_dashboard_arg(name, value, allowed)
+        if err is not None:
+            return err
+    return None
+
+
 async def overviewDashboard(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
@@ -1324,6 +1349,10 @@ async def overviewDashboard(
         view_type: Visualization format: "auto" (default: table or card default), "bar", "table", or "pie".
         domain_view: Visualization format for domain cards in overview mode: "table" (default), "bar", or "pie".
     """
+    arg_err = _validate_overview_dashboard_args(section, view_type, domain_view)
+    if arg_err is not None:
+        return arg_err
+
     eff_view = _resolve_domain_view(domain_view, view_type)
 
     if section in _WIDGET_DISPATCH:
