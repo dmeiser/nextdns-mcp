@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import logging
 import time
-from typing import Any, Literal
+from typing import Any, Awaitable, Literal, Protocol, cast
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.app import PrefabApp
@@ -979,7 +979,18 @@ DashboardSection = Literal[
     "security",
 ]
 
-_WIDGET_DISPATCH: dict[str, Any] = {
+class _WidgetHandler(Protocol):
+    def __call__(
+        self,
+        p: OptionalProfileId = None,
+        f: str | int = "-30d",
+        t: str | int = "now",
+        lim: int = 10,
+        v: Literal["auto", "bar", "table", "pie"] = "auto",
+    ) -> Awaitable[dict[str, Any] | ToolResult]: ...
+
+
+_WIDGET_DISPATCH: dict[str, _WidgetHandler] = cast(dict[str, _WidgetHandler], {
     "kpi": lambda p, f, t, lim, v: _kpi_analytics_impl(p, from_time=f, to_time=t),
     "domains": lambda p, f, t, lim, v: _domains_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
     "blocked_domains": lambda p, f, t, lim, v: _blocked_domains_analytics_impl(
@@ -994,7 +1005,7 @@ _WIDGET_DISPATCH: dict[str, Any] = {
     "countries": lambda p, f, t, lim, v: _country_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
     "gafam": lambda p, f, t, lim, v: _gafam_analytics_impl(p, from_time=f, to_time=t, view_type=v),
     "security": lambda p, f, t, lim, v: _security_analytics_impl(p, from_time=f, to_time=t),
-}
+})
 
 
 def _resolve_domain_view(
