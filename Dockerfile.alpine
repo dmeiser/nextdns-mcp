@@ -40,6 +40,10 @@ COPY --from=builder /install /install
 # Copy application code
 COPY src/ /app/src/
 
+# Deno runtime required by Prefab's sandbox when NEXTDNS_GENERATIVE_UI=on
+RUN apk add --no-cache curl unzip && \
+    curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- --version 2.3.7
+
 # OCI labels for container metadata
 LABEL org.opencontainers.image.title="NextDNS MCP Server (Alpine)"
 LABEL org.opencontainers.image.description="Model Context Protocol server for NextDNS API (Alpine variant)"
@@ -54,6 +58,7 @@ RUN adduser -D -s /sbin/nologin appuser
 USER appuser
 
 ENV PYTHONPATH=/install:/app/src \
+    PATH=/usr/local/bin:$PATH \
     FASTMCP_CHECK_FOR_UPDATES=off \
     FASTMCP_HTTP_HOST_ORIGIN_PROTECTION=auto
 
