@@ -375,7 +375,7 @@ class SpecApiTool(Tool):
             tags={"nextdns", "spec"},
             annotations=ToolAnnotations(
                 read_only_hint=read_only,
-                destructive_hint=method in {"DELETE", "PUT", "PATCH"},
+                destructive_hint=method in {"DELETE", "PUT", "PATCH"} or route.operation_id == "clearLogs",
             ),
         )
         self._route = route
