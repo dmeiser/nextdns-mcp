@@ -4,6 +4,7 @@ SPDX-License-Identifier: MIT
 """
 
 import asyncio
+import ast
 import json
 import re
 from typing import Any
@@ -117,9 +118,53 @@ def _result_size_bytes(result: Any) -> int:
     return len(str(result).encode("utf-8"))
 
 
+_CHART_NAMES = {"AreaChart", "LineChart", "BarChart", "PieChart", "DonutChart"}
+_TAB_NAMES = {"Tab", "TabsTrigger"}
+
+
+def _is_tab_call(node: "ast.AST") -> bool:
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _TAB_NAMES
+
+
+def _is_chart_call(node: "ast.AST") -> bool:
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _CHART_NAMES
+
+
+def _chart_in_tab(node: "ast.AST", in_tab: bool = False) -> bool:
+    """Return True if a chart call occurs inside a Tab/TabsTrigger subtree."""
+    if isinstance(node, ast.Call) and _is_chart_call(node) and in_tab:
+        return True
+
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        for item in node.items:
+            entering = in_tab or _is_tab_call(item.context_expr)
+            for stmt in node.body:
+                if _chart_in_tab(stmt, entering):
+                    return True
+        return False
+
+    if isinstance(node, ast.Call) and _is_tab_call(node):
+        for arg in node.args:
+            if _chart_in_tab(arg, True):
+                return True
+        for kw in node.keywords:
+            if kw.value is not None and _chart_in_tab(kw.value, True):
+                return True
+        return False
+
+    for child in ast.iter_child_nodes(node):
+        if _chart_in_tab(child, in_tab):
+            return True
+    return False
+
+
 def _validate_chart_placement(code: str) -> None:
     """Reject nesting charts in tabs to avoid 0px container collapse."""
-    if CHART_IN_TAB_PATTERN.search(code):
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return
+    if _chart_in_tab(tree):
         raise ValueError(
             "Recharts chart components (AreaChart, LineChart, BarChart, PieChart) cannot be placed "
             "inside Tab components because tab panels initialize with 0px width, causing charts to "
