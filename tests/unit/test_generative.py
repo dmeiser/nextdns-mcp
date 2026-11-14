@@ -1,6 +1,7 @@
 """Tests for NextDNSGenerativeUI provider and sizing rules."""
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -62,6 +63,65 @@ def test_validate_chart_placement_accepts_valid_code():
     ]
     for code in good_codes:
         _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_after_tab_block_is_accepted():
+    """A dedented chart after a Tab block is not nested (false-rejection regression)."""
+    code = "with Tab('Data'):\n    DataTable(columns=[], rows=[])\nAreaChart(data=[], series=[])\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_in_card_after_tab_block_is_accepted():
+    """A chart in a Card following a Tab block is not nested (false-rejection regression)."""
+    code = "with Tab('Data'):\n    DataTable(columns=[], rows=[])\nwith Card():\n    AreaChart(data=[], series=[])\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_before_tab_block_is_accepted():
+    """A chart placed before any Tab block is not nested."""
+    code = "AreaChart(data=[], series=[])\nwith Tab('Data'):\n    DataTable(columns=[], rows=[])\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_multiple_tab_blocks_without_charts_are_accepted():
+    """Several chart-free Tab blocks must not trip the validator."""
+    code = "".join(f"with Tab('T{i}'):\n    DataTable(columns=[], rows=[])\n" for i in range(5))
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_with_tabstrigger_chart_is_rejected():
+    """TabsTrigger is aliased to Tab in the prelude, so its charts are nested too."""
+    code = "with TabsTrigger('Charts'):\n    AreaChart(data=[], series=[])\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_tab_functional_children_chart_is_rejected():
+    """Functional Tab(children=[...]) nesting bypasses `with` matching."""
+    code = "Tab(children=[AreaChart(data=[], series=[])])\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_tabstrigger_functional_children_chart_is_rejected():
+    """Functional TabsTrigger(children=[...]) nesting is nested too."""
+    code = "TabsTrigger(value='a', children=[LineChart(data=[], series=[])])\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_repeated_tab_blocks_scale_subquadratically():
+    """Many chart-free Tab blocks must validate in sub-quadratic time (DoS regression)."""
+    small = "".join(f"with Tab('T{i}'):\n    pass\n" for i in range(400))
+    large = "".join(f"with Tab('T{i}'):\n    pass\n" for i in range(1600))
+    start = time.perf_counter()
+    _validate_chart_placement(small)  # should not raise
+    small_elapsed = time.perf_counter() - start
+    start = time.perf_counter()
+    _validate_chart_placement(large)  # should not raise
+    large_elapsed = time.perf_counter() - start
+    assert large_elapsed < 10
+    assert large_elapsed / max(small_elapsed, 1e-6) < 10
 
 
 def test_build_renderer_resource():

@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import ast
 import json
-import re
+from collections.abc import Iterable
 from typing import Any
 from weakref import WeakSet
 
@@ -53,8 +53,6 @@ MAX_CODE_BYTES = 32 * 1024
 MAX_DATA_BYTES = 128 * 1024
 MAX_RESULT_BYTES = 256 * 1024
 EXECUTION_TIMEOUT = 10.0
-
-CHART_IN_TAB_PATTERN = re.compile(r"with\s+Tab\b[\s\S]*?\b(AreaChart|LineChart|BarChart|PieChart|DonutChart)\b")
 
 GENERATE_DOC = (
     "Execute Prefab Python code in a sandbox and render the result.\n\n"
@@ -122,40 +120,83 @@ _CHART_NAMES = {"AreaChart", "LineChart", "BarChart", "PieChart", "DonutChart"}
 _TAB_NAMES = {"Tab", "TabsTrigger"}
 
 
-def _is_tab_call(node: "ast.AST") -> bool:
-    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _TAB_NAMES
+def _call_name(node: ast.AST) -> str | None:
+    """Return the callee name for simple `Name(...)` calls, else None."""
+    if not isinstance(node, ast.Call):
+        return None
+    if not isinstance(node.func, ast.Name):
+        return None
+    return node.func.id
 
 
-def _is_chart_call(node: "ast.AST") -> bool:
-    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _CHART_NAMES
+def _is_tab_call(node: ast.AST) -> bool:
+    return _call_name(node) in _TAB_NAMES
 
 
-def _chart_in_tab(node: "ast.AST", in_tab: bool = False) -> bool:
-    """Return True if a chart call occurs inside a Tab/TabsTrigger subtree."""
-    if isinstance(node, ast.Call) and _is_chart_call(node) and in_tab:
-        return True
+def _is_chart_call(node: ast.AST) -> bool:
+    return _call_name(node) in _CHART_NAMES
 
-    if isinstance(node, (ast.With, ast.AsyncWith)):
-        for item in node.items:
-            entering = in_tab or _is_tab_call(item.context_expr)
-            for stmt in node.body:
-                if _chart_in_tab(stmt, entering):
-                    return True
-        return False
 
-    if isinstance(node, ast.Call) and _is_tab_call(node):
-        for arg in node.args:
-            if _chart_in_tab(arg, True):
-                return True
-        for kw in node.keywords:
-            if kw.value is not None and _chart_in_tab(kw.value, True):
-                return True
-        return False
-
-    for child in ast.iter_child_nodes(node):
-        if _chart_in_tab(child, in_tab):
+def _any_in_tab(nodes: Iterable[ast.AST], in_tab: bool) -> bool:
+    """Return True if any subtree holds a chart nested in a tab."""
+    for node in nodes:
+        if _chart_in_tab(node, in_tab):
             return True
     return False
+
+
+def _any_child_in_tab(node: ast.AST, in_tab: bool) -> bool:
+    """Return True if any child subtree holds a chart nested in a tab."""
+    return _any_in_tab(ast.iter_child_nodes(node), in_tab)
+
+
+def _with_item_body_in_tab(item: ast.withitem, body: list[ast.stmt], in_tab: bool) -> bool:
+    """Check one `with` item's body, entering tab scope when it opens a Tab."""
+    entered = in_tab or _is_tab_call(item.context_expr)
+    return _any_in_tab(body, entered)
+
+
+def _with_in_tab(node: ast.With | ast.AsyncWith, in_tab: bool) -> bool:
+    """Check a `with`/`async with` body against each item it opens."""
+    for item in node.items:
+        if _with_item_body_in_tab(item, node.body, in_tab):
+            return True
+    return False
+
+
+def _keyword_value_in_tab(keyword: ast.keyword) -> bool:
+    """Check one keyword argument value inside tab scope."""
+    if keyword.value is None:
+        return False
+    return _any_in_tab([keyword.value], True)
+
+
+def _tab_call_args_in_tab(node: ast.Call) -> bool:
+    """Check a Tab(...)/TabsTrigger(...) call's arguments inside tab scope."""
+    if _any_in_tab(node.args, True):
+        return True
+    for keyword in node.keywords:
+        if _keyword_value_in_tab(keyword):
+            return True
+    return False
+
+
+def _call_in_tab(node: ast.Call, in_tab: bool) -> bool:
+    """Check a call node: a chart in tab scope, a Tab's args, or plain children."""
+    if in_tab and _is_chart_call(node):
+        return True
+    if _is_tab_call(node):
+        return _tab_call_args_in_tab(node)
+    return _any_child_in_tab(node, in_tab)
+
+
+def _chart_in_tab(node: ast.AST, in_tab: bool = False) -> bool:
+    """Return True if a chart call occurs inside a Tab/TabsTrigger subtree."""
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return _with_in_tab(node, in_tab)
+    if isinstance(node, ast.Call):
+        return _call_in_tab(node, in_tab)
+    return _any_child_in_tab(node, in_tab)
 
 
 def _validate_chart_placement(code: str) -> None:
