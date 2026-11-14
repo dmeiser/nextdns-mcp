@@ -6,7 +6,8 @@ SPDX-License-Identifier: MIT
 import asyncio
 import logging
 import time
-from typing import Any, Literal, NamedTuple, get_args
+from collections.abc import Awaitable
+from typing import Any, Literal, NamedTuple, Protocol, get_args
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.app import PrefabApp
@@ -996,50 +997,171 @@ DashboardSection = Literal[
 
 DASHBOARD_SECTIONS = get_args(DashboardSection)
 
-_WIDGET_DISPATCH: dict[str, Any] = {
-    "kpi": lambda p, f, t, lim, v: _kpi_analytics_impl(p, from_time=f, to_time=t),
-    "domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
-        p,
-        from_time=f,
-        to_time=t,
-        limit=lim,
-        view_type=v,
+
+class _WidgetHandler(Protocol):
+    def __call__(
+        self,
+        profile_id: OptionalProfileId = None,
+        from_time: str | int = "-30d",
+        to_time: str | int = "now",
+        limit: int = 10,
+        view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+    ) -> Awaitable[dict[str, Any] | ToolResult]: ...
+
+
+WidgetHandler = _WidgetHandler
+
+
+async def _dispatch_kpi(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _kpi_analytics_impl(profile_id, from_time=from_time, to_time=to_time)
+
+
+async def _dispatch_domains(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _domain_card_analytics_impl(
+        profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        view_type=view_type,
         fetch_extra={"status": "default"},
         title="Resolved Domains",
         description="Domains that resolved without being blocked.",
         summary_title="Resolved Domains",
         color="#3b82f6",
-    ),
-    "blocked_domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
-        p,
-        from_time=f,
-        to_time=t,
-        limit=lim,
-        view_type=v,
+    )
+
+
+async def _dispatch_blocked_domains(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _domain_card_analytics_impl(
+        profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        view_type=view_type,
         fetch_extra={"status": "blocked"},
         title="Blocked Domains",
         description="Domains blocked by security, privacy, or parental controls.",
         summary_title="Blocked Domains",
         color="#ef4444",
-    ),
-    "reasons": lambda p, f, t, lim, v: _reasons_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
-    "devices": lambda p, f, t, lim, v: _device_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
-    "ips": lambda p, f, t, lim, v: _ip_analytics_impl(p, from_time=f, to_time=t, limit=lim),
-    "root_domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
-        p,
-        from_time=f,
-        to_time=t,
-        limit=lim,
-        view_type=v,
+    )
+
+
+async def _dispatch_reasons(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _reasons_analytics_impl(
+        profile_id, from_time=from_time, to_time=to_time, limit=limit, view_type=view_type
+    )
+
+
+async def _dispatch_devices(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _device_analytics_impl(
+        profile_id, from_time=from_time, to_time=to_time, limit=limit, view_type=view_type
+    )
+
+
+async def _dispatch_ips(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _ip_analytics_impl(profile_id, from_time=from_time, to_time=to_time, limit=limit)
+
+
+async def _dispatch_root_domains(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _domain_card_analytics_impl(
+        profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        view_type=view_type,
         fetch_extra={"root": "true"},
         title="Root Domains",
         description="Aggregate queries for root domains and subdomains.",
         summary_title="Root Domains",
         key_name="domain",
-    ),
-    "countries": lambda p, f, t, lim, v: _country_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
-    "gafam": lambda p, f, t, lim, v: _gafam_analytics_impl(p, from_time=f, to_time=t, view_type=v),
-    "security": lambda p, f, t, lim, v: _security_analytics_impl(p, from_time=f, to_time=t),
+    )
+
+
+async def _dispatch_countries(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _country_analytics_impl(
+        profile_id, from_time=from_time, to_time=to_time, limit=limit, view_type=view_type
+    )
+
+
+async def _dispatch_gafam(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _gafam_analytics_impl(profile_id, from_time=from_time, to_time=to_time, view_type=view_type)
+
+
+async def _dispatch_security(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _security_analytics_impl(profile_id, from_time=from_time, to_time=to_time)
+
+
+_WIDGET_DISPATCH: dict[str, _WidgetHandler] = {
+    "kpi": _dispatch_kpi,
+    "domains": _dispatch_domains,
+    "blocked_domains": _dispatch_blocked_domains,
+    "reasons": _dispatch_reasons,
+    "devices": _dispatch_devices,
+    "ips": _dispatch_ips,
+    "root_domains": _dispatch_root_domains,
+    "countries": _dispatch_countries,
+    "gafam": _dispatch_gafam,
+    "security": _dispatch_security,
 }
 
 
