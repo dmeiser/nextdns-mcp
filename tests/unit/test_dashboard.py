@@ -158,10 +158,16 @@ class TestDashboardHelpers:
         long_list = ["verylongdomainnamethatisoverlimit.example.com"] * 100
         # Old implementation would return first 60 chars with partial second label
         # New implementation stops after first label because second would exceed budget
-        assert dash_module._destination_row({"domains": long_list})["sample_domains"] == "verylongdomainnamethatisoverlimit.example.com"
+        assert (
+            dash_module._destination_row({"domains": long_list})["sample_domains"]
+            == "verylongdomainnamethatisoverlimit.example.com"
+        )
         # Exact boundary cases
         assert dash_module._destination_row({"domains": ["a" * 30, "b" * 40]})["sample_domains"] == "a" * 30
-        assert dash_module._destination_row({"domains": ["a" * 28, "b" * 30]})["sample_domains"] == "a" * 28 + ", " + "b" * 30
+        assert (
+            dash_module._destination_row({"domains": ["a" * 28, "b" * 30]})["sample_domains"]
+            == "a" * 28 + ", " + "b" * 30
+        )
         # Empty list returns "-"
         assert dash_module._destination_row({"domains": []})["sample_domains"] == "-"
         # Single overlong label gets truncated to budget
