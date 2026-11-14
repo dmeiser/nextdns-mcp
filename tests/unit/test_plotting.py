@@ -861,3 +861,47 @@ class TestUnresolvableExtremeTimes:
 
     def test_a_numeric_string_past_the_float_range_is_unresolved(self):
         assert plots_module._resolve_time_point("1" + "0" * 400, now=1_700_000_000.0) is None
+
+
+class TestDownsampleChartSeries:
+    """Regression test for bounded-series visual downsampling.
+
+    The visual chart must never embed more than PLOT_CHART_MAX_POINTS raw
+    point dicts in structured_content, while totals are preserved.
+    """
+
+    def test_no_downsample_when_under_limit(self):
+        times = [f"2024-01-01T{i:02d}:00:00Z" for i in range(100)]
+        series_data = [{"name": "a", "queries": [i for i in range(100)]}]
+        out_times, out_series = plots_module._downsample_chart_series(times, series_data)
+        assert out_times is times
+        assert out_series is series_data
+
+    def test_downsample_reduces_points_and_preserves_totals(self):
+        n = 600
+        times = [f"2024-01-01T{i:04d}:00:00Z" for i in range(n)]
+        series_data = [
+            {"name": "a", "queries": list(range(n))},
+            {"name": "b", "queries": [2 * i for i in range(n)]},
+        ]
+        out_times, out_series = plots_module._downsample_chart_series(times, series_data)
+        # Points capped at PLOT_CHART_MAX_POINTS
+        assert len(out_times) <= plots_module.PLOT_CHART_MAX_POINTS
+        assert len(out_series) == 2
+        # Totals preserved per series
+        orig_totals = [sum(s["queries"]) for s in series_data]
+        new_totals = [sum(s["queries"]) for s in out_series]
+        assert orig_totals == new_totals
+        # First timestamp retained
+        assert out_times[0] == times[0]
+
+    def test_validate_partials_invalid_returns_error(self):
+        _partials, err = plots_module._validate_partials("invalid_value")
+        assert err is not None
+        assert err["code"] == "invalid_argument"
+
+    @pytest.mark.asyncio
+    async def test_plot_analytics_series_impl_invalid_partials_returns_error(self):
+        result = await plots_module._plot_analytics_series_impl(metric="status", profile_id="abc123", partials="bad")
+        assert isinstance(result, dict)
+        assert result["code"] == "invalid_argument"

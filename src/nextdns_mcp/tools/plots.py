@@ -181,6 +181,30 @@ def _build_chart_series(series_data: list[dict[str, Any]]) -> list[ChartSeries]:
     ]
 
 
+def _bucket_sums(queries: list[int], n: int, bucket_size: int) -> list[int]:
+    """Sum one series' per-point counts into ``bucket_size`` chunks over ``n`` points."""
+    return [sum(queries[start : min(start + bucket_size, n)]) for start in range(0, n, bucket_size)]
+
+
+def _bucket_series_data(
+    times: list[str],
+    series_data: list[dict[str, Any]],
+    bucket_size: int,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Bucket times and series queries into chunks of ``bucket_size``.
+
+    Returns representative times and a new series list with summed queries.
+    """
+    n = len(times)
+    new_times = [times[start] for start in range(0, n, bucket_size)]
+    new_series_data: list[dict[str, Any]] = []
+    for series in series_data:
+        new_series = dict(series)
+        new_series["queries"] = _bucket_sums(series.get("queries") or [], n, bucket_size)
+        new_series_data.append(new_series)
+    return new_times, new_series_data
+
+
 def _downsample_chart_series(
     times: list[str],
     series_data: list[dict[str, Any]],
@@ -197,20 +221,7 @@ def _downsample_chart_series(
     if n <= max_points or not times:
         return times, series_data
     bucket_size = math.ceil(n / max_points)
-    new_times: list[str] = []
-    bucketed: list[list[int]] = [[] for _ in series_data]
-    for start in range(0, n, bucket_size):
-        end = min(start + bucket_size, n)
-        new_times.append(times[start])
-        for s_idx, series in enumerate(series_data):
-            queries = series.get("queries") or []
-            bucketed[s_idx].append(sum(queries[start:end]))
-    new_series_data: list[dict[str, Any]] = []
-    for s_idx, series in enumerate(series_data):
-        new_series = dict(series)
-        new_series["queries"] = bucketed[s_idx]
-        new_series_data.append(new_series)
-    return new_times, new_series_data
+    return _bucket_series_data(times, series_data, bucket_size)
 
 
 def _build_series_chart(
