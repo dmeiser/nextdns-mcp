@@ -3,6 +3,7 @@
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -46,6 +47,10 @@ class DataTable(_BaseDataTable):
             kwargs["rows"] = rows
         super().__init__(**kwargs)
 """
+
+MAX_CODE_BYTES = 32 * 1024
+MAX_DATA_BYTES = 128 * 1024
+EXECUTION_TIMEOUT = 10.0
 
 CHART_IN_TAB_PATTERN = re.compile(r"with\s+Tab\b[\s\S]*?\b(AreaChart|LineChart|BarChart|PieChart|DonutChart)\b")
 
@@ -144,13 +149,32 @@ class NextDNSGenerativeUI(GenerativeUI):
             data: str | dict[str, Any] | None = None,
         ) -> PrefabApp:
             _validate_chart_placement(code)
+            if len(code.encode("utf-8")) > MAX_CODE_BYTES:
+                raise ValueError(f"code exceeds maximum size of {MAX_CODE_BYTES} bytes")
             parsed_data = _parse_ui_data(data)
+            if data is not None:
+                data_size = len(data.encode("utf-8")) if isinstance(data, str) else len(json.dumps(data).encode("utf-8"))
+                if data_size > MAX_DATA_BYTES:
+                    raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
             full_code = f"{SANDBOX_PRELUDE}\n{code}"
-            return await _gen.execute(
-                full_code,
-                data=parsed_data,
-                sandbox=sandbox_ref._get_sandbox(),
-            )
+            sandbox = sandbox_ref._get_sandbox()
+            try:
+                return await asyncio.wait_for(
+                    _gen.execute(full_code, data=parsed_data, sandbox=sandbox),
+                    timeout=EXECUTION_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                # Best-effort reset so the lock is not held forever.
+                for attr in ("close", "terminate", "reset", "restart"):
+                    fn = getattr(sandbox, attr, None)
+                    if callable(fn):
+                        try:
+                            res = fn()
+                            if asyncio.iscoroutine(res):
+                                await res
+                        except Exception:
+                            pass
+                raise TimeoutError(f"generate_prefab_ui execution exceeded {EXECUTION_TIMEOUT}s") from None
 
         doc = GENERATE_DOC + (_gen.execute.__doc__ or "")
         return Tool.from_function(
