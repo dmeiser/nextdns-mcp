@@ -605,3 +605,11 @@ def test_the_logs_status_enum_matches_the_live_api():
     logs_get = spec["paths"]["/profiles/{profile_id}/logs"]["get"]
     inline = next(p for p in logs_get["parameters"] if isinstance(p, dict) and p.get("name") == "status")
     assert "relayed" in inline["schema"]["enum"]
+
+
+def test_search_prefab_components_not_content_tool():
+    from scripts import validate_schema
+
+    assert "search_prefab_components" not in validate_schema.CONTENT_TOOLS
+    assert "search_prefab_components" in validate_schema.TOOL_RESPONSE_SCHEMAS
+    assert validate_schema.TOOL_RESPONSE_SCHEMAS["search_prefab_components"] == {"type": "string"}
