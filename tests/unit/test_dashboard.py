@@ -240,7 +240,9 @@ class TestDashboardToolsExecution:
         res = await dash_module.overviewDashboard(profile_id="abc123", domain_view="bar")
         assert isinstance(res, ToolResult)
         assert "$prefab" in res.structured_content
-        assert "BarChart" in str(res.structured_content)
+        # Full-tree substring is insufficient – check resolved domains explicitly
+        content = str(res.structured_content)
+        assert content.count("BarChart") >= 2
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_all_sections(self, mock_all_endpoints):
@@ -248,7 +250,9 @@ class TestDashboardToolsExecution:
         assert isinstance(res, ToolResult)
         assert "Rendered NextDNS Dashboard" in res.content[0].text
         assert "$prefab" in res.structured_content
-        assert "BarChart" in str(res.structured_content)
+        content = str(res.structured_content)
+        # At least 6 BarCharts: overview Resolved/Blocked + Reasons/Devices/Root/GAFAM
+        assert content.count("BarChart") >= 6
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_status_fetch_error(self, monkeypatch):
