@@ -1310,7 +1310,7 @@ def _validate_overview_dashboard_args(section: Any, view_type: Any, domain_view:
     return None
 
 
-async def overviewDashboard(
+async def _overview_dashboard_impl(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
     to_time: str | int = "now",
@@ -1349,10 +1349,6 @@ async def overviewDashboard(
         view_type: Visualization format: "auto" (default: table or card default), "bar", "table", or "pie".
         domain_view: Visualization format for domain cards in overview mode: "table" (default), "bar", or "pie".
     """
-    arg_err = _validate_overview_dashboard_args(section, view_type, domain_view)
-    if arg_err is not None:
-        return arg_err
-
     eff_view = _resolve_domain_view(domain_view, view_type)
 
     if section in _WIDGET_DISPATCH:
@@ -1370,3 +1366,30 @@ async def overviewDashboard(
         return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution returned no id")
 
     return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
+
+
+async def overviewDashboard(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    section: DashboardSection = "overview",
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+    domain_view: Literal["table", "bar", "pie"] = "table",
+) -> dict[str, Any] | ToolResult:
+    """Render interactive visual Prefab UI analytics dashboards and specialized widgets."""
+    arg_err = _validate_overview_dashboard_args(section, view_type, domain_view)
+    if arg_err is not None:
+        return arg_err
+    return await _overview_dashboard_impl(
+        profile_id=profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        section=section,
+        view_type=view_type,
+        domain_view=domain_view,
+    )
+
+
+overviewDashboard.__doc__ = _overview_dashboard_impl.__doc__
