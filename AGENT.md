@@ -77,6 +77,7 @@ These are the FastMCP internals this server leans on. `fastmcp` is version-pinne
 | `Tool.run` | `SpecApiTool` subclasses `Tool` and overrides `run` entirely (`src/nextdns_mcp/spec_tools.py`) | `run(arguments)` returns a `ToolResult` and never raises for an expected failure |
 | `parse_openapi_to_http_routes`, `route.flat_param_schema`, `route.parameter_map` | the generator's whole view of the document | A flat one-level parameter schema, and a parameter map that reports an unknown argument as absent rather than guessed |
 | `FastMCP(transforms=...)`, `add_middleware` | wiring disclosure, relaxation, and the call log | Transforms still apply to `tools/list`, and middleware still wraps every tool call |
+| `GenerativeUI._gen`, `_build_csp`, `_local._add_component`, `_setup_done`, `_get_sandbox`, `_tool_name`, `_components_tool_name`, `_include_components_tool` | `NextDNSGenerativeUI` (`src/nextdns_mcp/generative.py`) subclasses `GenerativeUI` and borrows these private members to register the generate/components/renderer tools with sizing guards | All eight members keep their names, types, and semantics across a FastMCP bump; `_ensure_setup()` must remain idempotent and `_local` must still expose `_add_component` |
 
 When a bump touches any of these: run the unit suite and the container E2E, and re-read the
 `# type: ignore` suppressions in `src/nextdns_mcp/tool_search.py` — they are suppressed
