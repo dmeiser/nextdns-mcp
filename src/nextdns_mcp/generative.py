@@ -152,7 +152,9 @@ class NextDNSGenerativeUI(GenerativeUI):
             if len(code.encode("utf-8")) > MAX_CODE_BYTES:
                 raise ValueError(f"code exceeds maximum size of {MAX_CODE_BYTES} bytes")
             if data is not None:
-                data_size = len(data.encode("utf-8")) if isinstance(data, str) else len(json.dumps(data).encode("utf-8"))
+                data_size = (
+                    len(data.encode("utf-8")) if isinstance(data, str) else len(json.dumps(data).encode("utf-8"))
+                )
                 if data_size > MAX_DATA_BYTES:
                     raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
             parsed_data = _parse_ui_data(data)
