@@ -73,7 +73,10 @@ async def _fetch_analytics_payload(
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Fetch an analytics endpoint payload through the access-controlled transport."""
     url = f"/profiles/{profile_id}/analytics/{endpoint}"
-    payload = await _api_request_payload("GET", url, params=params, max_response_bytes=MAX_SERIES_RESPONSE_BYTES)
+    if ";series" in endpoint:
+        payload = await _api_request_payload("GET", url, params=params, max_response_bytes=MAX_SERIES_RESPONSE_BYTES)
+    else:
+        payload = await _api_request_payload("GET", url, params=params)
     if isinstance(payload, dict) and "code" in payload and "error" in payload and "data" not in payload:
         return None, payload
     return payload, None
