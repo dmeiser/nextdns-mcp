@@ -400,9 +400,6 @@ def test_catalog_constants_are_imported_not_restated():
 
 def test_local_tool_names_reflects_generative_ui_toggle_after_import(monkeypatch):
     """local_tool_names() is evaluated dynamically, not snapshotted at import."""
-    from nextdns_mcp import spec_tools
-    from nextdns_mcp.config import is_generative_ui_enabled
-    from nextdns_mcp.server import _GENERATIVE_UI_TOOLS, published_tool_names
     from scripts import validate_schema
 
     monkeypatch.setenv("NEXTDNS_GENERATIVE_UI", "off")
