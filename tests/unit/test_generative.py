@@ -95,3 +95,41 @@ async def test_nextdns_generative_ui_without_components_tool():
     tools = {t.name: t for t in tool_list}
     assert "generate_prefab_ui" in tools
     assert "search_prefab_components" not in tools
+
+
+def test_close_calls_stop_when_sandbox_initialized():
+    gen_ui = NextDNSGenerativeUI()
+    sandbox = MagicMock()
+    gen_ui._sandbox = sandbox
+    gen_ui.close()
+    sandbox._stop.assert_called_once()
+    assert gen_ui._sandbox is None
+
+
+def test_close_noop_when_not_initialized():
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._sandbox = None
+    gen_ui.close()  # should not raise
+    assert gen_ui._sandbox is None
+
+
+def test_close_all_generative_ui():
+    from nextdns_mcp.generative import close_all_generative_ui
+
+    gen_ui = NextDNSGenerativeUI()
+    sandbox = MagicMock()
+    gen_ui._sandbox = sandbox
+    close_all_generative_ui()
+    sandbox._stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_server_lifespan_cleanup():
+    from unittest.mock import patch
+
+    from nextdns_mcp.openapi import _server_lifespan
+
+    with patch("nextdns_mcp.generative.close_all_generative_ui") as mock_close:
+        async with _server_lifespan(MagicMock()):
+            pass
+        mock_close.assert_called_once()
