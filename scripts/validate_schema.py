@@ -54,8 +54,6 @@ def local_tool_names() -> frozenset[str]:
     return frozenset(name for name in published_tool_names() if name not in set(spec_tool_names()))
 
 
-# Initial set evaluated at import time
-LOCAL_TOOLS = local_tool_names()
 
 # Of those, the ones that answer with content instead of a JSON document. A chart is an
 # interactive Prefab UI view, so there is no payload for a schema to describe; the runner's assertion for it
