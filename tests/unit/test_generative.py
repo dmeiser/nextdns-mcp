@@ -8,6 +8,7 @@ import pytest
 from nextdns_mcp.generative import (
     MAX_CODE_BYTES,
     MAX_DATA_BYTES,
+    MAX_RESULT_BYTES,
     SANDBOX_PRELUDE,
     NextDNSGenerativeUI,
     _build_renderer_resource,
@@ -241,6 +242,26 @@ async def test_generate_ui_data_size_limit():
     oversize_data = "b" * (MAX_DATA_BYTES + 1)
     with pytest.raises(ValueError, match="data exceeds maximum size"):
         await gen_tool.fn(code="print(1)", data=oversize_data)
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_result_size_limit():
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tool_list = await gen_ui._local.list_tools()
+    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+
+    class OversizedApp:
+        def to_json(self):
+            return {"payload": "x" * (MAX_RESULT_BYTES + 1)}
+
+    with (
+        patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_sandbox", return_value=MagicMock()),
+    ):
+        mock_exec.return_value = OversizedApp()
+        with pytest.raises(ValueError, match="result exceeds maximum size"):
+            await gen_tool.fn(code="print(1)")
 
 
 @pytest.mark.asyncio
