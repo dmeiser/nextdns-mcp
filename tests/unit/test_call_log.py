@@ -570,3 +570,34 @@ class TestEvidenceColumn:
         prefab_app = {"$prefab": {"version": "0.3"}, "view": {}}
         row = self._row("plotAnalytics", {}, True, prefab_app)
         assert "components" not in row.get("evidence", {})
+
+
+class TestIntermediateSerialization:
+    """Intermediate row fields remain objects and avoid redundant json.dumps pre-serialization."""
+
+    class _R:
+        def __init__(self, structured=None):
+            self.is_error = False
+            self.structured_content = structured
+
+    def test_record_row_retains_args_as_object_and_sorts_keys_only_in_final_serialization(self, tmp_path):
+        mw = CallLogMiddleware(path="")
+        args = {"z_key": "val", "a_key": "val"}
+        row = mw._record_row("testTool", args, True, "", self._R())
+
+        # Intermediate row keeps args as object, not pre-serialized JSON string
+        assert isinstance(row["args"], dict)
+        assert not isinstance(row["args"], str)
+
+        # Final append serializes row once with sorted keys
+        log_file = tmp_path / "calls.jsonl"
+        _append_row(str(log_file), row)
+
+        raw_line = log_file.read_text(encoding="utf-8").strip()
+        # args is a nested JSON object with sorted keys in the final JSON
+        assert '"args": {"a_key": "val", "z_key": "val"}' in raw_line
+        assert '\\"z_key\\"' not in raw_line
+
+        parsed = json.loads(raw_line)
+        assert isinstance(parsed["args"], dict)
+        assert parsed["args"] == {"a_key": "val", "z_key": "val"}

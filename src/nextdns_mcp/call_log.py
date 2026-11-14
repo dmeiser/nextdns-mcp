@@ -225,7 +225,7 @@ class CallLogMiddleware(Middleware):
             # Enough of the arguments to match the call the harness asked for
             # (which endpoint, which entry), bounded before serialization by
             # the same projection the result uses.
-            "args": json.dumps(_project_result(arguments), sort_keys=True, default=str)[:ARGS_CHARS],
+            "args": _project_result(arguments),
             "ok": ok,
             "error": error[:ERROR_CHARS],
             # What the call returned. This is what makes a READ verifiable: the
@@ -266,7 +266,7 @@ class CallLogMiddleware(Middleware):
 
 def _append_row(path: str, row: dict[str, Any]) -> None:
     """Write one row to the log. Runs on a worker thread (``_record`` offloads here)."""
-    line = json.dumps(row, sort_keys=True) + "\n"
+    line = json.dumps(row, sort_keys=True, default=str) + "\n"
     try:
         with _write_lock, _open_log_file(path) as fh:
             fh.write(line)
