@@ -151,6 +151,21 @@ class TestDashboardHelpers:
         assert dash_module._build_destinations_card(data, view_type="bar") is not None
         assert dash_module._build_destinations_card(data, view_type="pie") is not None
 
+    def test_accumulate_domains_budgeted(self):
+        # In-budget: labels fit exactly
+        assert dash_module._accumulate_domains(["a.com", "b.com"], budget=60) == "a.com, b.com"
+        # Overflow: stops before exceeding budget
+        long_list = ["verylongdomainnamethatisoverlimit.example.com"] * 100
+        result = dash_module._accumulate_domains(long_list, budget=60)
+        assert len(result) <= 60
+        # Single overlong label gets truncated to budget
+        over = "x" * 100
+        result = dash_module._accumulate_domains([over], budget=60)
+        assert result == over[:60]
+        # _destination_row reflects accumulation
+        row = dash_module._destination_row({"name": "US", "code": "US", "queries": 1, "domains": long_list})
+        assert len(row["sample_domains"]) <= 60
+
 
 class TestDashboardFetchAndValidation:
     """Tests for data validation and fetching error paths."""
