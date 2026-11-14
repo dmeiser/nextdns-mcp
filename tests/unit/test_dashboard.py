@@ -240,13 +240,15 @@ class TestDashboardToolsExecution:
         res = await dash_module.overviewDashboard(profile_id="abc123", domain_view="bar")
         assert isinstance(res, ToolResult)
         assert "$prefab" in res.structured_content
+        assert "BarChart" in str(res.structured_content)
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_all_sections(self, mock_all_endpoints):
-        res = await dash_module.overviewDashboard(profile_id="abc123", section="all")
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all", domain_view="bar")
         assert isinstance(res, ToolResult)
         assert "Rendered NextDNS Dashboard" in res.content[0].text
         assert "$prefab" in res.structured_content
+        assert "BarChart" in str(res.structured_content)
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_status_fetch_error(self, monkeypatch):
