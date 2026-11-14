@@ -183,7 +183,7 @@ def _domain_label(item: dict[str, Any], key_name: str = "domain") -> str:
 
 def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     """Build domain data table."""
-    rows: list[dict[str, Any] | Any] = [
+    rows: list[dict[str, Any]] = [
         {"domain": _domain_label(item, key_name), "queries": _item_queries(item)} for item in data
     ]
     return DataTable(
@@ -191,7 +191,7 @@ def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
             DataTableColumn(key="domain", header="Domain", sortable=True),
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -250,14 +250,14 @@ def _reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
 def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     """Build reasons data table."""
     total = sum(_item_queries(item) for item in data)
-    rows: list[dict[str, Any] | Any] = [_reason_row(item, total) for item in data]
+    rows: list[dict[str, Any]] = [_reason_row(item, total) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -310,7 +310,7 @@ def _device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
 def _devices_table(data: list[dict[str, Any]]) -> DataTable:
     """Build devices data table."""
     total = sum(_item_queries(item) for item in data)
-    rows: list[dict[str, Any] | Any] = [_device_row(item, total) for item in data]
+    rows: list[dict[str, Any]] = [_device_row(item, total) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="device", header="Device", sortable=True),
@@ -318,7 +318,7 @@ def _devices_table(data: list[dict[str, Any]]) -> DataTable:
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -367,7 +367,7 @@ def _ip_row(item: dict[str, Any]) -> dict[str, Any]:
 
 def _build_ips_card(data: list[dict[str, Any]]) -> Card:
     """Build the IP addresses card."""
-    rows: list[dict[str, Any] | Any] = [_ip_row(item) for item in data]
+    rows: list[dict[str, Any]] = [_ip_row(item) for item in data]
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle("IPs")
@@ -383,7 +383,7 @@ def _build_ips_card(data: list[dict[str, Any]]) -> Card:
                         DataTableColumn(key="location", header="Location", sortable=True),
                         DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
                     ],
-                    rows=rows,
+                    rows=rows,  # type: ignore[arg-type]
                 )
     return card
 
@@ -399,15 +399,15 @@ def _single_gafam_row(item: dict[str, Any], total: int) -> tuple[dict[str, Any],
     }
 
 
-def _gafam_rows(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any] | Any]]:
+def _gafam_rows(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Format data rows for the GAFAM donut chart and data table."""
     total = sum(_item_queries(item) for item in data)
     pairs = [_single_gafam_row(item, total) for item in data]
-    table_rows: list[dict[str, Any] | Any] = [p[1] for p in pairs]
+    table_rows: list[dict[str, Any]] = [p[1] for p in pairs]
     return [p[0] for p in pairs], table_rows
 
 
-def _gafam_table(table_rows: list[dict[str, Any] | Any]) -> DataTable:
+def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
     """Build GAFAM table."""
     return DataTable(
         columns=[
@@ -415,7 +415,7 @@ def _gafam_table(table_rows: list[dict[str, Any] | Any]) -> DataTable:
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
-        rows=table_rows,
+        rows=table_rows,  # type: ignore[arg-type]
     )
 
 
@@ -500,7 +500,7 @@ def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
 
 def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
     """Build destinations table."""
-    rows: list[dict[str, Any] | Any] = [_destination_row(item) for item in data]
+    rows: list[dict[str, Any]] = [_destination_row(item) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="country", header="Country", sortable=True),
@@ -508,7 +508,7 @@ def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="sample_domains", header="Sample Domains"),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
