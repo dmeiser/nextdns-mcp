@@ -163,7 +163,7 @@ class NextDNSGenerativeUI(GenerativeUI):
                     _gen.execute(full_code, data=parsed_data, sandbox=sandbox),
                     timeout=EXECUTION_TIMEOUT,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # asyncio.wait_for cancels the inner task; PyodideSandbox.run handles
                 # CancelledError by stopping the worker, so the lock is released.
                 raise TimeoutError(f"generate_prefab_ui execution exceeded {EXECUTION_TIMEOUT}s") from None

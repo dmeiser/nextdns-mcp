@@ -250,7 +250,7 @@ async def test_generate_ui_execution_timeout():
     tool_list = await gen_ui._local.list_tools()
     gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
     sandbox_mock = MagicMock()
-    async def never_resolves():
+    async def never_resolves(*args, **kwargs):
         await asyncio.sleep(9999)
     with (
         patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
