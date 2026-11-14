@@ -572,10 +572,7 @@ def validate_configuration() -> None:
     ):
         raw = os.getenv(env_name, default)
         if _parse_bool_env(raw) is None:
-            raise ConfigurationError(
-                f"Invalid {env_name}: {raw!r}. Expected one of "
-                f"{sorted(_BOOL_TOKENS - {''})}."
-            )
+            raise ConfigurationError(f"Invalid {env_name}: {raw!r}. Expected one of {sorted(_BOOL_TOKENS - {''})}.")
 
     _log_access_control_settings()
 
