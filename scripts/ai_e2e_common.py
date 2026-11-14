@@ -31,13 +31,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, get_args
 
+from nextdns_mcp.config import DEFAULT_API_BASE
 from nextdns_mcp.tools.metrics import PlotMetric
 
 # --------------------------------------------------------------------------- #
 # Constants
 # --------------------------------------------------------------------------- #
 
-DEFAULT_API_BASE = "https://api.nextdns.io"
 
 
 def api_base() -> str:

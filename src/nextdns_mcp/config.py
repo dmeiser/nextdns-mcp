@@ -55,7 +55,8 @@ def configure_logging() -> None:
 # not the MCP server under test. Read once at import: the ACL client's
 # base_url, the DoH allowlist host and the startup banner all resolve from
 # this constant, so the override configures every one of them.
-NEXTDNS_BASE_URL = os.getenv("NEXTDNS_API_BASE", "https://api.nextdns.io").rstrip("/")
+DEFAULT_API_BASE = "https://api.nextdns.io"
+NEXTDNS_BASE_URL = os.getenv("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
 
 # Default HTTP request timeout in seconds
 DEFAULT_HTTP_TIMEOUT: float = 30.0
@@ -544,7 +545,7 @@ def validate_configuration() -> None:
 
     get_http_timeout()
     get_download_max_bytes()
-    base_url = os.getenv("NEXTDNS_API_BASE", "https://api.nextdns.io").rstrip("/")
+    base_url = os.getenv("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
     if not base_url.lower().startswith("https://"):
         raise ConfigurationError("NEXTDNS_API_BASE must use https://")
     _log_access_control_settings()
