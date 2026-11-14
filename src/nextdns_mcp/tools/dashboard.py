@@ -687,6 +687,7 @@ async def _append_extra_dashboard_sections(
     from_time: str | int,
     to_time: str | int,
     limit: int,
+    domain_view: str = "table",
 ) -> None:
     """Fetch and append reasons, devices, IPs, root domains, GAFAM and security cards."""
     dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
@@ -1030,7 +1031,7 @@ async def _render_overview_page(
     kpis = _calculate_status_kpis(_payload_data(s_p))
     view = _assemble_overview_layout(kpis, ser_p, r_data, b_data, domain_view=domain_view)
     if section == "all":
-        await _append_extra_dashboard_sections(pid, view, from_time, to_time, limit)
+        await _append_extra_dashboard_sections(pid, view, from_time, to_time, limit, domain_view=domain_view)
 
     top_summary = _overview_top_summary(r_data, b_data)
     summary = (
@@ -1050,15 +1051,16 @@ async def _overview_dashboard_impl(
     domain_view: Literal["table", "bar", "pie"] = "table",
 ) -> dict[str, Any] | ToolResult:
     """Construct an overview dashboard or individual widget matching the NextDNS web UI."""
+    eff_view = _resolve_domain_view(domain_view, view_type)
+
     if section in _WIDGET_DISPATCH:
-        return await _WIDGET_DISPATCH[section](profile_id, from_time, to_time, limit, view_type)
+        return await _WIDGET_DISPATCH[section](profile_id, from_time, to_time, limit, eff_view)
 
     pid, err = await _resolve_profile(profile_id)
     if err is not None:
         return err
     assert pid is not None
 
-    eff_view = _resolve_domain_view(domain_view, view_type)
     return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
 
 
