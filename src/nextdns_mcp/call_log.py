@@ -69,6 +69,7 @@ ERROR_CHARS = 300
 PROJECT_MAX_ITEMS = 5
 PROJECT_MAX_KEYS = 50
 PROJECT_MAX_STRING_CHARS = 200
+PROJECT_MAX_DEPTH = 64
 
 # Dedicated bounded evidence (see ``_result_evidence``): how many id/name pairs
 # one row may carry, and how long each field may be. An id or name over the cap
@@ -141,26 +142,30 @@ def result_error(res: Any) -> str:
     return ""
 
 
-def _project_list(value: list[Any]) -> list[Any]:
+def _project_list(value: list[Any], depth: int) -> list[Any]:
     """Keep the leading items; when items were dropped, say how many.
 
     The omission marker exists so a reader can tell a small result from a
     truncated one; a list that fits whole is returned untouched.
     """
-    kept = [_project_value(item) for item in value[:PROJECT_MAX_ITEMS]]
+    if depth > PROJECT_MAX_DEPTH:
+        return []
+    kept = [_project_value(item, depth + 1) for item in value[:PROJECT_MAX_ITEMS]]
     if len(value) > PROJECT_MAX_ITEMS:
         kept.append({"_omitted_items": len(value) - PROJECT_MAX_ITEMS})
     return kept
 
 
-def _project_value(value: Any) -> Any:
+def _project_value(value: Any, depth: int = 0) -> Any:
     """A size-bounded projection of one result value (see ``PROJECT_*``)."""
+    if depth > PROJECT_MAX_DEPTH:
+        return None
     if isinstance(value, str):
         return value[:PROJECT_MAX_STRING_CHARS]
     if isinstance(value, dict):
-        return {key: _project_value(item) for key, item in list(value.items())[:PROJECT_MAX_KEYS]}
+        return {key: _project_value(item, depth + 1) for key, item in list(value.items())[:PROJECT_MAX_KEYS]}
     if isinstance(value, list):
-        return _project_list(value)
+        return _project_list(value, depth)
     return value
 
 
@@ -250,7 +255,7 @@ class CallLogMiddleware(Middleware):
         if ok:
             try:
                 evidence = _result_evidence(result, write)
-            except Exception as exc:  # never let evidence extraction fail the call
+            except (RuntimeError, TypeError, ValueError, KeyError, RecursionError, AttributeError) as exc:  # never let evidence extraction fail the call
                 logger.warning("call log evidence extraction failed: %s", exc)
                 evidence = {"degraded": True}
         if evidence:
@@ -356,17 +361,18 @@ def _walk_component_types(node: Any, types: set[str]) -> None:
         current, depth = stack.pop()
         if depth > COMPONENT_MAX_DEPTH:
             continue
-        if isinstance(current, dict):
-            component_type = current.get("type")
-            if isinstance(component_type, str):
-                types.add(component_type)
-            for key in ("view", "children"):
-                child = current.get(key)
-                if isinstance(child, (dict, list)):
-                    stack.append((child, depth + 1))
-        elif isinstance(current, list):
+        if isinstance(current, list):
             for item in current:
                 stack.append((item, depth + 1))
+            continue
+        if not isinstance(current, dict):
+            continue
+        if isinstance(current.get("type"), str):
+            types.add(current["type"])
+        for key in ("view", "children"):
+            child = current.get(key)
+            if isinstance(child, (dict, list)):
+                stack.append((child, depth + 1))
 
 
 def _created_id_of(data: Any) -> str:

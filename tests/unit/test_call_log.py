@@ -571,6 +571,57 @@ class TestEvidenceColumn:
         row = self._row("plotAnalytics", {}, True, prefab_app)
         assert "components" not in row.get("evidence", {})
 
+    def test_prefab_deep_nesting_completes_without_recursion_error(self):
+        # Build a 1,200-level nested view; the walk must complete and the middleware must not raise.
+        view = {"type": "Root"}
+        cur = view
+        for i in range(1200):
+            nxt = {"view": {"type": f"Level{i}"}}
+            cur["children"] = [nxt]
+            cur = nxt["view"]
+        prefab_app = {"$prefab": {"version": "0.3"}, "view": view}
+        row = self._row("plotAnalytics", {}, True, prefab_app)
+        # Should record at least the root type, and not raise.
+        assert "components" in row["evidence"]
+        assert "Root" in row["evidence"]["components"]
+
+    def test_prefab_component_walk_excludes_data_rows(self):
+        # Chart data rows carry a "type" field; they must not be collected as UI components.
+        DATA_ROW_TYPE = "DATA_ROW_TYPE"
+        ROW_TYPE_FIELD = "ROW_TYPE_FIELD"
+        prefab_app = {
+            "$prefab": {"version": "0.3"},
+            "view": {
+                "type": "AreaChart",
+                "children": [],
+                "data": [{"type": DATA_ROW_TYPE} for _ in range(2000)],
+                "rows": [{"type": ROW_TYPE_FIELD} for _ in range(2000)],
+            },
+        }
+        row = self._row("plotAnalytics", {}, True, prefab_app)
+        comps = row["evidence"].get("components", [])
+        assert "AreaChart" in comps
+        assert DATA_ROW_TYPE not in comps
+        assert ROW_TYPE_FIELD not in comps
+
+    def test_evidence_extraction_failure_marks_degraded(self):
+        # Simulate an extractor that raises; evidence should be marked degraded and not propagate.
+        from nextdns_mcp.call_log import _result_evidence
+        original = _result_evidence
+        def boom(*args, **kwargs):
+            raise RuntimeError("boom")
+        import nextdns_mcp.call_log as cl
+        cl._result_evidence = boom
+        try:
+            mw = CallLogMiddleware(path="", endpoints={})
+            class R:
+                is_error = False
+                structured_content = {"$prefab": {"version": "0.3"}}
+            row = mw._record_row("plotAnalytics", {}, True, "", R())
+            assert row["evidence"].get("degraded") is True
+        finally:
+            cl._result_evidence = original
+
 
 class TestIntermediateSerialization:
     """Intermediate fields serialize once, not twice with ``sort_keys``."""
@@ -607,3 +658,4 @@ class TestIntermediateSerialization:
         # Same single-sort contract as ``args``: the intermediate dump keeps
         # caller key order (pre-fix ``sort_keys`` rewrote it to ``a`` first).
         assert row["result"].index('"b"') < row["result"].index('"a"')
+
