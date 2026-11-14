@@ -1,6 +1,6 @@
 # Generative UI Trusted-Host Contract
 
-NextDNS MCP exposes a Generative UI provider (`generate_prefab_ui`) that executes Prefab Python in a sandbox and renders the resulting tree in the host client. The generated tree crosses host-controlled boundaries the backend cannot verify, so the **host client** must provide the guarantees below. Where a guarantee is unavailable, the server restricts output to passive, allowlisted components and rejects dangerous actions and raw HTML.
+NextDNS MCP exposes a Generative UI provider (`generate_prefab_ui`) that executes Prefab Python in a sandbox and renders the resulting tree in the host client. The generated tree crosses host-controlled boundaries the backend cannot verify, so the **host client** must provide the guarantees below. Where a guarantee is unavailable, the host (not this server) must restrict output to passive, allowlisted components and reject dangerous actions and raw HTML; the server does not enforce such a filter today.
 
 ## Trusted-host guarantees required
 
@@ -10,7 +10,7 @@ NextDNS MCP exposes a Generative UI provider (`generate_prefab_ui`) that execute
 4. **UI-initiated tool calls.** Treat any tool call originating from rendered UI as untrusted input: validate arguments server-side, enforce the same read/write ACLs and profile scoping as direct calls, and require explicit user confirmation for destructive actions.
 5. **Chart sizing.** Provide a measurable container width before charts render; charts placed in zero-width containers render blank (see sizing rules in tool docs).
 
-## Fallback when guarantees are unavailable
+## Fallback when guarantees are unavailable (host obligation)
 
 If the host cannot provide the above (e.g. clients without iframe sandboxing or CSP support), output must be limited to passive, allowlisted Prefab components (text, tables, charts, static layout) and must reject:
 - raw HTML or script injection,
