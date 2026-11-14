@@ -1054,6 +1054,18 @@ class TestToolAnnotations:
         assert get_logs.annotations is not None
         assert get_logs.annotations.read_only_hint is True
 
+    def test_clearLogs_is_annotated_destructive(self):
+        """clearLogs purges all query logs for a profile: destructive_hint must
+        be True. A plain POST that creates state stays non-destructive, so the
+        override is per-operation rather than per-method."""
+        routes = {route.operation_id: route for route in spec_tools.spec_routes()}
+        clear_logs = spec_tools.SpecApiTool(routes["clearLogs"])
+        assert clear_logs.annotations is not None
+        assert clear_logs.annotations.destructive_hint is True
+        create_profile = spec_tools.SpecApiTool(routes["createProfile"])
+        assert create_profile.annotations is not None
+        assert create_profile.annotations.destructive_hint is False
+
 
 class TestPlotsSpecToolsImportCycle:
     """tools.plots must not import spec_tools (the cycle was deferred, not removed)."""
