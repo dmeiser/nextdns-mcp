@@ -361,6 +361,16 @@ class TestBoundedProjection:
         parsed = json.loads(row["result"])
         assert isinstance(parsed, dict)
 
+    def test_deeply_nested_lists_are_capped_without_recursion(self):
+        """List nesting deeper than ``PROJECT_MAX_DEPTH`` is dropped, not recursed into."""
+        from nextdns_mcp.call_log import PROJECT_MAX_DEPTH, _project_value
+
+        value: list = []
+        for _ in range(PROJECT_MAX_DEPTH + 5):
+            value = [value]
+        projected = _project_value({"data": value})
+        assert isinstance(projected, dict)
+
 
 class TestOffsetReader:
     """``read_call_log_rows`` reads from an offset, the shared row contract.
@@ -410,6 +420,30 @@ class TestLoggingCannotBreakACall:
         with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
             await middleware._record("getProfile", {}, ok=True, error="")
         assert any("call log write failed" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_row_build_warns_and_the_call_still_returns(self, tmp_path, monkeypatch, caplog):
+        """The awaited ``_record`` is the last place logging could fail a successful call.
+
+        A defect in row construction surfaces as a warning, never as a raised
+        error: the caller receives the tool's result untouched.
+        """
+        from types import SimpleNamespace
+
+        middleware = CallLogMiddleware(path=str(tmp_path / "calls.jsonl"), endpoints={})
+        monkeypatch.setattr(
+            "nextdns_mcp.call_log.CallLogMiddleware._record_row_into",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("row build defect")),
+        )
+        result = SimpleNamespace(is_error=False, structured_content={"ok": True})
+
+        async def call_next(context):
+            return result
+
+        context = SimpleNamespace(message=SimpleNamespace(name="getProfile", arguments={"profile_id": "p1"}))
+        with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
+            assert await middleware.on_call_tool(context, call_next) is result
+        assert any("call log recording failed" in record.getMessage() for record in caplog.records)
 
     def test_an_unreadable_log_reads_as_empty_not_raised(self, tmp_path, monkeypatch, caplog):
         from nextdns_mcp.call_log import CALL_LOG_ENV, get_call_log
@@ -571,19 +605,36 @@ class TestEvidenceColumn:
         row = self._row("plotAnalytics", {}, True, prefab_app)
         assert "components" not in row.get("evidence", {})
 
-    def test_prefab_deep_nesting_completes_without_recursion_error(self):
-        # Build a 1,200-level nested view; the walk must complete and the middleware must not raise.
-        view = {"type": "Root"}
+    async def test_prefab_deep_nesting_completes_through_on_call_tool(self, tmp_path):
+        """The reporter's oracle: a ~1,200-level Prefab document through the awaited path.
+
+        Optional logging must never turn this successful call into a failure,
+        and the component walk (iterative, depth-capped) must still record the
+        root. Scalars sitting in ``children`` are skipped, not errors.
+        """
+        from types import SimpleNamespace
+
+        view: dict = {"type": "Root"}
         cur = view
         for i in range(1200):
             nxt = {"view": {"type": f"Level{i}"}}
-            cur["children"] = [nxt]
+            cur["children"] = [nxt, "text-leaf", 42]
             cur = nxt["view"]
-        prefab_app = {"$prefab": {"version": "0.3"}, "view": view}
-        row = self._row("plotAnalytics", {}, True, prefab_app)
-        # Should record at least the root type, and not raise.
-        assert "components" in row["evidence"]
-        assert "Root" in row["evidence"]["components"]
+        result = SimpleNamespace(
+            is_error=False,
+            structured_content={"$prefab": {"version": "0.3"}, "view": view},
+        )
+        path = tmp_path / "calls.jsonl"
+        middleware = CallLogMiddleware(path=str(path), endpoints={})
+
+        async def call_next(context):
+            return result
+
+        context = SimpleNamespace(message=SimpleNamespace(name="plotAnalytics", arguments={"profile_id": "p1"}))
+        assert await middleware.on_call_tool(context, call_next) is result
+        rows = _rows(path)
+        assert len(rows) == 1
+        assert "Root" in rows[0]["evidence"]["components"]
 
     def test_prefab_component_walk_excludes_data_rows(self):
         # Chart data rows carry a "type" field; they must not be collected as UI components.
@@ -604,23 +655,24 @@ class TestEvidenceColumn:
         assert DATA_ROW_TYPE not in comps
         assert ROW_TYPE_FIELD not in comps
 
-    def test_evidence_extraction_failure_marks_degraded(self):
-        # Simulate an extractor that raises; evidence should be marked degraded and not propagate.
-        from nextdns_mcp.call_log import _result_evidence
-        original = _result_evidence
+    async def test_evidence_extraction_failure_marks_degraded_without_failing_the_call(self, tmp_path, monkeypatch):
+        """A raising extractor degrades the evidence; the awaited call still returns its result."""
+        from types import SimpleNamespace
+
         def boom(*args, **kwargs):
             raise RuntimeError("boom")
-        import nextdns_mcp.call_log as cl
-        cl._result_evidence = boom
-        try:
-            mw = CallLogMiddleware(path="", endpoints={})
-            class R:
-                is_error = False
-                structured_content = {"$prefab": {"version": "0.3"}}
-            row = mw._record_row("plotAnalytics", {}, True, "", R())
-            assert row["evidence"].get("degraded") is True
-        finally:
-            cl._result_evidence = original
+        monkeypatch.setattr("nextdns_mcp.call_log._result_evidence", boom)
+        result = SimpleNamespace(is_error=False, structured_content={"$prefab": {"version": "0.3"}, "view": {}})
+        path = tmp_path / "calls.jsonl"
+        middleware = CallLogMiddleware(path=str(path), endpoints={})
+
+        async def call_next(context):
+            return result
+
+        context = SimpleNamespace(message=SimpleNamespace(name="plotAnalytics", arguments={}))
+        assert await middleware.on_call_tool(context, call_next) is result
+        rows = _rows(path)
+        assert rows[0]["evidence"].get("degraded") is True
 
 
 class TestIntermediateSerialization:

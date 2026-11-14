@@ -146,14 +146,19 @@ def _project_list(value: list[Any], depth: int) -> list[Any]:
     """Keep the leading items; when items were dropped, say how many.
 
     The omission marker exists so a reader can tell a small result from a
-    truncated one; a list that fits whole is returned untouched.
+    truncated one; a list that fits whole is returned untouched. Depth is
+    capped in ``_project_value`` before this runs, so items past
+    ``PROJECT_MAX_DEPTH`` arrive already projected to ``None``.
     """
-    if depth > PROJECT_MAX_DEPTH:
-        return []
     kept = [_project_value(item, depth + 1) for item in value[:PROJECT_MAX_ITEMS]]
     if len(value) > PROJECT_MAX_ITEMS:
         kept.append({"_omitted_items": len(value) - PROJECT_MAX_ITEMS})
     return kept
+
+
+def _project_dict(value: dict[Any, Any], depth: int) -> dict[Any, Any]:
+    """Keep the leading keys; each value is projected one level deeper."""
+    return {key: _project_value(item, depth + 1) for key, item in list(value.items())[:PROJECT_MAX_KEYS]}
 
 
 def _project_value(value: Any, depth: int = 0) -> Any:
@@ -163,7 +168,7 @@ def _project_value(value: Any, depth: int = 0) -> Any:
     if isinstance(value, str):
         return value[:PROJECT_MAX_STRING_CHARS]
     if isinstance(value, dict):
-        return {key: _project_value(item, depth + 1) for key, item in list(value.items())[:PROJECT_MAX_KEYS]}
+        return _project_dict(value, depth)
     if isinstance(value, list):
         return _project_list(value, depth)
     return value
@@ -210,7 +215,10 @@ class CallLogMiddleware(Middleware):
             await self._record(name, args, ok=False, error=f"{type(exc).__name__}: {exc}")
             raise
         error = result_error(result)
-        await self._record(name, args, ok=not error, error=error, result=result)
+        try:
+            await self._record(name, args, ok=not error, error=error, result=result)
+        except Exception as exc:  # noqa: BLE001 - logging is optional and must never fail the call
+            logger.warning("call log recording failed: %s", exc)
         return result
 
     def _record_row(self, tool: str, args: Any, ok: bool, error: str, result: Any) -> dict[str, Any]:
@@ -255,7 +263,14 @@ class CallLogMiddleware(Middleware):
         if ok:
             try:
                 evidence = _result_evidence(result, write)
-            except (RuntimeError, TypeError, ValueError, KeyError, RecursionError, AttributeError) as exc:  # never let evidence extraction fail the call
+            except (
+                RuntimeError,
+                TypeError,
+                ValueError,
+                KeyError,
+                RecursionError,
+                AttributeError,
+            ) as exc:  # never let evidence extraction fail the call
                 logger.warning("call log evidence extraction failed: %s", exc)
                 evidence = {"degraded": True}
         if evidence:
@@ -361,18 +376,28 @@ def _walk_component_types(node: Any, types: set[str]) -> None:
         current, depth = stack.pop()
         if depth > COMPONENT_MAX_DEPTH:
             continue
-        if isinstance(current, list):
-            for item in current:
-                stack.append((item, depth + 1))
-            continue
-        if not isinstance(current, dict):
-            continue
-        if isinstance(current.get("type"), str):
-            types.add(current["type"])
-        for key in ("view", "children"):
-            child = current.get(key)
-            if isinstance(child, (dict, list)):
-                stack.append((child, depth + 1))
+        _walk_component_node(current, depth, types, stack)
+
+
+def _walk_component_node(current: Any, depth: int, types: set[str], stack: list[tuple[Any, int]]) -> None:
+    """One node of the component walk: lists fan out, dicts name and push children."""
+    if isinstance(current, list):
+        for item in current:
+            stack.append((item, depth + 1))
+        return
+    if not isinstance(current, dict):
+        return
+    if isinstance(current.get("type"), str):
+        types.add(current["type"])
+    _push_component_children(current, depth, stack)
+
+
+def _push_component_children(current: dict[Any, Any], depth: int, stack: list[tuple[Any, int]]) -> None:
+    """UI child containers only: ``view`` and ``children``, never ``data`` / ``rows``."""
+    for key in ("view", "children"):
+        child = current.get(key)
+        if isinstance(child, (dict, list)):
+            stack.append((child, depth + 1))
 
 
 def _created_id_of(data: Any) -> str:
