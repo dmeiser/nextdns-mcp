@@ -2401,6 +2401,19 @@ def build_steps(targets: TaskTargets) -> list[Step]:
             "Show me the security analytics dashboard widget (Encrypted DNS and DNSSEC rates) for profile '{profile_id}'.",
         ),
     )
+    from nextdns_mcp.tools.dashboard import DASHBOARD_SECTIONS
+
+    _dashboard_covered = {spec[1] for spec in dashboard_specs}
+    # "all" is an aggregate section exercised via the individual widgets; no
+    # dedicated prompt step is required for it.
+    _dashboard_excluded = {"all"}
+    assert _dashboard_covered.isdisjoint(_dashboard_excluded), "excluded section also has a prompt step"
+    assert _dashboard_covered | _dashboard_excluded == set(DASHBOARD_SECTIONS), (
+        "dashboard prompt table drift: "
+        f"missing={set(DASHBOARD_SECTIONS) - _dashboard_covered - _dashboard_excluded}, "
+        f"extra={_dashboard_covered - set(DASHBOARD_SECTIONS)}"
+    )
+
     for step_id, section, desc, task_prompt in dashboard_specs:
         expect_args = () if section == "overview" else (section,)
         steps.append(
