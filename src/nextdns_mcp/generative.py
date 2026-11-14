@@ -60,7 +60,21 @@ GENERATE_DOC = (
 def _parse_ui_data(data: str | dict[str, Any] | None) -> dict[str, Any] | None:
     """Parse JSON string data or return dictionary."""
     if isinstance(data, str):
-        return json.loads(data) if data.strip() else None
+        if not data.strip():
+            return None
+        try:
+            value = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in data parameter: {exc}") from exc
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(  # noqa: TRY004
+                f"data parameter must decode to a JSON object, got {type(value).__name__}"
+            )
+        return value
+    if data is not None and not isinstance(data, dict):
+        raise ValueError(f"data parameter must be a dict or JSON object string, got {type(data).__name__}")
     return data
 
 
