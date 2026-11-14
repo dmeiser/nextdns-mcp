@@ -18,6 +18,7 @@ from nextdns_mcp import client as client_module
 from nextdns_mcp import spec_tools
 from nextdns_mcp.errors import ErrorCode
 from nextdns_mcp.tools.doh import dohLookup
+from nextdns_mcp.tools.dashboard import overviewDashboard
 from nextdns_mcp.tools.plots import plotAnalytics
 from nextdns_mcp.utils import resolve_profile_id
 
@@ -45,6 +46,7 @@ def mock_api_client(monkeypatch):
 _PROFILE_ID_SITES = [
     ("doh", lambda pid: dohLookup("example.com", pid, "A")),
     ("plot", lambda pid: plotAnalytics("status", profile_id=pid)),
+    ("dashboard", lambda pid: overviewDashboard(profile_id=pid)),
 ]
 
 
