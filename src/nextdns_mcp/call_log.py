@@ -225,7 +225,7 @@ class CallLogMiddleware(Middleware):
             # Enough of the arguments to match the call the harness asked for
             # (which endpoint, which entry), bounded before serialization by
             # the same projection the result uses.
-            "args": json.dumps(_project_result(arguments), sort_keys=True, default=str)[:ARGS_CHARS],
+            "args": _project_result(arguments),
             "ok": ok,
             "error": error[:ERROR_CHARS],
             # What the call returned. This is what makes a READ verifiable: the
