@@ -23,13 +23,19 @@ from scripts.run_container_e2e import (
 
 @pytest.fixture
 def runner(tmp_path: Path) -> ContainerE2ERunner:
-    """Create a runner instance with a temporary artifacts directory."""
+    """Create a runner instance with a temporary artifacts directory.
+
+    Pacing is off and the rate-limit table is zero-delay: these tests assert
+    behaviour, not elapsed time, and a suite of ~127 calls must not spend
+    minutes waiting for a wall clock it is not testing.
+    """
     return ContainerE2ERunner(
         endpoint="http://127.0.0.1:8000/mcp",
         variant="slim",
         allow_live_writes=False,
         plot_profile="",
         artifacts_dir=tmp_path,
+        rate_limit_backoff=(0.0,),
     )
 
 
@@ -212,6 +218,105 @@ async def test_execute_call_retry_on_exception(runner: ContainerE2ERunner):
     assert ok is True
     assert runner.executed_count == 1
     assert session.call_tool.call_count == 2
+
+
+def _tool_result(payload: dict) -> MagicMock:
+    """Build a mock MCP tool result carrying a JSON payload, as the server returns it."""
+    result = MagicMock()
+    result.is_error = False
+    result.content = [TextContent(type="text", text=json.dumps(payload))]
+    return result
+
+
+# The payload the server returns for an over-quota call: a normal result, not an
+# exception, carrying the status and the upstream code (errors.http_error_payload).
+RATE_LIMITED_PAYLOAD = {
+    "error": "HTTP error in POST /profiles: Client error '429 Too Many Requests' for url 'https://api.nextdns.io/profiles'",
+    "code": "http_error",
+    "status_code": 429,
+    "upstream_code": "rateLimit",
+    "upstream_codes": ["rateLimit"],
+}
+
+
+@pytest.mark.asyncio
+async def test_execute_call_retries_a_rate_limit_payload(tmp_path: Path):
+    """A 429 arrives as a result, not an exception: it must be waited out, not recorded FAILED."""
+    runner = ContainerE2ERunner(
+        endpoint="http://127.0.0.1:8000/mcp",
+        variant="slim",
+        allow_live_writes=False,
+        plot_profile="",
+        artifacts_dir=tmp_path,
+        rate_limit_backoff=(0.0,),
+    )
+    session = AsyncMock()
+    session.call_tool.side_effect = [_tool_result(RATE_LIMITED_PAYLOAD), _tool_result({"data": {"id": "p123"}})]
+
+    ok, res = await runner.execute_call(session, "createProfile", {"name": "E2E"}, max_retries=2)
+
+    assert ok is True
+    assert res == {"data": {"id": "p123"}}
+    assert session.call_tool.call_count == 2
+    assert runner.failed_count == 0
+    assert runner.executed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_call_fails_honestly_when_the_rate_limit_outlasts_the_attempts(tmp_path: Path):
+    """Every attempt 429: the run fails with the upstream message instead of looping forever."""
+    runner = ContainerE2ERunner(
+        endpoint="http://127.0.0.1:8000/mcp",
+        variant="slim",
+        allow_live_writes=False,
+        plot_profile="",
+        artifacts_dir=tmp_path,
+        rate_limit_backoff=(0.0,),
+    )
+    session = AsyncMock()
+    session.call_tool.return_value = _tool_result(RATE_LIMITED_PAYLOAD)
+
+    ok, _ = await runner.execute_call(session, "createProfile", {"name": "E2E"}, max_retries=3)
+
+    assert ok is False
+    assert session.call_tool.call_count == 3
+    assert runner.failed_count == 1
+    record = json.loads(runner.report_file.read_text(encoding="utf-8").strip())
+    assert record["status"] == "FAILED"
+    assert "429 Too Many Requests" in record["error"]
+
+
+def test_rate_limit_payload_is_recognised_by_status_or_upstream_code(runner: ContainerE2ERunner):
+    """Either signal marks the payload: the status alone, or the upstream code alone."""
+    assert runner._is_rate_limited(RATE_LIMITED_PAYLOAD) is True
+    assert runner._is_rate_limited({"status_code": 429}) is True
+    assert runner._is_rate_limited({"upstream_code": "rateLimit"}) is True
+    # Not a rate limit: a real failure, and a payload that is not a mapping at all.
+    assert runner._is_rate_limited({"status_code": 400, "upstream_code": "invalid"}) is False
+    assert runner._is_rate_limited(None) is False
+
+
+def test_rate_limit_delay_honours_an_advertised_retry_after(runner: ContainerE2ERunner):
+    """An advertised retry_after wins over the table; the table holds its last entry."""
+    assert runner._rate_limit_delay({"retry_after": 7}, attempt=1) == 7.0
+    # Zero or absent advertised delay falls through to the table.
+    assert runner._rate_limit_delay({"retry_after": 0}, attempt=1) == 0.0
+    assert runner._rate_limit_delay({}, attempt=99) == 0.0
+
+
+def test_rate_limit_delay_walks_the_backoff_table_and_holds_its_last_entry(tmp_path: Path):
+    """Attempt 1 gets the first delay, and attempts past the table get the last one."""
+    runner = ContainerE2ERunner(
+        endpoint="http://127.0.0.1:8000/mcp",
+        variant="slim",
+        allow_live_writes=False,
+        plot_profile="",
+        artifacts_dir=tmp_path,
+        rate_limit_backoff=(5.0, 10.0),
+    )
+    assert runner._rate_limit_delay({}, attempt=1) == 5.0
+    assert runner._rate_limit_delay({}, attempt=2) == 10.0
+    assert runner._rate_limit_delay({}, attempt=9) == 10.0
 
 
 @pytest.mark.asyncio
@@ -444,6 +549,38 @@ class TestE2EWorkflowSecretHandling:
         # an id literally named "", so the flag is added only when set.
         assert 'NEXTDNS_PROTECTED_PROFILES="${NEXTDNS_PLOT_PROFILE}"' in step["run"]
         assert 'if [ -n "${NEXTDNS_PLOT_PROFILE}" ]' in step["run"]
+
+
+class TestE2EWorkflowLiveSerialization:
+    """The live suite is serialized repo-wide, not per-ref.
+
+    The upstream quota is account-level, so a per-ref concurrency group (the
+    workflow's own) serializes nothing across the many branches that push to
+    this repository at once; that is how runs came to answer 92-216
+    `429 Too Many Requests` while a neighbouring run held the quota. The job
+    carries a constant group so at most one suite runs and the rest queue, and
+    it must not cancel a suite in progress: a cancelled write phase never
+    reaches its teardown, which is how test profiles leaked.
+    """
+
+    WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "e2e-container.yml"
+
+    def _job(self) -> dict:
+        import yaml
+
+        return yaml.safe_load(self.WORKFLOW.read_text(encoding="utf-8"))["jobs"]["e2e"]
+
+    def test_the_live_job_queues_on_a_constant_group(self):
+        concurrency = self._job().get("concurrency")
+        assert concurrency is not None, "the live job has no shared concurrency group; runs overlap per ref"
+        # Constant: no ${{ github.ref }} in the key, or it is per-ref again.
+        assert "${{" not in concurrency["group"]
+
+    def test_the_live_job_never_cancels_a_suite_in_progress(self):
+        assert self._job()["concurrency"]["cancel-in-progress"] is False
+
+    def test_the_matrix_still_serializes_the_image_variants(self):
+        assert self._job()["strategy"]["max-parallel"] == 1
 
 
 def test_settings_write_payloads_are_the_shared_table():
