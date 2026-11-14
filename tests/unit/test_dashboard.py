@@ -462,6 +462,16 @@ class TestDashboardToolsExecution:
         assert max_concurrency <= dash_module.OVERVIEW_FANOUT_CONCURRENCY
 
     @pytest.mark.asyncio
+    async def test_append_extra_dashboard_sections_standalone(self, mock_all_endpoints):
+        """Verify standalone execution of _append_extra_dashboard_sections."""
+        from prefab_ui.components import Column
+
+        with Column() as col:
+            pass
+        await dash_module._append_extra_dashboard_sections("abc123", col, "-30d", "now", 10)
+        assert len(col.children) > 0
+
+    @pytest.mark.asyncio
     async def test_analytics_dashboard_status_fetch_error(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
 
