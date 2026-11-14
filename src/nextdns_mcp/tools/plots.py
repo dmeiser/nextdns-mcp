@@ -84,31 +84,12 @@ def _series_boolean_label(series: dict[str, Any], index: int) -> str:
     return f"series_{index}"
 
 
-def _strptime_fallback(value: str) -> datetime:
-    """Parse via the ordered strptime fallback list; re-raises the original ValueError."""
-    for fmt in (
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S.%f%z",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S.%f",
-    ):
-        try:
-            # Anchored to UTC below, so the naive result is intentional.
-            return datetime.strptime(value, fmt)
-        except ValueError:
-            continue
-    raise ValueError(f"unparsable timestamp: {value!r}")
-
-
 def _parse_series_timestamp(value: str) -> datetime:
     """Parse an ISO 8601 timestamp returned by the NextDNS API.
 
-    Tries ``datetime.fromisoformat`` first (which, on the supported
-    Python >=3.12, already handles ``'Z'`` suffixes, offsets without colons,
-    and microsecond fractions of any length). A small ordered list of
-    ``strptime`` formats is tried in turn as a fallback, so timestamps that
-    ``fromisoformat`` rejects - including whole-second timestamps without a
-    timezone - still parse instead of raising an unhandled ``ValueError``.
+    Uses ``datetime.fromisoformat`` (which, on the supported Python >=3.12,
+    already handles ``'Z'`` suffixes, offsets without colons, and microsecond
+    fractions of any length).
 
     A value carrying no timezone is anchored to UTC, so the same string always
     denotes the same instant no matter which machine resolves it.
@@ -116,10 +97,7 @@ def _parse_series_timestamp(value: str) -> datetime:
     Raises:
         ValueError: If the value matches none of the supported formats.
     """
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        parsed = _strptime_fallback(value)
+    parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed

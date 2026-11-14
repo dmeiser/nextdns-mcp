@@ -1,7 +1,7 @@
 """Tests for the analytics plotting helpers and tool wrappers."""
 
 import json
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -124,21 +124,6 @@ class TestParseSeriesTimestamp:
         assert ts.second == 0
         # A zone-less value is anchored to UTC so it denotes the same instant
         # regardless of the host's local timezone.
-        assert ts.utcoffset() == timedelta(0)
-
-    def test_parses_whole_second_with_z_via_fallback_format(self, monkeypatch):
-        # Force the strptime fallback path and confirm the whole-second format
-        # is reachable when fromisoformat fails (issue #186). The datetime C
-        # type is immutable, so the module-level name is swapped for a subclass.
-        class _NoIsoFrom(datetime):
-            @classmethod
-            def fromisoformat(cls, value: str):
-                raise ValueError("fromisoformat unavailable")
-
-        monkeypatch.setattr(plots_module, "datetime", _NoIsoFrom)
-        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00Z")
-        assert ts.hour == 10
-        assert ts.tzinfo is not None
         assert ts.utcoffset() == timedelta(0)
 
     def test_malformed_timestamp_raises_value_error(self):
