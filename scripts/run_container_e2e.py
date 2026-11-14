@@ -564,17 +564,16 @@ class ContainerE2ERunner:
 
     @staticmethod
     def _is_prefab_payload(result: Any) -> bool:
-        """True when the result object carries a Prefab UI document."""
+        """True when the result object carries a Prefab UI document with a view."""
         structured = getattr(result, "structured_content", None) or getattr(result, "structuredContent", None)
-        return isinstance(structured, dict) and "$prefab" in structured
+        return isinstance(structured, dict) and "$prefab" in structured and "view" in structured
 
     @classmethod
     def _has_chart_content(cls, result: Any, has_image: bool, response_text: str) -> bool:
         """True when the response carries an image block, structured Prefab UI, or chart/dashboard summary."""
-        if has_image or cls._is_prefab_payload(result):
+        if has_image:
             return True
-        indicators = ("data:image", "Analytics:", "Rendered NextDNS", "[Rendered ", "$prefab")
-        return isinstance(response_text, str) and any(i in response_text for i in indicators)
+        return cls._is_prefab_payload(result)
 
     @classmethod
     def _content_missing_view(

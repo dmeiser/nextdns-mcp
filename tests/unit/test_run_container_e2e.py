@@ -329,7 +329,7 @@ async def test_execute_call_plot_prefab_content(runner: ContainerE2ERunner):
     mock_result = MagicMock()
     mock_result.is_error = False
     mock_result.content = [TextContent(type="text", text="NextDNS Analytics: status")]
-    mock_result.structured_content = {"$prefab": {"version": "0.3"}}
+    mock_result.structured_content = {"$prefab": {"version": "0.3"}, "view": {}}
     session.call_tool.return_value = mock_result
 
     ok, _ = await runner.execute_call(session, "plotAnalytics", {"metric": "status"})
@@ -432,7 +432,7 @@ async def test_run_success_read_only(runner: ContainerE2ERunner):
             ]
         elif name == "plotAnalytics" or name in validate_schema.CONTENT_TOOLS:
             mock_res.content = [TextContent(type="text", text="NextDNS Analytics: status")]
-            mock_res.structured_content = {"$prefab": {"version": "0.3"}}
+            mock_res.structured_content = {"$prefab": {"version": "0.3"}, "view": {}}
         else:
             mock_res.content = [TextContent(type="text", text='{"data":[{"id":"test-profile-id"}]}')]
         return mock_res
