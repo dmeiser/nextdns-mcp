@@ -272,6 +272,7 @@ def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
 
 def _build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the reasons for blocking card."""
+
     def _render():
         if not data:
             Text("No queries were blocked during this period.", css_class="text-sm text-muted-foreground py-4")
