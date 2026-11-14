@@ -99,7 +99,7 @@ Condition 1 below is therefore matched on the API endpoint the call executed
 (``POST /profiles/{profile_id}/denylist``): each published tool is bound to
 one, and the server's call log records it. ``plotAnalytics`` and ``dohLookup``
 have no endpoint; their pass rule is their own record instead — the call ran,
-answered, and (for the chart) came back as image content.
+answered, and (for the chart) came back as structured Prefab chart output.
 
 Targeted runs
 -------------
@@ -126,7 +126,7 @@ Three conditions, all of which must hold:
 1. The MCP server recorded a call to the **endpoint this step verifies** — and
    that call succeeded and answered with a payload. Each published tool is
    bound to one endpoint, so this names the API call the step is about no
-   matter which tool the actor found; the two local operations are named by
+   matter which tool the actor found; the three composite operations are named by
    their own record (see ``_expect``). The server writes what it executed to a
    JSONL call log (``NEXTDNS_CALL_LOG``, see ``nextdns_mcp.call_log``); the
    harness reads back the lines its own attempt appended. ``--print-steps``

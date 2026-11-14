@@ -648,7 +648,7 @@ async def plotAnalytics(
     ``getAnalytics*Series`` tools name the same window ``from``/``to``. Sending
     ``from``/``to`` here does not set the window: they are not in this tool's
     published schema, the server drops them, and the drop is reported on the
-    result (``ignored_arguments``, or a text note beside the image).
+    result (``ignored_arguments``, or a text note beside the chart).
 
     Supported metrics: ``status``, ``devices``, ``protocols``, ``queryTypes``,
     ``ipVersions``, ``dnssec``, ``encryption``, ``reasons``, ``ips``.

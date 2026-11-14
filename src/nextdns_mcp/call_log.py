@@ -463,7 +463,7 @@ def _result_text(result: Any) -> str:
         # json.dumps of a string can double it (quote/backslash escaping), so
         # the head takes at most half the budget minus the envelope.
         return json.dumps({"truncated": True, "head": raw[: (RESULT_CHARS - 64) // 2]}, sort_keys=True)
-    # No structured payload (e.g. plotAnalytics returns image content blocks):
+    # No structured payload (e.g. plotAnalytics returns structured Prefab chart output):
     # record the shape of what came back rather than the bytes.
     blocks = getattr(result, "content", None) or []
     kinds = [getattr(b, "type", type(b).__name__) for b in blocks]

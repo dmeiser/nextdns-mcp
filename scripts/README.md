@@ -185,7 +185,7 @@ A step passes when three things hold:
    answered with. The step must match that record, and the call must have
    answered with a payload. `--print-steps` shows each step's resolved endpoint.
    `plotAnalytics` and `dohLookup` have no endpoint; their rule is their own
-   record plus the payload (image content, the DNS answer). The log is created
+   record plus the payload (structured chart output, the DNS answer). The log is created
    mode 0600 and holds real account data — queried domains, device names,
    query-log rows — so a report written from it inherits that sensitivity; see
    "Call log" in `docs/safety.md`.

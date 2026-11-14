@@ -279,7 +279,7 @@ def _merge_ignored_hints(structured: dict[str, Any], hint: str) -> None:
 def _annotate_content_only(result: ToolResult, ignored: list[str], hint: str) -> None:
     """A content-only result has no structured payload to annotate: say it in the content.
 
-    plotAnalytics answers with image content and no structured dict; without
+    plotAnalytics answers with structured Prefab chart output and no image; without
     this the argument drop would be silent for exactly the tool whose names
     (from/to on the series endpoints) differ from this one's
     (from_time/to_time).
@@ -612,7 +612,7 @@ def create_mcp_server(
     """Create and configure the NextDNS MCP server.
 
     The tools themselves are registered by ``src/nextdns_mcp/server.py`` — the
-    generated ones and the two local operations. What happens here is the machinery
+    generated ones and the three composite operations. What happens here is the machinery
     around them: disclosure, argument relaxation, the call log, and the health
     endpoint.
 
