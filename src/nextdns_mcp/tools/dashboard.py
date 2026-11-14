@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import logging
 import time
-from typing import Any, Literal, get_args
+from typing import Any, Literal, NamedTuple, get_args
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.app import PrefabApp
@@ -684,23 +684,50 @@ def _assemble_overview_layout(
     return view
 
 
+class ExtraDashboardPayloads(NamedTuple):
+    """Named data lists for extra dashboard sections."""
+
+    reasons: list[dict[str, Any]]
+    devices: list[dict[str, Any]]
+    ips: list[dict[str, Any]]
+    root_domains: list[dict[str, Any]]
+    gafam: list[dict[str, Any]]
+    countries: list[dict[str, Any]]
+    encryption: list[dict[str, Any]]
+    dnssec: list[dict[str, Any]]
+
+
 async def _fetch_extra_payloads(
     profile_id: str, dom_params: dict[str, Any], params: dict[str, Any]
-) -> list[list[dict[str, Any]]]:
-    """Fetch data lists for extra dashboard sections."""
+) -> ExtraDashboardPayloads:
+    """Fetch data lists for extra dashboard sections.
+
+    Fetchers are keyed by result-field name and the tuple is built with
+    keyword arguments, so reordering entries cannot reassign section data.
+    """
     sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
-    tasks = [
-        _bounded_fetch_analytics_payload(sem, profile_id, "reasons", dom_params),
-        _bounded_fetch_analytics_payload(sem, profile_id, "devices", dom_params),
-        _bounded_fetch_analytics_payload(sem, profile_id, "ips", dom_params),
-        _bounded_fetch_analytics_payload(sem, profile_id, "domains", {**dom_params, "root": "true"}),
-        _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "gafam"}),
-        _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "countries"}),
-        _bounded_fetch_analytics_payload(sem, profile_id, "encryption", params),
-        _bounded_fetch_analytics_payload(sem, profile_id, "dnssec", params),
-    ]
-    res = await asyncio.gather(*tasks)
-    return [_payload_data(item[0]) for item in res]
+    fetchers = {
+        "reasons": _bounded_fetch_analytics_payload(sem, profile_id, "reasons", dom_params),
+        "devices": _bounded_fetch_analytics_payload(sem, profile_id, "devices", dom_params),
+        "ips": _bounded_fetch_analytics_payload(sem, profile_id, "ips", dom_params),
+        "root_domains": _bounded_fetch_analytics_payload(sem, profile_id, "domains", {**dom_params, "root": "true"}),
+        "gafam": _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "gafam"}),
+        "countries": _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "countries"}),
+        "encryption": _bounded_fetch_analytics_payload(sem, profile_id, "encryption", params),
+        "dnssec": _bounded_fetch_analytics_payload(sem, profile_id, "dnssec", params),
+    }
+    pending = {name: asyncio.ensure_future(coro) for name, coro in fetchers.items()}
+    results = {name: await task for name, task in pending.items()}
+    return ExtraDashboardPayloads(
+        reasons=_payload_data(results["reasons"][0]),
+        devices=_payload_data(results["devices"][0]),
+        ips=_payload_data(results["ips"][0]),
+        root_domains=_payload_data(results["root_domains"][0]),
+        gafam=_payload_data(results["gafam"][0]),
+        countries=_payload_data(results["countries"][0]),
+        encryption=_payload_data(results["encryption"][0]),
+        dnssec=_payload_data(results["dnssec"][0]),
+    )
 
 
 async def _append_extra_dashboard_sections(
@@ -715,20 +742,20 @@ async def _append_extra_dashboard_sections(
     dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
 
-    r_d, d_d, i_d, rt_d, g_d, c_d, e_d, sec_d = await _fetch_extra_payloads(profile_id, dom_params, params)
+    payloads = await _fetch_extra_payloads(profile_id, dom_params, params)
 
     with view:
         with Row(gap=4):
-            _build_reasons_card(r_d, view_type=domain_view)
-            _build_devices_card(d_d, view_type=domain_view)
+            _build_reasons_card(payloads.reasons, view_type=domain_view)
+            _build_devices_card(payloads.devices, view_type=domain_view)
         with Row(gap=4):
-            _build_domains_card("Root Domains", "Aggregate root domains.", rt_d, view_type=domain_view)
-            _build_ips_card(i_d)
+            _build_domains_card("Root Domains", "Aggregate root domains.", payloads.root_domains, view_type=domain_view)
+            _build_ips_card(payloads.ips)
         with Row(gap=4):
-            _build_gafam_card(g_d, view_type=domain_view)
-            _build_destinations_card(c_d, view_type=domain_view)
+            _build_gafam_card(payloads.gafam, view_type=domain_view)
+            _build_destinations_card(payloads.countries, view_type=domain_view)
         with Row(gap=4):
-            _build_security_card(e_d, sec_d)
+            _build_security_card(payloads.encryption, payloads.dnssec)
 
 
 def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
