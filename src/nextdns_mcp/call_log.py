@@ -246,7 +246,13 @@ class CallLogMiddleware(Middleware):
         """The endpoint line and the evidence column, both derived from the call."""
         if endpoint:
             row["endpoint"] = f"{endpoint[0]} {endpoint[1]}"
-        evidence = _result_evidence(result, write) if ok else {}
+        evidence = {}
+        if ok:
+            try:
+                evidence = _result_evidence(result, write)
+            except Exception as exc:  # never let evidence extraction fail the call
+                logger.warning("call log evidence extraction failed: %s", exc)
+                evidence = {"degraded": True}
         if evidence:
             row["evidence"] = evidence
 
@@ -335,22 +341,32 @@ def _walk_identities(node: Any, out: list[dict[str, str]], seen: set[str]) -> No
     _walk_children(node, out, seen)
 
 
-def _walk_component_dict(node: dict[str, Any], types: set[str]) -> None:
-    """Extract component type from dict node and recurse."""
-    component_type = node.get("type")
-    if isinstance(component_type, str):
-        types.add(component_type)
-    for value in node.values():
-        _walk_component_types(value, types)
+COMPONENT_MAX_DEPTH = 64
 
 
 def _walk_component_types(node: Any, types: set[str]) -> None:
-    """Collect all component `type` values in a Prefab UI view tree."""
-    if isinstance(node, dict):
-        _walk_component_dict(node, types)
-    elif isinstance(node, list):
-        for item in node:
-            _walk_component_types(item, types)
+    """Collect all component `type` values in a Prefab UI view tree.
+
+    Iterative (no RecursionError on deeply nested documents) and restricted
+    to UI child containers (``view`` / ``children``) so data rows and chart
+    datasets are never traversed. Bounded by ``COMPONENT_MAX_DEPTH``.
+    """
+    stack: list[tuple[Any, int]] = [(node, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth > COMPONENT_MAX_DEPTH:
+            continue
+        if isinstance(current, dict):
+            component_type = current.get("type")
+            if isinstance(component_type, str):
+                types.add(component_type)
+            for key in ("view", "children"):
+                child = current.get(key)
+                if isinstance(child, (dict, list)):
+                    stack.append((child, depth + 1))
+        elif isinstance(current, list):
+            for item in current:
+                stack.append((item, depth + 1))
 
 
 def _created_id_of(data: Any) -> str:
