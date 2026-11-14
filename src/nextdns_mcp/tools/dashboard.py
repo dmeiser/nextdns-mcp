@@ -520,7 +520,21 @@ def _destination_label(item: dict[str, Any]) -> str:
 
 def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
     """Format one country destination row."""
-    sample = ", ".join(item.get("domains") or [])[:60]
+    labels: list[str] = []
+    used = 0
+    for domain in item.get("domains") or []:
+        domain = str(domain)
+        separator = ", " if labels else ""
+        if used + len(separator) + len(domain) <= 60:
+            labels.append(domain)
+            used += len(separator) + len(domain)
+        elif not labels:
+            # A single label exceeds the budget; keep a truncated prefix.
+            labels.append(domain[:60])
+            break
+        else:
+            break
+    sample = ", ".join(labels)
     return {
         "country": _destination_label(item),
         "code": str(item.get("code") or "-"),
