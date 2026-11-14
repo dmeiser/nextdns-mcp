@@ -13,6 +13,7 @@ from nextdns_mcp.generative import (
     NextDNSGenerativeUI,
     _build_renderer_resource,
     _parse_ui_data,
+    _result_size_bytes,
     _validate_chart_placement,
 )
 
@@ -262,6 +263,34 @@ async def test_generate_ui_result_size_limit():
         mock_exec.return_value = OversizedApp()
         with pytest.raises(ValueError, match="result exceeds maximum size"):
             await gen_tool.fn(code="print(1)")
+
+
+def test_result_size_bytes_model_dump_json():
+    class DumpApp:
+        def model_dump_json(self):
+            return '{"payload": "' + "x" * (MAX_RESULT_BYTES + 1) + '"}'
+
+    assert _result_size_bytes(DumpApp()) > MAX_RESULT_BYTES
+
+
+def test_result_size_bytes_serialization_fallback():
+    class UnserializableApp:
+        def to_json(self):
+            raise TypeError("not serializable")
+
+        def __str__(self):
+            return "small"
+
+    assert _result_size_bytes(UnserializableApp()) == len(b"small")
+
+    class BrokenDumpApp:
+        def model_dump_json(self):
+            raise TypeError("broken")
+
+        def __str__(self):
+            return "tiny"
+
+    assert _result_size_bytes(BrokenDumpApp()) == len(b"tiny")
 
 
 @pytest.mark.asyncio
