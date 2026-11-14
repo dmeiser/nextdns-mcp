@@ -455,6 +455,14 @@ def _validate_interval_and_limit(interval: int, limit: int) -> dict[str, Any] | 
             interval=interval,
         )
 
+    if limit < 1:
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"limit must be at least 1, got {limit}",
+            min_limit=1,
+            limit=limit,
+        )
+
     if limit > PLOT_LIMIT_MAX:
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,
