@@ -25,6 +25,20 @@ Options:
 - `--api-key`: Credential the server was configured with; only used to assert it never appears in a `/health` response
 - `--expect-health`: Assert `/health` returns `200` (`ok`) or `503` with a failure class (`not-ok`) (default: `ok`)
 - `--health-only`: Validate only the `/health` endpoint and skip the MCP tool suite (default: `false`)
+#### Live-run rate limits
+
+NextDNS enforces the quota per account, not per run, and the CI job runs this suite for every PR
+push and every main push with the same API key. A single suite is well under the limit; 3-5 at once
+is not, which is what produced the 429 storms. Two things keep runs from starving each other:
+
+- the `E2E Container` job holds a constant concurrency group (`nextdns-live-api`, no
+  `cancel-in-progress`), so one live suite runs at a time and the rest queue behind it;
+- a 429 that still arrives is retried after a bounded backoff (`RATE_LIMIT_BACKOFF`: 15 s, 30 s,
+  60 s) instead of aborting the run. Per-call pacing is deliberately not used: a single run is
+  already under the limit, and slowing every run would only make the queue longer.
+
+Neither touches the server's own behaviour: the server still never retries, by design
+(see [docs/safety.md](../docs/safety.md), "Rate limiting").
 
 #### Validating the `/health` readiness probe
 
