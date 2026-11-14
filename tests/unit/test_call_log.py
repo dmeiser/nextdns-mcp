@@ -661,6 +661,7 @@ class TestEvidenceColumn:
 
         def boom(*args, **kwargs):
             raise RuntimeError("boom")
+
         monkeypatch.setattr("nextdns_mcp.call_log._result_evidence", boom)
         result = SimpleNamespace(is_error=False, structured_content={"$prefab": {"version": "0.3"}, "view": {}})
         path = tmp_path / "calls.jsonl"
@@ -710,4 +711,3 @@ class TestIntermediateSerialization:
         # Same single-sort contract as ``args``: the intermediate dump keeps
         # caller key order (pre-fix ``sort_keys`` rewrote it to ``a`` first).
         assert row["result"].index('"b"') < row["result"].index('"a"')
-
