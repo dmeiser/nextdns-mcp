@@ -697,13 +697,13 @@ async def _append_extra_dashboard_sections(
 
     with view:
         with Row(gap=4):
-            _build_reasons_card(r_d)
-            _build_devices_card(d_d)
+            _build_reasons_card(r_d, view_type=domain_view)
+            _build_devices_card(d_d, view_type=domain_view)
         with Row(gap=4):
-            _build_domains_card("Root Domains", "Aggregate root domains.", rt_d)
+            _build_domains_card("Root Domains", "Aggregate root domains.", rt_d, view_type=domain_view)
             _build_ips_card(i_d)
         with Row(gap=4):
-            _build_gafam_card(g_d)
+            _build_gafam_card(g_d, view_type=domain_view)
             _build_security_card(e_d, sec_d)
 
 
