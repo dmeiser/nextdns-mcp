@@ -289,6 +289,15 @@ def uncovered_write_operations() -> list[str]:
 
 SPEC_PATH = PROJECT_ROOT / "src" / "nextdns_mcp" / "nextdns-openapi.yaml"
 
+# The Generative UI probe is a separate mode: the generative tools are opt-in
+# (NEXTDNS_GENERATIVE_UI, off by default), so the live suite's preflight - which
+# grades the served catalog against the default (disabled) catalog - would see
+# them as unexpected drift. The probe starts its own container with the feature
+# on, so it runs as its own step and never inside the catalog-graded run.
+GENERATIVE_PROBE_TOOLS: tuple[str, ...] = ("generate_prefab_ui", "search_prefab_components")
+
+GENERATIVE_PROBE_CODE = 'with Column(gap=4) as view:\n    Text("hello")\napp = PrefabApp(view=view)'
+
 # The shipped document was parsed twice per process: once here for the catalog
 # and once per runner for schema validation (~160 ms each). One memo, keyed by
 # path so a monkeypatched SPEC_PATH reparses rather than serving a stale memo.
@@ -386,6 +395,42 @@ def _document_reads(operations: dict[str, str]) -> list[str]:
     )
 
 
+def _generative_probe_text(result: Any) -> str:
+    """Every text block of one tool result, joined.
+
+    A generative answer carries a ``[Rendered Prefab UI]`` marker here; the
+    Deno-missing failure surfaces as an error string in this text, so the
+    verdict reads it alongside the structured payload below.
+    """
+    texts = []
+    for block in getattr(result, "content", []):
+        text = _content_block_text(block)
+        if text:
+            texts.append(text)
+    return "\n".join(texts)
+
+
+def _generative_probe_structured(result: Any) -> str:
+    """The structured payload of one tool result, or "" when it has none."""
+    structured = getattr(result, "structured_content", None)
+    if structured is None:
+        structured = getattr(result, "structuredContent", None)
+    if structured is None:
+        return ""
+    return json.dumps(structured)
+
+
+def _generative_probe_blob(result: Any) -> str:
+    """Render one tool result for verdict matching: text plus payload."""
+    text = _generative_probe_text(result)
+    structured = _generative_probe_structured(result)
+    if not structured:
+        return text
+    if not text:
+        return structured
+    return text + "\n" + structured
+
+
 @contextlib.contextmanager
 def _private_open(path: Path, mode: str):
     """Open a report artifact 0600, creating or tightening it.
@@ -427,6 +472,7 @@ class ContainerE2ERunner:
         api_key: str = "",
         expect_health_ok: bool = True,
         health_only: bool = False,
+        generative_probe_only: bool = False,
     ) -> None:
         self.endpoint = endpoint
         self.variant = variant
@@ -438,6 +484,7 @@ class ContainerE2ERunner:
         self.api_key = api_key
         self.expect_health_ok = expect_health_ok
         self.health_only = health_only
+        self.generative_probe_only = generative_probe_only
         self.report_file = artifacts_dir / f"tools_report_{variant}.jsonl"
 
         # The schemas the served container advertises, kept from the preflight: the
@@ -1084,6 +1131,35 @@ class ContainerE2ERunner:
         log_success("/health readiness probe validated over HTTP")
         return 0
 
+    async def _generative_probe_advertised(self, session: ClientSession) -> tuple[bool, dict[str, Any]]:
+        """Require the two opt-in generative tools on the served catalog.
+
+        The container under test runs with ``NEXTDNS_GENERATIVE_UI=on``, so a
+        served catalog that omits them means the feature flag did not take
+        effect in the image; reporting which half of the pair is missing says
+        whether it hides or merely fails.
+        """
+        tools_result = await session.list_tools()
+        schemas = {tool.name: _input_schema(tool) for tool in tools_result.tools}
+        missing = [name for name in GENERATIVE_PROBE_TOOLS if name not in schemas]
+        if missing:
+            log_error(f"Generative UI tools not published by the container: {missing}")
+            return False, {}
+        log_success("Container publishes the generative UI tools")
+        return True, schemas
+
+    def _generative_probe_failure(self, observed: str) -> int:
+        """Record a failed probe verdict and its (redacted) evidence."""
+        self.record_result(
+            "generate_prefab_ui",
+            "FAILED",
+            args="code=<probe>",
+            duration=0.0,
+            error_msg=observed[:200],
+        )
+        self.failed_count += 1
+        return 1
+
     @asynccontextmanager
     async def _open_session(self) -> AsyncIterator[ClientSession]:
         """Open an initialized MCP session against the served container."""
@@ -1105,6 +1181,56 @@ class ContainerE2ERunner:
         if not await self.check_endpoint_readiness():
             return False
         return self.check_health()
+
+    async def _run_generative_probe(self, session: ClientSession) -> int:
+        """Invoke generate_prefab_ui once inside the container (issue #400).
+
+        Asserts the served container admits the code the failure mode hid from
+        every other check: a real ``generate_prefab_ui`` execution, with the
+        same ``$prefab`` content assertion the unit suite makes of the probed
+        tools, and an explicit rejection of the ``Deno is required`` payload
+        the images served before Deno was installed.
+        """
+        advertised, schemas = await self._generative_probe_advertised(session)
+        if not advertised:
+            return self._generative_probe_failure(f"tools/list omits: {GENERATIVE_PROBE_TOOLS}")
+        declared = set(schemas.get("generate_prefab_ui", {}).get("required", []))
+        if "code" not in declared:
+            return self._generative_probe_failure(f"generate_prefab_ui schema requires {sorted(declared)}")
+        try:
+            result = await session.call_tool("generate_prefab_ui", {"code": GENERATIVE_PROBE_CODE})
+        except Exception as e:  # noqa: BLE001
+            return self._generative_probe_failure(f"generate_prefab_ui raised {type(e).__name__}: {e}")
+        return self._generative_probe_verdict(result)
+
+    def _generative_probe_verdict(self, result: Any) -> int:
+        """Grade one generate_prefab_ui answer: a $prefab payload, no Deno-missing signal."""
+        blob = _generative_probe_blob(result)
+        if getattr(result, "is_error", False):
+            log_error("generate_prefab_ui answered with is_error")
+            return self._generative_probe_failure(blob)
+        if "Deno is required" in blob:
+            log_error("generate_prefab_ui answered with the Deno-missing failure")
+            return self._generative_probe_failure(blob)
+        if "$prefab" not in blob:
+            log_error("generate_prefab_ui answered without a $prefab payload")
+            return self._generative_probe_failure(blob)
+        self.record_result("generate_prefab_ui", "OK", args="code=<probe>", duration=0.0)
+        self.executed_count += 1
+        log_success("generate_prefab_ui rendered a $prefab payload in the container")
+        return 0
+
+    async def _run_single_probe(self) -> int | None:
+        """Run the generative probe when selected; None when the suite runs.
+
+        The probe is a single-mode flag like ``--health-only``: it opens its
+        own session against the Generative-UI-enabled container and returns
+        its verdict, so the catalog-graded suite below never sees it.
+        """
+        if not self.generative_probe_only:
+            return None
+        async with self._open_session() as session:
+            return await self._run_generative_probe(session)
 
     async def _run_suite(self, session: ClientSession) -> tuple[int, str]:
         """Run the suite on an open session; returns (exit code, profile to clean up).
@@ -1149,6 +1275,51 @@ class ContainerE2ERunner:
         log_success("All executed E2E calls completed successfully")
         return 0
 
+    async def _arch3_gate(self) -> bool:
+        """The live ARCH-3 gate: every write operation accounted for.
+
+        The WRITE_CASES/UNEXERCISED_WRITE_OPERATIONS bookkeeping must name
+        every published write operation, or "Executed calls: N" quietly stops
+        meaning "every write door was exercised". True when the suite may
+        touch the account.
+        """
+        uncovered = uncovered_write_operations()
+        if uncovered:
+            log_error(f"ARCH-3 gate: published write operations with no coverage decision: {', '.join(uncovered)}")
+            return False
+        return True
+
+    async def _run_single_mode(self) -> int | None:
+        """A single-mode flag run; None when the full suite should run.
+
+        ``--health-only`` and ``--generative-probe-only`` each target their
+        own container and skip the catalog-graded suite, so they return their
+        verdict; anything else returns None and the suite runs.
+        """
+        if self.health_only:
+            return await self._run_health_only()
+        return await self._run_single_probe()
+
+    async def _suite_body(self) -> int:
+        """Gates, preflight, suite, and cleanup; the report verdict follows."""
+        if not await self._arch3_gate():
+            return 1
+        if not await self._preflight_runtime():
+            return 1
+        return await self._suite_guarded()
+
+    async def _suite_guarded(self) -> int:
+        """Run the suite on an open session, always cleaning up the profile."""
+        created_profile_id = ""
+        try:
+            async with self._open_session() as session:
+                code, created_profile_id = await self._run_suite(session)
+            if code:
+                return code
+        finally:
+            await self._cleanup(created_profile_id)
+        return self._finish()
+
     async def run(self) -> int:
         """Run the full container E2E suite."""
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -1163,32 +1334,10 @@ class ContainerE2ERunner:
         log_info(f"Artifacts report: {self.report_file}")
         log_info("================================")
 
-        if self.health_only:
-            return await self._run_health_only()
-
-        # ARCH-3 gate, in the live runner itself and not only in the unit
-        # suite: the WRITE_CASES/UNEXERCISED_WRITE_OPERATIONS bookkeeping must
-        # account for every published write operation, or "Executed calls: N"
-        # quietly stops meaning "every write door was exercised". Fail before
-        # touching the account when it does not.
-        uncovered = uncovered_write_operations()
-        if uncovered:
-            log_error(f"ARCH-3 gate: published write operations with no coverage decision: {', '.join(uncovered)}")
-            return 1
-
-        if not await self._preflight_runtime():
-            return 1
-
-        created_profile_id = ""
-        try:
-            async with self._open_session() as session:
-                code, created_profile_id = await self._run_suite(session)
-            if code:
-                return code
-        finally:
-            await self._cleanup(created_profile_id)
-
-        return self._finish()
+        single = await self._run_single_mode()
+        if single is not None:
+            return single
+        return await self._suite_body()
 
     def _log_summary(self) -> None:
         """Log the execution summary."""
@@ -1261,6 +1410,12 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("HEALTH_ONLY", "false").lower() == "true",
         help="Validate only the /health endpoint and skip the MCP tool suite (default: false)",
     )
+    parser.add_argument(
+        "--generative-probe-only",
+        action="store_true",
+        default=os.environ.get("GENERATIVE_PROBE_ONLY", "false").lower() == "true",
+        help=("Invoke generate_prefab_ui in the container once and skip the rest of the suite (default: false)"),
+    )
     return parser.parse_args()
 
 
@@ -1276,6 +1431,7 @@ def main() -> int:
         api_key=args.api_key,
         expect_health_ok=args.expect_health == "ok",
         health_only=args.health_only,
+        generative_probe_only=args.generative_probe_only,
     )
     return asyncio.run(runner.run())
 
