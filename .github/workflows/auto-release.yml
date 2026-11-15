@@ -31,13 +31,29 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          unit=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
-            --jq '[.check_runs[] | select(.name == "unit-tests")] | .[0]')
-          if [ -z "$unit" ] || [ "$unit" = "null" ]; then
-            echo "❌ No unit-tests check-run found for $HEAD_SHA; refusing to release."
+          # Auto Release fires when E2E Container completes, but Unit Tests
+          # on the same head may still be running (or queued) at that point,
+          # so its check-run has a null conclusion. Poll until it resolves
+          # instead of reading it once (WORK-197).
+          deadline=$((SECONDS + 1800))  # 30-minute bound
+          conclusion=""
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            unit=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name == "unit-tests")] | .[0]')
+            if [ -n "$unit" ] && [ "$unit" != "null" ]; then
+              conclusion=$(echo "$unit" | jq -r .conclusion)
+              if [ -n "$conclusion" ] && [ "$conclusion" != "null" ]; then
+                break
+              fi
+            fi
+            echo "⏳ unit-tests not yet concluded for $HEAD_SHA (conclusion='${conclusion:-none}'); waiting 30s..."
+            conclusion=""
+            sleep 30
+          done
+          if [ -z "$conclusion" ] || [ "$conclusion" = "null" ]; then
+            echo "❌ Timed out waiting for a unit-tests check-run conclusion for $HEAD_SHA; refusing to release."
             exit 1
           fi
-          conclusion=$(echo "$unit" | jq -r .conclusion)
           if [ "$conclusion" != "success" ]; then
             echo "❌ unit-tests conclusion is '$conclusion' for $HEAD_SHA; refusing to release."
             exit 1
