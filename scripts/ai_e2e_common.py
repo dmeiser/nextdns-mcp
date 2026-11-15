@@ -232,14 +232,7 @@ def write_private_text(path: Any, text: str) -> None:
     file; if it fails, nothing is written and the error propagates - an
     artifact that cannot be made private is an artifact not written.
     """
-    p = Path(path)
-    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.fchmod(fd, 0o600)  # the creation mode only covers a brand-new file
-    except OSError:
-        os.close(fd)
-        raise
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    with private_open(path, "w") as fh:
         fh.write(text)
 
 
