@@ -6,6 +6,7 @@ import pytest
 from fastmcp.tools.base import ToolResult
 
 from nextdns_mcp.tools import dashboard as dash_module
+from nextdns_mcp.transport import MAX_SERIES_RESPONSE_BYTES
 
 
 class TestDashboardHelpers:
@@ -203,6 +204,22 @@ class TestDashboardFetchAndValidation:
         monkeypatch.setattr(dash_module, "_api_request_payload", AsyncMock(return_value={"data": [{"ok": True}]}))
         payload, err = await dash_module._fetch_analytics_payload("p1", "status")
         assert payload == {"data": [{"ok": True}]} and err is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_analytics_payload_series_cap_only_for_series(self, monkeypatch):
+        stub = AsyncMock(return_value={"data": []})
+        monkeypatch.setattr(dash_module, "_api_request_payload", stub)
+
+        payload, err = await dash_module._fetch_analytics_payload("p1", "status")
+        assert payload == {"data": []} and err is None
+        _, kwargs = stub.call_args
+        assert kwargs["max_response_bytes"] is None
+
+        stub.reset_mock()
+        payload, err = await dash_module._fetch_analytics_payload("p1", "status;series")
+        assert payload == {"data": []} and err is None
+        _, kwargs = stub.call_args
+        assert kwargs["max_response_bytes"] == MAX_SERIES_RESPONSE_BYTES
 
 
 class TestDashboardToolsExecution:
