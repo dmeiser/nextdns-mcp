@@ -126,6 +126,17 @@ class TestParseSeriesTimestamp:
         # regardless of the host's local timezone.
         assert ts.utcoffset() == timedelta(0)
 
+    def test_parses_colonless_offset(self):
+        # Previously covered by the ``%z`` strptime pattern; now handled by
+        # ``datetime.fromisoformat`` on Python >=3.12 (issue #450).
+        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00+0000")
+        assert (ts.hour, ts.minute) == (10, 30)
+        assert ts.utcoffset() == timedelta(0)
+
+        ts_fractional = plots_module._parse_series_timestamp("2024-01-15T10:30:00.123456+0000")
+        assert ts_fractional.microsecond == 123456
+        assert ts_fractional.utcoffset() == timedelta(0)
+
     def test_malformed_timestamp_raises_value_error(self):
         with pytest.raises(ValueError):
             plots_module._parse_series_timestamp("not-a-timestamp")
