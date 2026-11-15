@@ -695,6 +695,7 @@ async def _fetch_extra_payloads(
         _bounded_fetch_analytics_payload(sem, profile_id, "ips", dom_params),
         _bounded_fetch_analytics_payload(sem, profile_id, "domains", {**dom_params, "root": "true"}),
         _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "gafam"}),
+        _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "countries"}),
         _bounded_fetch_analytics_payload(sem, profile_id, "encryption", params),
         _bounded_fetch_analytics_payload(sem, profile_id, "dnssec", params),
     ]
@@ -714,7 +715,7 @@ async def _append_extra_dashboard_sections(
     dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
 
-    r_d, d_d, i_d, rt_d, g_d, e_d, sec_d = await _fetch_extra_payloads(profile_id, dom_params, params)
+    r_d, d_d, i_d, rt_d, g_d, c_d, e_d, sec_d = await _fetch_extra_payloads(profile_id, dom_params, params)
 
     with view:
         with Row(gap=4):
@@ -725,6 +726,8 @@ async def _append_extra_dashboard_sections(
             _build_ips_card(i_d)
         with Row(gap=4):
             _build_gafam_card(g_d, view_type=domain_view)
+            _build_destinations_card(c_d, view_type=domain_view)
+        with Row(gap=4):
             _build_security_card(e_d, sec_d)
 
 

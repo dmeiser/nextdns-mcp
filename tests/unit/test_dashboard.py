@@ -1,5 +1,6 @@
 """Unit tests for NextDNS interactive analytics dashboard and specialized UI tools."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -228,8 +229,10 @@ class TestDashboardToolsExecution:
     @pytest.fixture
     def mock_all_endpoints(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        calls: list[tuple[str, dict[str, object]]] = []
 
         async def fake_fetch(pid, endpoint, params=None):
+            calls.append((endpoint, dict(params or {})))
             if endpoint == "status":
                 return ({"data": [{"status": "default", "queries": 90}, {"status": "blocked", "queries": 10}]}, None)
             if endpoint == "status;series":
@@ -252,6 +255,7 @@ class TestDashboardToolsExecution:
             return ({"data": [{"domain": "test.com", "name": "Test", "ip": "1.1.1.1", "queries": 10}]}, None)
 
         monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        return calls
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_overview(self, mock_all_endpoints):
@@ -278,6 +282,13 @@ class TestDashboardToolsExecution:
         content = str(res.structured_content)
         # At least 6 BarCharts: overview Resolved/Blocked + Reasons/Devices/Root/GAFAM
         assert content.count("BarChart") >= 6
+        # Regression guard for #409: section="all" must fetch and render the countries card.
+        requested = {(endpoint, params.get("type")) for endpoint, params in mock_all_endpoints}
+        assert ("destinations", "countries") in requested
+        assert ("destinations", "gafam") in requested
+        rendered = json.dumps(res.structured_content, default=str)
+        assert "Traffic Destination" in rendered
+        assert "US" in rendered
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_status_fetch_error(self, monkeypatch):
@@ -511,7 +522,7 @@ class TestDashboardToolsExecution:
         monkeypatch.setattr(dash_module, "_fetch_analytics_payload", _tracking_fetch)
         res = await dash_module.overviewDashboard(profile_id="abc123", section="all")
         assert isinstance(res, ToolResult)
-        assert len(calls) == 11
+        assert len(calls) == 12
         assert 1 <= max_in_flight <= dash_module.OVERVIEW_FANOUT_CONCURRENCY
 
 
