@@ -149,10 +149,30 @@ def get_default_profile() -> str | None:
     return os.getenv("NEXTDNS_DEFAULT_PROFILE")
 
 
+# Canonical token sets for boolean environment flags. Keep these in sync with
+# the documented values in the README and tests.
+_BOOL_TRUE_TOKENS = frozenset(("true", "1", "yes", "on"))
+_BOOL_FALSE_TOKENS = frozenset(("false", "0", "no", "off", ""))
+_BOOL_TOKENS = _BOOL_TRUE_TOKENS | _BOOL_FALSE_TOKENS
+
+
+def _parse_bool_env(value: str) -> bool | None:
+    """Parse a boolean environment value.
+
+    Returns ``True``/``False`` for recognized tokens and ``None`` for any
+    unrecognized value, so callers can distinguish "off" from a typo.
+    """
+    normalized = value.strip().lower()
+    if normalized in _BOOL_TRUE_TOKENS:
+        return True
+    if normalized in _BOOL_FALSE_TOKENS:
+        return False
+    return None
+
+
 def _read_only_from_env() -> bool:
     """Read NEXTDNS_READ_ONLY once."""
-    value = os.getenv("NEXTDNS_READ_ONLY", "").strip().lower()
-    return value in ("true", "1", "yes")
+    return _parse_bool_env(os.getenv("NEXTDNS_READ_ONLY", "")) is True
 
 
 def is_read_only() -> bool:
@@ -166,8 +186,7 @@ def is_generative_ui_enabled() -> bool:
     Opt-in beta feature (disabled by default). Can be enabled by setting
     NEXTDNS_GENERATIVE_UI to 'true', '1', 'on', or 'yes'.
     """
-    value = os.getenv("NEXTDNS_GENERATIVE_UI", "off").strip().lower()
-    return value in ("true", "1", "on", "yes")
+    return _parse_bool_env(os.getenv("NEXTDNS_GENERATIVE_UI", "off")) is True
 
 
 def get_readable_profiles() -> set[str] | None:
@@ -547,6 +566,14 @@ def validate_configuration() -> None:
     base_url = os.getenv("NEXTDNS_API_BASE", "https://api.nextdns.io").rstrip("/")
     if not base_url.lower().startswith("https://"):
         raise ConfigurationError("NEXTDNS_API_BASE must use https://")
+    for env_name, default in (
+        ("NEXTDNS_READ_ONLY", ""),
+        ("NEXTDNS_GENERATIVE_UI", "off"),
+    ):
+        raw = os.getenv(env_name, default)
+        if _parse_bool_env(raw) is None:
+            raise ConfigurationError(f"Invalid {env_name}: {raw!r}. Expected one of {sorted(_BOOL_TOKENS - {''})}.")
+
     _log_access_control_settings()
 
 

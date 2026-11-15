@@ -376,3 +376,27 @@ def test_missing_api_key_is_catchable_as_configuration_error(active_config):
 
     with pytest.raises(ConfigurationError):
         create_nextdns_client()
+
+
+def test_validate_configuration_raises_on_invalid_read_only(monkeypatch, active_config):
+    """Test validate_configuration raises ConfigurationError on bad NEXTDNS_READ_ONLY."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", "test-key")
+    monkeypatch.setenv("NEXTDNS_READ_ONLY", "ture")
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        active_config.validate_configuration()
+
+    assert "NEXTDNS_READ_ONLY" in str(exc_info.value)
+    assert "'ture'" in str(exc_info.value)
+
+
+def test_validate_configuration_raises_on_invalid_generative_ui(monkeypatch, active_config):
+    """Test validate_configuration raises ConfigurationError on bad NEXTDNS_GENERATIVE_UI."""
+    monkeypatch.setenv("NEXTDNS_API_KEY", "test-key")
+    monkeypatch.setenv("NEXTDNS_GENERATIVE_UI", "enabled")
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        active_config.validate_configuration()
+
+    assert "NEXTDNS_GENERATIVE_UI" in str(exc_info.value)
+    assert "'enabled'" in str(exc_info.value)
