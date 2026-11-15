@@ -236,6 +236,17 @@ def _render_domain_content(title: str, data: list[dict[str, Any]], key_name: str
         _render_chart_view(chart_data, title, color, view_type)
 
 
+def _build_analytics_card(title: str, description: str, render_content) -> Card:
+    """Build a generic analytics card shell around rendered content."""
+    with Card(css_class="flex-1 min-w-[300px]") as card:
+        with CardHeader():
+            CardTitle(title)
+            CardDescription(description)
+        with CardContent():
+            render_content()
+    return card
+
+
 def _build_domains_card(
     title: str,
     description: str,
@@ -245,13 +256,11 @@ def _build_domains_card(
     color: str = "#3b82f6",
 ) -> Card:
     """Build a domain listing card with a sortable data table or bar chart."""
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle(title)
-            CardDescription(description)
-        with CardContent():
-            _render_domain_content(title, data, key_name, view_type, color)
-    return card
+    return _build_analytics_card(
+        title,
+        description,
+        lambda: _render_domain_content(title, data, key_name, view_type, color),
+    )
 
 
 def _reason_label(item: dict[str, Any]) -> str:
@@ -285,22 +294,24 @@ def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
 
 def _build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the reasons for blocking card."""
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle("Reasons for Blocking")
-            CardDescription("Security, Privacy and/or Parental Control settings that blocked the most queries.")
-        with CardContent():
-            if not data:
-                Text("No queries were blocked during this period.", css_class="text-sm text-muted-foreground py-4")
-            elif view_type == "table":
-                _reasons_table(data)
+
+    def _render():
+        if not data:
+            Text("No queries were blocked during this period.", css_class="text-sm text-muted-foreground py-4")
+        elif view_type == "table":
+            _reasons_table(data)
+        else:
+            chart_data = [{"label": _reason_label(item), "queries": _item_queries(item)} for item in data]
+            if view_type == "pie":
+                _pie_chart(chart_data)
             else:
-                chart_data = [{"label": _reason_label(item), "queries": _item_queries(item)} for item in data]
-                if view_type == "pie":
-                    _pie_chart(chart_data)
-                else:
-                    _bar_chart(chart_data, "Blocked Queries", "#ef4444")
-    return card
+                _bar_chart(chart_data, "Blocked Queries", "#ef4444")
+
+    return _build_analytics_card(
+        "Reasons for Blocking",
+        "Security, Privacy and/or Parental Control settings that blocked the most queries.",
+        _render,
+    )
 
 
 def _device_name(item: dict[str, Any]) -> str:
@@ -357,13 +368,11 @@ def _render_device_content(data: list[dict[str, Any]], view_type: str) -> None:
 
 def _build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the devices card."""
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle("Devices")
-            CardDescription("Devices making the queries.")
-        with CardContent():
-            _render_device_content(data, view_type)
-    return card
+    return _build_analytics_card(
+        "Devices",
+        "Devices making the queries.",
+        lambda: _render_device_content(data, view_type),
+    )
 
 
 def _location_string(geo: dict[str, Any]) -> str:
@@ -547,13 +556,11 @@ def _render_destination_content(data: list[dict[str, Any]], view_type: str) -> N
 
 def _build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the destination countries card."""
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle("Traffic Destination")
-            CardDescription("Top destination countries based on DNS queries.")
-        with CardContent():
-            _render_destination_content(data, view_type)
-    return card
+    return _build_analytics_card(
+        "Traffic Destination",
+        "Top destination countries based on DNS queries.",
+        lambda: _render_destination_content(data, view_type),
+    )
 
 
 # ==============================================================================
