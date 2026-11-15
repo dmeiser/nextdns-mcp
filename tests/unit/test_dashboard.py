@@ -205,19 +205,19 @@ class TestDashboardFetchAndValidation:
     @pytest.mark.asyncio
     async def test_fetch_card_data_error_paths(self, clean_env, monkeypatch):
         # 1. Profile resolution error
-        _pid0, _data0, err = await dash_module._fetch_card_data(None, "endpoint")
+        _data0, err = await dash_module._fetch_card_data(None, "endpoint")
         assert err is not None
 
         # 2. Fetch error from upstream
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         upstream_err = {"code": "http_error", "error": "failed"}
         monkeypatch.setattr(dash_module, "_fetch_analytics_payload", AsyncMock(return_value=(None, upstream_err)))
-        _pid, _data, err = await dash_module._fetch_card_data("abc123", "endpoint")
+        _data, err = await dash_module._fetch_card_data("abc123", "endpoint")
         assert err == upstream_err
 
         # 3. Empty data flows through (no no_data error) for consistent empty-state cards
         monkeypatch.setattr(dash_module, "_fetch_analytics_payload", AsyncMock(return_value=({"data": []}, None)))
-        _pid, _data, err = await dash_module._fetch_card_data("abc123", "endpoint")
+        _data, err = await dash_module._fetch_card_data("abc123", "endpoint")
         assert err is None
         assert _data == []
 
@@ -691,9 +691,9 @@ class TestFailClosedNoneGuards:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("section", CARD_SECTIONS)
     async def test_card_fetch_none_is_internal_error(self, clean_env, monkeypatch, section):
-        """``(None, None, None)`` from the card fetcher must not reach the renderer."""
+        """``(None, None)`` from the card fetcher must not reach the renderer."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(dash_module, "_fetch_card_data", AsyncMock(return_value=(None, None, None)))
+        monkeypatch.setattr(dash_module, "_fetch_card_data", AsyncMock(return_value=(None, None)))
 
         res = await dash_module.overviewDashboard(section=section)
         assert isinstance(res, dict)

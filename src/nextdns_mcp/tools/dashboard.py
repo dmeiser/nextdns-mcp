@@ -638,17 +638,17 @@ async def _fetch_card_data(
     to_time: str | int = "now",
     limit: int | None = None,
     **extra: Any,
-) -> tuple[str | None, list[dict[str, Any]] | None, dict[str, Any] | None]:
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
     """Fetch single endpoint data list with profile validation and error classification."""
     pid, err = await _resolve_profile(profile_id)
     if err or pid is None:
-        return None, None, err
+        return None, err
     params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, **extra)
     payload, fetch_err = await _fetch_analytics_payload(pid, endpoint, params)
     if fetch_err:
-        return pid, None, fetch_err
+        return None, fetch_err
     data, no_data_err = _validate_card_data(payload, endpoint, pid)
-    return pid, data, no_data_err
+    return data, no_data_err
 
 
 def _wrap_card_result(card: Card, summary_text: str) -> ToolResult:
@@ -850,9 +850,7 @@ async def _gafam_analytics_impl(
     view_type: Literal["auto", "pie", "bar", "table"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the GAFAM dominance donut chart and table."""
-    _pid, data, err = await _fetch_card_data(
-        profile_id, "destinations", from_time=from_time, to_time=to_time, type="gafam"
-    )
+    data, err = await _fetch_card_data(profile_id, "destinations", from_time=from_time, to_time=to_time, type="gafam")
     if err:
         return err
     if data is None:
@@ -904,7 +902,7 @@ async def _reasons_analytics_impl(
     view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the reasons for blocking card."""
-    _pid, data, err = await _fetch_card_data(profile_id, "reasons", from_time=from_time, to_time=to_time, limit=limit)
+    data, err = await _fetch_card_data(profile_id, "reasons", from_time=from_time, to_time=to_time, limit=limit)
     if err:
         return err
     if data is None:
@@ -923,7 +921,7 @@ async def _device_analytics_impl(
     view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the device analytics card."""
-    _pid, data, err = await _fetch_card_data(profile_id, "devices", from_time=from_time, to_time=to_time, limit=limit)
+    data, err = await _fetch_card_data(profile_id, "devices", from_time=from_time, to_time=to_time, limit=limit)
     if err:
         return err
     if data is None:
@@ -946,7 +944,7 @@ async def _ip_analytics_impl(
     limit: int = 10,
 ) -> dict[str, Any] | ToolResult:
     """Render the IP analytics card."""
-    _pid, data, err = await _fetch_card_data(profile_id, "ips", from_time=from_time, to_time=to_time, limit=limit)
+    data, err = await _fetch_card_data(profile_id, "ips", from_time=from_time, to_time=to_time, limit=limit)
     if err:
         return err
     if data is None:
@@ -973,7 +971,7 @@ async def _domain_card_analytics_impl(
     key_name: str = "domain",
 ) -> dict[str, Any] | ToolResult:
     """Render a domain analytics card (root/resolved/blocked)."""
-    _pid, data, err = await _fetch_card_data(
+    data, err = await _fetch_card_data(
         profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, **fetch_extra
     )
     if err:
@@ -1002,7 +1000,7 @@ async def _country_analytics_impl(
     view_type: Literal["auto", "table", "bar", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the destination countries analytics card."""
-    _pid, data, err = await _fetch_card_data(
+    data, err = await _fetch_card_data(
         profile_id, "destinations", from_time=from_time, to_time=to_time, limit=limit, type="countries"
     )
     if err:
@@ -1021,7 +1019,7 @@ async def _kpi_analytics_impl(
     to_time: str | int = "now",
 ) -> dict[str, Any] | ToolResult:
     """Render top KPI metric cards."""
-    _pid, data, err = await _fetch_card_data(profile_id, "status", from_time=from_time, to_time=to_time)
+    data, err = await _fetch_card_data(profile_id, "status", from_time=from_time, to_time=to_time)
     if err:
         return err
     if data is None:
