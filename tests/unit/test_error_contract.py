@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 """
 
 from collections.abc import Callable
+from datetime import UTC
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -609,3 +610,76 @@ class TestUnreadableAndOversizedBodies:
         # The slice carries the multibyte margin, so the decode yields whole
         # codepoints well past the character cap it exists to serve.
         assert len(text) >= MAX_RESPONSE_BODY_CHARS
+
+
+class TestRateLimitHeaders:
+    """HTTP 429 Retry-After and X-RateLimit-* headers surface cleanly on payloads."""
+
+    def test_structured_429_surfaces_numeric_retry_after_and_metadata(self):
+        exc = httpx.HTTPError("429")
+        exc.response = MagicMock(
+            status_code=429,
+            headers={
+                "Retry-After": "12.5",
+                "X-RateLimit-Limit": "100",
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "   ",
+            },
+        )
+        exc.response.json.return_value = {"error": "Too many requests", "code": "http_error"}
+
+        payload = http_error_payload("rate limited", exc)
+
+        assert payload["status_code"] == 429
+        assert payload["retry_after"] == 12.5
+        assert payload["rate_limit_limit"] == "100"
+        assert payload["rate_limit_remaining"] == "0"
+        assert "rate_limit_reset" not in payload
+
+    def test_generic_429_parses_http_date_and_clamps_past_dates(self):
+        from datetime import datetime, timedelta
+        from email.utils import format_datetime
+
+        future_hdr = format_datetime(datetime.now(UTC) + timedelta(seconds=30))
+        exc = httpx.HTTPError("rate limited")
+        exc.response = SimpleNamespace(
+            status_code=429,
+            text="slow down",
+            headers={"Retry-After": future_hdr, "X-RateLimit-Reset": "1700000000"},
+            json=MagicMock(side_effect=ValueError("not json")),
+        )
+
+        payload = http_error_payload("HTTP error in PATCH /privacy", exc)
+        assert 20.0 <= payload["retry_after"] <= 35.0
+        assert payload["rate_limit_reset"] == "1700000000"
+
+    def test_parse_retry_after_edge_cases(self):
+        from nextdns_mcp.errors import _parse_retry_after
+
+        assert _parse_retry_after(None) is None
+        assert _parse_retry_after("") is None
+        assert _parse_retry_after("   ") is None
+        assert _parse_retry_after("-5") == 0.0
+        assert _parse_retry_after("nan") is None
+        assert _parse_retry_after("inf") is None
+        assert _parse_retry_after("not-a-date") is None
+        # Naive HTTP-date (no explicit TZ -> assumed UTC, clamped to >= 0).
+        assert _parse_retry_after("Wed, 21 Oct 2015 07:28:00") == 0.0
+
+    def test_non_429_and_missing_headers_do_not_attach_retry_after(self):
+        exc_500 = httpx.HTTPError("500")
+        exc_500.response = SimpleNamespace(
+            status_code=500,
+            text="oops",
+            headers={"Retry-After": "10"},
+            json=MagicMock(side_effect=ValueError),
+        )
+        assert "retry_after" not in http_error_payload("err", exc_500)
+
+        exc_no_headers = httpx.HTTPError("429")
+        exc_no_headers.response = SimpleNamespace(
+            status_code=429,
+            text="rate limited",
+            json=MagicMock(side_effect=ValueError),
+        )
+        assert "retry_after" not in http_error_payload("err", exc_no_headers)

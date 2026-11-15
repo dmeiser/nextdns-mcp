@@ -36,6 +36,9 @@ def runner(tmp_path: Path) -> ContainerE2ERunner:
         plot_profile="",
         artifacts_dir=tmp_path,
         rate_limit_backoff=(0.0,),
+        read_delay=0.0,
+        write_delay=0.0,
+        phase_cooldown=0.0,
     )
 
 
@@ -658,6 +661,7 @@ def test_plot_sweep_walks_the_server_metric_table(tmp_path: Path):
         allow_live_writes=True,
         plot_profile="plotpid",
         artifacts_dir=tmp_path,
+        read_delay=0.0,
     )
     asyncio.run(runner._run_plot_sweep(session, "plotpid"))
     metrics = [call.kwargs["arguments"]["metric"] for call in session.call_tool.call_args_list]
@@ -1345,3 +1349,88 @@ def test_private_open_refuses_when_the_mode_cannot_be_established(tmp_path, monk
     with pytest.raises(PermissionError), _private_open(path, "a"):
         pass
     assert not path.exists() or path.stat().st_size == 0
+
+
+class TestRateLimitPacingAndFullBackoff:
+    """Default retries walk all RATE_LIMIT_BACKOFF entries and pace read/write bursts."""
+
+    @pytest.mark.asyncio
+    async def test_default_max_retries_walks_entire_backoff_table(self, tmp_path: Path, monkeypatch):
+        from scripts.run_container_e2e import DEFAULT_MAX_RETRIES, RATE_LIMIT_BACKOFF
+
+        assert DEFAULT_MAX_RETRIES == len(RATE_LIMIT_BACKOFF) + 1
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(secs: float) -> None:
+            sleep_calls.append(secs)
+
+        monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+        r = ContainerE2ERunner(
+            endpoint="http://127.0.0.1:8000/mcp",
+            variant="slim",
+            allow_live_writes=False,
+            plot_profile="",
+            artifacts_dir=tmp_path,
+            read_delay=0.0,
+        )
+        session = AsyncMock()
+        session.call_tool.return_value = _tool_result(RATE_LIMITED_PAYLOAD)
+
+        ok, _ = await r.execute_call(session, "updatePrivacySettings", {"profile_id": "p1"})
+        assert ok is False
+        assert session.call_tool.call_count == DEFAULT_MAX_RETRIES
+        assert sleep_calls == list(RATE_LIMIT_BACKOFF)
+
+    @pytest.mark.asyncio
+    async def test_pacing_transitions_from_read_to_write_and_bumps_on_429(self, tmp_path: Path, monkeypatch):
+        from scripts.run_container_e2e import ADAPTIVE_PACE_CAP_SECONDS
+
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(secs: float) -> None:
+            sleep_calls.append(secs)
+
+        monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+        r = ContainerE2ERunner(
+            endpoint="http://127.0.0.1:8000/mcp",
+            variant="slim",
+            allow_live_writes=False,
+            plot_profile="",
+            artifacts_dir=tmp_path,
+            rate_limit_backoff=(5.0,),
+            read_delay=0.2,
+            write_delay=0.5,
+            phase_cooldown=2.5,
+        )
+        session = AsyncMock()
+        session.call_tool.side_effect = [
+            _tool_result({"data": []}),
+            _tool_result({"data": []}),
+            _tool_result(RATE_LIMITED_PAYLOAD),
+            _tool_result({"data": []}),
+        ]
+
+        # First call has no pre-call delay; second waits read_delay; third waits
+        # read_delay, hits 429 (doubles pace 0.2 -> 0.4), and sleeps 5.0 backoff.
+        assert (await r.execute_call(session, "listProfiles", {}))[0] is True
+        assert sleep_calls == []
+        assert (await r.execute_call(session, "getProfile", {"profile_id": "p1"}))[0] is True
+        assert sleep_calls == [0.2]
+        assert (await r.execute_call(session, "getProfile", {"profile_id": "p1"}, max_retries=2))[0] is True
+        assert sleep_calls == [0.2, 0.2, 5.0]
+        assert r._pace_seconds == pytest.approx(0.4)
+
+        # Entering write phase raises pace to write_delay and sleeps phase_cooldown.
+        await r._enter_write_phase()
+        assert sleep_calls[-1] == 2.5
+        assert r._pace_seconds == 0.5
+
+        # Repeated bumps cap cleanly at ADAPTIVE_PACE_CAP_SECONDS.
+        for _ in range(5):
+            r._bump_pace()
+        assert r._pace_seconds == ADAPTIVE_PACE_CAP_SECONDS
+
+    def test_bump_pace_is_noop_when_pacing_disabled(self, runner: ContainerE2ERunner):
+        assert runner._pace_seconds == 0.0
+        runner._bump_pace()
+        assert runner._pace_seconds == 0.0
