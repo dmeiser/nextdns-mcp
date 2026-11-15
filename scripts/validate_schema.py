@@ -62,7 +62,6 @@ CONTENT_TOOLS = frozenset(
         "plotAnalytics",
         "overviewDashboard",
         "generate_prefab_ui",
-        "search_prefab_components",
     }
 )
 
@@ -112,6 +111,9 @@ TOOL_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
                 },
             },
         },
+    },
+    "search_prefab_components": {
+        "type": "string",
     },
 }
 
