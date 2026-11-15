@@ -664,6 +664,7 @@ def test_plot_sweep_walks_the_server_metric_table(tmp_path: Path):
     assert metrics == list(ai_e2e_common.PLOT_METRICS)
     assert len(metrics) == 9
 
+
 def test_plot_sweep_runs_on_supplied_profile_when_instance_state_is_unset(tmp_path: Path):
     """A supplied plot_profile_id is honored even when self.plot_profile is empty."""
     session = AsyncMock()
