@@ -34,7 +34,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from nextdns_mcp.server import published_tool_names
+from nextdns_mcp.server import (
+    generative_ui_content_tool_names,
+    generative_ui_data_tool_names,
+    published_tool_names,
+)
 
 # Operations the server does not publish, read from the server itself: the
 # reason is recorded in nextdns_mcp.spec_tools (``streamLogs`` is a Server-Sent
@@ -57,13 +61,10 @@ def local_tool_names() -> frozenset[str]:
 # Of those, the ones that answer with content instead of a JSON document. A chart is an
 # interactive Prefab UI view, so there is no payload for a schema to describe; the runner's assertion for it
 # is that the call came back with chart content, which is what run_container_e2e checks.
-CONTENT_TOOLS = frozenset(
-    {
-        "plotAnalytics",
-        "overviewDashboard",
-        "generate_prefab_ui",
-    }
-)
+# The generative-UI names are not restated here (WORK-142): they arrive through the server's
+# own content/data partition, so a rename there moves this set with it, and WORK-97's split —
+# ``search_prefab_components`` answers with data, not content — lives only on the server.
+CONTENT_TOOLS = frozenset({"plotAnalytics", "overviewDashboard", *generative_ui_content_tool_names()})
 
 # Response shapes for tools whose answer is not the document their endpoint returns.
 # dohLookup queries dns.nextdns.io directly (outside the NextDNS API spec), so its
@@ -112,9 +113,10 @@ TOOL_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
-    "search_prefab_components": {
-        "type": "string",
-    },
+    # The generative-UI data tools answer with a JSON string no endpoint returns, so their
+    # shape is pinned here; the names come from the server's content/data partition (WORK-142),
+    # so a rename moves the pin with it and cannot silently orphan it.
+    **{name: {"type": "string"} for name in generative_ui_data_tool_names()},
 }
 
 

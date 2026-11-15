@@ -409,7 +409,11 @@ def test_every_generative_ui_name_is_classified_exactly_once():
     catalog names live once, in ``generative_ui_tool_names()``, and the validator's
     two classifications must cover them without overlapping.
     """
-    from nextdns_mcp.server import generative_ui_tool_names
+    from nextdns_mcp.server import (
+        generative_ui_content_tool_names,
+        generative_ui_data_tool_names,
+        generative_ui_tool_names,
+    )
     from scripts import validate_schema
 
     names = set(generative_ui_tool_names())
@@ -417,6 +421,9 @@ def test_every_generative_ui_name_is_classified_exactly_once():
     pinned = names & set(validate_schema.TOOL_RESPONSE_SCHEMAS)
     assert content | pinned == names
     assert content & pinned == set()
+    # The classification the validator reaches is the server's own partition, not a restatement.
+    assert content == set(generative_ui_content_tool_names())
+    assert pinned == set(generative_ui_data_tool_names())
 
 
 def test_local_tool_names_reflects_generative_ui_toggle_after_import(monkeypatch):
