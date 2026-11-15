@@ -851,7 +851,7 @@ def _assemble_overview_layout(
 
 async def _fetch_extra_payloads(
     profile_id: str, dom_params: dict[str, Any], params: dict[str, Any]
-) -> ExtraDashboardPayloads | dict[str, Any]:
+) -> ExtraDashboardPayloads:
     """Fetch data lists for extra dashboard sections.
 
     Fetchers are keyed by result-field name and the tuple is built with
@@ -870,9 +870,6 @@ async def _fetch_extra_payloads(
     }
     pending = {name: asyncio.ensure_future(coro) for name, coro in fetchers.items()}
     results = {name: await task for name, task in pending.items()}
-    err = _first_error(*(r[1] for r in results.values()))
-    if err:
-        return err
     return ExtraDashboardPayloads(
         reasons=_payload_data(results["reasons"][0]),
         devices=_payload_data(results["devices"][0]),
@@ -903,7 +900,6 @@ def _render_extra_dashboard_sections(
             _build_destinations_card(payloads.countries, view_type=domain_view)
         with Row(gap=4):
             _build_security_card(payloads.encryption, payloads.dnssec)
-    return None
 
 
 async def _append_extra_dashboard_sections(
@@ -919,10 +915,7 @@ async def _append_extra_dashboard_sections(
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
 
     payloads = await _fetch_extra_payloads(profile_id, dom_params, params)
-    if isinstance(payloads, dict):
-        return payloads
     _render_extra_dashboard_sections(view, payloads, domain_view=domain_view)
-    return None
 
 
 def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
