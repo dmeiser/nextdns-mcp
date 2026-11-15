@@ -57,8 +57,6 @@ def _sanitize_label(value: Any) -> str:
     return text
 
 
-
-
 def _time_params(from_time: str | int | None, to_time: str | int | None) -> dict[str, Any]:
     """Extract normalized time window parameters."""
     p: dict[str, Any] = {}
