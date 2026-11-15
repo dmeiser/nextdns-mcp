@@ -42,6 +42,21 @@ from .plots import (
 logger = logging.getLogger(__name__)
 
 
+import re as _re
+
+_CONTROL_CHARS_RE = _re.compile(r"[\r\n\x00-\x1f\x7f-\x9f]")
+_MAX_LABEL_LENGTH = 200
+
+
+def _sanitize_label(value: Any) -> str:
+    """Strip control characters and bound length of attacker-controlled labels."""
+    text = str(value)
+    text = _CONTROL_CHARS_RE.sub("", text)
+    if len(text) > _MAX_LABEL_LENGTH:
+        text = text[:_MAX_LABEL_LENGTH] + "…"
+    return text
+
+
 def _time_params(from_time: str | int | None, to_time: str | int | None) -> dict[str, Any]:
     """Extract normalized time window parameters."""
     p: dict[str, Any] = {}
@@ -178,7 +193,7 @@ def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
 
 def _domain_label(item: dict[str, Any], key_name: str = "domain") -> str:
     """Extract domain label."""
-    return str(item.get(key_name) or item.get("domain") or "-")
+    return _sanitize_label(item.get(key_name) or item.get("domain") or "-")
 
 
 def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
@@ -234,7 +249,7 @@ def _build_domains_card(
 
 def _reason_label(item: dict[str, Any]) -> str:
     """Extract reason or blocklist name."""
-    return str(item.get("name") or item.get("id") or "Unknown")
+    return _sanitize_label(item.get("name") or item.get("id") or "Unknown")
 
 
 def _reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
@@ -283,14 +298,14 @@ def _build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> 
 
 def _device_name(item: dict[str, Any]) -> str:
     """Extract a human-readable device name."""
-    dev_id = str(item.get("id") or "-")
-    return "Unidentified" if dev_id == "__UNIDENTIFIED__" else str(item.get("name") or dev_id)
+    dev_id = _sanitize_label(item.get("id") or "-")
+    return "Unidentified" if dev_id == "__UNIDENTIFIED__" else _sanitize_label(item.get("name") or dev_id)
 
 
 def _device_label(item: dict[str, Any]) -> str:
     """Extract human-readable device name and model."""
     dev_name = _device_name(item)
-    model = str(item.get("model") or "")
+    model = _sanitize_label(item.get("model") or "")
     if model and model != "-" and model != dev_name:
         return f"{dev_name} ({model})"
     return dev_name
@@ -484,7 +499,7 @@ def _build_security_card(
 
 def _destination_label(item: dict[str, Any]) -> str:
     """Format country destination name."""
-    return str(item.get("name") or item.get("code") or "-")
+    return _sanitize_label(item.get("name") or item.get("code") or "-")
 
 
 def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
@@ -708,7 +723,7 @@ async def _append_extra_dashboard_sections(
 
 def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
     """Format top items as 'name (count)' list."""
-    formatted = [f"{name} ({q:,})" for name, q in items[:limit]]
+    formatted = [f"{_sanitize_label(name)} ({q:,})" for name, q in items[:limit]]
     return ", ".join(formatted)
 
 
