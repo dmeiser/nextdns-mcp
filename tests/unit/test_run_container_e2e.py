@@ -437,6 +437,25 @@ class TestE2EWorkflowSecretHandling:
         assert "--api-key" in step["run"]
         assert "NEXTDNS_API_KEY" not in step.get("env", {})
 
+    def test_the_generative_probe_runs_per_variant_in_ci(self):
+        """issue #400: the enabled-container probe must run in CI, per variant.
+
+        A probe mode nothing invokes ships a tool that fails at call time with
+        no signal, which is the defect this ticket was filed for; the step has
+        to start the image with the feature flag on and pass the probe flag,
+        so a workflow edit that drops either fails here.
+        """
+        step = next(s for name, s in self._steps().items() if name.startswith("Generative UI probe"))
+        assert "NEXTDNS_GENERATIVE_UI=on" in step["run"]
+        assert "--generative-probe-only" in step["run"]
+        assert "${{ matrix.variant }}" in step["run"]
+
+    def test_the_generative_probe_needs_no_real_credential(self):
+        """The probe uses a deliberately invalid key, so upstream 429s cannot mask it."""
+        step = next(s for name, s in self._steps().items() if name.startswith("Generative UI probe"))
+        assert "NEXTDNS_API_KEY" in step["run"]
+        assert "secrets.NEXTDNS_API_KEY" not in json.dumps(step.get("env", {}))
+
     def test_the_live_container_denies_writes_to_the_plot_profile(self):
         step = next(s for name, s in self._steps().items() if name.startswith("Start MCP Server Container"))
         assert "NEXTDNS_PLOT_PROFILE" in step["env"]

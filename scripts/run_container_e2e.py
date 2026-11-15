@@ -411,10 +411,13 @@ def _generative_probe_text(result: Any) -> str:
 
 
 def _generative_probe_structured(result: Any) -> str:
-    """The structured payload of one tool result, or "" when it has none."""
+    """The structured payload of one tool result, or "" when it has none.
+
+    Only ``structured_content`` is read: the deprecated ``structuredContent``
+    alias raises ``FastMCPDeprecationWarning``, and QA noted the failure path
+    triggering it; the current SDK name is enough (QA, WORK-98).
+    """
     structured = getattr(result, "structured_content", None)
-    if structured is None:
-        structured = getattr(result, "structuredContent", None)
     if structured is None:
         return ""
     return json.dumps(structured)

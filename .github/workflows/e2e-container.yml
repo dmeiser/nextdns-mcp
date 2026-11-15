@@ -179,6 +179,54 @@ jobs:
         if: always()
         run: docker logs nextdns-container-e2e-health || true; docker rm -f nextdns-container-e2e-health || true
 
+      - name: Generative UI probe (${{ matrix.variant }})
+        run: |
+          # issue #400: the generative tools are opt-in, so nothing else in this
+          # suite starts a container with NEXTDNS_GENERATIVE_UI=on. The Deno
+          # sandbox failure the images served before the fix is invisible to
+          # every other check, so this probe invokes generate_prefab_ui in a
+          # built image per variant. It needs no NextDNS credential (a
+          # deliberately invalid key starts the server without touching the
+          # account), so upstream 429s cannot mask it and it runs on fork PRs.
+          docker run -d \
+            --name nextdns-container-e2e-genui \
+            -p 8002:8000 \
+            -e NEXTDNS_API_KEY="e2e-invalid-key-not-a-real-credential" \
+            -e NEXTDNS_GENERATIVE_UI=on \
+            -e NEXTDNS_TOOL_SEARCH=off \
+            -e MCP_TRANSPORT="http" \
+            -e MCP_HOST="0.0.0.0" \
+            -e MCP_PORT="8000" \
+            nextdns-mcp:${{ matrix.variant }}
+
+          echo "Waiting for Generative UI container to be ready..."
+          READY=0
+          for i in $(seq 1 60); do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8002/mcp 2>/dev/null || true)
+            if [ "$HTTP_STATUS" != "000" ]; then
+              echo "Container is ready (HTTP $HTTP_STATUS at attempt $i)"
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "❌ Generative UI container failed to respond within 60 seconds"
+            docker logs nextdns-container-e2e-genui || true
+            docker rm -f nextdns-container-e2e-genui || true
+            exit 1
+          fi
+
+          uv run python scripts/run_container_e2e.py \
+            --generative-probe-only \
+            --endpoint http://127.0.0.1:8002/mcp \
+            --variant ${{ matrix.variant }}
+
+      - name: Stop Generative UI container (${{ matrix.variant }})
+        if: always()
+        run: docker logs nextdns-container-e2e-genui || true; docker rm -f nextdns-container-e2e-genui || true
+
       - name: Run E2E validation against container (${{ matrix.variant }})
         if: steps.check-secrets.outputs.has_secret == 'true'
         env:
