@@ -82,6 +82,17 @@ _mcp_server: FastMCP | None = None
 _GENERATIVE_UI_TOOLS = ("generate_prefab_ui", "search_prefab_components")
 
 
+def generative_ui_tool_names() -> tuple[str, ...]:
+    """The generative-UI tool names this server publishes, from its single source.
+
+    Consumers that read the catalog (schema validation's completeness checks, the
+    container pre-flight's expected-tool list) go through ``published_tool_names()``;
+    this accessor is for the tests and scripts that need these names as a set of
+    their own, so no second copy of the tuple can drift from the server that registers them.
+    """
+    return _GENERATIVE_UI_TOOLS
+
+
 def published_tool_names() -> list[str]:
     """Every tool name this server publishes, before any of them is registered.
 
@@ -91,7 +102,7 @@ def published_tool_names() -> list[str]:
     """
     names = [*spec_tool_names(), *(tool.__name__ for tool in _COMPOSITE_TOOLS)]
     if is_generative_ui_enabled():
-        names.extend(_GENERATIVE_UI_TOOLS)
+        names.extend(generative_ui_tool_names())
     return names
 
 
