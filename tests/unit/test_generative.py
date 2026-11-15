@@ -134,6 +134,7 @@ async def test_server_lifespan_cleanup():
             pass
         mock_close.assert_called_once()
 
+
 def test_close_all_generative_ui_handles_exception():
     from nextdns_mcp.generative import close_all_generative_ui
 
@@ -142,6 +143,7 @@ def test_close_all_generative_ui_handles_exception():
     gen_ui.close = MagicMock(side_effect=RuntimeError("boom"))
     # Should not propagate
     close_all_generative_ui()
+
 
 @pytest.mark.asyncio
 async def test_server_lifespan_cleanup_handles_exception():
