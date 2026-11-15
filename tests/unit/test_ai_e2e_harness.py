@@ -2972,6 +2972,76 @@ class TestServerCallEvidence:
         why = h._expected_call_ok([wrong_profile], step.expect, "abc")[1]
         assert "not the abc under test" in why
 
+    def test_expected_call_accepts_the_chart_marker_from_evidence_only(self, h):
+        """A chart marker lifted into the evidence column is the answer.
+
+        Plot and dashboard tools answer with a lossy result text; the
+        component facts travel in the ``evidence`` column, so a step that
+        expects the chart marker must see it there. Marker-free text is the
+        negative: evidence without the marker is not an answer either.
+        """
+        step = h.Step(
+            "plots.status",
+            "plots",
+            "plotAnalytics",
+            "d",
+            "p",
+            "chart",
+            expect=h._expect_local("plotAnalytics", args=("status",), result=("AreaChart",), profile=h.PLOT_PROFILE),
+        )
+        base = {
+            "tool": "plotAnalytics",
+            "profile_id": "plotpid",
+            "ok": True,
+            "write": False,
+            "args": '{"metric": "status"}',
+            "result": '{"content": ["image"]}',
+        }
+        ok, why = h._expected_call_ok(
+            [dict(base, evidence={"components": ["AreaChart", "ChartSeries", "Heading"]})],
+            step.expect,
+            "testpid",
+            alt_pid="plotpid",
+        )
+        assert ok, why
+        ok, why = h._expected_call_ok(
+            [dict(base, evidence={"components": ["Card", "DataTable"]})],
+            step.expect,
+            "testpid",
+            alt_pid="plotpid",
+        )
+        assert not ok
+        assert "answered without ['AreaChart']" in why
+        ok, why = h._expected_call_ok([base], step.expect, "testpid", alt_pid="plotpid")
+        assert not ok
+        assert "answered without ['AreaChart']" in why
+
+    def test_expected_call_accepts_the_prefab_marker_in_the_result_text(self, h):
+        """The dashboard's $prefab marker rides the result projection itself."""
+        step = h.Step(
+            "dashboard.overview",
+            "dashboard",
+            "overviewDashboard",
+            "d",
+            "p",
+            "dashboard",
+            expect=h._expect_local("overviewDashboard", result=("$prefab",), profile=h.PLOT_PROFILE),
+        )
+        record = {
+            "tool": "overviewDashboard",
+            "profile_id": "plotpid",
+            "ok": True,
+            "write": False,
+            "args": "{}",
+            "result": '{"content": "[Rendered NextDNS Dashboard]", "$prefab": true}',
+        }
+        ok, why = h._expected_call_ok([record], step.expect, "testpid", alt_pid="plotpid")
+        assert ok, why
+        marker_free = {**record, "result": '{"content": "[Rendered NextDNS Dashboard]"}'}
+        ok, why = h._expected_call_ok([marker_free], step.expect, "testpid", alt_pid="plotpid")
+        assert not ok
+        assert "answered without ['$prefab']" in why
+
     def test_answered_accepts_an_empty_list_as_an_answer(self, h):
         """A fresh profile really does have an empty allowlist."""
         assert h._answered('{"data": []}')

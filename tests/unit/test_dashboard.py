@@ -776,3 +776,147 @@ table: dict[str, _WidgetHandler] = {
         stdout, stderr, exit_status = mypy.api.run(["--config-file", "", str(bad_ret_file)])
         assert exit_status != 0, "mypy unexpectedly accepted handler returning int"
         assert "expected" in stdout and "_WidgetHandler" in stdout
+
+
+class TestDashboardParamForwarding:
+    """The fake must see the parameters, not just the payloads.
+
+    A section that drops or misroutes ``limit``, the time window, ``status``,
+    ``root`` or ``type`` used to stay green: the fakes recorded payloads but
+    never the outgoing params. These tests assert the requests the fake
+    actually received, per section, plus the component types each section
+    emits.
+    """
+
+    @pytest.fixture
+    def recorded(self, monkeypatch):
+        """Record ``(endpoint, params)`` per fetch and answer every endpoint."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        calls: list[tuple[str, dict]] = []
+
+        async def fake_fetch(pid, endpoint, params=None):
+            calls.append((endpoint, dict(params or {})))
+            if endpoint == "status":
+                return ({"data": [{"status": "default", "queries": 90}, {"status": "blocked", "queries": 10}]}, None)
+            if endpoint == "status;series":
+                return (
+                    {
+                        "meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}},
+                        "data": [{"name": "blocked", "queries": [10]}],
+                    },
+                    None,
+                )
+            return ({"data": [{"domain": "test.com", "queries": 10}]}, None)
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        return calls
+
+    @staticmethod
+    def _by_endpoint(calls):
+        out: dict[str, list[dict]] = {}
+        for endpoint, params in calls:
+            out.setdefault(endpoint, []).append(params)
+        return out
+
+    @staticmethod
+    def _component_types(res):
+        """Every prefab component type in the structured view tree."""
+        types: set[str] = set()
+
+        def walk(node):
+            if isinstance(node, dict):
+                node_type = node.get("type")
+                if isinstance(node_type, str):
+                    types.add(node_type)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(res.structured_content)
+        return types
+
+    @pytest.mark.asyncio
+    async def test_overview_sends_the_window_and_the_status_split(self, recorded):
+        res = await dash_module.overviewDashboard(profile_id="abc123", from_time="-1d", to_time="now", limit=25)
+        assert isinstance(res, ToolResult)
+        by_ep = self._by_endpoint(recorded)
+        assert set(by_ep) == {"status", "status;series", "domains"}
+        assert by_ep["status"] == [{"from": "-1d", "to": "now"}]
+        assert by_ep["status;series"] == [{"from": "-1d", "to": "now", "interval": 3600}]
+        assert by_ep["domains"] == [
+            {"from": "-1d", "to": "now", "limit": 25, "status": "default"},
+            {"from": "-1d", "to": "now", "limit": 25, "status": "blocked"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_all_sends_every_extra_section_its_own_params(self, recorded):
+        res = await dash_module.overviewDashboard(
+            profile_id="abc123", from_time="-1d", to_time="now", limit=25, section="all"
+        )
+        assert isinstance(res, ToolResult)
+        by_ep = self._by_endpoint(recorded)
+        window = {"from": "-1d", "to": "now"}
+        assert by_ep["reasons"] == [{**window, "limit": 25}]
+        assert by_ep["devices"] == [{**window, "limit": 25}]
+        assert by_ep["ips"] == [{**window, "limit": 25}]
+        assert by_ep["domains"] == [
+            {**window, "limit": 25, "status": "default"},
+            {**window, "limit": 25, "status": "blocked"},
+            {**window, "limit": 25, "root": "true"},
+        ]
+        assert by_ep["destinations"] == [
+            {**window, "type": "gafam"},
+            {**window, "type": "countries"},
+        ]
+        assert by_ep["encryption"] == [dict(window)]
+        assert by_ep["dnssec"] == [dict(window)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("section", "endpoint", "params"),
+        [
+            ("kpi", "status", {"from": "-1d", "to": "now"}),
+            ("domains", "domains", {"from": "-1d", "to": "now", "limit": 25, "status": "default"}),
+            ("blocked_domains", "domains", {"from": "-1d", "to": "now", "limit": 25, "status": "blocked"}),
+            ("reasons", "reasons", {"from": "-1d", "to": "now", "limit": 25}),
+            ("devices", "devices", {"from": "-1d", "to": "now", "limit": 25}),
+            ("ips", "ips", {"from": "-1d", "to": "now", "limit": 25}),
+            ("root_domains", "domains", {"from": "-1d", "to": "now", "limit": 25, "root": "true"}),
+            ("countries", "destinations", {"from": "-1d", "to": "now", "limit": 25, "type": "countries"}),
+            ("gafam", "destinations", {"from": "-1d", "to": "now", "type": "gafam"}),
+        ],
+        ids=["kpi", "domains", "blocked_domains", "reasons", "devices", "ips", "root_domains", "countries", "gafam"],
+    )
+    async def test_widget_sends_its_section_params(self, recorded, section, endpoint, params):
+        res = await dash_module.overviewDashboard(
+            profile_id="abc123", from_time="-1d", to_time="now", limit=25, section=section
+        )
+        assert isinstance(res, ToolResult)
+        assert [(ep, dict(p)) for ep, p in recorded] == [(endpoint, params)]
+
+    @pytest.mark.asyncio
+    async def test_security_sends_the_window_without_a_limit(self, recorded):
+        res = await dash_module.overviewDashboard(
+            profile_id="abc123", from_time="-1d", to_time="now", limit=25, section="security"
+        )
+        assert isinstance(res, ToolResult)
+        assert [(ep, dict(p)) for ep, p in recorded] == [
+            ("encryption", {"from": "-1d", "to": "now"}),
+            ("dnssec", {"from": "-1d", "to": "now"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_overview_emits_the_series_chart_and_the_domain_table(self, recorded):
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="overview")
+        assert {"AreaChart", "Card", "DataTable", "Heading"} <= self._component_types(res)
+
+    @pytest.mark.asyncio
+    async def test_domain_card_view_types_follow_view_type(self, recorded):
+        table = await dash_module.overviewDashboard(profile_id="abc123", section="domains", view_type="table")
+        bar = await dash_module.overviewDashboard(profile_id="abc123", section="domains", view_type="bar")
+        pie = await dash_module.overviewDashboard(profile_id="abc123", section="domains", view_type="pie")
+        assert "DataTable" in self._component_types(table) and "BarChart" not in self._component_types(table)
+        assert "BarChart" in self._component_types(bar) and "DataTable" not in self._component_types(bar)
+        assert "PieChart" in self._component_types(pie) and "DataTable" not in self._component_types(pie)

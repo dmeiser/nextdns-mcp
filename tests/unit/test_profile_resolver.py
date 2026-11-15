@@ -1,9 +1,11 @@
 """Unit tests for the centralized profile resolver utility.
 
-``resolve_profile_id`` is used by the two hand-written tools (``dohLookup``,
-``plotAnalytics``); the generated tools resolve the id as a path placeholder in
-``spec_tools`` instead, and a missing one is refused there before any request.
-Both are covered here, because both decide whether a call is made at all.
+``resolve_profile_id`` is used by the hand-written tools that build a request
+URL (``dohLookup``, ``plotAnalytics``, ``overviewDashboard``); the generated
+tools resolve the id as a path placeholder in ``spec_tools`` instead, and a
+missing one is refused there before any request. Every call site is registered
+in ``_PROFILE_ID_SITES`` below, because each decides whether a call is made at
+all.
 
 SPDX-License-Identifier: MIT
 """
@@ -17,6 +19,7 @@ import pytest
 from nextdns_mcp import client as client_module
 from nextdns_mcp import spec_tools
 from nextdns_mcp.errors import ErrorCode
+from nextdns_mcp.tools.dashboard import overviewDashboard
 from nextdns_mcp.tools.doh import dohLookup
 from nextdns_mcp.tools.plots import plotAnalytics
 from nextdns_mcp.utils import resolve_profile_id
@@ -39,12 +42,13 @@ def mock_api_client(monkeypatch):
     return client
 
 
-# Every tool that resolves a profile id through ``resolve_profile_id``. Neither
-# is generated from the spec, so both go through the resolver rather than a path
-# template, and both report an omitted profile_id as ``missing_profile_id``.
+# Every tool that resolves a profile id through ``resolve_profile_id``. None is
+# generated from the spec, so each goes through the resolver rather than a path
+# template, and each reports an omitted profile_id as ``missing_profile_id``.
 _PROFILE_ID_SITES = [
     ("doh", lambda pid: dohLookup("example.com", pid, "A")),
     ("plot", lambda pid: plotAnalytics("status", profile_id=pid)),
+    ("dashboard", lambda pid: overviewDashboard(profile_id=pid)),
 ]
 
 
