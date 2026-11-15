@@ -518,9 +518,35 @@ def _destination_label(item: dict[str, Any]) -> str:
     return str(item.get("name") or item.get("code") or "-")
 
 
+def _accumulate_domains(domains: list[str] | None, budget: int = 60) -> str:
+    """Accumulate domain labels until the display budget is reached.
+
+    Returns a comma-separated string of domains whose total length with separators
+    does not exceed *budget*. If the first domain alone exceeds the budget, return a
+    truncated prefix of that domain. The function stops reading further domains once the
+    budget would be exceeded, avoiding a full join of the input list.
+    """
+    if not domains:
+        return ""
+    labels: list[str] = []
+    first = str(domains[0])
+    if len(first) > budget:
+        return first[:budget]
+    labels.append(first)
+    used = len(first)
+    for domain in domains[1:]:
+        domain = str(domain)
+        need = used + 2 + len(domain)
+        if need > budget:
+            break
+        labels.append(domain)
+        used = need
+    return ", ".join(labels)
+
+
 def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
     """Format one country destination row."""
-    sample = ", ".join(item.get("domains") or [])[:60]
+    sample = _accumulate_domains(item.get("domains"), budget=60)
     return {
         "country": _destination_label(item),
         "code": str(item.get("code") or "-"),

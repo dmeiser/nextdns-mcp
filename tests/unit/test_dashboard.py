@@ -151,6 +151,29 @@ class TestDashboardHelpers:
         assert dash_module._build_destinations_card(data, view_type="bar") is not None
         assert dash_module._build_destinations_card(data, view_type="pie") is not None
 
+    def test_accumulate_domains_budgeted(self):
+        # In-budget: labels fit exactly
+        assert dash_module._accumulate_domains(["a.com", "b.com"], budget=60) == "a.com, b.com"
+        # Overflow: stops before exceeding budget - exact value distinguishes from old join-then-slice
+        long_list = ["verylongdomainnamethatisoverlimit.example.com"] * 100
+        # Old implementation would return first 60 chars with partial second label
+        # New implementation stops after first label because second would exceed budget
+        assert (
+            dash_module._destination_row({"domains": long_list})["sample_domains"]
+            == "verylongdomainnamethatisoverlimit.example.com"
+        )
+        # Exact boundary cases
+        assert dash_module._destination_row({"domains": ["a" * 30, "b" * 40]})["sample_domains"] == "a" * 30
+        assert (
+            dash_module._destination_row({"domains": ["a" * 28, "b" * 30]})["sample_domains"]
+            == "a" * 28 + ", " + "b" * 30
+        )
+        # Empty list returns "-"
+        assert dash_module._destination_row({"domains": []})["sample_domains"] == "-"
+        # Single overlong label gets truncated to budget
+        over = "x" * 100
+        assert dash_module._destination_row({"domains": [over]})["sample_domains"] == over[:60]
+
 
 class TestDashboardFetchAndValidation:
     """Tests for data validation and fetching error paths."""
