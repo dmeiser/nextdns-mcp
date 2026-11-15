@@ -390,13 +390,24 @@ def test_catalog_constants_are_imported_not_restated():
     assert validate_schema.WITHHELD_OPERATIONS is spec_tools.WITHHELD_OPERATIONS
     assert validate_schema.SPEC_PATH == spec_tools.SPEC_PATH
     published = set(published_tool_names())
-    assert validate_schema.LOCAL_TOOLS == published - set(spec_tools.spec_tool_names())
+    assert validate_schema.local_tool_names() == published - set(spec_tools.spec_tool_names())
     expected_local = {tool.__name__ for tool in _COMPOSITE_TOOLS}
     if is_generative_ui_enabled():
         from nextdns_mcp.server import _GENERATIVE_UI_TOOLS
 
         expected_local.update(_GENERATIVE_UI_TOOLS)
-    assert expected_local == set(validate_schema.LOCAL_TOOLS)
+    assert expected_local == set(validate_schema.local_tool_names())
+
+
+def test_local_tool_names_reflects_generative_ui_toggle_after_import(monkeypatch):
+    """local_tool_names() is evaluated dynamically, not snapshotted at import."""
+    from scripts import validate_schema
+
+    monkeypatch.setenv("NEXTDNS_GENERATIVE_UI", "off")
+    assert "generate_prefab_ui" not in validate_schema.local_tool_names()
+
+    monkeypatch.setenv("NEXTDNS_GENERATIVE_UI", "on")
+    assert "generate_prefab_ui" in validate_schema.local_tool_names()
 
 
 def _spec_with_request_body(operation_id: str, body_schema: dict) -> dict:

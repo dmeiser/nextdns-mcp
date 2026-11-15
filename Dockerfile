@@ -1,7 +1,7 @@
 # Multi-stage build for a lean final image
 
 # 1. Builder stage: Install dependencies
-FROM python:3.14-slim AS builder
+FROM python:3.15-slim AS builder
 
 # Update system packages for security
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
@@ -27,7 +27,7 @@ RUN uv export --frozen --no-dev --no-emit-project --output-file /tmp/requirement
     uv pip install --target /install --requirement /tmp/requirements.txt
 
 # 2. Final stage: Create the runtime image
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 # Update system packages for security
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
@@ -38,7 +38,7 @@ LABEL org.opencontainers.image.description="Model Context Protocol server for Ne
 LABEL org.opencontainers.image.authors="NextDNS MCP Contributors"
 LABEL org.opencontainers.image.source="https://github.com/dmeiser/nextdns-mcp"
 LABEL org.opencontainers.image.documentation="https://github.com/dmeiser/nextdns-mcp/blob/main/README.md"
-LABEL org.opencontainers.image.version="4.1.0"
+LABEL org.opencontainers.image.version="4.1.1"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Transport modes:

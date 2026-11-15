@@ -183,7 +183,7 @@ def _domain_label(item: dict[str, Any], key_name: str = "domain") -> str:
 
 def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     """Build domain data table."""
-    rows: list[dict[str, Any] | Any] = [
+    rows: list[dict[str, Any]] = [
         {"domain": _domain_label(item, key_name), "queries": _item_queries(item)} for item in data
     ]
     return DataTable(
@@ -191,7 +191,7 @@ def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
             DataTableColumn(key="domain", header="Domain", sortable=True),
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -250,14 +250,14 @@ def _reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
 def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     """Build reasons data table."""
     total = sum(_item_queries(item) for item in data)
-    rows: list[dict[str, Any] | Any] = [_reason_row(item, total) for item in data]
+    rows: list[dict[str, Any]] = [_reason_row(item, total) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -310,7 +310,7 @@ def _device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
 def _devices_table(data: list[dict[str, Any]]) -> DataTable:
     """Build devices data table."""
     total = sum(_item_queries(item) for item in data)
-    rows: list[dict[str, Any] | Any] = [_device_row(item, total) for item in data]
+    rows: list[dict[str, Any]] = [_device_row(item, total) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="device", header="Device", sortable=True),
@@ -318,7 +318,7 @@ def _devices_table(data: list[dict[str, Any]]) -> DataTable:
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -367,7 +367,7 @@ def _ip_row(item: dict[str, Any]) -> dict[str, Any]:
 
 def _build_ips_card(data: list[dict[str, Any]]) -> Card:
     """Build the IP addresses card."""
-    rows: list[dict[str, Any] | Any] = [_ip_row(item) for item in data]
+    rows: list[dict[str, Any]] = [_ip_row(item) for item in data]
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle("IPs")
@@ -383,7 +383,7 @@ def _build_ips_card(data: list[dict[str, Any]]) -> Card:
                         DataTableColumn(key="location", header="Location", sortable=True),
                         DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
                     ],
-                    rows=rows,
+                    rows=rows,  # type: ignore[arg-type]
                 )
     return card
 
@@ -399,15 +399,15 @@ def _single_gafam_row(item: dict[str, Any], total: int) -> tuple[dict[str, Any],
     }
 
 
-def _gafam_rows(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any] | Any]]:
+def _gafam_rows(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Format data rows for the GAFAM donut chart and data table."""
     total = sum(_item_queries(item) for item in data)
     pairs = [_single_gafam_row(item, total) for item in data]
-    table_rows: list[dict[str, Any] | Any] = [p[1] for p in pairs]
+    table_rows: list[dict[str, Any]] = [p[1] for p in pairs]
     return [p[0] for p in pairs], table_rows
 
 
-def _gafam_table(table_rows: list[dict[str, Any] | Any]) -> DataTable:
+def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
     """Build GAFAM table."""
     return DataTable(
         columns=[
@@ -415,7 +415,7 @@ def _gafam_table(table_rows: list[dict[str, Any] | Any]) -> DataTable:
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
-        rows=table_rows,
+        rows=table_rows,  # type: ignore[arg-type]
     )
 
 
@@ -500,7 +500,7 @@ def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
 
 def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
     """Build destinations table."""
-    rows: list[dict[str, Any] | Any] = [_destination_row(item) for item in data]
+    rows: list[dict[str, Any]] = [_destination_row(item) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="country", header="Country", sortable=True),
@@ -508,7 +508,7 @@ def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="sample_domains", header="Sample Domains"),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -571,7 +571,7 @@ def _validate_card_data(
 ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
     """Extract list data from payload or return typed no-data error."""
     data = _payload_data(payload)
-    if not data:
+    if payload is None:
         return None, error_payload(ErrorCode.NO_DATA, f"No {endpoint} data available", profile_id=pid)
     return data, None
 
@@ -839,29 +839,38 @@ async def _ip_analytics_impl(
     return _wrap_card_result(_build_ips_card(data), summary)
 
 
-async def _root_domain_analytics_impl(
+async def _domain_card_analytics_impl(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
     view_type: Literal["auto", "table", "bar", "pie"] = "auto",
+    *,
+    fetch_extra: dict[str, Any],
+    title: str,
+    description: str,
+    summary_title: str,
+    summary_noun: str = "domains",
+    color: str = "#3b82f6",
+    key_name: str = "domain",
 ) -> dict[str, Any] | ToolResult:
-    """Render the root domain analytics card."""
+    """Render a domain analytics card (root/resolved/blocked)."""
     _pid, data, err = await _fetch_card_data(
-        profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, root="true"
+        profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, **fetch_extra
     )
     if err:
         return err
     assert data is not None
-    items = [(_domain_label(item, "domain"), _item_queries(item)) for item in data]
+    items = [(_domain_label(item, key_name), _item_queries(item)) for item in data]
     total = sum(q for _, q in items)
-    summary = _format_items_summary("Root Domains", "domains", items, total)
+    summary = _format_items_summary(summary_title, summary_noun, items, total)
     card = _build_domains_card(
-        "Root Domains",
-        "Aggregate queries for root domains and subdomains.",
+        title,
+        description,
         data,
-        key_name="domain",
+        key_name=key_name,
         view_type=view_type,
+        color=color,
     )
     return _wrap_card_result(card, summary)
 
@@ -906,60 +915,6 @@ async def _kpi_analytics_impl(
     return ToolResult(content=summary, structured_content=app)
 
 
-async def _domains_analytics_impl(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Render top resolved domains card."""
-    _pid, data, err = await _fetch_card_data(
-        profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, status="default"
-    )
-    if err:
-        return err
-    assert data is not None
-    card = _build_domains_card(
-        "Resolved Domains",
-        "Domains that resolved without being blocked.",
-        data,
-        view_type=view_type,
-        color="#3b82f6",
-    )
-    items = [(_domain_label(item, "domain"), _item_queries(item)) for item in data]
-    total = sum(q for _, q in items)
-    summary = _format_items_summary("Resolved Domains", "domains", items, total)
-    return _wrap_card_result(card, summary)
-
-
-async def _blocked_domains_analytics_impl(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Render top blocked domains card."""
-    _pid, data, err = await _fetch_card_data(
-        profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, status="blocked"
-    )
-    if err:
-        return err
-    assert data is not None
-    card = _build_domains_card(
-        "Blocked Domains",
-        "Domains blocked by security, privacy, or parental controls.",
-        data,
-        view_type=view_type,
-        color="#ef4444",
-    )
-    items = [(_domain_label(item, "domain"), _item_queries(item)) for item in data]
-    total = sum(q for _, q in items)
-    summary = _format_items_summary("Blocked Domains", "domains", items, total)
-    return _wrap_card_result(card, summary)
-
-
 # ==============================================================================
 # Dispatch and Public Overview Dashboard Tool
 # ==============================================================================
@@ -981,15 +936,44 @@ DashboardSection = Literal[
 
 _WIDGET_DISPATCH: dict[str, Any] = {
     "kpi": lambda p, f, t, lim, v: _kpi_analytics_impl(p, from_time=f, to_time=t),
-    "domains": lambda p, f, t, lim, v: _domains_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
-    "blocked_domains": lambda p, f, t, lim, v: _blocked_domains_analytics_impl(
-        p, from_time=f, to_time=t, limit=lim, view_type=v
+    "domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
+        p,
+        from_time=f,
+        to_time=t,
+        limit=lim,
+        view_type=v,
+        fetch_extra={"status": "default"},
+        title="Resolved Domains",
+        description="Domains that resolved without being blocked.",
+        summary_title="Resolved Domains",
+        color="#3b82f6",
+    ),
+    "blocked_domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
+        p,
+        from_time=f,
+        to_time=t,
+        limit=lim,
+        view_type=v,
+        fetch_extra={"status": "blocked"},
+        title="Blocked Domains",
+        description="Domains blocked by security, privacy, or parental controls.",
+        summary_title="Blocked Domains",
+        color="#ef4444",
     ),
     "reasons": lambda p, f, t, lim, v: _reasons_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
     "devices": lambda p, f, t, lim, v: _device_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
     "ips": lambda p, f, t, lim, v: _ip_analytics_impl(p, from_time=f, to_time=t, limit=lim),
-    "root_domains": lambda p, f, t, lim, v: _root_domain_analytics_impl(
-        p, from_time=f, to_time=t, limit=lim, view_type=v
+    "root_domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
+        p,
+        from_time=f,
+        to_time=t,
+        limit=lim,
+        view_type=v,
+        fetch_extra={"root": "true"},
+        title="Root Domains",
+        description="Aggregate queries for root domains and subdomains.",
+        summary_title="Root Domains",
+        key_name="domain",
     ),
     "countries": lambda p, f, t, lim, v: _country_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
     "gafam": lambda p, f, t, lim, v: _gafam_analytics_impl(p, from_time=f, to_time=t, view_type=v),

@@ -170,8 +170,8 @@ class TestDashboardFetchAndValidation:
         assert err["code"] == "no_data"
 
         data, err = dash_module._validate_card_data({"data": []}, "test", "p1")
-        assert data is None
-        assert err["code"] == "no_data"
+        assert err is None
+        assert data == []
 
     @pytest.mark.asyncio
     async def test_fetch_card_data_error_paths(self, clean_env, monkeypatch):
@@ -186,10 +186,11 @@ class TestDashboardFetchAndValidation:
         _pid, _data, err = await dash_module._fetch_card_data("abc123", "endpoint")
         assert err == upstream_err
 
-        # 3. Empty data returns no_data error
+        # 3. Empty data flows through (no no_data error) for consistent empty-state cards
         monkeypatch.setattr(dash_module, "_fetch_analytics_payload", AsyncMock(return_value=({"data": []}, None)))
         _pid, _data, err = await dash_module._fetch_card_data("abc123", "endpoint")
-        assert err["code"] == "no_data"
+        assert err is None
+        assert _data == []
 
     @pytest.mark.asyncio
     async def test_fetch_analytics_payload_error_classification(self, monkeypatch):

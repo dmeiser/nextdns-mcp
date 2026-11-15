@@ -18,7 +18,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 | NEXTDNS_DEFAULT_PROFILE | string | - | No | Default profile ID used only by `overviewDashboard`, `dohLookup`, and `plotAnalytics` when they omit `profile_id`; every generated operation tool requires an explicit `profile_id` |
 | NEXTDNS_HTTP_TIMEOUT | number (seconds) | 30 | No | HTTP timeout for API and DoH requests. Captured at client construction; changing this setting requires a process restart |
 | NEXTDNS_DOWNLOAD_MAX_BYTES | number (bytes) | 1073741824 (1 GiB) | No | Hard cap on the total bytes a single `downloadLogs` may stream to disk; the download is aborted mid-stream when it would be exceeded |
-| NEXTDNS_READ_ONLY | bool (true/false/1/0/yes/no) | false | No | Disables all write operations when true |
+| NEXTDNS_READ_ONLY | bool (true/false/1/0/yes/no) | false | No | Disables all write operations when true. Surrounding whitespace is ignored |
 | NEXTDNS_READABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for reads; special value "ALL" allows reads of all profiles; empty/unset denies all reads |
 | NEXTDNS_WRITABLE_PROFILES | string | (unset) | No | Comma-separated profile IDs allowed for writes; special value "ALL" allows writes to all profiles; empty/unset denies all writes; ignored if NEXTDNS_READ_ONLY=true |
 | NEXTDNS_PROTECTED_PROFILES | string | (unset) | No | Comma-separated profile IDs that are NEVER writable, overriding even `NEXTDNS_WRITABLE_PROFILES=ALL`; reads are unaffected — the denylist is writes-only by design, and a profile created by `createProfile` is not covered by it. Intended for data-bearing/production profiles a test agent must not modify or delete. See "Protected profiles" in safety.md |
