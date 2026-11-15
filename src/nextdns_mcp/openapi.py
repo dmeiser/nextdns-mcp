@@ -634,6 +634,7 @@ def create_mcp_server(
         logger.info(f"Default profile: {default_profile}")
 
     _register_health_endpoint(mcp)
+    _register_compat_endpoints(mcp)
 
     return mcp
 
@@ -728,11 +729,25 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
             status_code=503,
         )
 
+    mcp.custom_route("/health", methods=["GET"])(health_check)
+
+
+def _register_compat_endpoints(mcp: FastMCP) -> None:
+    """Register OpenWebUI compatibility endpoints on the FastMCP HTTP app.
+
+    These routes exist for compatibility with third-party clients (e.g.
+    OpenWebUI's automatic model-discovery probe) rather than for the MCP
+    protocol itself. They are registered separately from the health endpoint
+    so health and compat concerns stay independent and independently testable.
+
+    Args:
+        mcp: The FastMCP server to attach the routes to.
+    """
+
     async def v1_models(_request: Request) -> JSONResponse:
         """Answer OpenWebUI's automatic model-discovery probe to prevent noisy 404 logs."""
         return JSONResponse({"object": "list", "data": []})
 
-    mcp.custom_route("/health", methods=["GET"])(health_check)
     mcp.custom_route("/v1/models", methods=["GET"])(v1_models)
 
 
