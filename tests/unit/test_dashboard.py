@@ -222,6 +222,33 @@ class TestDashboardFetchAndValidation:
         _, kwargs = stub.call_args
         assert kwargs["max_response_bytes"] == MAX_SERIES_RESPONSE_BYTES
 
+    @pytest.mark.asyncio
+    async def test_fetch_extra_payloads_binds_fields_by_name(self, monkeypatch):
+        """Each named field carries its own endpoint's payload (WORK-140 oracle)."""
+        tagged = {
+            "reasons": [{"tag": "reasons"}],
+            "devices": [{"tag": "devices"}],
+            "ips": [{"tag": "ips"}],
+            "domains": [{"tag": "root_domains"}],
+            "destinations": [{"tag": "gafam"}],
+            "encryption": [{"tag": "encryption"}],
+            "dnssec": [{"tag": "dnssec"}],
+        }
+
+        async def fake_fetch(profile_id, endpoint, params=None):
+            return {"data": tagged[endpoint]}, None
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        payloads = await dash_module._fetch_extra_payloads("p1", {"limit": 1}, {})
+        assert isinstance(payloads, dash_module.ExtraDashboardPayloads)
+        assert payloads.reasons == [{"tag": "reasons"}]
+        assert payloads.devices == [{"tag": "devices"}]
+        assert payloads.ips == [{"tag": "ips"}]
+        assert payloads.root_domains == [{"tag": "root_domains"}]
+        assert payloads.gafam == [{"tag": "gafam"}]
+        assert payloads.encryption == [{"tag": "encryption"}]
+        assert payloads.dnssec == [{"tag": "dnssec"}]
+
 
 class TestDashboardToolsExecution:
     """Tests executing each public tool end-to-end with mock data."""
