@@ -24,34 +24,33 @@ on:
 permissions:
   contents: read
 
+# One live suite at a time, repo-wide, across every branch, PR, tag, and event.
+#
+# The upstream quota is account-level, so every PR push and every main push
+# draws from the same budget with the same API key; a per-ref group
+# (e.g. ${{ github.ref }}) serializes nothing across open PRs. Holding a single
+# constant group at the workflow level ensures at most one E2E Container run
+# executes at a time across the entire repo (with slim and alpine serialized by
+# max-parallel: 1 below, never interleaved across runs), while non-E2E
+# workflows (unit tests, lint, CodeQL) continue running concurrently.
+#
+# cancel-in-progress stays false. Killing a suite mid-write is how profiles
+# leak (a cancelled run never reaches its deleteProfile teardown), and a
+# queue that cancels its own members would drop the main-branch run that
+# Auto Release gates on.
+#
+# GitHub holds one running and one pending run per group and supersedes the
+# pending one on a newer arrival. Under agent commit churn that is what you
+# want (only the latest push of a branch matters); a suite that does lose the
+# quota race anyway waits out the window and retries instead of failing.
 concurrency:
-  group: e2e-container-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: true
+  group: nextdns-live-api
+  cancel-in-progress: false
 
 jobs:
   e2e:
     name: E2E Container (${{ matrix.variant }})
     runs-on: ubuntu-latest
-    # One live suite at a time, repo-wide, across every ref.
-    #
-    # The upstream quota is account-level, so every PR push and every main push
-    # draws from the same budget with the same API key; the workflow-level
-    # concurrency above is per-ref and therefore serializes nothing across 30
-    # open PRs. This job-level group is the shared gate: at most one suite runs,
-    # the rest queue.
-    #
-    # cancel-in-progress stays false. Killing a suite mid-write is how profiles
-    # leak (a cancelled run never reaches its deleteProfile teardown), and a
-    # queue that cancels its own members would drop the main-branch run that
-    # Auto Release gates on.
-    #
-    # GitHub holds one running and one pending run per group and supersedes the
-    # pending one on a newer arrival. Under agent commit churn that is what you
-    # want (only the latest push of a branch matters); a suite that does lose the
-    # quota race anyway waits out the window and retries instead of failing.
-    concurrency:
-      group: nextdns-live-api
-      cancel-in-progress: false
     strategy:
       fail-fast: false
       # Live-write runs against the shared dev account trip the upstream rate

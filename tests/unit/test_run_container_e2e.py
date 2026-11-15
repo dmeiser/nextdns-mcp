@@ -554,33 +554,67 @@ class TestE2EWorkflowSecretHandling:
 class TestE2EWorkflowLiveSerialization:
     """The live suite is serialized repo-wide, not per-ref.
 
-    The upstream quota is account-level, so a per-ref concurrency group (the
-    workflow's own) serializes nothing across the many branches that push to
-    this repository at once; that is how runs came to answer 92-216
-    `429 Too Many Requests` while a neighbouring run held the quota. The job
-    carries a constant group so at most one suite runs and the rest queue, and
-    it must not cancel a suite in progress: a cancelled write phase never
-    reaches its teardown, which is how test profiles leaked.
+    The upstream quota is account-level, so a per-ref concurrency group
+    (``${{ github.ref }}``) serializes nothing across the many branches that
+    push to this repository at once; that is how runs came to answer 92-216
+    `429 Too Many Requests` while a neighbouring run held the quota. The
+    workflow holds a single constant group at workflow level so at most one E2E
+    run executes at a time across every branch/PR/event (without interleaving
+    matrix legs across runs), and it must not cancel a suite in progress: a
+    cancelled write phase never reaches its teardown, which is how test profiles
+    leaked. Non-E2E workflows stay free to run concurrently.
     """
 
-    WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "e2e-container.yml"
+    WORKFLOWS_DIR = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+    WORKFLOW = WORKFLOWS_DIR / "e2e-container.yml"
 
-    def _job(self) -> dict:
+    def _doc(self) -> dict:
         import yaml
 
-        return yaml.safe_load(self.WORKFLOW.read_text(encoding="utf-8"))["jobs"]["e2e"]
+        return yaml.safe_load(self.WORKFLOW.read_text(encoding="utf-8"))
 
-    def test_the_live_job_queues_on_a_constant_group(self):
-        concurrency = self._job().get("concurrency")
-        assert concurrency is not None, "the live job has no shared concurrency group; runs overlap per ref"
+    def _job(self) -> dict:
+        return self._doc()["jobs"]["e2e"]
+
+    def test_the_workflow_queues_on_a_constant_group(self):
+        concurrency = self._doc().get("concurrency")
+        assert concurrency is not None, "the E2E workflow has no shared concurrency group; runs overlap across refs"
         # Constant: no ${{ github.ref }} in the key, or it is per-ref again.
         assert "${{" not in concurrency["group"]
 
-    def test_the_live_job_never_cancels_a_suite_in_progress(self):
-        assert self._job()["concurrency"]["cancel-in-progress"] is False
+    def test_the_workflow_never_cancels_a_suite_in_progress(self):
+        assert self._doc()["concurrency"]["cancel-in-progress"] is False
+
+    def test_the_matrix_job_relies_on_workflow_concurrency(self):
+        assert "concurrency" not in self._job()
 
     def test_the_matrix_still_serializes_the_image_variants(self):
         assert self._job()["strategy"]["max-parallel"] == 1
+
+    def test_only_e2e_workflow_holds_the_live_api_concurrency_group(self):
+        import yaml
+
+        e2e_group = self._doc()["concurrency"]["group"]
+        for wf_path in sorted(self.WORKFLOWS_DIR.glob("*.yml")):
+            if wf_path == self.WORKFLOW:
+                continue
+            doc = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
+            wf_group = (doc.get("concurrency") or {}).get("group")
+            assert wf_group != e2e_group, f"{wf_path.name} must not share E2E concurrency group {e2e_group}"
+            for job_name, job in (doc.get("jobs") or {}).items():
+                job_group = (job.get("concurrency") or {}).get("group")
+                assert job_group != e2e_group, (
+                    f"{wf_path.name} job {job_name} must not share E2E concurrency group {e2e_group}"
+                )
+
+    def test_pr_checks_and_unit_tests_have_no_repo_wide_concurrency_lock(self):
+        import yaml
+
+        for name in ("unit-tests.yml", "codeql.yml", "openapi-lint.yml", "version-guard.yml"):
+            doc = yaml.safe_load((self.WORKFLOWS_DIR / name).read_text(encoding="utf-8"))
+            assert "concurrency" not in doc, f"{name} should run concurrently across branches"
+            for job_name, job in (doc.get("jobs") or {}).items():
+                assert "concurrency" not in job, f"{name} job {job_name} should run concurrently"
 
 
 def test_settings_write_payloads_are_the_shared_table():

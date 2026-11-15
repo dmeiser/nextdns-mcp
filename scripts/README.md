@@ -31,8 +31,10 @@ NextDNS enforces the quota per account, not per run, and the CI job runs this su
 push and every main push with the same API key. A single suite is well under the limit; 3-5 at once
 is not, which is what produced the 429 storms. Two things keep runs from starving each other:
 
-- the `E2E Container` job holds a constant concurrency group (`nextdns-live-api`, no
-  `cancel-in-progress`), so one live suite runs at a time and the rest queue behind it;
+- the `E2E Container` workflow holds a constant concurrency group at the workflow level
+  (`nextdns-live-api`, `cancel-in-progress: false`), so only one live E2E run executes at a time
+  across every branch and event while the rest queue (with `slim` and `alpine` serialized inside
+  the run via `max-parallel: 1`);
 - a 429 that still arrives is retried after a bounded backoff (`RATE_LIMIT_BACKOFF`: 15 s, 30 s,
   60 s) instead of aborting the run. Per-call pacing is deliberately not used: a single run is
   already under the limit, and slowing every run would only make the queue longer.
