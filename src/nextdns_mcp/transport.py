@@ -319,6 +319,41 @@ async def _api_request_payload(
         return _note_404_on_a_profile_path(_handle_api_error(e), url)
 
 
+def is_error_payload(payload: Any) -> bool:
+    """Say whether a payload from ``_api_request_payload`` is a typed failure.
+
+    The whole classification behind the ``(payload, error)`` convention the
+    analytics tools use (AGENT.md, issue #181): a typed failure carries a
+    ``code`` and an ``error`` and never a ``data`` key; a 2xx body that merely
+    happens to carry an ``error`` key is data. It lives here, next to the
+    wrapper that produces those payloads, so the analytics fetchers cannot each
+    keep their own copy of the contract and drift apart on it.
+    """
+    return isinstance(payload, dict) and "code" in payload and "error" in payload and "data" not in payload
+
+
+async def fetch_analytics_payload(
+    url: str,
+    params: dict[str, Any] | None = None,
+    *,
+    max_response_bytes: int | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Fetch an analytics payload and split success from typed failure.
+
+    Awaits ``_api_request_payload`` and classifies the result with
+    ``is_error_payload``, returning ``(payload, None)`` on success and
+    ``(None, error_payload)`` on a typed failure - the one place that shape is
+    built. ``max_response_bytes`` is passed through unchanged, because the cap
+    is the caller's decision: ``;series`` endpoints run under
+    ``MAX_SERIES_RESPONSE_BYTES`` while the bounded analytics endpoints are not
+    capped at all.
+    """
+    payload = await _api_request_payload("GET", url, params=params, max_response_bytes=max_response_bytes)
+    if is_error_payload(payload):
+        return None, payload
+    return payload, None
+
+
 # The first path segment every profile-scoped endpoint shares.
 _PROFILE_PATH_RE = re.compile(r"^/profiles/([^/?#]+)")
 
