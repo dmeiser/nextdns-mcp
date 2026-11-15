@@ -43,6 +43,11 @@ from .plots import (
 logger = logging.getLogger(__name__)
 
 
+# Reusable table columns shared across dashboard builders.
+QUERIES_COLUMN = DataTableColumn(key="queries", header="Queries", sortable=True, format="number")
+SHARE_COLUMN = DataTableColumn(key="share", header="Share", sortable=True)
+
+
 def _time_params(from_time: str | int | None, to_time: str | int | None) -> dict[str, Any]:
     """Extract normalized time window parameters."""
     p: dict[str, Any] = {}
@@ -195,7 +200,7 @@ def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     return DataTable(
         columns=[
             DataTableColumn(key="domain", header="Domain", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
+            QUERIES_COLUMN,
         ],
         rows=rows,  # type: ignore[arg-type]
     )
@@ -260,8 +265,8 @@ def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     return DataTable(
         columns=[
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
-            DataTableColumn(key="share", header="Share", sortable=True),
+            QUERIES_COLUMN,
+            SHARE_COLUMN,
         ],
         rows=rows,  # type: ignore[arg-type]
     )
@@ -321,8 +326,8 @@ def _devices_table(data: list[dict[str, Any]]) -> DataTable:
         columns=[
             DataTableColumn(key="device", header="Device", sortable=True),
             DataTableColumn(key="model", header="Model", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
-            DataTableColumn(key="share", header="Share", sortable=True),
+            QUERIES_COLUMN,
+            SHARE_COLUMN,
         ],
         rows=rows,  # type: ignore[arg-type]
     )
@@ -387,7 +392,7 @@ def _build_ips_card(data: list[dict[str, Any]]) -> Card:
                         DataTableColumn(key="ip", header="IP Address", sortable=True),
                         DataTableColumn(key="isp", header="ISP", sortable=True),
                         DataTableColumn(key="location", header="Location", sortable=True),
-                        DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
+                        QUERIES_COLUMN,
                     ],
                     rows=rows,  # type: ignore[arg-type]
                 )
@@ -418,8 +423,8 @@ def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
     return DataTable(
         columns=[
             DataTableColumn(key="company", header="Company", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
-            DataTableColumn(key="share", header="Share", sortable=True),
+            QUERIES_COLUMN,
+            SHARE_COLUMN,
         ],
         rows=table_rows,  # type: ignore[arg-type]
     )
@@ -511,7 +516,7 @@ def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
         columns=[
             DataTableColumn(key="country", header="Country", sortable=True),
             DataTableColumn(key="code", header="Code", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
+            QUERIES_COLUMN,
             DataTableColumn(key="sample_domains", header="Sample Domains"),
         ],
         rows=rows,  # type: ignore[arg-type]
