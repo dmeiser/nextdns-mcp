@@ -960,13 +960,14 @@ class ContainerE2ERunner:
         # The nine chartable metrics, from the server's own typed literal — the
         # same table the actor harness walks — not a list retyped here.
         plot_metrics = ai_e2e_common.PLOT_METRICS
-        if self.plot_profile:
+        profile = plot_profile_id or self.plot_profile
+        if profile:
             for metric in plot_metrics:
                 await self.execute_call(
                     session,
                     "plotAnalytics",
                     # The API reads a relative offset, and the chart is of the last day.
-                    {"metric": metric, "profile_id": plot_profile_id, "from_time": "-1d"},
+                    {"metric": metric, "profile_id": profile, "from_time": "-1d"},
                 )
         else:
             log_warn("NEXTDNS_PLOT_PROFILE not set; skipping plotAnalytics tools")
@@ -989,12 +990,13 @@ class ContainerE2ERunner:
             "security",
             "all",
         )
-        if self.plot_profile:
+        profile = plot_profile_id or self.plot_profile
+        if profile:
             for section in dashboard_sections:
                 await self.execute_call(
                     session,
                     "overviewDashboard",
-                    {"profile_id": plot_profile_id, "from_time": "-30d", "section": section},
+                    {"profile_id": profile, "from_time": "-30d", "section": section},
                 )
         else:
             log_warn("NEXTDNS_PLOT_PROFILE not set; skipping dashboard tools")

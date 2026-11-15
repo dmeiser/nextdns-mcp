@@ -669,6 +669,50 @@ def test_plot_sweep_walks_the_server_metric_table(tmp_path: Path):
     assert len(metrics) == 9
 
 
+def test_plot_sweep_runs_on_supplied_profile_when_instance_state_is_unset(tmp_path: Path):
+    """A supplied plot_profile_id is honored even when self.plot_profile is empty."""
+    session = AsyncMock()
+    mock_call_res = MagicMock()
+    mock_call_res.is_error = False
+    mock_call_res.content = [TextContent(type="text", text='{"data": []}')]
+    session.call_tool.return_value = mock_call_res
+
+    runner = ContainerE2ERunner(
+        endpoint="http://127.0.0.1:8000/mcp",
+        variant="slim",
+        allow_live_writes=True,
+        plot_profile="",
+        artifacts_dir=tmp_path,
+    )
+    asyncio.run(runner._run_plot_sweep(session, "reporter-profile"))
+    calls = session.call_tool.call_args_list
+    assert len(calls) == 9
+    for call in calls:
+        assert call.kwargs["arguments"]["profile_id"] == "reporter-profile"
+
+
+def test_dashboard_sweep_runs_on_supplied_profile_when_instance_state_is_unset(tmp_path: Path):
+    """A supplied plot_profile_id is honored even when self.plot_profile is empty."""
+    session = AsyncMock()
+    mock_call_res = MagicMock()
+    mock_call_res.is_error = False
+    mock_call_res.content = [TextContent(type="text", text='{"data": []}')]
+    session.call_tool.return_value = mock_call_res
+
+    runner = ContainerE2ERunner(
+        endpoint="http://127.0.0.1:8000/mcp",
+        variant="slim",
+        allow_live_writes=True,
+        plot_profile="",
+        artifacts_dir=tmp_path,
+    )
+    asyncio.run(runner._run_dashboard_sweep(session, "reporter-profile"))
+    calls = session.call_tool.call_args_list
+    assert len(calls) == 12
+    for call in calls:
+        assert call.kwargs["arguments"]["profile_id"] == "reporter-profile"
+
+
 def test_load_spec_once_parses_each_path_once(tmp_path: Path, monkeypatch):
     """The shipped document is parsed once per path, not once per consumer.
 
