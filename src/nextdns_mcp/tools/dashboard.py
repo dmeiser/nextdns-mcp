@@ -782,7 +782,7 @@ class ExtraDashboardPayloads(NamedTuple):
 
 async def _fetch_extra_payloads(
     profile_id: str, dom_params: dict[str, Any], params: dict[str, Any]
- ) -> ExtraDashboardPayloads | dict[str, Any]:
+) -> ExtraDashboardPayloads | dict[str, Any]:
     """Fetch data lists for extra dashboard sections.
 
     Fetchers are keyed by result-field name and the tuple is built with
@@ -879,7 +879,9 @@ async def _gafam_analytics_impl(
     view_type: Literal["auto", "pie", "bar", "table"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the GAFAM dominance donut chart and table."""
-    data, err = await _fetch_card_data(profile_id, "destinations", from_time=from_time, to_time=to_time, limit=limit, type="gafam")
+    data, err = await _fetch_card_data(
+        profile_id, "destinations", from_time=from_time, to_time=to_time, limit=limit, type="gafam"
+    )
     if err:
         return err
     if data is None:
@@ -1225,7 +1227,9 @@ async def _dispatch_gafam(
     limit: int = 10,
     view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
-    return await _gafam_analytics_impl(profile_id, from_time=from_time, to_time=to_time, limit=limit, view_type=view_type)
+    return await _gafam_analytics_impl(
+        profile_id, from_time=from_time, to_time=to_time, limit=limit, view_type=view_type
+    )
 
 
 async def _dispatch_security(
@@ -1323,6 +1327,7 @@ def _validate_overview_dashboard_args(section: Any, view_type: Any, domain_view:
             return err
     return None
 
+
 DASHBOARD_LIMIT_MIN = 1
 DASHBOARD_LIMIT_MAX = 500
 
@@ -1349,11 +1354,6 @@ async def _overview_dashboard_impl(
     view_type: Literal["auto", "bar", "table", "pie"] = "auto",
     domain_view: Literal["table", "bar", "pie"] = "table",
 ) -> dict[str, Any] | ToolResult:
-    """Construct an overview dashboard or individual widget matching the NextDNS web UI."""
-    limit_error = _validate_dashboard_limit(limit)
-    if limit_error is not None:
-        return limit_error
-
     """Render interactive visual Prefab UI analytics dashboards and specialized widgets.
 
     Displays visual cards, charts, progress indicators, and sortable tables for NextDNS analytics.
@@ -1417,6 +1417,9 @@ async def overviewDashboard(
     arg_err = _validate_overview_dashboard_args(section, view_type, domain_view)
     if arg_err is not None:
         return arg_err
+    limit_err = _validate_dashboard_limit(limit)
+    if limit_err is not None:
+        return limit_err
     return await _overview_dashboard_impl(
         profile_id=profile_id,
         from_time=from_time,
