@@ -45,6 +45,11 @@ x-mcp-divergences:
     # URL chain, unauthenticated follow-up fetch, size cap, SSRF checks
     # (nextdns_mcp.tools.logs; spec_tools.DELEGATED_HANDLERS).
     downloadLogs: nextdns_mcp.tools.logs
+  destructive-hint-overrides:
+    # Operations the spec declares irreversible regardless of HTTP method;
+    # SpecApiTool publishes them destructive_hint=True (see SpecApiTool).
+    clearLogs: x-mcp-destructive
+    deleteProfile: x-mcp-destructive
   composite-tools:
     # Hand-written operations with no API endpoint to describe - the declared
     # exceptions to full derivability from this document
@@ -740,6 +745,7 @@ paths:
 
         **Safety Warning**: Only delete profiles that you own and are certain you want to remove.
       operationId: deleteProfile
+      x-mcp-destructive: true
       security:
         - ApiKeyAuth: []
       tags:
@@ -2702,6 +2708,7 @@ paths:
 
         **Safety Note**: Only use with designated test profiles.
       operationId: clearLogs
+      x-mcp-destructive: true
       security:
         - ApiKeyAuth: []
       tags:

@@ -368,6 +368,13 @@ class SpecApiTool(Tool):
         # downloadLogs answers a GET but WRITES a CSV to disk, so marking it
         # read-only would tell callers a call has no side effects it has.
         read_only = method in {"GET", "HEAD"} and route.operation_id != "downloadLogs"
+        # destructiveHint is derived from the HTTP method, with one override:
+        # an operation the spec declares `x-mcp-destructive: true` destroys
+        # state no matter its method, so a future POST-shaped purge cannot
+        # publish as non-destructive (see x-mcp-divergences in the spec).
+        destructive = method in {"DELETE", "PUT", "PATCH"} or bool(
+            (getattr(route, "extensions", None) or {}).get("x-mcp-destructive")
+        )
         super().__init__(
             name=str(route.operation_id),
             description=describe(route),
@@ -375,7 +382,7 @@ class SpecApiTool(Tool):
             tags={"nextdns", "spec"},
             annotations=ToolAnnotations(
                 read_only_hint=read_only,
-                destructive_hint=method in {"DELETE", "PUT", "PATCH"},
+                destructive_hint=destructive,
             ),
         )
         self._route = route
