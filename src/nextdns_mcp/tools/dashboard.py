@@ -660,15 +660,26 @@ async def _fetch_overview_payloads(
     ser_params = _build_series_params(from_time=from_time, to_time=to_time, interval=interval)
 
     sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
-    s_task = _bounded_fetch_analytics_payload(sem, pid, "status", params)
-    ser_task = _bounded_fetch_analytics_payload(sem, pid, "status;series", ser_params)
-    r_task = _bounded_fetch_analytics_payload(sem, pid, "domains", dom_params)
-    b_task = _bounded_fetch_analytics_payload(sem, pid, "domains", blk_params)
+    status_task = _bounded_fetch_analytics_payload(sem, pid, "status", params)
+    series_task = _bounded_fetch_analytics_payload(sem, pid, "status;series", ser_params)
+    resolved_task = _bounded_fetch_analytics_payload(sem, pid, "domains", dom_params)
+    blocked_task = _bounded_fetch_analytics_payload(sem, pid, "domains", blk_params)
 
-    (s_p, s_err), (ser_p, _), (r_p, _), (b_p, _) = await asyncio.gather(s_task, ser_task, r_task, b_task)
-    if s_err:
-        return {}, {}, [], [], s_err
-    return (s_p or {}), (ser_p or {}), _payload_data(r_p), _payload_data(b_p), None
+    (
+        (status_payload, status_err),
+        (series_payload, _),
+        (resolved_payload, _),
+        (blocked_payload, _),
+    ) = await asyncio.gather(status_task, series_task, resolved_task, blocked_task)
+    if status_err:
+        return {}, {}, [], [], status_err
+    return (
+        (status_payload or {}),
+        (series_payload or {}),
+        _payload_data(resolved_payload),
+        _payload_data(blocked_payload),
+        None,
+    )
 
 
 def _assemble_overview_layout(
@@ -831,7 +842,7 @@ async def _security_analytics_impl(
     if pid is None:
         return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution returned no id")
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
-    (enc_p, enc_err), (sec_p, sec_err) = await asyncio.gather(
+    (encryption_payload, enc_err), (dnssec_payload, sec_err) = await asyncio.gather(
         _fetch_analytics_payload(pid, "encryption", params),
         _fetch_analytics_payload(pid, "dnssec", params),
     )
@@ -839,12 +850,12 @@ async def _security_analytics_impl(
     if first_err:
         return first_err
 
-    enc_data = _payload_data(enc_p)
-    sec_data = _payload_data(sec_p)
-    enc_val, enc_total, enc_pct = _calc_rate(enc_data, "encrypted")
-    dnssec_val, dnssec_total, dnssec_pct = _calc_rate(sec_data, "validated")
+    encryption_data = _payload_data(encryption_payload)
+    dnssec_data = _payload_data(dnssec_payload)
+    enc_val, enc_total, enc_pct = _calc_rate(encryption_data, "encrypted")
+    dnssec_val, dnssec_total, dnssec_pct = _calc_rate(dnssec_data, "validated")
 
-    card = _build_security_card(enc_data, sec_data)
+    card = _build_security_card(encryption_data, dnssec_data)
     summary = (
         f"[Rendered Security Analytics: Encrypted DNS {enc_pct:.2f}% ({enc_val:,}/{enc_total:,}), "
         f"DNSSEC {dnssec_pct:.2f}% ({dnssec_val:,}/{dnssec_total:,})]"
