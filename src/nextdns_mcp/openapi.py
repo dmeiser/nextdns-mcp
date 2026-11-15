@@ -588,15 +588,6 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             await close_api_client()
         finally:
             await close_doh_client()
-            # Stop the lazily-started Pyodide/Deno sandbox subprocess, if any
-            # (issue #408): neither NextDNSGenerativeUI nor this lifespan
-            # previously stopped it, leaking ~4 GB per restart.
-            try:
-                from .generative import close_all_generative_ui
-
-                close_all_generative_ui()
-            except Exception:  # noqa: BLE001, S110
-                pass
             # Successful downloadLogs CSVs are kept after their call (the caller
             # reads the path post-call); shutdown is the first safe reclaim point.
             # The context var still names this lifespan's registry, so only this
