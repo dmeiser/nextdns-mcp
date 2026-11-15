@@ -40,6 +40,10 @@ class TestDashboardHelpers:
     def test_item_and_blocked_queries(self):
         assert dash_module._item_queries({"queries": 42}) == 42
         assert dash_module._item_queries({}) == 0
+        assert dash_module._item_queries({"queries": "abc"}) == 0
+        assert dash_module._item_queries({"queries": {"nested": 1}}) == 0
+        assert dash_module._item_queries({"queries": [1, 2]}) == 0
+        assert dash_module._item_queries({"queries": "123"}) == 123
         assert dash_module._blocked_queries({"status": "blocked", "queries": 10}) == 10
         assert dash_module._blocked_queries({"status": "allowed", "queries": 10}) == 0
 

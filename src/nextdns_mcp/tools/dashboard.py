@@ -105,7 +105,10 @@ def _format_share(count: int, total: int) -> str:
 
 def _item_queries(item: dict[str, Any]) -> int:
     """Extract integer query count from an item dict."""
-    return int(item.get("queries") or 0)
+    try:
+        return int(item.get("queries") or 0)
+    except (ValueError, TypeError):
+        return 0
 
 
 def _blocked_queries(item: dict[str, Any]) -> int:
