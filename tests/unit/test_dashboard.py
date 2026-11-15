@@ -866,7 +866,10 @@ class TestDashboardParamForwarding:
             {**window, "limit": 25, "status": "blocked"},
             {**window, "limit": 25, "root": "true"},
         ]
-        assert by_ep["destinations"] == [{**window, "type": "gafam"}]
+        assert by_ep["destinations"] == [
+            {**window, "type": "gafam"},
+            {**window, "type": "countries"},
+        ]
         assert by_ep["encryption"] == [dict(window)]
         assert by_ep["dnssec"] == [dict(window)]
 
@@ -917,4 +920,3 @@ class TestDashboardParamForwarding:
         assert "DataTable" in self._component_types(table) and "BarChart" not in self._component_types(table)
         assert "BarChart" in self._component_types(bar) and "DataTable" not in self._component_types(bar)
         assert "PieChart" in self._component_types(pie) and "DataTable" not in self._component_types(pie)
-
