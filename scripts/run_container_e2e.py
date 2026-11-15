@@ -29,6 +29,7 @@ if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from nextdns_mcp.constants import is_write_operation
+from nextdns_mcp.tools.dashboard import DASHBOARD_SECTIONS
 from scripts import ai_e2e_common, validate_schema
 from scripts.validate_schema import (
     assert_operation_coverage,
@@ -976,20 +977,7 @@ class ContainerE2ERunner:
 
     async def _run_dashboard_sweep(self, session: ClientSession, plot_profile_id: str) -> None:
         """Exercise overviewDashboard across all section options."""
-        dashboard_sections = (
-            "overview",
-            "kpi",
-            "domains",
-            "blocked_domains",
-            "reasons",
-            "devices",
-            "ips",
-            "root_domains",
-            "countries",
-            "gafam",
-            "security",
-            "all",
-        )
+        dashboard_sections = DASHBOARD_SECTIONS
         profile = plot_profile_id or self.plot_profile
         if profile:
             for section in dashboard_sections:

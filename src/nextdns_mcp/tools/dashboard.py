@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import logging
 import time
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.app import PrefabApp
@@ -966,6 +966,8 @@ DashboardSection = Literal[
     "gafam",
     "security",
 ]
+
+DASHBOARD_SECTIONS = get_args(DashboardSection)
 
 _WIDGET_DISPATCH: dict[str, Any] = {
     "kpi": lambda p, f, t, lim, v: _kpi_analytics_impl(p, from_time=f, to_time=t),
