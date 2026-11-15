@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 import json
 import re
 from typing import Any
+from weakref import WeakSet
 
 from fastmcp.apps.config import AppConfig
 from fastmcp.apps.generative import (
@@ -115,8 +116,24 @@ def _build_renderer_resource(csp: Any) -> TextResource:
     )
 
 
+_ACTIVE_GENERATIVE_UI: "WeakSet[NextDNSGenerativeUI]" = WeakSet()
+
+
 class NextDNSGenerativeUI(GenerativeUI):
     """GenerativeUI provider customized with pre-execution validation and Pyodide prelude."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        _ACTIVE_GENERATIVE_UI.add(self)
+
+    def close(self) -> None:
+        """Stop the lazily-started Deno/Pyodide sandbox subprocess, if any."""
+        sandbox = getattr(self, "_sandbox", None)
+        if sandbox is not None:
+            try:
+                sandbox._stop()
+            finally:
+                self._sandbox = None
 
     def _create_generate_tool(self, app_config: AppConfig, annotations: ToolAnnotations) -> Tool:
         """Create the generate_prefab_ui tool with interceptor and prelude."""
@@ -172,3 +189,13 @@ class NextDNSGenerativeUI(GenerativeUI):
             self._local._add_component(self._create_components_tool(components_annotations))
         self._local._add_component(_build_renderer_resource(csp))
         self._setup_done = True
+
+
+def close_all_generative_ui() -> None:
+    """Stop every registered GenerativeUI sandbox (called on server shutdown)."""
+    for provider in list(_ACTIVE_GENERATIVE_UI):
+        try:
+            provider.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+    _ACTIVE_GENERATIVE_UI.clear()
