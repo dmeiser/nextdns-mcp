@@ -217,3 +217,13 @@ class TestDocumentedDownloadAndProfileContracts:
         for name in ("overviewDashboard", "dohLookup", "plotAnalytics"):
             assert name in troubleshooting, f"troubleshooting.md omits {name} from the default-profile fallback"
         assert "only `dohLookup` and `plotAnalytics` use the default" not in troubleshooting
+
+    def test_agent_docs_count_the_three_composites(self):
+        agent = (_REPO_ROOT / "AGENT.md").read_text(encoding="utf-8")
+        for name in ("plotAnalytics", "dohLookup", "overviewDashboard"):
+            assert name in agent, f"AGENT.md omits {name} from the composite tools"
+        assert "the two operations the document cannot describe" not in agent
+        assert "the two composites" not in agent
+
+        integration_readme = (_REPO_ROOT / "tests" / "integration" / "README.md").read_text(encoding="utf-8")
+        assert "`overviewDashboard`" in integration_readme
