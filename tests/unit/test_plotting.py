@@ -241,6 +241,99 @@ class TestBuildSeriesChart:
         assert "view" in result.structured_content
 
 
+class TestChartSeriesDownsampling:
+    """Tests for _downsample_chart_series and payload bounding in _build_series_chart."""
+
+    def test_downsample_at_or_below_budget_retains_full_resolution(self):
+        """At or below PLOT_CHART_MAX_POINTS, data is returned unchanged."""
+        times = [f"2024-01-01T{i:02d}:00:00Z" for i in range(10)]
+        series_data = [{"name": "example.com", "queries": list(range(10))}]
+        out_times, out_series = plots_module._downsample_chart_series(times, series_data)
+        assert out_times == times
+        assert out_series == series_data
+
+        # Exact boundary at 250 points
+        times_250 = [f"2024-01-01T{i:05d}" for i in range(250)]
+        series_250 = [{"name": "example.com", "queries": [1] * 250}]
+        out_times_250, out_series_250 = plots_module._downsample_chart_series(times_250, series_250)
+        assert len(out_times_250) == 250
+        assert out_times_250 == times_250
+        assert out_series_250 == series_250
+
+    def test_downsample_above_budget_bounds_points_and_preserves_totals(self):
+        """Above PLOT_CHART_MAX_POINTS, series is downsampled into <= 250 buckets with sums."""
+        # 251 points -> ceil(251/250) = 2 -> ceil(251/2) = 126 buckets
+        times_251 = [f"2024-01-01T{i:05d}" for i in range(251)]
+        series_251 = [{"name": "s1", "queries": [3] * 251}]
+        out_times_251, out_series_251 = plots_module._downsample_chart_series(times_251, series_251)
+        assert len(out_times_251) == 126
+        assert len(out_times_251) <= plots_module.PLOT_CHART_MAX_POINTS
+        assert sum(out_series_251[0]["queries"]) == 251 * 3
+
+        # 2000 points -> ceil(2000/250) = 8 -> 250 buckets
+        times_2000 = [f"2024-01-01T{i:05d}" for i in range(2000)]
+        series_2000 = [
+            {"name": "s1", "queries": [2] * 2000},
+            {"name": "s2", "queries": [5] * 2000},
+        ]
+        out_times_2000, out_series_2000 = plots_module._downsample_chart_series(times_2000, series_2000)
+        assert len(out_times_2000) == 250
+        assert sum(out_series_2000[0]["queries"]) == 2000 * 2
+        assert sum(out_series_2000[1]["queries"]) == 2000 * 5
+
+        # 2001 points -> ceil(2001/250) = 9 -> ceil(2001/9) = 223 buckets
+        times_2001 = [f"2024-01-01T{i:05d}" for i in range(2001)]
+        series_2001 = [{"name": "s1", "queries": [3] * 2001}]
+        out_times_2001, out_series_2001 = plots_module._downsample_chart_series(times_2001, series_2001)
+        assert len(out_times_2001) == 223
+        assert sum(out_series_2001[0]["queries"]) == 2001 * 3
+
+        # 5000 points with 4 series -> ceil(5000/250) = 20 -> 250 buckets
+        times_5000 = [f"2024-01-01T{i:05d}" for i in range(5000)]
+        series_5000 = [{"name": f"s{i}", "queries": [i + 1] * 5000} for i in range(4)]
+        out_times_5000, out_series_5000 = plots_module._downsample_chart_series(times_5000, series_5000)
+        assert len(out_times_5000) == 250
+        for i in range(4):
+            assert sum(out_series_5000[i]["queries"]) == 5000 * (i + 1)
+
+    def test_downsample_handles_missing_or_short_queries(self):
+        """Missing or shorter queries lists sum gracefully without error."""
+        times = [f"2024-01-01T{i:05d}" for i in range(252)]
+        series_data = [
+            {"name": "none_queries", "queries": None},
+            {"name": "missing_queries"},
+            {"name": "short_queries", "queries": [10, 20]},
+        ]
+        out_times, out_series = plots_module._downsample_chart_series(times, series_data)
+        assert len(out_times) == 126
+        assert out_series[0]["queries"] == [0] * 126
+        assert out_series[1]["queries"] == [0] * 126
+        assert out_series[2]["queries"][:2] == [30, 0]
+        assert sum(out_series[2]["queries"]) == 30
+
+    def test_build_series_chart_payload_bounded_and_totals_preserved(self):
+        """_build_series_chart downsamples structured_content data when points exceed budget."""
+        n_points = 2001
+        times = [f"2024-01-01T{(i // 3600) % 24:02d}:{(i // 60) % 60:02d}:{i % 60:02d}" for i in range(n_points)]
+        data = [{"name": "qname:example.com", "queries": [3] * n_points}]
+        result = plots_module._build_series_chart("by_qname", times, data)
+
+        assert isinstance(result, ToolResult)
+        chart = result.structured_content["view"]["children"][0]["children"][2]
+        rows = chart["data"]
+        assert len(rows) <= plots_module.PLOT_CHART_MAX_POINTS
+        assert len(rows) == 223
+
+        metrics = {
+            c["label"]: c["value"]
+            for c in result.structured_content["view"]["children"][0]["children"][1]["children"]
+            if c.get("type") == "Metric"
+        }
+        assert metrics["Total Queries"] == "6,003"
+        assert metrics["Data Points"] == "223"
+        assert "6,003 total queries across 223 intervals" in result.content[0].text
+
+
 @pytest.fixture
 def now():
     """A fixed clock so relative from/to values resolve deterministically."""
