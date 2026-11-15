@@ -88,6 +88,51 @@ async def test_nextdns_generative_ui_setup_and_execution():
 
 
 @pytest.mark.asyncio
+async def test_nextdns_generative_ui_tool_lookup():
+    """Compatibility: registered tools are retrievable via the local provider lookup."""
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+
+    gen_tool = await gen_ui._local.get_tool("generate_prefab_ui")
+    assert gen_tool is not None
+    assert gen_tool.name == "generate_prefab_ui"
+    assert gen_tool.annotations.read_only_hint is False
+    assert gen_tool.annotations.destructive_hint is False
+
+    comp_tool = await gen_ui._local.get_tool("search_prefab_components")
+    assert comp_tool is not None
+    assert comp_tool.name == "search_prefab_components"
+
+    assert await gen_ui._local.get_tool("does-not-exist") is None
+
+
+@pytest.mark.asyncio
+async def test_nextdns_generative_ui_registers_renderer_resource():
+    """Compatibility: _ensure_setup registers the renderer resource on the local provider."""
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+
+    resources = await gen_ui._local.list_resources()
+    uris = [str(r.uri) for r in resources]
+    assert "ui://prefab/generative.html" in uris
+
+
+@pytest.mark.asyncio
+async def test_nextdns_generative_ui_lifespan_and_sandbox_reuse():
+    """Compatibility: local-provider lifespan cycles cleanly and sandbox is reused."""
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+
+    async with gen_ui._local.lifespan():
+        pass
+
+    sentinel = MagicMock(name="sandbox")
+    gen_ui._sandbox = sentinel
+    assert gen_ui._get_sandbox() is sentinel
+    assert gen_ui._get_sandbox() is sentinel
+
+
+@pytest.mark.asyncio
 async def test_nextdns_generative_ui_without_components_tool():
     gen_ui = NextDNSGenerativeUI(include_components_tool=False)
     gen_ui._ensure_setup()
