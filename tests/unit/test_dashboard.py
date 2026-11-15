@@ -458,3 +458,34 @@ class TestDashboardToolsExecution:
         assert dash_module._build_destinations_card([{"name": "US", "queries": 10}], view_type="table") is not None
         # Interval unparseable fallback
         assert dash_module._overview_interval("invalid", "now") == 86400
+
+    @pytest.mark.asyncio
+    async def test_overview_dashboard_bounds_concurrent_fanout(self, clean_env, monkeypatch):
+        """overviewDashboard(section='all') must cap concurrent upstream analytics requests."""
+        import asyncio
+
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        in_flight = 0
+        max_in_flight = 0
+        calls: list[str] = []
+
+        async def _tracking_fetch(pid: str, endpoint: str, params=None):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            calls.append(endpoint)
+            try:
+                await asyncio.sleep(0.01)
+                if endpoint == "status;series":
+                    return {"data": [{"status": "default", "queries": [1, 2]}], "meta": {"pagination": {}}}, None
+                if endpoint == "status":
+                    return {"data": [{"status": "default", "queries": 3}]}, None
+                return {"data": [{"domain": "example.com", "queries": 1}]}, None
+            finally:
+                in_flight -= 1
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", _tracking_fetch)
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all")
+        assert isinstance(res, ToolResult)
+        assert len(calls) == 11
+        assert 1 <= max_in_flight <= dash_module.OVERVIEW_FANOUT_CONCURRENCY

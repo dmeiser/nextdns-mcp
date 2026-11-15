@@ -604,6 +604,20 @@ def _wrap_card_result(card: Card, summary_text: str) -> ToolResult:
     return ToolResult(content=summary_text, structured_content=app)
 
 
+OVERVIEW_FANOUT_CONCURRENCY = 2
+
+
+async def _bounded_fetch_analytics_payload(
+    semaphore: asyncio.Semaphore,
+    profile_id: str,
+    endpoint: str,
+    params: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Fetch an analytics payload while bounding concurrent upstream fan-out."""
+    async with semaphore:
+        return await _fetch_analytics_payload(profile_id, endpoint, params)
+
+
 async def _fetch_overview_payloads(
     pid: str,
     from_time: str | int,
@@ -623,10 +637,11 @@ async def _fetch_overview_payloads(
     blk_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="blocked")
     ser_params = {"from": from_time, "to": to_time, "interval": interval}
 
-    s_task = _fetch_analytics_payload(pid, "status", params)
-    ser_task = _fetch_analytics_payload(pid, "status;series", ser_params)
-    r_task = _fetch_analytics_payload(pid, "domains", dom_params)
-    b_task = _fetch_analytics_payload(pid, "domains", blk_params)
+    sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
+    s_task = _bounded_fetch_analytics_payload(sem, pid, "status", params)
+    ser_task = _bounded_fetch_analytics_payload(sem, pid, "status;series", ser_params)
+    r_task = _bounded_fetch_analytics_payload(sem, pid, "domains", dom_params)
+    b_task = _bounded_fetch_analytics_payload(sem, pid, "domains", blk_params)
 
     (s_p, s_err), (ser_p, _), (r_p, _), (b_p, _) = await asyncio.gather(s_task, ser_task, r_task, b_task)
     if s_err:
@@ -668,14 +683,15 @@ async def _fetch_extra_payloads(
     profile_id: str, dom_params: dict[str, Any], params: dict[str, Any]
 ) -> list[list[dict[str, Any]]]:
     """Fetch data lists for extra dashboard sections."""
+    sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
     tasks = [
-        _fetch_analytics_payload(profile_id, "reasons", dom_params),
-        _fetch_analytics_payload(profile_id, "devices", dom_params),
-        _fetch_analytics_payload(profile_id, "ips", dom_params),
-        _fetch_analytics_payload(profile_id, "domains", {**dom_params, "root": "true"}),
-        _fetch_analytics_payload(profile_id, "destinations", {**params, "type": "gafam"}),
-        _fetch_analytics_payload(profile_id, "encryption", params),
-        _fetch_analytics_payload(profile_id, "dnssec", params),
+        _bounded_fetch_analytics_payload(sem, profile_id, "reasons", dom_params),
+        _bounded_fetch_analytics_payload(sem, profile_id, "devices", dom_params),
+        _bounded_fetch_analytics_payload(sem, profile_id, "ips", dom_params),
+        _bounded_fetch_analytics_payload(sem, profile_id, "domains", {**dom_params, "root": "true"}),
+        _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "gafam"}),
+        _bounded_fetch_analytics_payload(sem, profile_id, "encryption", params),
+        _bounded_fetch_analytics_payload(sem, profile_id, "dnssec", params),
     ]
     res = await asyncio.gather(*tasks)
     return [_payload_data(item[0]) for item in res]
