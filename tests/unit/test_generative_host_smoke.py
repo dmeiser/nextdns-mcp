@@ -68,9 +68,12 @@ async def test_host_smoke_renderer_resource_advertises_csp() -> None:
     resource = _build_renderer_resource(_build_csp())
     assert resource.mime_type == "text/html;profile=mcp-app"
     csp = resource.meta["ui"]["csp"]
-    assert "https://cdn.jsdelivr.net" in csp["resourceDomains"]
-    assert "https://cdn.jsdelivr.net" in csp["connectDomains"]
-    assert "https://pypi.org" in csp["connectDomains"]
+    assert csp["resourceDomains"] == ["https://cdn.jsdelivr.net"]
+    assert csp["connectDomains"] == [
+        "https://cdn.jsdelivr.net",
+        "https://pypi.org",
+        "https://files.pythonhosted.org",
+    ]
 
 
 def test_host_smoke_chart_sizing_guard_rejects_charts_in_tabs() -> None:
