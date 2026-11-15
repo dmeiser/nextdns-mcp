@@ -49,12 +49,22 @@ async def _fetch_analytics_payload(
     endpoint: str,
     params: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Fetch an analytics endpoint payload through the access-controlled transport."""
+    """Fetch an analytics endpoint payload through the access-controlled transport.
+
+    Only a ``;series`` endpoint rides the capped streaming path: the ceiling
+    exists to bound a large series body, while the aggregate endpoints answer
+    small JSON that takes the normal request path (WORK-122).
+    """
     url = f"/profiles/{profile_id}/analytics/{endpoint}"
-    payload = await _api_request_payload("GET", url, params=params, max_response_bytes=MAX_SERIES_RESPONSE_BYTES)
-    if isinstance(payload, dict) and "code" in payload and "error" in payload and "data" not in payload:
+    max_bytes = MAX_SERIES_RESPONSE_BYTES if ";series" in endpoint else None
+    payload = await _api_request_payload("GET", url, params=params, max_response_bytes=max_bytes)
+    if _is_error_payload(payload):
         return None, payload
     return payload, None
+
+
+def _is_error_payload(payload: Any) -> bool:
+    return isinstance(payload, dict) and "code" in payload and "error" in payload and "data" not in payload
 
 
 def _format_share(count: int, total: int) -> str:
