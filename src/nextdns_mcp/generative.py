@@ -57,11 +57,40 @@ GENERATE_DOC = (
 )
 
 
+def _decode_ui_json(data: str) -> Any:
+    """Decode a JSON string, raising a clear validation error on failure."""
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in data parameter: {exc}") from exc
+
+
+def _require_ui_object(value: Any, source: str) -> dict[str, Any]:
+    """Ensure a decoded/passed value is a dict or None-compatible object."""
+    if not isinstance(value, dict):
+        raise ValueError(  # noqa: TRY004
+            f"{source} must be a JSON object, got {type(value).__name__}"
+        )
+    return value
+
+
+def _parse_ui_string(data: str) -> dict[str, Any] | None:
+    """Parse a (possibly blank) JSON string into a dict or None."""
+    if not data.strip():
+        return None
+    value = _decode_ui_json(data)
+    if value is None:
+        return None
+    return _require_ui_object(value, "data parameter")
+
+
 def _parse_ui_data(data: str | dict[str, Any] | None) -> dict[str, Any] | None:
     """Parse JSON string data or return dictionary."""
     if isinstance(data, str):
-        return json.loads(data) if data.strip() else None
-    return data
+        return _parse_ui_string(data)
+    if data is None or isinstance(data, dict):
+        return data
+    raise ValueError(f"data parameter must be a dict or JSON object string, got {type(data).__name__}")
 
 
 def _validate_chart_placement(code: str) -> None:

@@ -21,6 +21,22 @@ def test_parse_ui_data():
     assert _parse_ui_data({"key": "value"}) == {"key": "value"}
 
 
+def test_parse_ui_data_rejects_malformed_and_non_dict():
+    import pytest
+
+    with pytest.raises(ValueError, match="Invalid JSON in data parameter"):
+        _parse_ui_data('{"a": ')
+    for payload in ("[1,2]", "42", "true", '"hi"', "null"):
+        if payload == "null":
+            assert _parse_ui_data(payload) is None
+            continue
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            _parse_ui_data(payload)
+    for bad in (123, ["a"], True):
+        with pytest.raises(ValueError):
+            _parse_ui_data(bad)
+
+
 def test_validate_chart_placement_rejects_charts_in_tabs():
     bad_codes = [
         "with Tabs():\n    with Tab('Charts'):\n        AreaChart(data=[], series=[])",
