@@ -1248,7 +1248,12 @@ async def _overview_dashboard_impl(
     eff_view = _resolve_domain_view(domain_view, view_type)
 
     if section in _WIDGET_DISPATCH:
-        return await _WIDGET_DISPATCH[section](profile_id, from_time, to_time, limit, eff_view)
+        norm_from = normalize_time_value(from_time)
+        norm_to = normalize_time_value(to_time)
+        budget_err = _series_budget_error(norm_from, norm_to, _overview_interval(norm_from, norm_to))
+        if budget_err is not None:
+            return budget_err
+        return await _WIDGET_DISPATCH[section](profile_id, norm_from, norm_to, limit, eff_view)
 
     pid, err = await _resolve_profile(profile_id)
     if err is not None:
