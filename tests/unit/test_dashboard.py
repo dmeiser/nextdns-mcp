@@ -513,3 +513,60 @@ class TestDashboardToolsExecution:
         assert isinstance(res, ToolResult)
         assert len(calls) == 11
         assert 1 <= max_in_flight <= dash_module.OVERVIEW_FANOUT_CONCURRENCY
+
+
+class TestFailClosedNoneGuards:
+    """Request paths fail closed on ``(None, None)`` instead of narrowing with ``assert``.
+
+    ``python -O`` strips asserts, so a bare ``assert`` on the profile id or the
+    fetched card data turns into an unhandled ``TypeError``/network round-trip
+    instead of the typed ``internal_error`` payload (fail-closed contract in
+    ``AGENT.md``; convention from ``tests/unit/test_plotting.py``).
+    """
+
+    CARD_SECTIONS = (
+        "kpi",
+        "domains",
+        "blocked_domains",
+        "reasons",
+        "devices",
+        "ips",
+        "root_domains",
+        "countries",
+        "gafam",
+    )
+
+    @pytest.mark.asyncio
+    async def test_resolver_none_is_internal_error_and_skips_fetch(self, clean_env, monkeypatch):
+        """``(None, None)`` from the resolver must not build ``/profiles/None/...`` URLs."""
+        monkeypatch.setattr(dash_module, "_resolve_profile", AsyncMock(return_value=(None, None)))
+
+        wrapped = AsyncMock(return_value=({}, None))
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", wrapped)
+
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="security")
+        assert isinstance(res, dict)
+        assert res["code"] == "internal_error"
+        assert "no id" in res["error"].lower()
+        wrapped.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_overview_resolver_none_is_internal_error(self, clean_env, monkeypatch):
+        monkeypatch.setattr(dash_module, "_resolve_profile", AsyncMock(return_value=(None, None)))
+
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="overview")
+        assert isinstance(res, dict)
+        assert res["code"] == "internal_error"
+        assert "no id" in res["error"].lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", CARD_SECTIONS)
+    async def test_card_fetch_none_is_internal_error(self, clean_env, monkeypatch, section):
+        """``(None, None, None)`` from the card fetcher must not reach the renderer."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        monkeypatch.setattr(dash_module, "_fetch_card_data", AsyncMock(return_value=(None, None, None)))
+
+        res = await dash_module.overviewDashboard(section=section)
+        assert isinstance(res, dict)
+        assert res["code"] == "internal_error"
+        assert "no data" in res["error"].lower()

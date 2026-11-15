@@ -764,7 +764,8 @@ async def _gafam_analytics_impl(
     )
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     chart_data, _ = _gafam_rows(data)
     total = sum(r["queries"] for r in chart_data)
     summary = _format_gafam_summary(chart_data, total)
@@ -780,7 +781,8 @@ async def _security_analytics_impl(
     pid, err = await _resolve_profile(profile_id)
     if err is not None:
         return err
-    assert pid is not None
+    if pid is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution returned no id")
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
     (enc_p, enc_err), (sec_p, sec_err) = await asyncio.gather(
         _fetch_analytics_payload(pid, "encryption", params),
@@ -814,7 +816,8 @@ async def _reasons_analytics_impl(
     _pid, data, err = await _fetch_card_data(profile_id, "reasons", from_time=from_time, to_time=to_time, limit=limit)
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = [(_reason_label(item), _item_queries(item)) for item in data]
     total = sum(q for _, q in items)
     summary = _format_items_summary("Reasons for Blocking", "blocklists", items, total)
@@ -832,7 +835,8 @@ async def _device_analytics_impl(
     _pid, data, err = await _fetch_card_data(profile_id, "devices", from_time=from_time, to_time=to_time, limit=limit)
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = [(_device_label(item), _item_queries(item)) for item in data]
     total = sum(q for _, q in items)
     summary = _format_items_summary("Device Analytics", "devices", items, total)
@@ -854,7 +858,8 @@ async def _ip_analytics_impl(
     _pid, data, err = await _fetch_card_data(profile_id, "ips", from_time=from_time, to_time=to_time, limit=limit)
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = _ip_summary_items(data)
     total = sum(q for _, q in items)
     summary = _format_items_summary("IP Analytics", "IP addresses", items, total)
@@ -882,7 +887,8 @@ async def _domain_card_analytics_impl(
     )
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = [(_domain_label(item, key_name), _item_queries(item)) for item in data]
     total = sum(q for _, q in items)
     summary = _format_items_summary(summary_title, summary_noun, items, total)
@@ -910,7 +916,8 @@ async def _country_analytics_impl(
     )
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = [(_destination_label(item), _item_queries(item)) for item in data]
     total = sum(q for _, q in items)
     summary = _format_items_summary("Traffic Destinations", "countries", items, total)
@@ -926,7 +933,8 @@ async def _kpi_analytics_impl(
     _pid, data, err = await _fetch_card_data(profile_id, "status", from_time=from_time, to_time=to_time)
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     kpis = _calculate_status_kpis(data)
     with Column(gap=4, css_class="p-6") as view:
         _build_kpi_row(kpis)
@@ -1064,7 +1072,8 @@ async def _overview_dashboard_impl(
     pid, err = await _resolve_profile(profile_id)
     if err is not None:
         return err
-    assert pid is not None
+    if pid is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution returned no id")
 
     return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
 
