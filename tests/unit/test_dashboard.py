@@ -608,3 +608,103 @@ class TestFailClosedNoneGuards:
         assert isinstance(res, dict)
         assert res["code"] == "internal_error"
         assert "no data" in res["error"].lower()
+
+
+class TestWidgetDispatchTypingContract:
+    """Regression tests verifying _WIDGET_DISPATCH is typed and mypy guards handler calls."""
+
+    def test_widget_dispatch_runtime_annotations_and_signatures(self):
+        """Verify _WIDGET_DISPATCH is annotated with _WidgetHandler and handlers match signature."""
+        import inspect
+        from typing import get_type_hints
+
+        hints = get_type_hints(dash_module)
+        assert "_WIDGET_DISPATCH" in hints
+        assert hints["_WIDGET_DISPATCH"] == dict[str, dash_module._WidgetHandler]
+
+        expected_params = ["profile_id", "from_time", "to_time", "limit", "view_type"]
+        for section, handler in dash_module._WIDGET_DISPATCH.items():
+            sig = inspect.signature(handler)
+            assert list(sig.parameters.keys()) == expected_params, (
+                f"Handler for section '{section}' does not match expected parameters {expected_params}"
+            )
+
+    def test_widget_dispatch_mypy_catches_signature_and_arity_mismatches(self, tmp_path):
+        """Verify mypy enforces _WidgetHandler call site and dispatch table type checks."""
+        import mypy.api
+
+        # 1. Valid call and valid handler definition must pass mypy
+        valid_code = """
+from nextdns_mcp.tools.dashboard import _WIDGET_DISPATCH
+
+async def call_valid() -> None:
+    await _WIDGET_DISPATCH["kpi"]("p123", "-7d", "now", 5, "auto")
+"""
+        valid_file = tmp_path / "valid.py"
+        valid_file.write_text(valid_code)
+        stdout, stderr, exit_status = mypy.api.run(["--config-file", "", str(valid_file)])
+        assert exit_status == 0, f"Valid call failed mypy:\n{stdout}\n{stderr}"
+
+        # 2. Too many positional arguments at the call site must fail mypy
+        extra_arg_code = """
+from nextdns_mcp.tools.dashboard import _WIDGET_DISPATCH
+
+async def call_extra() -> None:
+    await _WIDGET_DISPATCH["kpi"]("p123", "-7d", "now", 5, "auto", "extra_6th_arg")
+"""
+        extra_arg_file = tmp_path / "extra_arg.py"
+        extra_arg_file.write_text(extra_arg_code)
+        stdout, stderr, exit_status = mypy.api.run(["--config-file", "", str(extra_arg_file)])
+        assert exit_status != 0, "mypy unexpectedly passed call with 6 positional arguments"
+        assert 'Too many arguments for "__call__" of "_WidgetHandler"' in stdout
+
+        # 3. Mismatched handler parameter names in dispatch table must fail mypy
+        bad_param_code = """
+from typing import Any, Literal
+from fastmcp.tools.base import ToolResult
+from nextdns_mcp.coercion import OptionalProfileId
+from nextdns_mcp.tools.dashboard import _WidgetHandler
+
+async def bad_param_handler(
+    profile_id: OptionalProfileId = None,
+    fromtime: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return {}
+
+table: dict[str, _WidgetHandler] = {
+    "kpi": bad_param_handler,
+}
+"""
+        bad_param_file = tmp_path / "bad_param.py"
+        bad_param_file.write_text(bad_param_code)
+        stdout, stderr, exit_status = mypy.api.run(["--config-file", "", str(bad_param_file)])
+        assert exit_status != 0, "mypy unexpectedly accepted handler with renamed parameter"
+        assert "expected" in stdout and "_WidgetHandler" in stdout
+
+        # 4. Incompatible return type in dispatch table must fail mypy
+        bad_ret_code = """
+from typing import Literal
+from nextdns_mcp.coercion import OptionalProfileId
+from nextdns_mcp.tools.dashboard import _WidgetHandler
+
+async def bad_return_handler(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> int:
+    return 123
+
+table: dict[str, _WidgetHandler] = {
+    "security": bad_return_handler,
+}
+"""
+        bad_ret_file = tmp_path / "bad_ret.py"
+        bad_ret_file.write_text(bad_ret_code)
+        stdout, stderr, exit_status = mypy.api.run(["--config-file", "", str(bad_ret_file)])
+        assert exit_status != 0, "mypy unexpectedly accepted handler returning int"
+        assert "expected" in stdout and "_WidgetHandler" in stdout
