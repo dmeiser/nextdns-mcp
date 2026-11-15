@@ -8,6 +8,7 @@ import httpx
 import pytest
 from fastmcp.tools.base import ToolResult
 
+from nextdns_mcp import charts as charts_module
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server, spec_tools
 from nextdns_mcp.tools import plots as plots_module
@@ -45,51 +46,51 @@ class TestExtractSeriesLabel:
     """Tests for _extract_series_label."""
 
     def test_name_label(self):
-        assert plots_module._extract_series_label({"name": "example.com"}, 0) == "example.com"
+        assert charts_module._extract_series_label({"name": "example.com"}, 0) == "example.com"
 
     def test_status_label(self):
-        assert plots_module._extract_series_label({"status": "blocked"}, 0) == "blocked"
+        assert charts_module._extract_series_label({"status": "blocked"}, 0) == "blocked"
 
     def test_protocol_label(self):
-        assert plots_module._extract_series_label({"protocol": "DoH"}, 0) == "DoH"
+        assert charts_module._extract_series_label({"protocol": "DoH"}, 0) == "DoH"
 
     def test_version_label(self):
-        assert plots_module._extract_series_label({"version": "IPv4"}, 0) == "IPv4"
+        assert charts_module._extract_series_label({"version": "IPv4"}, 0) == "IPv4"
 
     def test_id_label(self):
-        assert plots_module._extract_series_label({"id": "device1"}, 0) == "device1"
+        assert charts_module._extract_series_label({"id": "device1"}, 0) == "device1"
 
     def test_validated_true_label(self):
-        assert plots_module._extract_series_label({"validated": True}, 0) == "validated"
+        assert charts_module._extract_series_label({"validated": True}, 0) == "validated"
 
     def test_validated_false_label(self):
-        assert plots_module._extract_series_label({"validated": False}, 0) == "not_validated"
+        assert charts_module._extract_series_label({"validated": False}, 0) == "not_validated"
 
     def test_encrypted_true_label(self):
-        assert plots_module._extract_series_label({"encrypted": True}, 0) == "encrypted"
+        assert charts_module._extract_series_label({"encrypted": True}, 0) == "encrypted"
 
     def test_encrypted_false_label(self):
-        assert plots_module._extract_series_label({"encrypted": False}, 0) == "unencrypted"
+        assert charts_module._extract_series_label({"encrypted": False}, 0) == "unencrypted"
 
     def test_fallback_index_label(self):
-        assert plots_module._extract_series_label({"queries": []}, 3) == "series_3"
+        assert charts_module._extract_series_label({"queries": []}, 3) == "series_3"
 
 
 class TestSeriesColor:
     """Tests for series color determination."""
 
     def test_series_color(self):
-        assert plots_module._series_color({"status": "blocked"}) == "#ef4444"
-        assert plots_module._series_color({"status": "default"}) == "#3b82f6"
-        assert plots_module._series_color({"name": "allowed"}) == "#3b82f6"
-        assert plots_module._series_color({"name": "something_else"}) is None
+        assert charts_module._series_color({"status": "blocked"}) == "#ef4444"
+        assert charts_module._series_color({"status": "default"}) == "#3b82f6"
+        assert charts_module._series_color({"name": "allowed"}) == "#3b82f6"
+        assert charts_module._series_color({"name": "something_else"}) is None
 
 
 class TestParseSeriesTimestamp:
     """Tests for _parse_series_timestamp."""
 
     def test_parses_z_timestamp(self):
-        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00Z")
+        ts = charts_module._parse_series_timestamp("2024-01-15T10:30:00Z")
         assert ts.year == 2024
         assert ts.month == 1
         assert ts.day == 15
@@ -99,17 +100,17 @@ class TestParseSeriesTimestamp:
         assert ts.utcoffset() == timedelta(0)
 
     def test_parses_offset_timestamp(self):
-        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00+00:00")
+        ts = charts_module._parse_series_timestamp("2024-01-15T10:30:00+00:00")
         assert ts.year == 2024
 
     def test_parses_microseconds_with_z(self):
-        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00.123456Z")
+        ts = charts_module._parse_series_timestamp("2024-01-15T10:30:00.123456Z")
         assert ts.microsecond == 123456
         assert ts.tzinfo is not None
         assert ts.utcoffset() == timedelta(0)
 
     def test_parses_microseconds_fallback(self):
-        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00.123456+00:00")
+        ts = charts_module._parse_series_timestamp("2024-01-15T10:30:00.123456+00:00")
         assert ts.year == 2024
         assert ts.microsecond == 123456
 
@@ -117,7 +118,7 @@ class TestParseSeriesTimestamp:
         # Regression (issue #186): the old single %f-bearing strptime fallback
         # could not match a whole-second timestamp, so it leaked a bare
         # ValueError from strptime.
-        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00")
+        ts = charts_module._parse_series_timestamp("2024-01-15T10:30:00")
         assert ts.year == 2024
         assert ts.hour == 10
         assert ts.minute == 30
@@ -129,7 +130,7 @@ class TestParseSeriesTimestamp:
     def test_parses_colonless_offset(self):
         # Previously covered by the ``%z`` strptime pattern; now handled by
         # ``datetime.fromisoformat`` on Python >=3.12 (issue #450).
-        ts = plots_module._parse_series_timestamp("2024-01-15T10:30:00+0000")
+        ts = charts_module._parse_series_timestamp("2024-01-15T10:30:00+0000")
         assert (ts.hour, ts.minute) == (10, 30)
         assert ts.utcoffset() == timedelta(0)
 
@@ -139,34 +140,34 @@ class TestParseSeriesTimestamp:
 
     def test_malformed_timestamp_raises_value_error(self):
         with pytest.raises(ValueError):
-            plots_module._parse_series_timestamp("not-a-timestamp")
+            charts_module._parse_series_timestamp("not-a-timestamp")
 
 
 class TestBuildSeriesChart:
     """Tests for Prefab chart construction helpers."""
 
     def test_build_chart_point_validates_and_aligns(self):
-        query_lists = plots_module._extract_series_queries(
+        query_lists = charts_module._extract_series_queries(
             [
                 {"name": "blocked", "queries": [10, 20]},
                 {"name": "allowed", "queries": [5]},
             ]
         )
-        point0 = plots_module._build_chart_point("2024-01-15T10:00:00Z", 0, query_lists)
+        point0 = charts_module._build_chart_point("2024-01-15T10:00:00Z", 0, query_lists)
         assert point0 == {"time": "2024-01-15T10:00:00Z", "series_0": 10, "series_1": 5}
 
         # Index beyond series_1 length defaults to 0
-        point1 = plots_module._build_chart_point("2024-01-15T11:00:00Z", 1, query_lists)
+        point1 = charts_module._build_chart_point("2024-01-15T11:00:00Z", 1, query_lists)
         assert point1 == {"time": "2024-01-15T11:00:00Z", "series_0": 20, "series_1": 0}
 
     def test_build_chart_point_raises_for_invalid_timestamp(self):
         with pytest.raises(ValueError):
-            plots_module._build_chart_point("bad-timestamp", 0, [[1]])
+            charts_module._build_chart_point("bad-timestamp", 0, [[1]])
 
     def test_extract_series_queries_coalesces_missing_queries(self):
         # A series with no ``queries``, a null ``queries`` and a short list all
         # keep the same shape the per-point build produced before (issue #434).
-        lists = plots_module._extract_series_queries(
+        lists = charts_module._extract_series_queries(
             [{"name": "a"}, {"name": "b", "queries": None}, {"name": "c", "queries": [7]}]
         )
         assert lists == [[], [], [7]]
@@ -187,7 +188,7 @@ class TestBuildSeriesChart:
             _CountingSeries(name="allowed", queries=[5, 6]),
         )
         times = [f"2024-01-15T10:0{idx}:00Z" for idx in range(3)]
-        data = plots_module._build_chart_data(times, [blocked, allowed])
+        data = charts_module.build_chart_data(times, [blocked, allowed])
 
         assert data == [
             {"time": "2024-01-15T10:00:00Z", "series_0": 10, "series_1": 5},
@@ -204,10 +205,10 @@ class TestBuildSeriesChart:
             calls.append(value)
             return real_parse(value)
 
-        real_parse = plots_module._parse_series_timestamp
-        monkeypatch.setattr(plots_module, "_parse_series_timestamp", _counting_parse)
+        real_parse = charts_module._parse_series_timestamp
+        monkeypatch.setattr(charts_module, "_parse_series_timestamp", _counting_parse)
         times = [f"2024-01-15T10:0{idx}:00Z" for idx in range(3)]
-        plots_module._build_chart_data(times, [{"queries": [1, 2, 3]}, {"queries": [4, 5, 6]}])
+        charts_module.build_chart_data(times, [{"queries": [1, 2, 3]}, {"queries": [4, 5, 6]}])
         assert calls == times
 
     def test_build_chart_series_extracts_labels(self):
@@ -216,7 +217,7 @@ class TestBuildSeriesChart:
             {"status": "allowed", "queries": [5]},
             {"queries": [1]},
         ]
-        series = plots_module._build_chart_series(series_data)
+        series = charts_module.build_chart_series(series_data)
         assert len(series) == 3
         assert series[0].data_key == "series_0" and series[0].label == "blocked"
         assert series[1].data_key == "series_1" and series[1].label == "allowed"
@@ -419,7 +420,7 @@ class TestPlotAnalyticsSeriesImpl:
     async def test_request_within_budget_forwarded_unchanged(self, clean_env, mock_api_client, monkeypatch):
         """A request that already fits the point budget is sent exactly as asked."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
         # -1d at a 1-hour interval is 24 points, well inside the budget.
         await plots_module._plot_analytics_series_impl("status", from_time="-1d", interval=3600)
@@ -491,13 +492,13 @@ class TestPlotAnalyticsSeriesImpl:
         buffered by ``_api_request`` and then plotted (issue #267).
         """
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", from_time="-1y", interval=60)
 
         assert result["code"] == "invalid_argument"
-        assert result["max_points"] == plots_module.PLOT_MAX_POINTS
+        assert result["max_points"] == charts_module.PLOT_MAX_POINTS
         assert result["interval"] == 60
         assert not mock_api_client.stream_calls
 
@@ -511,7 +512,7 @@ class TestPlotAnalyticsSeriesImpl:
         """
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         now = 1_700_000_000.0
-        monkeypatch.setattr(plots_module, "_now", lambda: now)
+        monkeypatch.setattr(charts_module, "current_time", lambda: now)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", from_time="-10y", interval=2592000)
@@ -524,7 +525,7 @@ class TestPlotAnalyticsSeriesImpl:
     @pytest.mark.asyncio
     async def test_interval_at_ceiling_is_accepted(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
         # -1y at the 86400s ceiling is 365 points, inside the budget.
         await plots_module._plot_analytics_series_impl("status", from_time="-1y", interval=86400)
@@ -540,10 +541,10 @@ class TestPlotAnalyticsSeriesImpl:
         ],
     )
     def test_series_budget_error(self, now, from_time, to_time, interval, over_budget):
-        error = plots_module._series_budget_error(from_time, to_time, interval, now=now)
+        error = charts_module.series_budget_error(from_time, to_time, interval, now=now)
         assert (error is not None) == over_budget
         if over_budget:
-            assert error["max_points"] == plots_module.PLOT_MAX_POINTS
+            assert error["max_points"] == charts_module.PLOT_MAX_POINTS
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -560,11 +561,11 @@ class TestPlotAnalyticsSeriesImpl:
         ],
     )
     def test_resolve_time_point(self, value, expected):
-        assert plots_module._resolve_time_point(value, 1_700_000_000.0) == expected
+        assert charts_module.resolve_time_point(value, 1_700_000_000.0) == expected
 
     @pytest.mark.parametrize("value", ["not-a-time", "2024-13-45T99:99:99Z", True, "-1M", "-1D"])
     def test_resolve_time_point_unparseable_returns_none(self, value):
-        assert plots_module._resolve_time_point(value, 1_700_000_000.0) is None
+        assert charts_module.resolve_time_point(value, 1_700_000_000.0) is None
 
     def test_resolve_time_point_uppercase_unit_is_not_folded_onto_its_lowercase_twin(self, now):
         """``-1M`` is months upstream and must never be sized as the 60s of ``-1m``.
@@ -573,15 +574,15 @@ class TestPlotAnalyticsSeriesImpl:
         one, so the point budget would pass a request the API answers with tens
         of thousands of points. The helper refuses the value instead.
         """
-        assert plots_module._resolve_time_point("-1m", now) == now - 60
-        assert plots_module._resolve_time_point("-1M", now) is None
+        assert charts_module.resolve_time_point("-1m", now) == now - 60
+        assert charts_module.resolve_time_point("-1M", now) is None
 
     @pytest.mark.asyncio
     async def test_uppercase_relative_unit_is_rejected_not_sized_as_minutes(
         self, clean_env, mock_api_client, monkeypatch
     ):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", from_time="-1M", to_time="now", interval=60)
@@ -598,7 +599,7 @@ class TestPlotAnalyticsSeriesImpl:
         monkeypatch.setenv("TZ", tz)
         time.tzset()
         try:
-            resolved = plots_module._resolve_time_point("2024-01-15T10:00:00", 1_700_000_000.0)
+            resolved = charts_module.resolve_time_point("2024-01-15T10:00:00", 1_700_000_000.0)
         finally:
             monkeypatch.undo()
             time.tzset()
@@ -613,7 +614,7 @@ class TestPlotAnalyticsSeriesImpl:
         silently different request.
         """
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", limit=501)
@@ -627,7 +628,7 @@ class TestPlotAnalyticsSeriesImpl:
     async def test_limit_at_cap_is_accepted_and_not_forwarded(self, clean_env, mock_api_client, monkeypatch):
         """A valid ``limit`` is accepted and never reaches the ``;series`` endpoint."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         await plots_module._plot_analytics_series_impl("status", from_time="-1d", limit=plots_module.PLOT_LIMIT_MAX)
@@ -644,7 +645,7 @@ class TestPlotAnalyticsSeriesImpl:
         typed error rather than a pass-through.
         """
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", from_time="-1 month", to_time="now")
@@ -661,7 +662,7 @@ class TestPlotAnalyticsSeriesImpl:
         ],
     )
     def test_series_budget_error_unparseable_range_is_rejected(self, now, from_time, to_time, interval):
-        error = plots_module._series_budget_error(from_time, to_time, interval, now=now)
+        error = charts_module.series_budget_error(from_time, to_time, interval, now=now)
         assert error is not None
         assert error["code"] == "invalid_argument"
         assert "-7d" in error["error"]
@@ -670,7 +671,7 @@ class TestPlotAnalyticsSeriesImpl:
 
     @pytest.mark.parametrize(("from_time", "to_time"), [("now", "-1d"), ("-1d", "-1d"), ("now", "now")])
     def test_series_budget_error_non_positive_span_is_rejected(self, now, from_time, to_time):
-        error = plots_module._series_budget_error(from_time, to_time, 60, now=now)
+        error = charts_module.series_budget_error(from_time, to_time, 60, now=now)
         assert error is not None
         assert error["code"] == "invalid_argument"
         assert "must end after it starts" in error["error"]
@@ -683,7 +684,7 @@ class TestPlotAnalyticsSeriesImpl:
         in the message said which argument was at fault - so it retried three
         different intervals with the same broken range.
         """
-        error = plots_module._series_budget_error(-86400, "now", 3600, now=now)
+        error = charts_module.series_budget_error(-86400, "now", 3600, now=now)
         assert error is not None
         assert "1969-12-31" in error["error"]
         assert "absolute Unix timestamp" in error["error"]
@@ -928,8 +929,8 @@ class TestRangeReportingAndProfileGuard:
         A point that could not be parsed has to read as unresolved rather than as a
         timestamp invented from None, or the error blames the wrong argument.
         """
-        assert plots_module._format_resolved(None) == "unresolved"
-        assert plots_module._format_resolved(1_700_000_000).endswith("+00:00")
+        assert charts_module._format_resolved(None) == "unresolved"
+        assert charts_module._format_resolved(1_700_000_000).endswith("+00:00")
 
     @pytest.mark.asyncio
     async def test_a_plot_with_no_resolved_profile_does_not_request_a_series(self, clean_env, monkeypatch):
@@ -963,9 +964,9 @@ class TestReporterIsTotal:
         timestamp turns the caller's typed error into an internal one. The
         value must appear in the string exactly as the caller sent it.
         """
-        assert plots_module._format_resolved(1e30) == "out of range (1e+30)"
+        assert charts_module._format_resolved(1e30) == "out of range (1e+30)"
         # The negative side overflows too on this platform.
-        assert plots_module._format_resolved(-1e30).startswith("out of range (")
+        assert charts_module._format_resolved(-1e30).startswith("out of range (")
 
     @pytest.mark.asyncio
     async def test_a_fetch_returning_nothing_at_all_is_an_internal_error(self, clean_env, monkeypatch):
@@ -992,10 +993,10 @@ class TestUnresolvableExtremeTimes:
     """
 
     def test_an_absolute_int_past_the_float_range_is_unresolved(self):
-        assert plots_module._resolve_time_point(10**400, now=1_700_000_000.0) is None
+        assert charts_module.resolve_time_point(10**400, now=1_700_000_000.0) is None
 
     def test_a_relative_offset_past_the_float_range_is_unresolved(self):
-        assert plots_module._resolve_time_point("-" + "9" * 400 + "d", now=1_700_000_000.0) is None
+        assert charts_module.resolve_time_point("-" + "9" * 400 + "d", now=1_700_000_000.0) is None
 
     def test_a_numeric_string_past_the_float_range_is_unresolved(self):
-        assert plots_module._resolve_time_point("1" + "0" * 400, now=1_700_000_000.0) is None
+        assert charts_module.resolve_time_point("1" + "0" * 400, now=1_700_000_000.0) is None

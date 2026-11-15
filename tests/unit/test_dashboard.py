@@ -7,6 +7,10 @@ import pytest
 from fastmcp.tools.base import ToolResult
 
 from nextdns_mcp.tools import dashboard as dash_module
+from nextdns_mcp.tools.dashboard import components as ui
+from nextdns_mcp.tools.dashboard import data as data_mod
+from nextdns_mcp.tools.dashboard import formatters as fmt
+from nextdns_mcp.tools.dashboard import tool as tool_mod
 from nextdns_mcp.transport import MAX_SERIES_RESPONSE_BYTES
 
 
@@ -16,17 +20,17 @@ class TestDashboardHelpers:
     def test_wrap_card_result_uses_documented_composition(self):
         import inspect
 
-        src = inspect.getsource(dash_module._wrap_card_result)
+        src = inspect.getsource(ui._wrap_card_result)
         assert "children.append" not in src
         assert "children=[card]" in src
 
     def test_time_params(self):
-        assert dash_module._time_params(None, None) == {}
-        p = dash_module._time_params("-7d", "now")
+        assert data_mod._time_params(None, None) == {}
+        p = data_mod._time_params("-7d", "now")
         assert p["from"] == "-7d" and p["to"] == "now"
 
     def test_build_analytics_params(self):
-        p = dash_module._build_analytics_params("-1d", "now", limit=5, extra_key="val", none_key=None)
+        p = data_mod._build_analytics_params("-1d", "now", limit=5, extra_key="val", none_key=None)
         assert p["from"] == "-1d"
         assert p["to"] == "now"
         assert p["limit"] == 5
@@ -34,64 +38,64 @@ class TestDashboardHelpers:
         assert "none_key" not in p
 
     def test_format_share(self):
-        assert dash_module._format_share(25, 100) == "25.0%"
-        assert dash_module._format_share(0, 0) == "0.0%"
+        assert data_mod._format_share(25, 100) == "25.0%"
+        assert data_mod._format_share(0, 0) == "0.0%"
 
     def test_item_and_blocked_queries(self):
-        assert dash_module._item_queries({"queries": 42}) == 42
-        assert dash_module._item_queries({}) == 0
-        assert dash_module._item_queries({"queries": "abc"}) == 0
-        assert dash_module._item_queries({"queries": {"nested": 1}}) == 0
-        assert dash_module._item_queries({"queries": [1, 2]}) == 0
-        assert dash_module._item_queries({"queries": "123"}) == 123
-        assert dash_module._blocked_queries({"status": "blocked", "queries": 10}) == 10
-        assert dash_module._blocked_queries({"status": "allowed", "queries": 10}) == 0
+        assert data_mod._item_queries({"queries": 42}) == 42
+        assert data_mod._item_queries({}) == 0
+        assert data_mod._item_queries({"queries": "abc"}) == 0
+        assert data_mod._item_queries({"queries": {"nested": 1}}) == 0
+        assert data_mod._item_queries({"queries": [1, 2]}) == 0
+        assert data_mod._item_queries({"queries": "123"}) == 123
+        assert data_mod._blocked_queries({"status": "blocked", "queries": 10}) == 10
+        assert data_mod._blocked_queries({"status": "allowed", "queries": 10}) == 0
 
     def test_calculate_status_kpis(self):
         data = [
             {"status": "default", "queries": 80},
             {"status": "blocked", "queries": 20},
         ]
-        kpis = dash_module._calculate_status_kpis(data)
+        kpis = data_mod._calculate_status_kpis(data)
         assert kpis["total"] == 100
         assert kpis["blocked"] == 20
         assert kpis["rate"] == 20.0
 
-        empty_kpis = dash_module._calculate_status_kpis([])
+        empty_kpis = data_mod._calculate_status_kpis([])
         assert empty_kpis["total"] == 0
         assert empty_kpis["rate"] == 0.0
 
     def test_build_kpi_row(self):
         kpis = {"total": 1000, "blocked": 100, "rate": 10.0}
-        row = dash_module._build_kpi_row(kpis)
+        row = ui._build_kpi_row(kpis)
         assert len(row.children) == 3
 
     def test_build_queries_series_card(self):
-        empty_card = dash_module._build_queries_series_card({})
+        empty_card = ui._build_queries_series_card({})
         assert empty_card is None
 
         valid_payload = {
             "meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}},
             "data": [{"name": "blocked", "queries": [5]}],
         }
-        card = dash_module._build_queries_series_card(valid_payload)
+        card = ui._build_queries_series_card(valid_payload)
         assert card is not None
 
     def test_build_domains_card(self):
         data = [{"domain": "example.com", "queries": 50}, {}]
-        card = dash_module._build_domains_card("Title", "Desc", data)
+        card = ui._build_domains_card("Title", "Desc", data)
         assert card is not None
-        assert dash_module._build_domains_card("Title", "Desc", data, view_type="bar") is not None
-        assert dash_module._build_domains_card("Title", "Desc", data, view_type="pie") is not None
+        assert ui._build_domains_card("Title", "Desc", data, view_type="bar") is not None
+        assert ui._build_domains_card("Title", "Desc", data, view_type="pie") is not None
 
     def test_reasons_card(self):
         data = [{"name": "List A", "queries": 50}, {"id": "list-b", "queries": 50}]
-        card = dash_module._build_reasons_card(data)
+        card = ui._build_reasons_card(data)
         assert card is not None
-        assert dash_module._build_reasons_card(data, view_type="table") is not None
-        assert dash_module._build_reasons_card(data, view_type="pie") is not None
+        assert ui._build_reasons_card(data, view_type="table") is not None
+        assert ui._build_reasons_card(data, view_type="pie") is not None
 
-        empty_row = dash_module._reason_row({}, 0)
+        empty_row = data_mod._reason_row({}, 0)
         assert empty_row["name"] == "Unknown"
         assert empty_row["share"] == "0.0%"
 
@@ -102,16 +106,16 @@ class TestDashboardHelpers:
             {"id": "dev2"},
             {},
         ]
-        card = dash_module._build_devices_card(data)
+        card = ui._build_devices_card(data)
         assert card is not None
-        assert dash_module._build_devices_card(data, view_type="bar") is not None
-        assert dash_module._build_devices_card(data, view_type="pie") is not None
+        assert ui._build_devices_card(data, view_type="bar") is not None
+        assert ui._build_devices_card(data, view_type="pie") is not None
 
     def test_location_string_and_ips_card(self):
-        assert dash_module._location_string({"city": "City", "country": "Country"}) == "City, Country"
-        assert dash_module._location_string({"city": "City"}) == "City"
-        assert dash_module._location_string({"country": "Country"}) == "Country"
-        assert dash_module._location_string({}) == "-"
+        assert data_mod._location_string({"city": "City", "country": "Country"}) == "City, Country"
+        assert data_mod._location_string({"city": "City"}) == "City"
+        assert data_mod._location_string({"country": "Country"}) == "Country"
+        assert data_mod._location_string({}) == "-"
 
         data = [
             {
@@ -122,23 +126,23 @@ class TestDashboardHelpers:
             },
             {},
         ]
-        card = dash_module._build_ips_card(data)
+        card = ui._build_ips_card(data)
         assert card is not None
 
     def test_gafam_card(self):
         data = [{"company": "google", "queries": 100}, {}]
-        card = dash_module._build_gafam_card(data)
+        card = ui._build_gafam_card(data)
         assert card is not None
-        assert dash_module._build_gafam_card(data, view_type="bar") is not None
-        assert dash_module._build_gafam_card(data, view_type="table") is not None
+        assert ui._build_gafam_card(data, view_type="bar") is not None
+        assert ui._build_gafam_card(data, view_type="table") is not None
 
     def test_security_card(self):
         enc = [{"encrypted": True, "queries": 90}, {"encrypted": False, "queries": 10}]
         dnssec = [{"validated": True, "queries": 20}, {"validated": False, "queries": 80}]
-        card = dash_module._build_security_card(enc, dnssec)
+        card = ui._build_security_card(enc, dnssec)
         assert card is not None
 
-        empty_card = dash_module._build_security_card([], [])
+        empty_card = ui._build_security_card([], [])
         assert empty_card is not None
 
     def test_destinations_card(self):
@@ -146,10 +150,10 @@ class TestDashboardHelpers:
             {"name": "United States", "code": "US", "queries": 100, "domains": ["google.com"]},
             {},
         ]
-        card = dash_module._build_destinations_card(data)
+        card = ui._build_destinations_card(data)
         assert card is not None
-        assert dash_module._build_destinations_card(data, view_type="bar") is not None
-        assert dash_module._build_destinations_card(data, view_type="pie") is not None
+        assert ui._build_destinations_card(data, view_type="bar") is not None
+        assert ui._build_destinations_card(data, view_type="pie") is not None
 
     def test_accumulate_domains_budgeted(self):
         # In-budget: labels fit exactly
@@ -180,44 +184,44 @@ class TestDashboardFetchAndValidation:
 
     @pytest.mark.asyncio
     async def test_resolve_profile_errors(self, clean_env, monkeypatch):
-        _res, err = await dash_module._resolve_profile(None)
+        _res, err = await data_mod._resolve_profile(None)
         assert err is not None
         assert "No profile_id provided" in err["error"]
 
-        monkeypatch.setattr(dash_module, "resolve_profile_id", lambda *a, **kw: (None, None))
-        _res2, err = await dash_module._resolve_profile("any")
+        monkeypatch.setattr(data_mod, "resolve_profile_id", lambda *a, **kw: (None, None))
+        _res2, err = await data_mod._resolve_profile("any")
         assert err is not None
         assert err["code"] == "internal_error"
 
     def test_validate_card_data(self):
-        data, err = dash_module._validate_card_data({"data": [{"x": 1}]}, "test", "p1")
+        data, err = data_mod._validate_card_data({"data": [{"x": 1}]}, "test", "p1")
         assert err is None
         assert data == [{"x": 1}]
 
-        data, err = dash_module._validate_card_data(None, "test", "p1")
+        data, err = data_mod._validate_card_data(None, "test", "p1")
         assert data is None
         assert err["code"] == "no_data"
 
-        data, err = dash_module._validate_card_data({"data": []}, "test", "p1")
+        data, err = data_mod._validate_card_data({"data": []}, "test", "p1")
         assert err is None
         assert data == []
 
     @pytest.mark.asyncio
     async def test_fetch_card_data_error_paths(self, clean_env, monkeypatch):
         # 1. Profile resolution error
-        _data0, err = await dash_module._fetch_card_data(None, "endpoint")
+        _data0, err = await data_mod._fetch_card_data(None, "endpoint")
         assert err is not None
 
         # 2. Fetch error from upstream
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         upstream_err = {"code": "http_error", "error": "failed"}
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", AsyncMock(return_value=(None, upstream_err)))
-        _data, err = await dash_module._fetch_card_data("abc123", "endpoint")
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", AsyncMock(return_value=(None, upstream_err)))
+        _data, err = await data_mod._fetch_card_data("abc123", "endpoint")
         assert err == upstream_err
 
         # 3. Empty data flows through (no no_data error) for consistent empty-state cards
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", AsyncMock(return_value=({"data": []}, None)))
-        _data, err = await dash_module._fetch_card_data("abc123", "endpoint")
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", AsyncMock(return_value=({"data": []}, None)))
+        _data, err = await data_mod._fetch_card_data("abc123", "endpoint")
         assert err is None
         assert _data == []
 
@@ -227,13 +231,13 @@ class TestDashboardFetchAndValidation:
             "nextdns_mcp.transport._api_request_payload",
             AsyncMock(return_value={"code": "http_error", "error": "upstream"}),
         )
-        payload, err = await dash_module._fetch_analytics_payload("p1", "status")
+        payload, err = await data_mod._fetch_analytics_payload("p1", "status")
         assert payload is None and err["code"] == "http_error"
 
         monkeypatch.setattr(
             "nextdns_mcp.transport._api_request_payload", AsyncMock(return_value={"data": [{"ok": True}]})
         )
-        payload, err = await dash_module._fetch_analytics_payload("p1", "status")
+        payload, err = await data_mod._fetch_analytics_payload("p1", "status")
         assert payload == {"data": [{"ok": True}]} and err is None
 
     @pytest.mark.asyncio
@@ -241,13 +245,13 @@ class TestDashboardFetchAndValidation:
         stub = AsyncMock(return_value={"data": []})
         monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", stub)
 
-        payload, err = await dash_module._fetch_analytics_payload("p1", "status")
+        payload, err = await data_mod._fetch_analytics_payload("p1", "status")
         assert payload == {"data": []} and err is None
         _, kwargs = stub.call_args
         assert kwargs["max_response_bytes"] is None
 
         stub.reset_mock()
-        payload, err = await dash_module._fetch_analytics_payload("p1", "status;series")
+        payload, err = await data_mod._fetch_analytics_payload("p1", "status;series")
         assert payload == {"data": []} and err is None
         _, kwargs = stub.call_args
         assert kwargs["max_response_bytes"] == MAX_SERIES_RESPONSE_BYTES
@@ -268,9 +272,9 @@ class TestDashboardFetchAndValidation:
         async def fake_fetch(profile_id, endpoint, params=None):
             return {"data": tagged[endpoint]}, None
 
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
-        payloads = await dash_module._fetch_extra_payloads("p1", {"limit": 1}, {})
-        assert isinstance(payloads, dash_module.ExtraDashboardPayloads)
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
+        payloads = await data_mod._fetch_extra_payloads("p1", {"limit": 1}, {})
+        assert isinstance(payloads, data_mod.ExtraDashboardPayloads)
         assert payloads.reasons == [{"tag": "reasons"}]
         assert payloads.devices == [{"tag": "devices"}]
         assert payloads.ips == [{"tag": "ips"}]
@@ -311,7 +315,7 @@ class TestDashboardToolsExecution:
                 return ({"data": [{"validated": True, "queries": 30}, {"validated": False, "queries": 70}]}, None)
             return ({"data": [{"domain": "test.com", "name": "Test", "ip": "1.1.1.1", "queries": 10}]}, None)
 
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
         return calls
 
     @pytest.mark.asyncio
@@ -480,7 +484,7 @@ class TestDashboardToolsExecution:
                 return None, {"code": "http_error", "error": "status error"}
             return {}, None
 
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_status_err)
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_status_err)
         res = await dash_module.overviewDashboard(profile_id="abc123")
         assert isinstance(res, dict)
         assert res["code"] == "http_error"
@@ -496,7 +500,7 @@ class TestDashboardToolsExecution:
     async def test_gafam_analytics_error(self, clean_env, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(
-            dash_module, "_fetch_analytics_payload", AsyncMock(return_value=(None, {"code": "err", "error": "fail"}))
+            data_mod, "_fetch_analytics_payload", AsyncMock(return_value=(None, {"code": "err", "error": "fail"}))
         )
         res = await dash_module.overviewDashboard(section="gafam")
         assert isinstance(res, dict)
@@ -519,7 +523,7 @@ class TestDashboardToolsExecution:
         # 2. Encryption error
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(
-            dash_module,
+            data_mod,
             "_fetch_analytics_payload",
             AsyncMock(side_effect=[(None, {"code": "enc_err", "error": "enc"}), ({}, None)]),
         )
@@ -528,7 +532,7 @@ class TestDashboardToolsExecution:
 
         # 3. DNSSEC error
         monkeypatch.setattr(
-            dash_module,
+            data_mod,
             "_fetch_analytics_payload",
             AsyncMock(side_effect=[({}, None), (None, {"code": "sec_err", "error": "sec"})]),
         )
@@ -574,7 +578,7 @@ class TestDashboardToolsExecution:
                 return ({}, None)
             return ({"data": [{"status": "default", "queries": 10}]}, None)
 
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_empty_series)
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_empty_series)
         res = await dash_module.overviewDashboard(profile_id="abc123")
         assert isinstance(res, ToolResult)
 
@@ -629,7 +633,7 @@ class TestDashboardToolsExecution:
     async def test_specialized_tools_error_paths(self, clean_env, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(
-            dash_module, "_fetch_analytics_payload", AsyncMock(return_value=(None, {"code": "err", "error": "fail"}))
+            data_mod, "_fetch_analytics_payload", AsyncMock(return_value=(None, {"code": "err", "error": "fail"}))
         )
 
         for sec in (
@@ -648,9 +652,9 @@ class TestDashboardToolsExecution:
 
     def test_overview_interval_and_budget(self):
         # Short span <= 2 days uses 3600s
-        assert dash_module._overview_interval("-1d", "now") == 3600
+        assert data_mod._overview_interval("-1d", "now") == 3600
         # Long span > 2 days uses 86400s
-        assert dash_module._overview_interval("-30d", "now") == 86400
+        assert data_mod._overview_interval("-30d", "now") == 86400
 
     @pytest.mark.asyncio
     async def test_overview_dashboard_budget_error(self, clean_env, monkeypatch):
@@ -660,7 +664,7 @@ class TestDashboardToolsExecution:
         assert res["code"] == "invalid_argument"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("section", sorted(dash_module._WIDGET_DISPATCH))
+    @pytest.mark.parametrize("section", sorted(tool_mod._WIDGET_DISPATCH))
     async def test_widget_sections_reject_invalid_time_ranges(self, clean_env, monkeypatch, section):
         """Every single-widget section must reject invalid ranges without an upstream call."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
@@ -670,7 +674,7 @@ class TestDashboardToolsExecution:
             calls.append((endpoint, params))
             return ({"data": [{"status": "default", "queries": 10}]}, None)
 
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
         bad_ranges = [
             ("2026-11-02T00:00:00Z", "2026-11-01T00:00:00Z"),  # inverted: end before start
             ("definitely-not-a-time", "now"),  # unresolvable relative string
@@ -686,7 +690,7 @@ class TestDashboardToolsExecution:
             assert calls == [], section
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("section", sorted(dash_module._WIDGET_DISPATCH))
+    @pytest.mark.parametrize("section", sorted(tool_mod._WIDGET_DISPATCH))
     async def test_widget_sections_still_dispatch_valid_ranges(self, clean_env, monkeypatch, section):
         """Valid ranges must still dispatch to the widget after validation."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
@@ -715,38 +719,38 @@ class TestDashboardToolsExecution:
                 return ({"data": [{"validated": True, "queries": 30}, {"validated": False, "queries": 70}]}, None)
             return ({"data": [{"domain": "test.com", "name": "Test", "ip": "1.1.1.1", "queries": 10}]}, None)
 
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
         res = await dash_module.overviewDashboard(profile_id="abc123", from_time="-1d", to_time="now", section=section)
         assert calls, section
         assert isinstance(res, ToolResult), section
 
     def test_build_queries_series_card_exception_handling(self, monkeypatch):
-        monkeypatch.setattr(dash_module, "_validate_series_payload", MagicMock(side_effect=ValueError("bad data")))
-        assert dash_module._build_queries_series_card({"meta": {}}) is None
+        monkeypatch.setattr(ui, "validate_series_payload", MagicMock(side_effect=ValueError("bad data")))
+        assert ui._build_queries_series_card({"meta": {}}) is None
 
     def test_empty_cards_rendering(self):
         # Format summary with empty items
-        assert dash_module._format_items_summary("Test", "items", [], 0) == "[Rendered Test (0 items, 0 queries)]"
-        assert dash_module._format_gafam_summary([], 0) == "[Rendered GAFAM Dominance (0 queries)]"
+        assert fmt._format_items_summary("Test", "items", [], 0) == "[Rendered Test (0 items, 0 queries)]"
+        assert fmt._format_gafam_summary([], 0) == "[Rendered GAFAM Dominance (0 queries)]"
 
         # Empty cards render fallback text
-        assert dash_module._build_domains_card("Domains", "desc", [], view_type="table") is not None
-        assert dash_module._build_domains_card("Domains", "desc", [], view_type="bar") is not None
-        assert dash_module._build_reasons_card([], view_type="table") is not None
-        assert dash_module._build_reasons_card([], view_type="bar") is not None
-        assert dash_module._build_devices_card([], view_type="table") is not None
-        assert dash_module._build_devices_card([], view_type="bar") is not None
-        assert dash_module._build_devices_card([], view_type="pie") is not None
-        assert dash_module._build_devices_card([{"name": "iPhone", "queries": 10}], view_type="table") is not None
-        assert dash_module._build_ips_card([]) is not None
-        assert dash_module._build_gafam_card([], view_type="table") is not None
-        assert dash_module._build_gafam_card([], view_type="bar") is not None
-        assert dash_module._build_destinations_card([], view_type="table") is not None
-        assert dash_module._build_destinations_card([], view_type="bar") is not None
-        assert dash_module._build_destinations_card([], view_type="pie") is not None
-        assert dash_module._build_destinations_card([{"name": "US", "queries": 10}], view_type="table") is not None
+        assert ui._build_domains_card("Domains", "desc", [], view_type="table") is not None
+        assert ui._build_domains_card("Domains", "desc", [], view_type="bar") is not None
+        assert ui._build_reasons_card([], view_type="table") is not None
+        assert ui._build_reasons_card([], view_type="bar") is not None
+        assert ui._build_devices_card([], view_type="table") is not None
+        assert ui._build_devices_card([], view_type="bar") is not None
+        assert ui._build_devices_card([], view_type="pie") is not None
+        assert ui._build_devices_card([{"name": "iPhone", "queries": 10}], view_type="table") is not None
+        assert ui._build_ips_card([]) is not None
+        assert ui._build_gafam_card([], view_type="table") is not None
+        assert ui._build_gafam_card([], view_type="bar") is not None
+        assert ui._build_destinations_card([], view_type="table") is not None
+        assert ui._build_destinations_card([], view_type="bar") is not None
+        assert ui._build_destinations_card([], view_type="pie") is not None
+        assert ui._build_destinations_card([{"name": "US", "queries": 10}], view_type="table") is not None
         # Interval unparseable fallback
-        assert dash_module._overview_interval("invalid", "now") == 86400
+        assert data_mod._overview_interval("invalid", "now") == 86400
 
     @pytest.mark.asyncio
     async def test_overview_dashboard_bounds_concurrent_fanout(self, clean_env, monkeypatch):
@@ -773,11 +777,11 @@ class TestDashboardToolsExecution:
             finally:
                 in_flight -= 1
 
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", _tracking_fetch)
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", _tracking_fetch)
         res = await dash_module.overviewDashboard(profile_id="abc123", section="all")
         assert isinstance(res, ToolResult)
         assert len(calls) == 12
-        assert 1 <= max_in_flight <= dash_module.OVERVIEW_FANOUT_CONCURRENCY
+        assert 1 <= max_in_flight <= data_mod.OVERVIEW_FANOUT_CONCURRENCY
 
 
 class TestFailClosedNoneGuards:
@@ -804,10 +808,10 @@ class TestFailClosedNoneGuards:
     @pytest.mark.asyncio
     async def test_resolver_none_is_internal_error_and_skips_fetch(self, clean_env, monkeypatch):
         """``(None, None)`` from the resolver must not build ``/profiles/None/...`` URLs."""
-        monkeypatch.setattr(dash_module, "_resolve_profile", AsyncMock(return_value=(None, None)))
+        monkeypatch.setattr(tool_mod, "_resolve_profile", AsyncMock(return_value=(None, None)))
 
         wrapped = AsyncMock(return_value=({}, None))
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", wrapped)
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", wrapped)
 
         res = await dash_module.overviewDashboard(profile_id="abc123", section="security")
         assert isinstance(res, dict)
@@ -817,7 +821,7 @@ class TestFailClosedNoneGuards:
 
     @pytest.mark.asyncio
     async def test_overview_resolver_none_is_internal_error(self, clean_env, monkeypatch):
-        monkeypatch.setattr(dash_module, "_resolve_profile", AsyncMock(return_value=(None, None)))
+        monkeypatch.setattr(tool_mod, "_resolve_profile", AsyncMock(return_value=(None, None)))
 
         res = await dash_module.overviewDashboard(profile_id="abc123", section="overview")
         assert isinstance(res, dict)
@@ -829,7 +833,7 @@ class TestFailClosedNoneGuards:
     async def test_card_fetch_none_is_internal_error(self, clean_env, monkeypatch, section):
         """``(None, None)`` from the card fetcher must not reach the renderer."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(dash_module, "_fetch_card_data", AsyncMock(return_value=(None, None)))
+        monkeypatch.setattr(tool_mod, "_fetch_card_data", AsyncMock(return_value=(None, None)))
 
         res = await dash_module.overviewDashboard(section=section)
         assert isinstance(res, dict)
@@ -847,10 +851,10 @@ class TestWidgetDispatchTypingContract:
 
         hints = get_type_hints(dash_module)
         assert "_WIDGET_DISPATCH" in hints
-        assert hints["_WIDGET_DISPATCH"] == dict[str, dash_module._WidgetHandler]
+        assert hints["_WIDGET_DISPATCH"] == dict[str, tool_mod._WidgetHandler]
 
         expected_params = ["profile_id", "from_time", "to_time", "limit", "view_type"]
-        for section, handler in dash_module._WIDGET_DISPATCH.items():
+        for section, handler in tool_mod._WIDGET_DISPATCH.items():
             sig = inspect.signature(handler)
             assert list(sig.parameters.keys()) == expected_params, (
                 f"Handler for section '{section}' does not match expected parameters {expected_params}"
@@ -967,7 +971,7 @@ class TestDashboardParamForwarding:
                 )
             return ({"data": [{"domain": "test.com", "queries": 10}]}, None)
 
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
         return calls
 
     @staticmethod
