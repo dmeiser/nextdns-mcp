@@ -69,6 +69,7 @@ ERROR_CHARS = 300
 PROJECT_MAX_ITEMS = 5
 PROJECT_MAX_KEYS = 50
 PROJECT_MAX_STRING_CHARS = 200
+PROJECT_MAX_DEPTH = 64
 
 # Dedicated bounded evidence (see ``_result_evidence``): how many id/name pairs
 # one row may carry, and how long each field may be. An id or name over the cap
@@ -141,26 +142,35 @@ def result_error(res: Any) -> str:
     return ""
 
 
-def _project_list(value: list[Any]) -> list[Any]:
+def _project_list(value: list[Any], depth: int) -> list[Any]:
     """Keep the leading items; when items were dropped, say how many.
 
     The omission marker exists so a reader can tell a small result from a
-    truncated one; a list that fits whole is returned untouched.
+    truncated one; a list that fits whole is returned untouched. Depth is
+    capped in ``_project_value`` before this runs, so items past
+    ``PROJECT_MAX_DEPTH`` arrive already projected to ``None``.
     """
-    kept = [_project_value(item) for item in value[:PROJECT_MAX_ITEMS]]
+    kept = [_project_value(item, depth + 1) for item in value[:PROJECT_MAX_ITEMS]]
     if len(value) > PROJECT_MAX_ITEMS:
         kept.append({"_omitted_items": len(value) - PROJECT_MAX_ITEMS})
     return kept
 
 
-def _project_value(value: Any) -> Any:
+def _project_dict(value: dict[Any, Any], depth: int) -> dict[Any, Any]:
+    """Keep the leading keys; each value is projected one level deeper."""
+    return {key: _project_value(item, depth + 1) for key, item in list(value.items())[:PROJECT_MAX_KEYS]}
+
+
+def _project_value(value: Any, depth: int = 0) -> Any:
     """A size-bounded projection of one result value (see ``PROJECT_*``)."""
+    if depth > PROJECT_MAX_DEPTH:
+        return None
     if isinstance(value, str):
         return value[:PROJECT_MAX_STRING_CHARS]
     if isinstance(value, dict):
-        return {key: _project_value(item) for key, item in list(value.items())[:PROJECT_MAX_KEYS]}
+        return _project_dict(value, depth)
     if isinstance(value, list):
-        return _project_list(value)
+        return _project_list(value, depth)
     return value
 
 
@@ -205,7 +215,10 @@ class CallLogMiddleware(Middleware):
             await self._record(name, args, ok=False, error=f"{type(exc).__name__}: {exc}")
             raise
         error = result_error(result)
-        await self._record(name, args, ok=not error, error=error, result=result)
+        try:
+            await self._record(name, args, ok=not error, error=error, result=result)
+        except Exception as exc:  # noqa: BLE001 - logging is optional and must never fail the call
+            logger.warning("call log recording failed: %s", exc)
         return result
 
     def _record_row(self, tool: str, args: Any, ok: bool, error: str, result: Any) -> dict[str, Any]:
@@ -246,7 +259,20 @@ class CallLogMiddleware(Middleware):
         """The endpoint line and the evidence column, both derived from the call."""
         if endpoint:
             row["endpoint"] = f"{endpoint[0]} {endpoint[1]}"
-        evidence = _result_evidence(result, write) if ok else {}
+        evidence = {}
+        if ok:
+            try:
+                evidence = _result_evidence(result, write)
+            except (
+                RuntimeError,
+                TypeError,
+                ValueError,
+                KeyError,
+                RecursionError,
+                AttributeError,
+            ) as exc:  # never let evidence extraction fail the call
+                logger.warning("call log evidence extraction failed: %s", exc)
+                evidence = {"degraded": True}
         if evidence:
             row["evidence"] = evidence
 
@@ -335,22 +361,43 @@ def _walk_identities(node: Any, out: list[dict[str, str]], seen: set[str]) -> No
     _walk_children(node, out, seen)
 
 
-def _walk_component_dict(node: dict[str, Any], types: set[str]) -> None:
-    """Extract component type from dict node and recurse."""
-    component_type = node.get("type")
-    if isinstance(component_type, str):
-        types.add(component_type)
-    for value in node.values():
-        _walk_component_types(value, types)
+COMPONENT_MAX_DEPTH = 64
 
 
 def _walk_component_types(node: Any, types: set[str]) -> None:
-    """Collect all component `type` values in a Prefab UI view tree."""
-    if isinstance(node, dict):
-        _walk_component_dict(node, types)
-    elif isinstance(node, list):
-        for item in node:
-            _walk_component_types(item, types)
+    """Collect all component `type` values in a Prefab UI view tree.
+
+    Iterative (no RecursionError on deeply nested documents) and restricted
+    to UI child containers (``view`` / ``children``) so data rows and chart
+    datasets are never traversed. Bounded by ``COMPONENT_MAX_DEPTH``.
+    """
+    stack: list[tuple[Any, int]] = [(node, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth > COMPONENT_MAX_DEPTH:
+            continue
+        _walk_component_node(current, depth, types, stack)
+
+
+def _walk_component_node(current: Any, depth: int, types: set[str], stack: list[tuple[Any, int]]) -> None:
+    """One node of the component walk: lists fan out, dicts name and push children."""
+    if isinstance(current, list):
+        for item in current:
+            stack.append((item, depth + 1))
+        return
+    if not isinstance(current, dict):
+        return
+    if isinstance(current.get("type"), str):
+        types.add(current["type"])
+    _push_component_children(current, depth, stack)
+
+
+def _push_component_children(current: dict[Any, Any], depth: int, stack: list[tuple[Any, int]]) -> None:
+    """UI child containers only: ``view`` and ``children``, never ``data`` / ``rows``."""
+    for key in ("view", "children"):
+        child = current.get(key)
+        if isinstance(child, (dict, list)):
+            stack.append((child, depth + 1))
 
 
 def _created_id_of(data: Any) -> str:
