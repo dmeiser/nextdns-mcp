@@ -2337,67 +2337,56 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         (
             "dashboard.overview",
             "overview",
-            "overview dashboard",
             "Show me an overview dashboard for profile '{profile_id}'.",
         ),
         (
             "dashboard.kpi",
             "kpi",
-            "top KPI metrics",
             "Show me the top KPI metrics dashboard widget (queries, blocked queries, block rate) for profile '{profile_id}'.",
         ),
         (
             "dashboard.domains",
             "domains",
-            "top resolved domains",
             "Show me the top resolved domains dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.blocked_domains",
             "blocked_domains",
-            "top blocked domains",
             "Show me the top blocked domains dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.reasons",
             "reasons",
-            "block reasons",
             "Show me the block reasons dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.devices",
             "devices",
-            "device breakdown",
             "Show me the device analytics dashboard widget (device models and traffic share) for profile '{profile_id}'.",
         ),
         (
             "dashboard.ips",
             "ips",
-            "client IP addresses",
             "Show me the client IP addresses and ISP details dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.root_domains",
             "root_domains",
-            "aggregate root domains",
             "Show me the top root domains dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.countries",
             "countries",
-            "traffic by country",
             "Show me the country traffic dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.gafam",
             "gafam",
-            "GAFAM traffic share",
             "Show me the GAFAM traffic dominance dashboard widget for profile '{profile_id}'.",
         ),
         (
             "dashboard.security",
             "security",
-            "security analytics",
             "Show me the security analytics dashboard widget (Encrypted DNS and DNSSEC rates) for profile '{profile_id}'.",
         ),
     )
@@ -2414,7 +2403,7 @@ def build_steps(targets: TaskTargets) -> list[Step]:
         f"extra={_dashboard_covered - set(DASHBOARD_SECTIONS)}"
     )
 
-    for step_id, section, desc, task_prompt in dashboard_specs:
+    for step_id, section, task_prompt in dashboard_specs:
         expect_args = () if section == "overview" else (section,)
         steps.append(
             Step(
