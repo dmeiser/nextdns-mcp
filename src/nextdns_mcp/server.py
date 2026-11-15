@@ -155,7 +155,7 @@ def build_mcp_server() -> FastMCP:
     for tool, app_enabled in _COMPOSITE_TOOLS:
         # FastMCP publishes only the first text section of a docstring as the tool
         # description, so the accepted values and the worked example further down
-        # would never reach a caller — and for these two tools that is exactly the
+        # would never reach a caller — and for these three tools that is exactly the
         # part a caller needs (a chart's interval range, a lookup's record types).
         server.tool(
             description=inspect.getdoc(tool) or "",

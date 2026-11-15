@@ -1,4 +1,4 @@
-"""Interactive analytics dashboard and specialized analytics UI tools for NextDNS.
+"""Interactive analytics dashboard with specialized analytics widgets for NextDNS.
 
 SPDX-License-Identifier: MIT
 """

@@ -679,8 +679,8 @@ class CallToolShapeMiddleware(Middleware):
 
         `endpoints` is the ``tool name -> (method, path template)`` map from
         the server's route parse: the sound read of whether a name executes a
-        write. A name the map does not carry - the three composite operations (plotAnalytics, dohLookup, overviewDashboard),
-        plotAnalytics and dohLookup - reads.
+        write. A name the map does not carry - one of the three composite tools
+        (``plotAnalytics``, ``dohLookup``, ``overviewDashboard``) - reads.
         """
         self._call_tool_name = call_tool_name
         self._transform = transform

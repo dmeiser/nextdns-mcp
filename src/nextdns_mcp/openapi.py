@@ -277,10 +277,12 @@ def _merge_ignored_hints(structured: dict[str, Any], hint: str) -> None:
 
 
 def _annotate_content_only(result: ToolResult, ignored: list[str], hint: str) -> None:
-    """A content-only result has no structured payload to annotate: say it in the content.
+    """Say the annotation in the content when no plain-dict payload can carry it.
 
-    plotAnalytics answers with structured Prefab chart output and no image; without
-    this the argument drop would be silent for exactly the tool whose names
+    Prefab answers (plotAnalytics, overviewDashboard) arrive as a model rather
+    than a dict, so the dict-merge path cannot touch them, and a result with
+    no structured payload at all has nothing else to carry the note; without
+    this the argument drop would be silent for exactly the tools whose names
     (from/to on the series endpoints) differ from this one's
     (from_time/to_time).
     """

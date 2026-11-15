@@ -84,7 +84,7 @@ which only ever fires on a value that would not have meant this tool's operation
 
 ## The composite visual and lookup tools are declared exceptions
 
-`overviewDashboard` and specialized analytics widgets, `plotAnalytics` (compose several series into an interactive Prefab chart), and `dohLookup` (resolve a name over
+`overviewDashboard` (the interactive Prefab dashboard whose sections double as specialized analytics widgets), `plotAnalytics` (compose several series into an interactive Prefab chart), and `dohLookup` (resolve a name over
 the DoH endpoint) do things no endpoint describes, so the published catalog is **not**
 fully derivable from the document: `published_tool_names()` combines the generated names
 with the composite tools, and they are registered beside them. This is the accepted cost of
