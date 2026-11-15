@@ -201,19 +201,22 @@ class TestDashboardFetchAndValidation:
     @pytest.mark.asyncio
     async def test_fetch_analytics_payload_error_classification(self, monkeypatch):
         monkeypatch.setattr(
-            dash_module, "_api_request_payload", AsyncMock(return_value={"code": "http_error", "error": "upstream"})
+            "nextdns_mcp.transport._api_request_payload",
+            AsyncMock(return_value={"code": "http_error", "error": "upstream"}),
         )
         payload, err = await dash_module._fetch_analytics_payload("p1", "status")
         assert payload is None and err["code"] == "http_error"
 
-        monkeypatch.setattr(dash_module, "_api_request_payload", AsyncMock(return_value={"data": [{"ok": True}]}))
+        monkeypatch.setattr(
+            "nextdns_mcp.transport._api_request_payload", AsyncMock(return_value={"data": [{"ok": True}]})
+        )
         payload, err = await dash_module._fetch_analytics_payload("p1", "status")
         assert payload == {"data": [{"ok": True}]} and err is None
 
     @pytest.mark.asyncio
     async def test_fetch_analytics_payload_series_cap_only_for_series(self, monkeypatch):
         stub = AsyncMock(return_value={"data": []})
-        monkeypatch.setattr(dash_module, "_api_request_payload", stub)
+        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", stub)
 
         payload, err = await dash_module._fetch_analytics_payload("p1", "status")
         assert payload == {"data": []} and err is None

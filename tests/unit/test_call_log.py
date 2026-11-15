@@ -180,8 +180,6 @@ class TestALocalOperationHasNoEndpoint:
 
     @pytest.mark.asyncio
     async def test_a_chart_records_no_endpoint_and_is_not_a_write(self, monkeypatch, tmp_path):
-        from nextdns_mcp.tools import plots as plots_module
-
         monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
@@ -189,11 +187,13 @@ class TestALocalOperationHasNoEndpoint:
         monkeypatch.setenv(CALL_LOG_ENV, str(path))
 
         # An empty series: the fetch is not what this test is about, and the tool
-        # returns a typed no-data payload without rendering anything.
-        async def empty_series(method, url, params=None, json_body=None):
+        # returns a typed no-data payload without rendering anything. The
+        # signature mirrors transport._api_request_payload, including the series
+        # cap the plot fetch passes.
+        async def empty_series(method, url, params=None, json_body=None, max_response_bytes=None):
             return {"meta": {"series": {"times": []}}, "data": []}
 
-        monkeypatch.setattr(plots_module, "_api_request_payload", empty_series)
+        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", empty_series)
 
         async with Client(build_mcp_server()) as client:
             await client.call_tool("plotAnalytics", {"metric": "status", "profile_id": "abc123"}, raise_on_error=False)

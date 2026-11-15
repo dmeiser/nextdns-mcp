@@ -29,7 +29,7 @@ from prefab_ui.components.charts import AreaChart, BarChart, ChartSeries, PieCha
 
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
-from ..transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload
+from ..transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ..utils import (
     _build_query_params,
     _build_series_params,
@@ -85,17 +85,17 @@ async def _fetch_analytics_payload(
     endpoint: str,
     params: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Fetch an analytics endpoint payload through the access-controlled transport."""
+    """Fetch an analytics endpoint payload through the access-controlled transport.
+
+    The fetch and the typed-error classification are ``transport.fetch_analytics_payload``
+    - shared with ``plots._fetch_series_payload`` so the error contract cannot be
+    copied twice and drift. What stays here is the decision only a dashboard
+    endpoint can make: a ``;series`` response is capped at
+    ``MAX_SERIES_RESPONSE_BYTES``, the bounded analytics endpoints are not.
+    """
     url = f"/profiles/{profile_id}/analytics/{endpoint}"
     max_bytes = MAX_SERIES_RESPONSE_BYTES if ";series" in endpoint else None
-    payload = await _api_request_payload("GET", url, params=params, max_response_bytes=max_bytes)
-    if _is_error_payload(payload):
-        return None, payload
-    return payload, None
-
-
-def _is_error_payload(payload: Any) -> bool:
-    return isinstance(payload, dict) and "code" in payload and "error" in payload and "data" not in payload
+    return await fetch_analytics_payload(url, params, max_response_bytes=max_bytes)
 
 
 def _format_share(count: int, total: int) -> str:

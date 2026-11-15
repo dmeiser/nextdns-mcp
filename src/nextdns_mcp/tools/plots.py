@@ -17,7 +17,7 @@ from prefab_ui.components.charts import AreaChart, ChartSeries
 
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
-from ..transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload
+from ..transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ..utils import (
     PARTIALS_VALUES,
     _build_series_params,
@@ -479,22 +479,20 @@ async def _fetch_series_payload(
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Fetch a time-series payload through the shared payload wrapper.
 
-    Goes through ``transport._api_request_payload`` - the one place that
-    turns raised ``NextDNSError`` into standardized error payloads, returns
-    the ACL layer's denial payload, and adds the profile/entry hint to a 404
-    (issue #183). Plotting keeping its own raise/except wrapper around the
-    raw ``_api_request`` was a second copy of that contract, and a copy that
-    silently lacked the 404 enrichment.
+    Goes through ``transport.fetch_analytics_payload``, which awaits
+    ``transport._api_request_payload`` - the one place that turns raised
+    ``NextDNSError`` into standardized error payloads, returns the ACL layer's
+    denial payload, and adds the profile/entry hint to a 404 (issue #183).
+    Plotting keeping its own raise/except wrapper around the raw
+    ``_api_request`` was a second copy of that contract, and a copy that
+    silently lacked the 404 enrichment; keeping its own copy of the payload
+    classification was a second copy too, which is why the classification now
+    lives beside the wrapper (issue #421).
 
-    The wrapper returns every failure - raised or returned - as a payload,
-    so the classification below is the whole check: a typed failure carries
-    a ``code`` and an ``error`` and never a ``data`` key; a 2xx body that
-    merely happens to carry an ``error`` key is data.
+    A series response is capped at ``MAX_SERIES_RESPONSE_BYTES`` while
+    streaming; the cap stays here because it is what a series endpoint is.
     """
-    payload = await _api_request_payload("GET", url, params=params, max_response_bytes=MAX_SERIES_RESPONSE_BYTES)
-    if isinstance(payload, dict) and "code" in payload and "error" in payload and "data" not in payload:
-        return None, payload
-    return payload, None
+    return await fetch_analytics_payload(url, params, max_response_bytes=MAX_SERIES_RESPONSE_BYTES)
 
 
 def _validate_series_payload(payload: dict[str, Any]) -> tuple[list[Any], list[Any]]:
