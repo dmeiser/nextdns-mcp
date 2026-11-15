@@ -455,6 +455,67 @@ class TestDashboardToolsExecution:
         assert isinstance(res, dict)
         assert res["code"] == "invalid_argument"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", sorted(dash_module._WIDGET_DISPATCH))
+    async def test_widget_sections_reject_invalid_time_ranges(self, clean_env, monkeypatch, section):
+        """Every single-widget section must reject invalid ranges without an upstream call."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        calls: list[tuple] = []
+
+        async def fake_fetch(pid, endpoint, params=None):
+            calls.append((endpoint, params))
+            return ({"data": [{"status": "default", "queries": 10}]}, None)
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        bad_ranges = [
+            ("2026-11-02T00:00:00Z", "2026-11-01T00:00:00Z"),  # inverted: end before start
+            ("definitely-not-a-time", "now"),  # unresolvable relative string
+            ("-3650d", "now"),  # over the series point budget
+        ]
+        for from_time, to_time in bad_ranges:
+            calls.clear()
+            res = await dash_module.overviewDashboard(
+                profile_id="abc123", from_time=from_time, to_time=to_time, section=section
+            )
+            assert isinstance(res, dict), section
+            assert res["code"] == "invalid_argument", section
+            assert calls == [], section
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", sorted(dash_module._WIDGET_DISPATCH))
+    async def test_widget_sections_still_dispatch_valid_ranges(self, clean_env, monkeypatch, section):
+        """Valid ranges must still dispatch to the widget after validation."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        calls: list[tuple] = []
+
+        async def fake_fetch(pid, endpoint, params=None):
+            calls.append((endpoint, params))
+            if endpoint == "status":
+                return ({"data": [{"status": "default", "queries": 90}, {"status": "blocked", "queries": 10}]}, None)
+            if endpoint == "status;series":
+                return (
+                    {
+                        "meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}},
+                        "data": [{"name": "blocked", "queries": [10]}],
+                    },
+                    None,
+                )
+            if endpoint == "destinations":
+                return (
+                    {"data": [{"company": "google", "queries": 50}, {"name": "US", "code": "US", "queries": 50}]},
+                    None,
+                )
+            if endpoint == "encryption":
+                return ({"data": [{"encrypted": True, "queries": 80}, {"encrypted": False, "queries": 20}]}, None)
+            if endpoint == "dnssec":
+                return ({"data": [{"validated": True, "queries": 30}, {"validated": False, "queries": 70}]}, None)
+            return ({"data": [{"domain": "test.com", "name": "Test", "ip": "1.1.1.1", "queries": 10}]}, None)
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        res = await dash_module.overviewDashboard(profile_id="abc123", from_time="-1d", to_time="now", section=section)
+        assert calls, section
+        assert isinstance(res, ToolResult), section
+
     def test_build_queries_series_card_exception_handling(self, monkeypatch):
         monkeypatch.setattr(dash_module, "_validate_series_payload", MagicMock(side_effect=ValueError("bad data")))
         assert dash_module._build_queries_series_card({"meta": {}}) is None
