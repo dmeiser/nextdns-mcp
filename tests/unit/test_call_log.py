@@ -570,3 +570,33 @@ class TestEvidenceColumn:
         prefab_app = {"$prefab": {"version": "0.3"}, "view": {}}
         row = self._row("plotAnalytics", {}, True, prefab_app)
         assert "components" not in row.get("evidence", {})
+
+
+class TestIntermediateSerialization:
+    """Intermediate fields serialize once, not twice with ``sort_keys``."""
+
+    class _R:
+        def __init__(self, structured=None):
+            self.is_error = False
+            self.structured_content = structured
+
+    def test_args_column_is_a_bounded_json_string_with_sorted_final_keys(self, tmp_path):
+        mw = CallLogMiddleware(path="")
+        row = mw._record_row("addToDenylist", {"z_key": "1", "a_key": "2"}, True, "", self._R())
+        # The harness matches the column as text (e.g. '"active": false'), so
+        # it stays the bounded JSON string it always was.
+        assert isinstance(row["args"], str)
+        assert len(row["args"]) <= 600
+        assert json.loads(row["args"]) == {"z_key": "1", "a_key": "2"}
+        # The final row serialization sorts keys exactly once.
+        log_file = tmp_path / "calls.jsonl"
+        _append_row(str(log_file), row)
+        raw = log_file.read_text(encoding="utf-8").strip()
+        assert json.loads(raw)["args"] == row["args"]
+        assert '"args"' in raw and raw.index('"args"') < raw.index('"error"')
+
+    def test_result_column_is_a_bounded_json_string(self):
+        mw = CallLogMiddleware(path="")
+        row = mw._record_row("getDenylist", {"profile_id": "p1"}, True, "", self._R({"data": [{"b": 1, "a": 2}]}))
+        assert isinstance(row["result"], str)
+        assert json.loads(row["result"]) == {"data": [{"b": 1, "a": 2}]}

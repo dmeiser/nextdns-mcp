@@ -224,8 +224,11 @@ class CallLogMiddleware(Middleware):
             "profile_id": str(arguments.get("profile_id", "")),
             # Enough of the arguments to match the call the harness asked for
             # (which endpoint, which entry), bounded before serialization by
-            # the same projection the result uses.
-            "args": json.dumps(_project_result(arguments), sort_keys=True, default=str)[:ARGS_CHARS],
+            # the same projection the result uses. Serialized once, without
+            # sort_keys: key order is fixed by the final row serialization in
+            # ``_append_row``, so sorting here would serialize twice for
+            # nothing (the harness matches substrings, never key order).
+            "args": json.dumps(_project_result(arguments), default=str)[:ARGS_CHARS],
             "ok": ok,
             "error": error[:ERROR_CHARS],
             # What the call returned. This is what makes a READ verifiable: the
@@ -404,7 +407,10 @@ def _result_text(result: Any) -> str:
     """
     structured = getattr(result, "structured_content", None)
     if structured is not None:
-        raw = json.dumps(_project_result(structured), sort_keys=True, default=str)
+        # No sort_keys here: the row serializer in ``_append_row`` sorts the
+        # whole row once, so sorting this intermediate dump would serialize
+        # twice for nothing (same reasoning as the ``args`` column above).
+        raw = json.dumps(_project_result(structured), default=str)
         if len(raw) <= RESULT_CHARS:
             return raw
         # json.dumps of a string can double it (quote/backslash escaping), so
