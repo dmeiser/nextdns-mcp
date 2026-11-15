@@ -571,7 +571,7 @@ def _validate_card_data(
 ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
     """Extract list data from payload or return typed no-data error."""
     data = _payload_data(payload)
-    if not data:
+    if payload is None:
         return None, error_payload(ErrorCode.NO_DATA, f"No {endpoint} data available", profile_id=pid)
     return data, None
 
