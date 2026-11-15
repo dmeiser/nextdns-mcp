@@ -13,9 +13,12 @@ import httpx
 import pytest
 from fastmcp.tools.base import ToolResult
 
+from nextdns_mcp import charts as charts_module
 from nextdns_mcp import client as client_module
 from nextdns_mcp.tools import dashboard as dash_module
 from nextdns_mcp.tools import plots as plots_module
+from nextdns_mcp.tools.dashboard import data as data_mod
+from nextdns_mcp.tools.dashboard import tool as tool_mod
 
 
 class _StreamedResponse:
@@ -59,7 +62,7 @@ class TestValidateDashboardLimit:
 
     @pytest.mark.parametrize("limit", [0, -1, -100, 501, 1000, 10_000_000, True])
     def test_out_of_range_limits_rejected(self, limit):
-        err = dash_module._validate_dashboard_limit(limit)
+        err = tool_mod._validate_dashboard_limit(limit)
         assert err is not None
         assert err["code"] == "invalid_argument"
         assert err["min_limit"] == 1
@@ -68,7 +71,7 @@ class TestValidateDashboardLimit:
 
     @pytest.mark.parametrize("limit", [1, 10, 500])
     def test_boundary_limits_accepted(self, limit):
-        assert dash_module._validate_dashboard_limit(limit) is None
+        assert tool_mod._validate_dashboard_limit(limit) is None
 
 
 class TestOverviewDashboardLimitValidation:
@@ -99,7 +102,7 @@ class TestOverviewDashboardLimitValidation:
                 return ({"data": [{"validated": True, "queries": 30}, {"validated": False, "queries": 70}]}, None)
             return ({"data": [{"domain": "test.com", "name": "Test", "ip": "1.1.1.1", "queries": 10}]}, None)
 
-        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
         return calls
 
     @pytest.mark.asyncio
@@ -146,7 +149,7 @@ class TestPlotAnalyticsLimitLowerBound:
     @pytest.mark.parametrize("limit", [0, -1, -100])
     async def test_non_positive_limit_rejected(self, mock_api_client, monkeypatch, limit):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         result = await plots_module._plot_analytics_series_impl("status", limit=limit)
@@ -159,7 +162,7 @@ class TestPlotAnalyticsLimitLowerBound:
     @pytest.mark.asyncio
     async def test_limit_of_one_accepted(self, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(plots_module, "_now", lambda: 1_700_000_000.0)
+        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
         await plots_module._plot_analytics_series_impl("status", from_time="-1d", interval=3600, limit=1)

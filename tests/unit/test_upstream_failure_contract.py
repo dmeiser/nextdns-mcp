@@ -24,8 +24,8 @@ from nextdns_mcp import client as client_module
 from nextdns_mcp import transport
 from nextdns_mcp.errors import NextDNSAuthError, NextDNSError, NextDNSRateLimitError, NextDNSServerError
 from nextdns_mcp.server import build_mcp_server
-from nextdns_mcp.tools import dashboard as dashboard_module
 from nextdns_mcp.tools import plots as plots_module
+from nextdns_mcp.tools.dashboard import data as dashboard_module
 
 # Path served by the stub -> (status, body). The plot series path carries a
 # query string; the stub matches on path only. A bytes body is served with

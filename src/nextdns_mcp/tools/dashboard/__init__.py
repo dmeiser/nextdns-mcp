@@ -1,4 +1,4 @@
-"""Interactive analytics dashboard and specialized analytics UI tools for NextDNS.
+"""Interactive analytics dashboard with specialized analytics widgets for NextDNS.
 
 The package is split by responsibility, one concern per module:
 
@@ -17,6 +17,6 @@ live in ``nextdns_mcp.charts``, which neither this package nor ``tools.plots`` o
 SPDX-License-Identifier: MIT
 """
 
-from .tool import DashboardSection, overviewDashboard
+from .tool import DASHBOARD_SECTIONS, DashboardSection, overviewDashboard
 
-__all__ = ["DashboardSection", "overviewDashboard"]
+__all__ = ["DASHBOARD_SECTIONS", "DashboardSection", "overviewDashboard"]

@@ -9,12 +9,16 @@ reads through ``data``, renders through ``components`` and words its result thro
 SPDX-License-Identifier: MIT
 """
 
-from typing import Any, Literal
+from collections.abc import Awaitable
+from typing import Any, Literal, Protocol, get_args
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.components import Column
 
+from ...charts import series_budget_error
 from ...coercion import OptionalProfileId
+from ...errors import ErrorCode, error_payload
+from ...utils import normalize_time_value
 from .components import (
     _append_extra_cards,
     _assemble_overview_layout,
@@ -42,6 +46,7 @@ from .data import (
     _fetch_security_payloads,
     _gafam_rows,
     _item_queries,
+    _overview_interval,
     _payload_data,
     _reason_label,
     _resolve_profile,
@@ -58,15 +63,17 @@ async def _gafam_analytics_impl(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
     to_time: str | int = "now",
+    limit: int = 10,
     view_type: Literal["auto", "pie", "bar", "table"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the GAFAM dominance donut chart and table."""
-    _pid, data, err = await _fetch_card_data(
-        profile_id, "destinations", from_time=from_time, to_time=to_time, type="gafam"
+    data, err = await _fetch_card_data(
+        profile_id, "destinations", from_time=from_time, to_time=to_time, limit=limit, type="gafam"
     )
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     chart_data, _ = _gafam_rows(data)
     total = sum(r["queries"] for r in chart_data)
     summary = _format_gafam_summary(chart_data, total)
@@ -82,19 +89,20 @@ async def _security_analytics_impl(
     pid, err = await _resolve_profile(profile_id)
     if err is not None:
         return err
-    assert pid is not None
+    if pid is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution returned no id")
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
-    (enc_p, enc_err), (sec_p, sec_err) = await _fetch_security_payloads(pid, params)
+    (encryption_payload, enc_err), (dnssec_payload, sec_err) = await _fetch_security_payloads(pid, params)
     first_err = enc_err or sec_err
     if first_err:
         return first_err
 
-    enc_data = _payload_data(enc_p)
-    sec_data = _payload_data(sec_p)
-    enc_val, enc_total, enc_pct = _calc_rate(enc_data, "encrypted")
-    dnssec_val, dnssec_total, dnssec_pct = _calc_rate(sec_data, "validated")
+    encryption_data = _payload_data(encryption_payload)
+    dnssec_data = _payload_data(dnssec_payload)
+    enc_val, enc_total, enc_pct = _calc_rate(encryption_data, "encrypted")
+    dnssec_val, dnssec_total, dnssec_pct = _calc_rate(dnssec_data, "validated")
 
-    card = _build_security_card(enc_data, sec_data)
+    card = _build_security_card(encryption_data, dnssec_data)
     summary = (
         f"[Rendered Security Analytics: Encrypted DNS {enc_pct:.2f}% ({enc_val:,}/{enc_total:,}), "
         f"DNSSEC {dnssec_pct:.2f}% ({dnssec_val:,}/{dnssec_total:,})]"
@@ -110,10 +118,11 @@ async def _reasons_analytics_impl(
     view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the reasons for blocking card."""
-    _pid, data, err = await _fetch_card_data(profile_id, "reasons", from_time=from_time, to_time=to_time, limit=limit)
+    data, err = await _fetch_card_data(profile_id, "reasons", from_time=from_time, to_time=to_time, limit=limit)
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = [(_reason_label(item), _item_queries(item)) for item in data]
     total = sum(q for _, q in items)
     summary = _format_items_summary("Reasons for Blocking", "blocklists", items, total)
@@ -128,10 +137,11 @@ async def _device_analytics_impl(
     view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the device analytics card."""
-    _pid, data, err = await _fetch_card_data(profile_id, "devices", from_time=from_time, to_time=to_time, limit=limit)
+    data, err = await _fetch_card_data(profile_id, "devices", from_time=from_time, to_time=to_time, limit=limit)
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = [(_device_label(item), _item_queries(item)) for item in data]
     total = sum(q for _, q in items)
     summary = _format_items_summary("Device Analytics", "devices", items, total)
@@ -145,10 +155,11 @@ async def _ip_analytics_impl(
     limit: int = 10,
 ) -> dict[str, Any] | ToolResult:
     """Render the IP analytics card."""
-    _pid, data, err = await _fetch_card_data(profile_id, "ips", from_time=from_time, to_time=to_time, limit=limit)
+    data, err = await _fetch_card_data(profile_id, "ips", from_time=from_time, to_time=to_time, limit=limit)
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = _ip_summary_items(data)
     total = sum(q for _, q in items)
     summary = _format_items_summary("IP Analytics", "IP addresses", items, total)
@@ -171,12 +182,13 @@ async def _domain_card_analytics_impl(
     key_name: str = "domain",
 ) -> dict[str, Any] | ToolResult:
     """Render a domain analytics card (root/resolved/blocked)."""
-    _pid, data, err = await _fetch_card_data(
+    data, err = await _fetch_card_data(
         profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, **fetch_extra
     )
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = [(_domain_label(item, key_name), _item_queries(item)) for item in data]
     total = sum(q for _, q in items)
     summary = _format_items_summary(summary_title, summary_noun, items, total)
@@ -199,12 +211,13 @@ async def _country_analytics_impl(
     view_type: Literal["auto", "table", "bar", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the destination countries analytics card."""
-    _pid, data, err = await _fetch_card_data(
+    data, err = await _fetch_card_data(
         profile_id, "destinations", from_time=from_time, to_time=to_time, limit=limit, type="countries"
     )
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = [(_destination_label(item), _item_queries(item)) for item in data]
     total = sum(q for _, q in items)
     summary = _format_items_summary("Traffic Destinations", "countries", items, total)
@@ -217,10 +230,11 @@ async def _kpi_analytics_impl(
     to_time: str | int = "now",
 ) -> dict[str, Any] | ToolResult:
     """Render top KPI metric cards."""
-    _pid, data, err = await _fetch_card_data(profile_id, "status", from_time=from_time, to_time=to_time)
+    data, err = await _fetch_card_data(profile_id, "status", from_time=from_time, to_time=to_time)
     if err:
         return err
-    assert data is not None
+    if data is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     kpis = _calculate_status_kpis(data)
     summary = (
         f"[Rendered NextDNS KPI Metrics: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%)]"
@@ -243,50 +257,177 @@ DashboardSection = Literal[
     "security",
 ]
 
-_WIDGET_DISPATCH: dict[str, Any] = {
-    "kpi": lambda p, f, t, lim, v: _kpi_analytics_impl(p, from_time=f, to_time=t),
-    "domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
-        p,
-        from_time=f,
-        to_time=t,
-        limit=lim,
-        view_type=v,
+# The section table the published tool accepts, read from the same Literal so the
+# E2E sweep and the actor harness cannot drift from it (#470).
+DASHBOARD_SECTIONS = get_args(DashboardSection)
+
+
+class _WidgetHandler(Protocol):
+    def __call__(
+        self,
+        profile_id: OptionalProfileId = None,
+        from_time: str | int = "-30d",
+        to_time: str | int = "now",
+        limit: int = 10,
+        view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+    ) -> Awaitable[dict[str, Any] | ToolResult]: ...
+
+
+WidgetHandler = _WidgetHandler
+
+
+async def _dispatch_kpi(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _kpi_analytics_impl(profile_id, from_time=from_time, to_time=to_time)
+
+
+async def _dispatch_domains(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _domain_card_analytics_impl(
+        profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        view_type=view_type,
         fetch_extra={"status": "default"},
         title="Resolved Domains",
         description="Domains that resolved without being blocked.",
         summary_title="Resolved Domains",
         color="#3b82f6",
-    ),
-    "blocked_domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
-        p,
-        from_time=f,
-        to_time=t,
-        limit=lim,
-        view_type=v,
+    )
+
+
+async def _dispatch_blocked_domains(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _domain_card_analytics_impl(
+        profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        view_type=view_type,
         fetch_extra={"status": "blocked"},
         title="Blocked Domains",
         description="Domains blocked by security, privacy, or parental controls.",
         summary_title="Blocked Domains",
         color="#ef4444",
-    ),
-    "reasons": lambda p, f, t, lim, v: _reasons_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
-    "devices": lambda p, f, t, lim, v: _device_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
-    "ips": lambda p, f, t, lim, v: _ip_analytics_impl(p, from_time=f, to_time=t, limit=lim),
-    "root_domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
-        p,
-        from_time=f,
-        to_time=t,
-        limit=lim,
-        view_type=v,
+    )
+
+
+async def _dispatch_reasons(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _reasons_analytics_impl(
+        profile_id, from_time=from_time, to_time=to_time, limit=limit, view_type=view_type
+    )
+
+
+async def _dispatch_devices(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _device_analytics_impl(
+        profile_id, from_time=from_time, to_time=to_time, limit=limit, view_type=view_type
+    )
+
+
+async def _dispatch_ips(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _ip_analytics_impl(profile_id, from_time=from_time, to_time=to_time, limit=limit)
+
+
+async def _dispatch_root_domains(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _domain_card_analytics_impl(
+        profile_id,
+        from_time=from_time,
+        to_time=to_time,
+        limit=limit,
+        view_type=view_type,
         fetch_extra={"root": "true"},
         title="Root Domains",
         description="Aggregate queries for root domains and subdomains.",
         summary_title="Root Domains",
         key_name="domain",
-    ),
-    "countries": lambda p, f, t, lim, v: _country_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
-    "gafam": lambda p, f, t, lim, v: _gafam_analytics_impl(p, from_time=f, to_time=t, view_type=v),
-    "security": lambda p, f, t, lim, v: _security_analytics_impl(p, from_time=f, to_time=t),
+    )
+
+
+async def _dispatch_countries(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _country_analytics_impl(
+        profile_id, from_time=from_time, to_time=to_time, limit=limit, view_type=view_type
+    )
+
+
+async def _dispatch_gafam(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _gafam_analytics_impl(
+        profile_id, from_time=from_time, to_time=to_time, limit=limit, view_type=view_type
+    )
+
+
+async def _dispatch_security(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+) -> dict[str, Any] | ToolResult:
+    return await _security_analytics_impl(profile_id, from_time=from_time, to_time=to_time)
+
+
+_WIDGET_DISPATCH: dict[str, _WidgetHandler] = {
+    "kpi": _dispatch_kpi,
+    "domains": _dispatch_domains,
+    "blocked_domains": _dispatch_blocked_domains,
+    "reasons": _dispatch_reasons,
+    "devices": _dispatch_devices,
+    "ips": _dispatch_ips,
+    "root_domains": _dispatch_root_domains,
+    "countries": _dispatch_countries,
+    "gafam": _dispatch_gafam,
+    "security": _dispatch_security,
 }
 
 
@@ -308,11 +449,12 @@ async def _append_extra_dashboard_sections(
     limit: int,
     domain_view: str = "table",
 ) -> None:
-    """Fetch the extra section payloads and hand the rows to the card builders."""
+    """Fetch and append reasons, devices, IPs, root domains, GAFAM, destinations and security cards."""
     dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
-    sections = await _fetch_extra_payloads(profile_id, dom_params, params)
-    _append_extra_cards(view, sections, domain_view=domain_view)
+
+    payloads = await _fetch_extra_payloads(profile_id, dom_params, params)
+    _append_extra_cards(view, payloads, domain_view=domain_view)
 
 
 async def _render_overview_page(
@@ -324,14 +466,17 @@ async def _render_overview_page(
     domain_view: Literal["table", "bar", "pie"],
 ) -> dict[str, Any] | ToolResult:
     """Fetch payloads, assemble layout, and return ToolResult for overview or all."""
-    s_p, ser_p, r_data, b_data, fetch_err = await _fetch_overview_payloads(pid, from_time, to_time, limit)
+    include_extra = section == "all"
+    s_p, ser_p, r_data, b_data, extra_payloads, fetch_err = await _fetch_overview_payloads(
+        pid, from_time, to_time, limit, include_extra=include_extra
+    )
     if fetch_err:
         return fetch_err
 
     kpis = _calculate_status_kpis(_payload_data(s_p))
     view = _assemble_overview_layout(kpis, ser_p, r_data, b_data, domain_view=domain_view)
-    if section == "all":
-        await _append_extra_dashboard_sections(pid, view, from_time, to_time, limit, domain_view=domain_view)
+    if include_extra and extra_payloads is not None:
+        _append_extra_cards(view, extra_payloads, domain_view=domain_view)
 
     top_summary = _overview_top_summary(r_data, b_data)
     summary = (
@@ -341,30 +486,49 @@ async def _render_overview_page(
     return ToolResult(content=summary, structured_content=_build_page_app(view))
 
 
+def _validate_dashboard_arg(name: str, value: Any, allowed_literal: Any) -> dict[str, Any] | None:
+    """Return an INVALID_ARGUMENT payload when ``value`` is outside ``allowed_literal``."""
+    allowed = set(get_args(allowed_literal))
+    if value in allowed:
+        return None
+    return error_payload(
+        ErrorCode.INVALID_ARGUMENT,
+        f"Invalid '{name}': {value!r}; allowed values: {sorted(allowed)}",
+        **{name: value},
+    )
+
+
+def _validate_overview_dashboard_args(section: Any, view_type: Any, domain_view: Any) -> dict[str, Any] | None:
+    """Validate overview dashboard arguments; return an error payload or None."""
+    for name, value, allowed in (
+        ("section", section, DashboardSection),
+        ("view_type", view_type, Literal["auto", "bar", "table", "pie"]),
+        ("domain_view", domain_view, Literal["table", "bar", "pie"]),
+    ):
+        err = _validate_dashboard_arg(name, value, allowed)
+        if err is not None:
+            return err
+    return None
+
+
+DASHBOARD_LIMIT_MIN = 1
+DASHBOARD_LIMIT_MAX = 500
+
+
+def _validate_dashboard_limit(limit: int) -> dict[str, Any] | None:
+    """Reject out-of-range dashboard limits before any upstream request."""
+    if isinstance(limit, bool) or limit < DASHBOARD_LIMIT_MIN or limit > DASHBOARD_LIMIT_MAX:
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"limit must be between {DASHBOARD_LIMIT_MIN} and {DASHBOARD_LIMIT_MAX}, got {limit}",
+            min_limit=DASHBOARD_LIMIT_MIN,
+            max_limit=DASHBOARD_LIMIT_MAX,
+            limit=limit,
+        )
+    return None
+
+
 async def _overview_dashboard_impl(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    section: DashboardSection = "overview",
-    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
-    domain_view: Literal["table", "bar", "pie"] = "table",
-) -> dict[str, Any] | ToolResult:
-    """Construct an overview dashboard or individual widget matching the NextDNS web UI."""
-    eff_view = _resolve_domain_view(domain_view, view_type)
-
-    if section in _WIDGET_DISPATCH:
-        return await _WIDGET_DISPATCH[section](profile_id, from_time, to_time, limit, eff_view)
-
-    pid, err = await _resolve_profile(profile_id)
-    if err is not None:
-        return err
-    assert pid is not None
-
-    return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
-
-
-async def overviewDashboard(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
     to_time: str | int = "now",
@@ -396,13 +560,49 @@ async def overviewDashboard(
 
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start of time window (e.g. "-30d", "-7d", "-1d", Unix timestamp).
+        from_time: Start of time window (e.g. "-30d", "-7d", "-1d", Unix timestamp). Default "-30d".
         to_time: End of time window (default "now").
+        Default window: from_time="-30d" to to_time="now" (30 days).
         limit: Maximum number of rows to display in lists and tables (default 10).
         section: Dashboard section or widget to render (default "overview").
         view_type: Visualization format: "auto" (default: table or card default), "bar", "table", or "pie".
         domain_view: Visualization format for domain cards in overview mode: "table" (default), "bar", or "pie".
     """
+    eff_view = _resolve_domain_view(domain_view, view_type)
+
+    if section in _WIDGET_DISPATCH:
+        norm_from = normalize_time_value(from_time)
+        norm_to = normalize_time_value(to_time)
+        budget_err = series_budget_error(norm_from, norm_to, _overview_interval(norm_from, norm_to))
+        if budget_err is not None:
+            return budget_err
+        return await _WIDGET_DISPATCH[section](profile_id, norm_from, norm_to, limit, eff_view)
+
+    pid, err = await _resolve_profile(profile_id)
+    if err is not None:
+        return err
+    if pid is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution returned no id")
+
+    return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
+
+
+async def overviewDashboard(
+    profile_id: OptionalProfileId = None,
+    from_time: str | int = "-30d",
+    to_time: str | int = "now",
+    limit: int = 10,
+    section: DashboardSection = "overview",
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
+    domain_view: Literal["table", "bar", "pie"] = "table",
+) -> dict[str, Any] | ToolResult:
+    """Render interactive visual Prefab UI analytics dashboards and specialized widgets."""
+    arg_err = _validate_overview_dashboard_args(section, view_type, domain_view)
+    if arg_err is not None:
+        return arg_err
+    limit_err = _validate_dashboard_limit(limit)
+    if limit_err is not None:
+        return limit_err
     return await _overview_dashboard_impl(
         profile_id=profile_id,
         from_time=from_time,
@@ -412,3 +612,6 @@ async def overviewDashboard(
         view_type=view_type,
         domain_view=domain_view,
     )
+
+
+overviewDashboard.__doc__ = _overview_dashboard_impl.__doc__

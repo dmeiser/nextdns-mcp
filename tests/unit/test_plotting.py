@@ -134,7 +134,7 @@ class TestParseSeriesTimestamp:
         assert (ts.hour, ts.minute) == (10, 30)
         assert ts.utcoffset() == timedelta(0)
 
-        ts_fractional = plots_module._parse_series_timestamp("2024-01-15T10:30:00.123456+0000")
+        ts_fractional = charts_module._parse_series_timestamp("2024-01-15T10:30:00.123456+0000")
         assert ts_fractional.microsecond == 123456
         assert ts_fractional.utcoffset() == timedelta(0)
 

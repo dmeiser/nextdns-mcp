@@ -10,12 +10,12 @@ SPDX-License-Identifier: MIT
 
 from typing import Any
 
-from .data import _domain_label, _item_queries
+from .data import _domain_label, _item_queries, _sanitize_label
 
 
 def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
     """Format top items as 'name (count)' list."""
-    formatted = [f"{name} ({q:,})" for name, q in items[:limit]]
+    formatted = [f"{_sanitize_label(name)} ({q:,})" for name, q in items[:limit]]
     return ", ".join(formatted)
 
 

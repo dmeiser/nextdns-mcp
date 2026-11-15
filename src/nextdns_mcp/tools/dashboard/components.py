@@ -35,6 +35,7 @@ from prefab_ui.components.charts import AreaChart, BarChart, ChartSeries, PieCha
 
 from ...charts import DASHBOARD_THEME, build_chart_data, build_chart_series, validate_series_payload
 from .data import (
+    ExtraDashboardPayloads,
     _calc_rate,
     _destination_label,
     _destination_row,
@@ -49,6 +50,10 @@ from .data import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Reusable table columns shared across dashboard builders.
+QUERIES_COLUMN = DataTableColumn(key="queries", header="Queries", sortable=True, format="number")
+SHARE_COLUMN = DataTableColumn(key="share", header="Share", sortable=True)
 
 
 def _build_kpi_row(kpis: dict[str, Any]) -> Row:
@@ -133,7 +138,7 @@ def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     return DataTable(
         columns=[
             DataTableColumn(key="domain", header="Domain", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
+            QUERIES_COLUMN,
         ],
         rows=rows,  # type: ignore[arg-type]
     )
@@ -158,6 +163,17 @@ def _render_domain_content(title: str, data: list[dict[str, Any]], key_name: str
         _render_chart_view(chart_data, title, color, view_type)
 
 
+def _build_analytics_card(title: str, description: str, render_content) -> Card:
+    """Build a generic analytics card shell around rendered content."""
+    with Card(css_class="flex-1 min-w-[300px]") as card:
+        with CardHeader():
+            CardTitle(title)
+            CardDescription(description)
+        with CardContent():
+            render_content()
+    return card
+
+
 def _build_domains_card(
     title: str,
     description: str,
@@ -167,13 +183,11 @@ def _build_domains_card(
     color: str = "#3b82f6",
 ) -> Card:
     """Build a domain listing card with a sortable data table or bar chart."""
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle(title)
-            CardDescription(description)
-        with CardContent():
-            _render_domain_content(title, data, key_name, view_type, color)
-    return card
+    return _build_analytics_card(
+        title,
+        description,
+        lambda: _render_domain_content(title, data, key_name, view_type, color),
+    )
 
 
 def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
@@ -183,8 +197,8 @@ def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     return DataTable(
         columns=[
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
-            DataTableColumn(key="share", header="Share", sortable=True),
+            QUERIES_COLUMN,
+            SHARE_COLUMN,
         ],
         rows=rows,  # type: ignore[arg-type]
     )
@@ -192,22 +206,24 @@ def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
 
 def _build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the reasons for blocking card."""
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle("Reasons for Blocking")
-            CardDescription("Security, Privacy and/or Parental Control settings that blocked the most queries.")
-        with CardContent():
-            if not data:
-                Text("No queries were blocked during this period.", css_class="text-sm text-muted-foreground py-4")
-            elif view_type == "table":
-                _reasons_table(data)
+
+    def _render():
+        if not data:
+            Text("No queries were blocked during this period.", css_class="text-sm text-muted-foreground py-4")
+        elif view_type == "table":
+            _reasons_table(data)
+        else:
+            chart_data = [{"label": _reason_label(item), "queries": _item_queries(item)} for item in data]
+            if view_type == "pie":
+                _pie_chart(chart_data)
             else:
-                chart_data = [{"label": _reason_label(item), "queries": _item_queries(item)} for item in data]
-                if view_type == "pie":
-                    _pie_chart(chart_data)
-                else:
-                    _bar_chart(chart_data, "Blocked Queries", "#ef4444")
-    return card
+                _bar_chart(chart_data, "Blocked Queries", "#ef4444")
+
+    return _build_analytics_card(
+        "Reasons for Blocking",
+        "Security, Privacy and/or Parental Control settings that blocked the most queries.",
+        _render,
+    )
 
 
 def _devices_table(data: list[dict[str, Any]]) -> DataTable:
@@ -218,8 +234,8 @@ def _devices_table(data: list[dict[str, Any]]) -> DataTable:
         columns=[
             DataTableColumn(key="device", header="Device", sortable=True),
             DataTableColumn(key="model", header="Model", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
-            DataTableColumn(key="share", header="Share", sortable=True),
+            QUERIES_COLUMN,
+            SHARE_COLUMN,
         ],
         rows=rows,  # type: ignore[arg-type]
     )
@@ -238,13 +254,11 @@ def _render_device_content(data: list[dict[str, Any]], view_type: str) -> None:
 
 def _build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the devices card."""
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle("Devices")
-            CardDescription("Devices making the queries.")
-        with CardContent():
-            _render_device_content(data, view_type)
-    return card
+    return _build_analytics_card(
+        "Devices",
+        "Devices making the queries.",
+        lambda: _render_device_content(data, view_type),
+    )
 
 
 def _build_ips_card(data: list[dict[str, Any]]) -> Card:
@@ -263,7 +277,7 @@ def _build_ips_card(data: list[dict[str, Any]]) -> Card:
                         DataTableColumn(key="ip", header="IP Address", sortable=True),
                         DataTableColumn(key="isp", header="ISP", sortable=True),
                         DataTableColumn(key="location", header="Location", sortable=True),
-                        DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
+                        QUERIES_COLUMN,
                     ],
                     rows=rows,  # type: ignore[arg-type]
                 )
@@ -275,8 +289,8 @@ def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
     return DataTable(
         columns=[
             DataTableColumn(key="company", header="Company", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
-            DataTableColumn(key="share", header="Share", sortable=True),
+            QUERIES_COLUMN,
+            SHARE_COLUMN,
         ],
         rows=table_rows,  # type: ignore[arg-type]
     )
@@ -339,7 +353,7 @@ def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
         columns=[
             DataTableColumn(key="country", header="Country", sortable=True),
             DataTableColumn(key="code", header="Code", sortable=True),
-            DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
+            QUERIES_COLUMN,
             DataTableColumn(key="sample_domains", header="Sample Domains"),
         ],
         rows=rows,  # type: ignore[arg-type]
@@ -359,13 +373,11 @@ def _render_destination_content(data: list[dict[str, Any]], view_type: str) -> N
 
 def _build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the destination countries card."""
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle("Traffic Destination")
-            CardDescription("Top destination countries based on DNS queries.")
-        with CardContent():
-            _render_destination_content(data, view_type)
-    return card
+    return _build_analytics_card(
+        "Traffic Destination",
+        "Top destination countries based on DNS queries.",
+        lambda: _render_destination_content(data, view_type),
+    )
 
 
 def _assemble_overview_layout(
@@ -400,26 +412,27 @@ def _assemble_overview_layout(
 
 def _append_extra_cards(
     view: Column,
-    sections: list[list[dict[str, Any]]],
+    payloads: ExtraDashboardPayloads,
     domain_view: str = "table",
 ) -> None:
-    """Append the reasons, devices, IPs, root-domain, GAFAM and security cards to a view.
+    """Append the reasons, devices, IPs, root-domain, GAFAM, countries and security cards.
 
-    The caller fetches; this only lays out. ``sections`` is unpacked in the order
-    ``data._fetch_extra_payloads`` answers its fan-out, which is the pairing the
-    original single-body implementation had too.
+    The caller fetches; this only lays out. ``payloads`` carries one named field
+    per section, so the pairing between a fetch and the card that renders it is
+    carried by name rather than by position.
     """
-    r_d, d_d, i_d, rt_d, g_d, e_d, sec_d = sections
     with view:
         with Row(gap=4):
-            _build_reasons_card(r_d, view_type=domain_view)
-            _build_devices_card(d_d, view_type=domain_view)
+            _build_reasons_card(payloads.reasons, view_type=domain_view)
+            _build_devices_card(payloads.devices, view_type=domain_view)
         with Row(gap=4):
-            _build_domains_card("Root Domains", "Aggregate root domains.", rt_d, view_type=domain_view)
-            _build_ips_card(i_d)
+            _build_domains_card("Root Domains", "Aggregate root domains.", payloads.root_domains, view_type=domain_view)
+            _build_ips_card(payloads.ips)
         with Row(gap=4):
-            _build_gafam_card(g_d, view_type=domain_view)
-            _build_security_card(e_d, sec_d)
+            _build_gafam_card(payloads.gafam, view_type=domain_view)
+            _build_destinations_card(payloads.countries, view_type=domain_view)
+        with Row(gap=4):
+            _build_security_card(payloads.encryption, payloads.dnssec)
 
 
 def _build_page_app(view: Column) -> PrefabApp:
