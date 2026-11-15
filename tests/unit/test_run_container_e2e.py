@@ -1478,3 +1478,37 @@ class TestRateLimitPacingAndFullBackoff:
         assert runner._pace_seconds == 0.0
         runner._bump_pace()
         assert runner._pace_seconds == 0.0
+
+
+@pytest.mark.asyncio
+async def test_execute_call_plot_prefab_content_rejects_summary_only(runner: ContainerE2ERunner):
+    """A summary-only plotAnalytics answer must fail the visual check (issue #399).
+
+    The reporter's own inputs — text carrying "Analytics:" / "[Rendered " with no
+    $prefab envelope — passed under the old predicate, so the E2E could not detect
+    a regressed UI payload. This test fails on that predicate and passes on the
+    new one, which requires an image block or a $prefab envelope with a view.
+    """
+    for text in ("NextDNS Analytics: status", "[Rendered NextDNS dashboard]"):
+        session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.is_error = False
+        mock_result.content = [TextContent(type="text", text=text)]
+        mock_result.structured_content = None
+        session.call_tool.return_value = mock_result
+
+        ok, _ = await runner.execute_call(session, "plotAnalytics", {"metric": "status"})
+
+        assert ok is False
+
+    # $prefab without a view is still rejected.
+    session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.is_error = False
+    mock_result.content = [TextContent(type="text", text="NextDNS Analytics: status")]
+    mock_result.structured_content = {"$prefab": {"version": "0.3"}}
+    session.call_tool.return_value = mock_result
+
+    ok, _ = await runner.execute_call(session, "plotAnalytics", {"metric": "status"})
+
+    assert ok is False
