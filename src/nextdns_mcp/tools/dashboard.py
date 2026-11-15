@@ -598,8 +598,8 @@ async def _fetch_card_data(
 
 def _wrap_card_result(card: Card, summary_text: str) -> ToolResult:
     """Wrap a single visual card into a ToolResult."""
-    with Column(gap=4, css_class="p-6") as view:
-        view.children.append(card)
+    with Column(gap=4, css_class="p-6", children=[card]) as view:
+        pass
     app = PrefabApp(view=view, theme=DASHBOARD_THEME)
     return ToolResult(content=summary_text, structured_content=app)
 
