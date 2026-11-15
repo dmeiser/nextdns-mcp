@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -13,9 +14,13 @@ from mcp.types import TextContent, Tool
 from scripts import validate_schema
 from scripts.run_container_e2e import (
     EXPECTED_TOOLS,
+    PREFAB_UI_TOOL,
+    PREFAB_VIEW_CODE,
     SPEC_PATH,
     WRITE_CASES,
     ContainerE2ERunner,
+    _generative_ui_failure,
+    _missing_generative_ui_tools,
     check_health_endpoint,
     parse_args,
 )
@@ -1512,3 +1517,157 @@ async def test_execute_call_plot_prefab_content_rejects_summary_only(runner: Con
     ok, _ = await runner.execute_call(session, "plotAnalytics", {"metric": "status"})
 
     assert ok is False
+
+
+# --- Issue #400: the enabled-container test for the generative-UI tool ------------
+
+
+def _prefab_result(payload: dict | None = None, *, is_error: bool = False, text: str = "") -> SimpleNamespace:
+    """A tools/call answer: a structured $prefab document, or whatever the sandbox said."""
+    structured = {"$prefab": {"type": "view"}} if payload is None else payload
+    return SimpleNamespace(
+        is_error=is_error,
+        structured_content=structured if not text else None,
+        content=[TextContent(type="text", text=text or json.dumps(structured))],
+    )
+
+
+def test_generative_ui_failure_accepts_a_prefab_document():
+    """A $prefab payload with no error flag is an executed UI document."""
+    assert _generative_ui_failure(_prefab_result(), json.dumps({"$prefab": {"type": "view"}})) == ""
+
+
+def test_generative_ui_failure_names_the_missing_deno_runtime():
+    """The sandbox's Deno error is reported as an image regression, not a generic failure."""
+    text = '{"error": "RuntimeError: Deno is required for the Prefab sandbox"}'
+    failure = _generative_ui_failure(_prefab_result(payload={}, text=text), text)
+    assert "no runnable Deno" in failure
+
+
+def test_generative_ui_failure_rejects_an_error_result_and_a_missing_payload():
+    """Either half of a broken answer fails: the error flag, or no $prefab document."""
+    assert "error result" in _generative_ui_failure(_prefab_result(is_error=True, text="{}"), "{}")
+    assert "no $prefab payload" in _generative_ui_failure(_prefab_result(payload={}), "{}")
+
+
+def test_missing_generative_ui_tools_reports_the_pair():
+    """tools/list without the generative-UI pair is the first half of the #400 contract."""
+    assert _missing_generative_ui_tools({"listProfiles", PREFAB_UI_TOOL, "search_prefab_components"}) == []
+    assert _missing_generative_ui_tools({"listProfiles"}) == ["generate_prefab_ui", "search_prefab_components"]
+
+
+def _ui_runner(tmp_path: Path) -> ContainerE2ERunner:
+    """A runner in generative-UI-only mode against the credential-free container."""
+    return ContainerE2ERunner(
+        endpoint="http://127.0.0.1:8002/mcp",
+        variant="alpine",
+        allow_live_writes=False,
+        plot_profile="",
+        artifacts_dir=tmp_path,
+        expect_health_ok=False,
+        generative_ui_only=True,
+    )
+
+
+async def test_generative_ui_only_calls_the_tool_in_the_container(tmp_path):
+    """--generative-ui-only lists the catalog, calls generate_prefab_ui, and passes on $prefab."""
+    runner = _ui_runner(tmp_path)
+    session = AsyncMock()
+    session.list_tools.return_value = MagicMock(
+        tools=[SimpleNamespace(name=t) for t in ("listProfiles", PREFAB_UI_TOOL, "search_prefab_components")]
+    )
+    text = json.dumps({"$prefab": {"type": "view"}})
+    session.call_tool.return_value = _prefab_result(text=text)
+
+    with (
+        patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=True)),
+        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, "503 class=auth")),
+        patch.object(runner, "_open_session") as open_session,
+    ):
+        open_session.return_value.__aenter__ = AsyncMock(return_value=session)
+        open_session.return_value.__aexit__ = AsyncMock(return_value=False)
+        exit_code = await runner.run()
+
+    assert exit_code == 0
+    assert session.call_tool.await_args.args == (PREFAB_UI_TOOL,)
+    assert session.call_tool.await_args.kwargs["arguments"]["code"] == PREFAB_VIEW_CODE
+    assert runner.executed_count == 1 and runner.failed_count == 0
+
+
+async def test_generative_ui_only_fails_when_the_tool_is_not_served(tmp_path):
+    """NEXTDNS_GENERATIVE_UI=on but no generate_prefab_ui in tools/list: the run fails."""
+    runner = _ui_runner(tmp_path)
+    session = AsyncMock()
+    session.list_tools.return_value = SimpleNamespace(tools=[SimpleNamespace(name="listProfiles")])
+
+    with (
+        patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=True)),
+        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, "503 class=auth")),
+        patch.object(runner, "_open_session") as open_session,
+        patch.object(runner, "execute_call", AsyncMock()) as execute,
+    ):
+        open_session.return_value.__aenter__ = AsyncMock(return_value=session)
+        open_session.return_value.__aexit__ = AsyncMock(return_value=False)
+        exit_code = await runner.run()
+
+    assert exit_code == 1
+    execute.assert_not_called()
+
+
+async def test_generative_ui_only_fails_when_the_sandbox_has_no_deno(tmp_path):
+    """The call-time Deno crash #400 was filed for fails the run, not just the tool."""
+    runner = _ui_runner(tmp_path)
+    session = AsyncMock()
+    session.list_tools.return_value = SimpleNamespace(
+        tools=[SimpleNamespace(name=t) for t in (PREFAB_UI_TOOL, "search_prefab_components")]
+    )
+    text = '{"error": "RuntimeError: Deno is required for the Prefab sandbox"}'
+    session.call_tool.return_value = _prefab_result(payload={}, text=text)
+
+    with (
+        patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=True)),
+        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, "503 class=auth")),
+        patch.object(runner, "_open_session") as open_session,
+    ):
+        open_session.return_value.__aenter__ = AsyncMock(return_value=session)
+        open_session.return_value.__aexit__ = AsyncMock(return_value=False)
+        exit_code = await runner.run()
+
+    assert exit_code == 1
+    assert runner.failed_count == 1
+
+
+async def test_generative_ui_only_needs_no_endpoint_and_no_credential(tmp_path):
+    """Health failure with a valid failure class is expected here; a dead endpoint still fails."""
+    runner = _ui_runner(tmp_path)
+    with (
+        patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=False)),
+        patch("scripts.run_container_e2e.check_health_endpoint") as health,
+    ):
+        assert await runner.run() == 1
+    health.assert_not_called()
+
+
+def test_parse_args_generative_ui(monkeypatch):
+    """--generative-ui-only is off by default and settable from the environment or CLI."""
+    monkeypatch.delenv("GENERATIVE_UI_ONLY", raising=False)
+    with patch("sys.argv", ["run_container_e2e.py"]):
+        assert parse_args().generative_ui_only is False
+
+    monkeypatch.setenv("GENERATIVE_UI_ONLY", "true")
+    with patch("sys.argv", ["run_container_e2e.py"]):
+        assert parse_args().generative_ui_only is True
+
+
+def test_execute_call_names_the_deno_regression_for_the_prefab_tool(runner):
+    """A generate_prefab_ui answer without a $prefab document fails, named as an image regression."""
+    deno_error = "Code execution failed: Deno is required for the Prefab sandbox"
+    text = json.dumps({"error": deno_error})
+    result = _prefab_result(payload={"error": deno_error}, text=text)
+    session = AsyncMock()
+    session.call_tool.return_value = result
+
+    ok, _parsed = asyncio.run(runner.execute_call(session, PREFAB_UI_TOOL, {"code": PREFAB_VIEW_CODE}, max_retries=1))
+
+    assert ok is False and runner.failed_count == 1
+    assert "no runnable Deno" in runner._call_failure(result, PREFAB_UI_TOOL)[0]

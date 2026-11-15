@@ -198,6 +198,60 @@ jobs:
         if: always()
         run: docker logs nextdns-container-e2e-health || true; docker rm -f nextdns-container-e2e-health || true
 
+      - name: Start container with generative UI enabled (${{ matrix.variant }})
+        run: |
+          # Issue #400: Prefab's generative-UI sandbox shells out to Deno, which
+          # neither image used to ship — so a deployment could publish
+          # generate_prefab_ui knowing nothing about whether it could ever run.
+          # This container proves it runs in the image itself, on this variant.
+          # An invalid (not absent) key keeps the run credential-free: /health
+          # must report the upstream auth failure, while the Prefab sandbox
+          # needs only the image's own Deno and the API's rate limit cannot
+          # turn this check red or green.
+          docker run -d \
+            --name nextdns-container-e2e-prefab \
+            -p 8002:8000 \
+            -e NEXTDNS_API_KEY="e2e-invalid-key-not-a-real-credential" \
+            -e NEXTDNS_GENERATIVE_UI="on" \
+            -e NEXTDNS_TOOL_SEARCH="off" \
+            -e MCP_TRANSPORT="http" \
+            -e MCP_HOST="0.0.0.0" \
+            -e MCP_PORT="8000" \
+            nextdns-mcp:${{ matrix.variant }}
+
+          echo "Waiting for container HTTP endpoint to be ready..."
+          READY=0
+          for i in $(seq 1 30); do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8002/mcp 2>/dev/null || true)
+            if [ "$HTTP_STATUS" != "000" ]; then
+              echo "Container is ready (HTTP $HTTP_STATUS at attempt $i)"
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "❌ Container failed to respond within 30 seconds"
+            docker logs nextdns-container-e2e-prefab || true
+            docker rm -f nextdns-container-e2e-prefab || true
+            exit 1
+          fi
+
+      - name: Validate generate_prefab_ui end to end in the container (${{ matrix.variant }})
+        run: |
+          uv run python scripts/run_container_e2e.py \
+            --endpoint http://127.0.0.1:8002/mcp \
+            --variant ${{ matrix.variant }} \
+            --health-url http://127.0.0.1:8002/health \
+            --expect-health not-ok \
+            --generative-ui-only \
+            --api-key "e2e-invalid-key-not-a-real-credential"
+
+      - name: Stop generative UI container (${{ matrix.variant }})
+        if: always()
+        run: docker logs nextdns-container-e2e-prefab || true; docker rm -f nextdns-container-e2e-prefab || true
+
       - name: Run E2E validation against container (${{ matrix.variant }})
         if: steps.check-secrets.outputs.has_secret == 'true'
         env:

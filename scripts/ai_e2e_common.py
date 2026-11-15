@@ -39,7 +39,6 @@ from nextdns_mcp.tools.metrics import PlotMetric
 # --------------------------------------------------------------------------- #
 
 
-
 def api_base() -> str:
     """The NextDNS API base, read when it is used rather than when it is imported.
 
