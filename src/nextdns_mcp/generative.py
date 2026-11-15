@@ -3,6 +3,7 @@
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -46,6 +47,11 @@ class DataTable(_BaseDataTable):
             kwargs["rows"] = rows
         super().__init__(**kwargs)
 """
+
+MAX_CODE_BYTES = 32 * 1024
+MAX_DATA_BYTES = 128 * 1024
+MAX_RESULT_BYTES = 256 * 1024
+EXECUTION_TIMEOUT = 10.0
 
 CHART_IN_TAB_PATTERN = re.compile(r"with\s+Tab\b[\s\S]*?\b(AreaChart|LineChart|BarChart|PieChart|DonutChart)\b")
 
@@ -92,6 +98,23 @@ def _parse_ui_data(data: str | dict[str, Any] | None) -> dict[str, Any] | None:
     if data is None or isinstance(data, dict):
         return data
     raise ValueError(f"data parameter must be a dict or JSON object string, got {type(data).__name__}")
+
+
+def _result_size_bytes(result: Any) -> int:
+    """Measure the serialized byte size of a sandbox result."""
+    to_json = getattr(result, "to_json", None)
+    if callable(to_json):
+        try:
+            return len(json.dumps(to_json()).encode("utf-8"))
+        except (TypeError, ValueError):
+            return len(str(result).encode("utf-8"))
+    dump_json = getattr(result, "model_dump_json", None)
+    if callable(dump_json):
+        try:
+            return len(dump_json().encode("utf-8"))
+        except (TypeError, ValueError):
+            return len(str(result).encode("utf-8"))
+    return len(str(result).encode("utf-8"))
 
 
 def _validate_chart_placement(code: str) -> None:
@@ -144,13 +167,30 @@ class NextDNSGenerativeUI(GenerativeUI):
             data: str | dict[str, Any] | None = None,
         ) -> PrefabApp:
             _validate_chart_placement(code)
+            if len(code.encode("utf-8")) > MAX_CODE_BYTES:
+                raise ValueError(f"code exceeds maximum size of {MAX_CODE_BYTES} bytes")
+            if data is not None:
+                data_size = (
+                    len(data.encode("utf-8")) if isinstance(data, str) else len(json.dumps(data).encode("utf-8"))
+                )
+                if data_size > MAX_DATA_BYTES:
+                    raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
             parsed_data = _parse_ui_data(data)
             full_code = f"{SANDBOX_PRELUDE}\n{code}"
-            return await _gen.execute(
-                full_code,
-                data=parsed_data,
-                sandbox=sandbox_ref._get_sandbox(),
-            )
+            sandbox = sandbox_ref._get_sandbox()
+            try:
+                result = await asyncio.wait_for(
+                    _gen.execute(full_code, data=parsed_data, sandbox=sandbox),
+                    timeout=EXECUTION_TIMEOUT,
+                )
+            except TimeoutError:
+                # asyncio.wait_for cancels the inner task; PyodideSandbox.run handles
+                # CancelledError by stopping the worker, so the lock is released.
+                raise TimeoutError(f"generate_prefab_ui execution exceeded {EXECUTION_TIMEOUT}s") from None
+            result_size = _result_size_bytes(result)
+            if result_size > MAX_RESULT_BYTES:
+                raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
+            return result
 
         doc = GENERATE_DOC + (_gen.execute.__doc__ or "")
         return Tool.from_function(

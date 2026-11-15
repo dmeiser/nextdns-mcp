@@ -1,14 +1,19 @@
 """Tests for NextDNSGenerativeUI provider and sizing rules."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nextdns_mcp.generative import (
+    MAX_CODE_BYTES,
+    MAX_DATA_BYTES,
+    MAX_RESULT_BYTES,
     SANDBOX_PRELUDE,
     NextDNSGenerativeUI,
     _build_renderer_resource,
     _parse_ui_data,
+    _result_size_bytes,
     _validate_chart_placement,
 )
 
@@ -216,3 +221,95 @@ async def test_server_lifespan_cleanup_handles_exception():
         # Should not raise
         async with _server_lifespan(MagicMock()):
             pass
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_code_size_limit():
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tool_list = await gen_ui._local.list_tools()
+    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    oversize = "a" * (MAX_CODE_BYTES + 1)
+    with pytest.raises(ValueError, match="code exceeds maximum size"):
+        await gen_tool.fn(code=oversize)
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_data_size_limit():
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tool_list = await gen_ui._local.list_tools()
+    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    oversize_data = "b" * (MAX_DATA_BYTES + 1)
+    with pytest.raises(ValueError, match="data exceeds maximum size"):
+        await gen_tool.fn(code="print(1)", data=oversize_data)
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_result_size_limit():
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tool_list = await gen_ui._local.list_tools()
+    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+
+    class OversizedApp:
+        def to_json(self):
+            return {"payload": "x" * (MAX_RESULT_BYTES + 1)}
+
+    with (
+        patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_sandbox", return_value=MagicMock()),
+    ):
+        mock_exec.return_value = OversizedApp()
+        with pytest.raises(ValueError, match="result exceeds maximum size"):
+            await gen_tool.fn(code="print(1)")
+
+
+def test_result_size_bytes_model_dump_json():
+    class DumpApp:
+        def model_dump_json(self):
+            return '{"payload": "' + "x" * (MAX_RESULT_BYTES + 1) + '"}'
+
+    assert _result_size_bytes(DumpApp()) > MAX_RESULT_BYTES
+
+
+def test_result_size_bytes_serialization_fallback():
+    class UnserializableApp:
+        def to_json(self):
+            raise TypeError("not serializable")
+
+        def __str__(self):
+            return "small"
+
+    assert _result_size_bytes(UnserializableApp()) == len(b"small")
+
+    class BrokenDumpApp:
+        def model_dump_json(self):
+            raise TypeError("broken")
+
+        def __str__(self):
+            return "tiny"
+
+    assert _result_size_bytes(BrokenDumpApp()) == len(b"tiny")
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_execution_timeout():
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tool_list = await gen_ui._local.list_tools()
+    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    sandbox_mock = MagicMock()
+
+    async def never_resolves(*args, **kwargs):
+        await asyncio.sleep(9999)
+
+    with (
+        patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_sandbox", return_value=sandbox_mock),
+    ):
+        mock_exec.side_effect = never_resolves
+        with pytest.raises(TimeoutError, match="execution exceeded"):
+            await gen_tool.fn(code="print(1)")
+        # sandbox reset attempted
+        # at least one reset method may have been accessed
