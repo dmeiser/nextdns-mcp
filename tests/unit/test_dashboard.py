@@ -216,7 +216,7 @@ class TestDashboardFetchAndValidation:
     @pytest.mark.asyncio
     async def test_fetch_analytics_payload_series_cap_only_for_series(self, monkeypatch):
         stub = AsyncMock(return_value={"data": []})
-        monkeypatch.setattr(dash_module, "_api_request_payload", stub)
+        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", stub)
 
         payload, err = await dash_module._fetch_analytics_payload("p1", "status")
         assert payload == {"data": []} and err is None

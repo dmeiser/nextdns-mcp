@@ -14,6 +14,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
 import pytest
@@ -23,6 +24,8 @@ from nextdns_mcp import client as client_module
 from nextdns_mcp import transport
 from nextdns_mcp.errors import NextDNSAuthError, NextDNSError, NextDNSRateLimitError, NextDNSServerError
 from nextdns_mcp.server import build_mcp_server
+from nextdns_mcp.tools import dashboard as dashboard_module
+from nextdns_mcp.tools import plots as plots_module
 
 # Path served by the stub -> (status, body). The plot series path carries a
 # query string; the stub matches on path only. A bytes body is served with
@@ -347,3 +350,84 @@ class TestSharedBufferedBodyHelpers:
         assert int(response.headers["content-length"]) == len(b"plain")
         assert response.headers["x-keep"] == "yes"
         assert response.request is request
+
+
+class TestSharedAnalyticsPayloadContract:
+    """The analytics ``(payload, error)`` split exists once, in the transport (issue #421).
+
+    ``dashboard._fetch_analytics_payload`` and ``plots._fetch_series_payload`` each
+    carried their own copy of the typed-error predicate around the same wrapper,
+    so the contract AGENT.md states had two implementations that could drift -
+    one learning the 404 hint and the other not, one keeping the response cap and
+    the other dropping it. These pin the single implementation: where the
+    predicate's boundary is, what the fetch helper returns, and that both call
+    sites route through it.
+    """
+
+    @pytest.mark.parametrize(
+        ("payload", "is_failure"),
+        [
+            pytest.param({"code": "http_error", "error": "upstream", "status_code": 503}, True, id="typed-failure"),
+            pytest.param({"code": "response_too_large", "error": "series too large"}, True, id="cap-refusal"),
+            pytest.param(
+                {"code": "notFound", "error": "no such profile", "hint": "listProfiles() lists them"},
+                True,
+                id="four-oh-four-with-hint",
+            ),
+            pytest.param({"code": "partial", "error": "truncated", "data": []}, False, id="data-wins-over-a-code"),
+            pytest.param({"error": "an answer about a domain named error"}, False, id="two-x-x-error-key-is-data"),
+            pytest.param({"data": [{"queries": 1}]}, False, id="plain-data"),
+            pytest.param(None, False, id="not-a-dict"),
+        ],
+    )
+    def test_only_a_typed_failure_reads_as_an_error(self, payload: Any, is_failure: bool) -> None:
+        assert transport.is_error_payload(payload) is is_failure
+
+    @pytest.mark.asyncio
+    async def test_a_typed_upstream_failure_returns_as_the_error_half(self, stub_nextdns_api: str) -> None:
+        """Through real HTTP, not a mock: what an analytics fetcher sees on 5xx."""
+        _serve(503, '{"error":"upstream unavailable"}')
+        payload, error = await transport.fetch_analytics_payload(
+            "/profiles/abc123/analytics/status;series", max_response_bytes=transport.MAX_SERIES_RESPONSE_BYTES
+        )
+        assert payload is None
+        assert error is not None
+        assert error["code"] == "http_error"
+        assert error["status_code"] == 503
+
+    @pytest.mark.asyncio
+    async def test_a_successful_answer_returns_as_the_data_half(self, stub_nextdns_api: str) -> None:
+        payload, error = await transport.fetch_analytics_payload(
+            "/profiles/abc123/analytics/status;series", max_response_bytes=transport.MAX_SERIES_RESPONSE_BYTES
+        )
+        assert error is None
+        assert payload == {"data": []}
+
+    @pytest.mark.asyncio
+    async def test_both_analytics_fetchers_delegate_to_the_shared_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The drift guard: neither tool module may hold its own fetch-and-classify.
+
+        What each call site keeps is only its own cap decision - the dashboard
+        caps a ``;series`` endpoint and leaves the bounded analytics endpoints
+        uncapped (issue #478), the plot fetch caps every series.
+        """
+        dashboard_shared = AsyncMock(return_value=({"data": []}, None))
+        monkeypatch.setattr(dashboard_module, "fetch_analytics_payload", dashboard_shared)
+        plots_shared = AsyncMock(return_value=({"data": []}, None))
+        monkeypatch.setattr(plots_module, "fetch_analytics_payload", plots_shared)
+
+        assert await dashboard_module._fetch_analytics_payload("abc123", "status;series") == ({"data": []}, None)
+        dashboard_shared.assert_awaited_once_with(
+            "/profiles/abc123/analytics/status;series", None, max_response_bytes=transport.MAX_SERIES_RESPONSE_BYTES
+        )
+
+        await dashboard_module._fetch_analytics_payload("abc123", "destinations")
+        assert dashboard_shared.await_args.kwargs["max_response_bytes"] is None
+
+        assert await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", {}) == (
+            {"data": []},
+            None,
+        )
+        plots_shared.assert_awaited_once_with(
+            "/profiles/abc123/analytics/status;series", {}, max_response_bytes=transport.MAX_SERIES_RESPONSE_BYTES
+        )
