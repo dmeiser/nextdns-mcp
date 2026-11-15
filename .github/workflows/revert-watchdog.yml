@@ -5,12 +5,24 @@ name: Revert Watchdog
 # revert PR of the offending commit so the merge is effectively cancelled
 # without waiting for a human. The release pipeline stays quiet because a
 # failed E2E also blocks Auto Release.
+#
+# Validation without breaking main: dispatch this workflow against a
+# known-good SHA, e.g.
+#   gh workflow run revert-watchdog.yml -f sha=<full-sha-on-main>
+# It runs the identical flow, pushing an auto-revert/<sha> branch and opening
+# a revert PR. Close the PR and delete the branch when the check is done.
 
 on:
   workflow_run:
     workflows: ["E2E Container", "Unit Tests"]
     types: [completed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full SHA on main to revert (manual validation of this workflow)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -19,20 +31,35 @@ permissions:
 jobs:
   revert:
     if: |
-      github.event.workflow_run.conclusion == 'failure' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          # The git commands below need a real repository with full history:
+          # `git revert` must see the failing commit and its parent. Without
+          # this step the workspace is empty and the job aborts at
+          # "fatal: not in a git directory" (exit 128).
+          fetch-depth: 0
+
       - name: Create revert PR for the failing head
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          RUN_URL: ${{ github.event.workflow_run.html_url }}
-          RUN_NAME: ${{ github.event.workflow_run.name }}
+          HEAD_SHA: ${{ github.event.inputs.sha || github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url || format('{0}/{1}/actions/workflows/revert-watchdog.yml', github.server_url, github.repository) }}
+          RUN_NAME: ${{ github.event.workflow_run.name || 'manual dispatch' }}
         run: |
           set -euo pipefail
+
+          if [ -z "$HEAD_SHA" ]; then
+            echo "HEAD_SHA is empty; pass a sha input when dispatching manually." >&2
+            exit 1
+          fi
 
           existing=$(gh pr list --repo "$REPO" --state open --search "$HEAD_SHA" --json number --jq 'length')
           if [ "$existing" -gt 0 ]; then
