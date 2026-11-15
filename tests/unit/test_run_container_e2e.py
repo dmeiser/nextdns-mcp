@@ -23,13 +23,22 @@ from scripts.run_container_e2e import (
 
 @pytest.fixture
 def runner(tmp_path: Path) -> ContainerE2ERunner:
-    """Create a runner instance with a temporary artifacts directory."""
+    """Create a runner instance with a temporary artifacts directory.
+
+    Pacing is off and the rate-limit table is zero-delay: these tests assert
+    behaviour, not elapsed time, and a suite of ~127 calls must not spend
+    minutes waiting for a wall clock it is not testing.
+    """
     return ContainerE2ERunner(
         endpoint="http://127.0.0.1:8000/mcp",
         variant="slim",
         allow_live_writes=False,
         plot_profile="",
         artifacts_dir=tmp_path,
+        rate_limit_backoff=(0.0,),
+        read_delay=0.0,
+        write_delay=0.0,
+        phase_cooldown=0.0,
     )
 
 
@@ -212,6 +221,105 @@ async def test_execute_call_retry_on_exception(runner: ContainerE2ERunner):
     assert ok is True
     assert runner.executed_count == 1
     assert session.call_tool.call_count == 2
+
+
+def _tool_result(payload: dict) -> MagicMock:
+    """Build a mock MCP tool result carrying a JSON payload, as the server returns it."""
+    result = MagicMock()
+    result.is_error = False
+    result.content = [TextContent(type="text", text=json.dumps(payload))]
+    return result
+
+
+# The payload the server returns for an over-quota call: a normal result, not an
+# exception, carrying the status and the upstream code (errors.http_error_payload).
+RATE_LIMITED_PAYLOAD = {
+    "error": "HTTP error in POST /profiles: Client error '429 Too Many Requests' for url 'https://api.nextdns.io/profiles'",
+    "code": "http_error",
+    "status_code": 429,
+    "upstream_code": "rateLimit",
+    "upstream_codes": ["rateLimit"],
+}
+
+
+@pytest.mark.asyncio
+async def test_execute_call_retries_a_rate_limit_payload(tmp_path: Path):
+    """A 429 arrives as a result, not an exception: it must be waited out, not recorded FAILED."""
+    runner = ContainerE2ERunner(
+        endpoint="http://127.0.0.1:8000/mcp",
+        variant="slim",
+        allow_live_writes=False,
+        plot_profile="",
+        artifacts_dir=tmp_path,
+        rate_limit_backoff=(0.0,),
+    )
+    session = AsyncMock()
+    session.call_tool.side_effect = [_tool_result(RATE_LIMITED_PAYLOAD), _tool_result({"data": {"id": "p123"}})]
+
+    ok, res = await runner.execute_call(session, "createProfile", {"name": "E2E"}, max_retries=2)
+
+    assert ok is True
+    assert res == {"data": {"id": "p123"}}
+    assert session.call_tool.call_count == 2
+    assert runner.failed_count == 0
+    assert runner.executed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_call_fails_honestly_when_the_rate_limit_outlasts_the_attempts(tmp_path: Path):
+    """Every attempt 429: the run fails with the upstream message instead of looping forever."""
+    runner = ContainerE2ERunner(
+        endpoint="http://127.0.0.1:8000/mcp",
+        variant="slim",
+        allow_live_writes=False,
+        plot_profile="",
+        artifacts_dir=tmp_path,
+        rate_limit_backoff=(0.0,),
+    )
+    session = AsyncMock()
+    session.call_tool.return_value = _tool_result(RATE_LIMITED_PAYLOAD)
+
+    ok, _ = await runner.execute_call(session, "createProfile", {"name": "E2E"}, max_retries=3)
+
+    assert ok is False
+    assert session.call_tool.call_count == 3
+    assert runner.failed_count == 1
+    record = json.loads(runner.report_file.read_text(encoding="utf-8").strip())
+    assert record["status"] == "FAILED"
+    assert "429 Too Many Requests" in record["error"]
+
+
+def test_rate_limit_payload_is_recognised_by_status_or_upstream_code(runner: ContainerE2ERunner):
+    """Either signal marks the payload: the status alone, or the upstream code alone."""
+    assert runner._is_rate_limited(RATE_LIMITED_PAYLOAD) is True
+    assert runner._is_rate_limited({"status_code": 429}) is True
+    assert runner._is_rate_limited({"upstream_code": "rateLimit"}) is True
+    # Not a rate limit: a real failure, and a payload that is not a mapping at all.
+    assert runner._is_rate_limited({"status_code": 400, "upstream_code": "invalid"}) is False
+    assert runner._is_rate_limited(None) is False
+
+
+def test_rate_limit_delay_honours_an_advertised_retry_after(runner: ContainerE2ERunner):
+    """An advertised retry_after wins over the table; the table holds its last entry."""
+    assert runner._rate_limit_delay({"retry_after": 7}, attempt=1) == 7.0
+    # Zero or absent advertised delay falls through to the table.
+    assert runner._rate_limit_delay({"retry_after": 0}, attempt=1) == 0.0
+    assert runner._rate_limit_delay({}, attempt=99) == 0.0
+
+
+def test_rate_limit_delay_walks_the_backoff_table_and_holds_its_last_entry(tmp_path: Path):
+    """Attempt 1 gets the first delay, and attempts past the table get the last one."""
+    runner = ContainerE2ERunner(
+        endpoint="http://127.0.0.1:8000/mcp",
+        variant="slim",
+        allow_live_writes=False,
+        plot_profile="",
+        artifacts_dir=tmp_path,
+        rate_limit_backoff=(5.0, 10.0),
+    )
+    assert runner._rate_limit_delay({}, attempt=1) == 5.0
+    assert runner._rate_limit_delay({}, attempt=2) == 10.0
+    assert runner._rate_limit_delay({}, attempt=9) == 10.0
 
 
 @pytest.mark.asyncio
@@ -446,6 +554,72 @@ class TestE2EWorkflowSecretHandling:
         assert 'if [ -n "${NEXTDNS_PLOT_PROFILE}" ]' in step["run"]
 
 
+class TestE2EWorkflowLiveSerialization:
+    """The live suite is serialized repo-wide, not per-ref.
+
+    The upstream quota is account-level, so a per-ref concurrency group
+    (``${{ github.ref }}``) serializes nothing across the many branches that
+    push to this repository at once; that is how runs came to answer 92-216
+    `429 Too Many Requests` while a neighbouring run held the quota. The
+    workflow holds a single constant group at workflow level so at most one E2E
+    run executes at a time across every branch/PR/event (without interleaving
+    matrix legs across runs), and it must not cancel a suite in progress: a
+    cancelled write phase never reaches its teardown, which is how test profiles
+    leaked. Non-E2E workflows stay free to run concurrently.
+    """
+
+    WORKFLOWS_DIR = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+    WORKFLOW = WORKFLOWS_DIR / "e2e-container.yml"
+
+    def _doc(self) -> dict:
+        import yaml
+
+        return yaml.safe_load(self.WORKFLOW.read_text(encoding="utf-8"))
+
+    def _job(self) -> dict:
+        return self._doc()["jobs"]["e2e"]
+
+    def test_the_workflow_queues_on_a_constant_group(self):
+        concurrency = self._doc().get("concurrency")
+        assert concurrency is not None, "the E2E workflow has no shared concurrency group; runs overlap across refs"
+        # Constant: no ${{ github.ref }} in the key, or it is per-ref again.
+        assert "${{" not in concurrency["group"]
+
+    def test_the_workflow_never_cancels_a_suite_in_progress(self):
+        assert self._doc()["concurrency"]["cancel-in-progress"] is False
+
+    def test_the_matrix_job_relies_on_workflow_concurrency(self):
+        assert "concurrency" not in self._job()
+
+    def test_the_matrix_still_serializes_the_image_variants(self):
+        assert self._job()["strategy"]["max-parallel"] == 1
+
+    def test_only_e2e_workflow_holds_the_live_api_concurrency_group(self):
+        import yaml
+
+        e2e_group = self._doc()["concurrency"]["group"]
+        for wf_path in sorted(self.WORKFLOWS_DIR.glob("*.yml")):
+            if wf_path == self.WORKFLOW:
+                continue
+            doc = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
+            wf_group = (doc.get("concurrency") or {}).get("group")
+            assert wf_group != e2e_group, f"{wf_path.name} must not share E2E concurrency group {e2e_group}"
+            for job_name, job in (doc.get("jobs") or {}).items():
+                job_group = (job.get("concurrency") or {}).get("group")
+                assert job_group != e2e_group, (
+                    f"{wf_path.name} job {job_name} must not share E2E concurrency group {e2e_group}"
+                )
+
+    def test_pr_checks_and_unit_tests_have_no_repo_wide_concurrency_lock(self):
+        import yaml
+
+        for name in ("unit-tests.yml", "codeql.yml", "openapi-lint.yml", "version-guard.yml"):
+            doc = yaml.safe_load((self.WORKFLOWS_DIR / name).read_text(encoding="utf-8"))
+            assert "concurrency" not in doc, f"{name} should run concurrently across branches"
+            for job_name, job in (doc.get("jobs") or {}).items():
+                assert "concurrency" not in job, f"{name} job {job_name} should run concurrently"
+
+
 def test_settings_write_payloads_are_the_shared_table():
     """The seven settings payloads are SETTINGS_CATEGORIES' `set` payloads verbatim.
 
@@ -487,6 +661,7 @@ def test_plot_sweep_walks_the_server_metric_table(tmp_path: Path):
         allow_live_writes=True,
         plot_profile="plotpid",
         artifacts_dir=tmp_path,
+        read_delay=0.0,
     )
     asyncio.run(runner._run_plot_sweep(session, "plotpid"))
     metrics = [call.kwargs["arguments"]["metric"] for call in session.call_tool.call_args_list]
@@ -1174,3 +1349,88 @@ def test_private_open_refuses_when_the_mode_cannot_be_established(tmp_path, monk
     with pytest.raises(PermissionError), _private_open(path, "a"):
         pass
     assert not path.exists() or path.stat().st_size == 0
+
+
+class TestRateLimitPacingAndFullBackoff:
+    """Default retries walk all RATE_LIMIT_BACKOFF entries and pace read/write bursts."""
+
+    @pytest.mark.asyncio
+    async def test_default_max_retries_walks_entire_backoff_table(self, tmp_path: Path, monkeypatch):
+        from scripts.run_container_e2e import DEFAULT_MAX_RETRIES, RATE_LIMIT_BACKOFF
+
+        assert DEFAULT_MAX_RETRIES == len(RATE_LIMIT_BACKOFF) + 1
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(secs: float) -> None:
+            sleep_calls.append(secs)
+
+        monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+        r = ContainerE2ERunner(
+            endpoint="http://127.0.0.1:8000/mcp",
+            variant="slim",
+            allow_live_writes=False,
+            plot_profile="",
+            artifacts_dir=tmp_path,
+            read_delay=0.0,
+        )
+        session = AsyncMock()
+        session.call_tool.return_value = _tool_result(RATE_LIMITED_PAYLOAD)
+
+        ok, _ = await r.execute_call(session, "updatePrivacySettings", {"profile_id": "p1"})
+        assert ok is False
+        assert session.call_tool.call_count == DEFAULT_MAX_RETRIES
+        assert sleep_calls == list(RATE_LIMIT_BACKOFF)
+
+    @pytest.mark.asyncio
+    async def test_pacing_transitions_from_read_to_write_and_bumps_on_429(self, tmp_path: Path, monkeypatch):
+        from scripts.run_container_e2e import ADAPTIVE_PACE_CAP_SECONDS
+
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(secs: float) -> None:
+            sleep_calls.append(secs)
+
+        monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+        r = ContainerE2ERunner(
+            endpoint="http://127.0.0.1:8000/mcp",
+            variant="slim",
+            allow_live_writes=False,
+            plot_profile="",
+            artifacts_dir=tmp_path,
+            rate_limit_backoff=(5.0,),
+            read_delay=0.2,
+            write_delay=0.5,
+            phase_cooldown=2.5,
+        )
+        session = AsyncMock()
+        session.call_tool.side_effect = [
+            _tool_result({"data": []}),
+            _tool_result({"data": []}),
+            _tool_result(RATE_LIMITED_PAYLOAD),
+            _tool_result({"data": []}),
+        ]
+
+        # First call has no pre-call delay; second waits read_delay; third waits
+        # read_delay, hits 429 (doubles pace 0.2 -> 0.4), and sleeps 5.0 backoff.
+        assert (await r.execute_call(session, "listProfiles", {}))[0] is True
+        assert sleep_calls == []
+        assert (await r.execute_call(session, "getProfile", {"profile_id": "p1"}))[0] is True
+        assert sleep_calls == [0.2]
+        assert (await r.execute_call(session, "getProfile", {"profile_id": "p1"}, max_retries=2))[0] is True
+        assert sleep_calls == [0.2, 0.2, 5.0]
+        assert r._pace_seconds == pytest.approx(0.4)
+
+        # Entering write phase raises pace to write_delay and sleeps phase_cooldown.
+        await r._enter_write_phase()
+        assert sleep_calls[-1] == 2.5
+        assert r._pace_seconds == 0.5
+
+        # Repeated bumps cap cleanly at ADAPTIVE_PACE_CAP_SECONDS.
+        for _ in range(5):
+            r._bump_pace()
+        assert r._pace_seconds == ADAPTIVE_PACE_CAP_SECONDS
+
+    def test_bump_pace_is_noop_when_pacing_disabled(self, runner: ContainerE2ERunner):
+        assert runner._pace_seconds == 0.0
+        runner._bump_pace()
+        assert runner._pace_seconds == 0.0

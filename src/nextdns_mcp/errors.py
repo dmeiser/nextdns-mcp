@@ -8,7 +8,10 @@ branch on the typed ``code`` instead of parsing opaque exception text.
 SPDX-License-Identifier: MIT
 """
 
+import math
 import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 # Server-side cap on the number of characters of an unparseable upstream
@@ -261,17 +264,71 @@ def http_error_payload(message: str, exc: Exception, fallback_code: str = ErrorC
             parsed = None
         structured = _structured_error_payload(parsed, fallback_code, status_code)
         if structured is not None:
+            _attach_rate_limit_headers(structured, response)
             return structured
 
     payload = error_payload(fallback_code, message, status_code=status_code)
     _attach_error_body(payload, response)
     _add_upstream_diagnosis(payload, parsed)
+    _attach_rate_limit_headers(payload, response)
     # httpx appends a pointer to the MDN page for the status code to every
     # raise_for_status() message. It describes HTTP, not this request, and it
     # eats the room the diagnosis needs - the call log keeps 300 characters of
     # the message, and the link was what survived.
     payload["error"] = _STATUS_DOC_LINK.sub("", str(payload["error"]))
     return payload
+
+
+_RATE_LIMIT_HEADER_FIELDS = (
+    ("X-RateLimit-Limit", "rate_limit_limit"),
+    ("X-RateLimit-Remaining", "rate_limit_remaining"),
+    ("X-RateLimit-Reset", "rate_limit_reset"),
+)
+
+
+def _parse_http_date_delay(text: str) -> float | None:
+    """Parse an HTTP-date string into seconds from now, clamped at zero."""
+    if not text:
+        return None
+    try:
+        dt = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        return None
+    normalized = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    return max(0.0, (normalized - datetime.now(UTC)).total_seconds())
+
+
+def _parse_retry_after(raw: Any) -> float | None:
+    """Parse an HTTP Retry-After value (seconds or HTTP-date) into non-negative seconds."""
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        return _parse_http_date_delay(text)
+    return max(0.0, seconds) if math.isfinite(seconds) else None
+
+
+def _attach_x_ratelimit_metadata(payload: dict[str, Any], headers: Any) -> None:
+    """Copy non-empty X-RateLimit-* header strings onto a 429 error payload."""
+    for header_name, field in _RATE_LIMIT_HEADER_FIELDS:
+        raw = headers.get(header_name)
+        if isinstance(raw, str) and raw.strip():
+            payload.setdefault(field, raw.strip())
+
+
+def _attach_rate_limit_headers(payload: dict[str, Any], response: Any) -> None:
+    """Surface Retry-After and X-RateLimit-* headers when present on a 429 response."""
+    if payload.get("status_code") != 429:
+        return
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return
+    delay = _parse_retry_after(headers.get("Retry-After"))
+    if delay is not None:
+        payload.setdefault("retry_after", round(delay, 3))
+    _attach_x_ratelimit_metadata(payload, headers)
 
 
 def _structured_error_payload(parsed: Any, fallback_code: str, status_code: Any) -> dict[str, Any] | None:

@@ -54,9 +54,6 @@ def local_tool_names() -> frozenset[str]:
     return frozenset(name for name in published_tool_names() if name not in set(spec_tool_names()))
 
 
-# Initial set evaluated at import time
-LOCAL_TOOLS = local_tool_names()
-
 # Of those, the ones that answer with content instead of a JSON document. A chart is an
 # interactive Prefab UI view, so there is no payload for a schema to describe; the runner's assertion for it
 # is that the call came back with chart content, which is what run_container_e2e checks.
@@ -248,7 +245,7 @@ def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str
     direct comparison rather than a lookup through a mapping table:
 
     - every published tool names an operation the spec declares, unless it is one of
-      the operations the server performs itself (``LOCAL_TOOLS``), whose answer no
+      the operations the server performs itself (``local_tool_names()``), whose answer no
       endpoint returns — that answer is either pinned here or is content rather than a
       document (``CONTENT_TOOLS``);
     - every operation the spec declares is published, unless it is withheld with a

@@ -25,6 +25,27 @@ Options:
 - `--api-key`: Credential the server was configured with; only used to assert it never appears in a `/health` response
 - `--expect-health`: Assert `/health` returns `200` (`ok`) or `503` with a failure class (`not-ok`) (default: `ok`)
 - `--health-only`: Validate only the `/health` endpoint and skip the MCP tool suite (default: `false`)
+#### Live-run rate limits
+
+NextDNS enforces the quota per account, not per run, and the CI job runs this suite for every PR
+push and every main push with the same API key. Even with one suite active at a time, an unpaced
+burst across ~70 read/dashboard requests immediately followed by 60+ mutations can trigger `429`
+answers on write endpoints (`PATCH`, `DELETE`, `POST /profiles`). Three layers keep runs clean:
+
+- the `E2E Container` workflow holds a constant concurrency group at the workflow level
+  (`nextdns-live-api`, `cancel-in-progress: false`), so only one live E2E run executes at a time
+  across every branch and event while the rest queue (with `slim` and `alpine` serialized inside
+  the run via `max-parallel: 1`);
+- the runner smooths single-suite request bursts with lightweight inter-call pacing
+  (`READ_PACE_SECONDS = 0.15`, `WRITE_PACE_SECONDS = 0.35`), a brief pre-write cooldown
+  (`PHASE_COOLDOWN_SECONDS = 3.0`), and an adaptive `2x` pacing bump (up to `ADAPTIVE_PACE_CAP_SECONDS`)
+  if a `429` is seen;
+- a `429` that still arrives is retried up to `DEFAULT_MAX_RETRIES` (4 attempts) honoring any
+  upstream `Retry-After` header surfaced by `http_error_payload` or walking the full bounded
+  backoff table (`RATE_LIMIT_BACKOFF`: 15 s, 30 s, 60 s = 105 s total) instead of aborting early.
+
+Neither touches the server's own behaviour: the server still never retries, by design
+(see [docs/safety.md](../docs/safety.md), "Rate limiting").
 
 #### Validating the `/health` readiness probe
 

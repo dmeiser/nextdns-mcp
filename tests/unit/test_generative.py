@@ -65,7 +65,7 @@ async def test_nextdns_generative_ui_setup_and_execution():
     assert "search_prefab_components" in tools
 
     gen_tool = tools["generate_prefab_ui"]
-    assert gen_tool.annotations.read_only_hint is True
+    assert gen_tool.annotations.read_only_hint is False
     assert gen_tool.annotations.destructive_hint is False
 
     comp_tool = tools["search_prefab_components"]

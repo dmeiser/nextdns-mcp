@@ -183,7 +183,7 @@ def _domain_label(item: dict[str, Any], key_name: str = "domain") -> str:
 
 def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     """Build domain data table."""
-    rows: list[dict[str, Any] | Any] = [
+    rows: list[dict[str, Any]] = [
         {"domain": _domain_label(item, key_name), "queries": _item_queries(item)} for item in data
     ]
     return DataTable(
@@ -191,7 +191,7 @@ def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
             DataTableColumn(key="domain", header="Domain", sortable=True),
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -250,14 +250,14 @@ def _reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
 def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     """Build reasons data table."""
     total = sum(_item_queries(item) for item in data)
-    rows: list[dict[str, Any] | Any] = [_reason_row(item, total) for item in data]
+    rows: list[dict[str, Any]] = [_reason_row(item, total) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -310,7 +310,7 @@ def _device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
 def _devices_table(data: list[dict[str, Any]]) -> DataTable:
     """Build devices data table."""
     total = sum(_item_queries(item) for item in data)
-    rows: list[dict[str, Any] | Any] = [_device_row(item, total) for item in data]
+    rows: list[dict[str, Any]] = [_device_row(item, total) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="device", header="Device", sortable=True),
@@ -318,7 +318,7 @@ def _devices_table(data: list[dict[str, Any]]) -> DataTable:
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -367,7 +367,7 @@ def _ip_row(item: dict[str, Any]) -> dict[str, Any]:
 
 def _build_ips_card(data: list[dict[str, Any]]) -> Card:
     """Build the IP addresses card."""
-    rows: list[dict[str, Any] | Any] = [_ip_row(item) for item in data]
+    rows: list[dict[str, Any]] = [_ip_row(item) for item in data]
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle("IPs")
@@ -383,7 +383,7 @@ def _build_ips_card(data: list[dict[str, Any]]) -> Card:
                         DataTableColumn(key="location", header="Location", sortable=True),
                         DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
                     ],
-                    rows=rows,
+                    rows=rows,  # type: ignore[arg-type]
                 )
     return card
 
@@ -399,15 +399,15 @@ def _single_gafam_row(item: dict[str, Any], total: int) -> tuple[dict[str, Any],
     }
 
 
-def _gafam_rows(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any] | Any]]:
+def _gafam_rows(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Format data rows for the GAFAM donut chart and data table."""
     total = sum(_item_queries(item) for item in data)
     pairs = [_single_gafam_row(item, total) for item in data]
-    table_rows: list[dict[str, Any] | Any] = [p[1] for p in pairs]
+    table_rows: list[dict[str, Any]] = [p[1] for p in pairs]
     return [p[0] for p in pairs], table_rows
 
 
-def _gafam_table(table_rows: list[dict[str, Any] | Any]) -> DataTable:
+def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
     """Build GAFAM table."""
     return DataTable(
         columns=[
@@ -415,7 +415,7 @@ def _gafam_table(table_rows: list[dict[str, Any] | Any]) -> DataTable:
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="share", header="Share", sortable=True),
         ],
-        rows=table_rows,
+        rows=table_rows,  # type: ignore[arg-type]
     )
 
 
@@ -500,7 +500,7 @@ def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
 
 def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
     """Build destinations table."""
-    rows: list[dict[str, Any] | Any] = [_destination_row(item) for item in data]
+    rows: list[dict[str, Any]] = [_destination_row(item) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="country", header="Country", sortable=True),
@@ -508,7 +508,7 @@ def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
             DataTableColumn(key="queries", header="Queries", sortable=True, format="number"),
             DataTableColumn(key="sample_domains", header="Sample Domains"),
         ],
-        rows=rows,
+        rows=rows,  # type: ignore[arg-type]
     )
 
 
@@ -571,7 +571,7 @@ def _validate_card_data(
 ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
     """Extract list data from payload or return typed no-data error."""
     data = _payload_data(payload)
-    if not data:
+    if payload is None:
         return None, error_payload(ErrorCode.NO_DATA, f"No {endpoint} data available", profile_id=pid)
     return data, None
 
@@ -604,6 +604,20 @@ def _wrap_card_result(card: Card, summary_text: str) -> ToolResult:
     return ToolResult(content=summary_text, structured_content=app)
 
 
+OVERVIEW_FANOUT_CONCURRENCY = 2
+
+
+async def _bounded_fetch_analytics_payload(
+    semaphore: asyncio.Semaphore,
+    profile_id: str,
+    endpoint: str,
+    params: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Fetch an analytics payload while bounding concurrent upstream fan-out."""
+    async with semaphore:
+        return await _fetch_analytics_payload(profile_id, endpoint, params)
+
+
 async def _fetch_overview_payloads(
     pid: str,
     from_time: str | int,
@@ -623,10 +637,11 @@ async def _fetch_overview_payloads(
     blk_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="blocked")
     ser_params = {"from": from_time, "to": to_time, "interval": interval}
 
-    s_task = _fetch_analytics_payload(pid, "status", params)
-    ser_task = _fetch_analytics_payload(pid, "status;series", ser_params)
-    r_task = _fetch_analytics_payload(pid, "domains", dom_params)
-    b_task = _fetch_analytics_payload(pid, "domains", blk_params)
+    sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
+    s_task = _bounded_fetch_analytics_payload(sem, pid, "status", params)
+    ser_task = _bounded_fetch_analytics_payload(sem, pid, "status;series", ser_params)
+    r_task = _bounded_fetch_analytics_payload(sem, pid, "domains", dom_params)
+    b_task = _bounded_fetch_analytics_payload(sem, pid, "domains", blk_params)
 
     (s_p, s_err), (ser_p, _), (r_p, _), (b_p, _) = await asyncio.gather(s_task, ser_task, r_task, b_task)
     if s_err:
@@ -668,14 +683,15 @@ async def _fetch_extra_payloads(
     profile_id: str, dom_params: dict[str, Any], params: dict[str, Any]
 ) -> list[list[dict[str, Any]]]:
     """Fetch data lists for extra dashboard sections."""
+    sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
     tasks = [
-        _fetch_analytics_payload(profile_id, "reasons", dom_params),
-        _fetch_analytics_payload(profile_id, "devices", dom_params),
-        _fetch_analytics_payload(profile_id, "ips", dom_params),
-        _fetch_analytics_payload(profile_id, "domains", {**dom_params, "root": "true"}),
-        _fetch_analytics_payload(profile_id, "destinations", {**params, "type": "gafam"}),
-        _fetch_analytics_payload(profile_id, "encryption", params),
-        _fetch_analytics_payload(profile_id, "dnssec", params),
+        _bounded_fetch_analytics_payload(sem, profile_id, "reasons", dom_params),
+        _bounded_fetch_analytics_payload(sem, profile_id, "devices", dom_params),
+        _bounded_fetch_analytics_payload(sem, profile_id, "ips", dom_params),
+        _bounded_fetch_analytics_payload(sem, profile_id, "domains", {**dom_params, "root": "true"}),
+        _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "gafam"}),
+        _bounded_fetch_analytics_payload(sem, profile_id, "encryption", params),
+        _bounded_fetch_analytics_payload(sem, profile_id, "dnssec", params),
     ]
     res = await asyncio.gather(*tasks)
     return [_payload_data(item[0]) for item in res]
@@ -687,6 +703,7 @@ async def _append_extra_dashboard_sections(
     from_time: str | int,
     to_time: str | int,
     limit: int,
+    domain_view: str = "table",
 ) -> None:
     """Fetch and append reasons, devices, IPs, root domains, GAFAM and security cards."""
     dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
@@ -696,13 +713,13 @@ async def _append_extra_dashboard_sections(
 
     with view:
         with Row(gap=4):
-            _build_reasons_card(r_d)
-            _build_devices_card(d_d)
+            _build_reasons_card(r_d, view_type=domain_view)
+            _build_devices_card(d_d, view_type=domain_view)
         with Row(gap=4):
-            _build_domains_card("Root Domains", "Aggregate root domains.", rt_d)
+            _build_domains_card("Root Domains", "Aggregate root domains.", rt_d, view_type=domain_view)
             _build_ips_card(i_d)
         with Row(gap=4):
-            _build_gafam_card(g_d)
+            _build_gafam_card(g_d, view_type=domain_view)
             _build_security_card(e_d, sec_d)
 
 
@@ -839,29 +856,38 @@ async def _ip_analytics_impl(
     return _wrap_card_result(_build_ips_card(data), summary)
 
 
-async def _root_domain_analytics_impl(
+async def _domain_card_analytics_impl(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int = 10,
     view_type: Literal["auto", "table", "bar", "pie"] = "auto",
+    *,
+    fetch_extra: dict[str, Any],
+    title: str,
+    description: str,
+    summary_title: str,
+    summary_noun: str = "domains",
+    color: str = "#3b82f6",
+    key_name: str = "domain",
 ) -> dict[str, Any] | ToolResult:
-    """Render the root domain analytics card."""
+    """Render a domain analytics card (root/resolved/blocked)."""
     _pid, data, err = await _fetch_card_data(
-        profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, root="true"
+        profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, **fetch_extra
     )
     if err:
         return err
     assert data is not None
-    items = [(_domain_label(item, "domain"), _item_queries(item)) for item in data]
+    items = [(_domain_label(item, key_name), _item_queries(item)) for item in data]
     total = sum(q for _, q in items)
-    summary = _format_items_summary("Root Domains", "domains", items, total)
+    summary = _format_items_summary(summary_title, summary_noun, items, total)
     card = _build_domains_card(
-        "Root Domains",
-        "Aggregate queries for root domains and subdomains.",
+        title,
+        description,
         data,
-        key_name="domain",
+        key_name=key_name,
         view_type=view_type,
+        color=color,
     )
     return _wrap_card_result(card, summary)
 
@@ -906,60 +932,6 @@ async def _kpi_analytics_impl(
     return ToolResult(content=summary, structured_content=app)
 
 
-async def _domains_analytics_impl(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Render top resolved domains card."""
-    _pid, data, err = await _fetch_card_data(
-        profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, status="default"
-    )
-    if err:
-        return err
-    assert data is not None
-    card = _build_domains_card(
-        "Resolved Domains",
-        "Domains that resolved without being blocked.",
-        data,
-        view_type=view_type,
-        color="#3b82f6",
-    )
-    items = [(_domain_label(item, "domain"), _item_queries(item)) for item in data]
-    total = sum(q for _, q in items)
-    summary = _format_items_summary("Resolved Domains", "domains", items, total)
-    return _wrap_card_result(card, summary)
-
-
-async def _blocked_domains_analytics_impl(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    view_type: Literal["auto", "table", "bar", "pie"] = "auto",
-) -> dict[str, Any] | ToolResult:
-    """Render top blocked domains card."""
-    _pid, data, err = await _fetch_card_data(
-        profile_id, "domains", from_time=from_time, to_time=to_time, limit=limit, status="blocked"
-    )
-    if err:
-        return err
-    assert data is not None
-    card = _build_domains_card(
-        "Blocked Domains",
-        "Domains blocked by security, privacy, or parental controls.",
-        data,
-        view_type=view_type,
-        color="#ef4444",
-    )
-    items = [(_domain_label(item, "domain"), _item_queries(item)) for item in data]
-    total = sum(q for _, q in items)
-    summary = _format_items_summary("Blocked Domains", "domains", items, total)
-    return _wrap_card_result(card, summary)
-
-
 # ==============================================================================
 # Dispatch and Public Overview Dashboard Tool
 # ==============================================================================
@@ -981,15 +953,44 @@ DashboardSection = Literal[
 
 _WIDGET_DISPATCH: dict[str, Any] = {
     "kpi": lambda p, f, t, lim, v: _kpi_analytics_impl(p, from_time=f, to_time=t),
-    "domains": lambda p, f, t, lim, v: _domains_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
-    "blocked_domains": lambda p, f, t, lim, v: _blocked_domains_analytics_impl(
-        p, from_time=f, to_time=t, limit=lim, view_type=v
+    "domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
+        p,
+        from_time=f,
+        to_time=t,
+        limit=lim,
+        view_type=v,
+        fetch_extra={"status": "default"},
+        title="Resolved Domains",
+        description="Domains that resolved without being blocked.",
+        summary_title="Resolved Domains",
+        color="#3b82f6",
+    ),
+    "blocked_domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
+        p,
+        from_time=f,
+        to_time=t,
+        limit=lim,
+        view_type=v,
+        fetch_extra={"status": "blocked"},
+        title="Blocked Domains",
+        description="Domains blocked by security, privacy, or parental controls.",
+        summary_title="Blocked Domains",
+        color="#ef4444",
     ),
     "reasons": lambda p, f, t, lim, v: _reasons_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
     "devices": lambda p, f, t, lim, v: _device_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
     "ips": lambda p, f, t, lim, v: _ip_analytics_impl(p, from_time=f, to_time=t, limit=lim),
-    "root_domains": lambda p, f, t, lim, v: _root_domain_analytics_impl(
-        p, from_time=f, to_time=t, limit=lim, view_type=v
+    "root_domains": lambda p, f, t, lim, v: _domain_card_analytics_impl(
+        p,
+        from_time=f,
+        to_time=t,
+        limit=lim,
+        view_type=v,
+        fetch_extra={"root": "true"},
+        title="Root Domains",
+        description="Aggregate queries for root domains and subdomains.",
+        summary_title="Root Domains",
+        key_name="domain",
     ),
     "countries": lambda p, f, t, lim, v: _country_analytics_impl(p, from_time=f, to_time=t, limit=lim, view_type=v),
     "gafam": lambda p, f, t, lim, v: _gafam_analytics_impl(p, from_time=f, to_time=t, view_type=v),
@@ -1030,7 +1031,7 @@ async def _render_overview_page(
     kpis = _calculate_status_kpis(_payload_data(s_p))
     view = _assemble_overview_layout(kpis, ser_p, r_data, b_data, domain_view=domain_view)
     if section == "all":
-        await _append_extra_dashboard_sections(pid, view, from_time, to_time, limit)
+        await _append_extra_dashboard_sections(pid, view, from_time, to_time, limit, domain_view=domain_view)
 
     top_summary = _overview_top_summary(r_data, b_data)
     summary = (
@@ -1050,15 +1051,16 @@ async def _overview_dashboard_impl(
     domain_view: Literal["table", "bar", "pie"] = "table",
 ) -> dict[str, Any] | ToolResult:
     """Construct an overview dashboard or individual widget matching the NextDNS web UI."""
+    eff_view = _resolve_domain_view(domain_view, view_type)
+
     if section in _WIDGET_DISPATCH:
-        return await _WIDGET_DISPATCH[section](profile_id, from_time, to_time, limit, view_type)
+        return await _WIDGET_DISPATCH[section](profile_id, from_time, to_time, limit, eff_view)
 
     pid, err = await _resolve_profile(profile_id)
     if err is not None:
         return err
     assert pid is not None
 
-    eff_view = _resolve_domain_view(domain_view, view_type)
     return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
 
 

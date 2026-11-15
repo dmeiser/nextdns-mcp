@@ -152,11 +152,12 @@ class NextDNSGenerativeUI(GenerativeUI):
 
         csp = _build_csp()
         app_config = AppConfig(resource_uri=_gen.RESOURCE_URI)
-        annotations = ToolAnnotations(read_only_hint=True, destructive_hint=False)
+        generate_annotations = ToolAnnotations(read_only_hint=False, destructive_hint=False)
+        components_annotations = ToolAnnotations(read_only_hint=True, destructive_hint=False)
 
-        self._local._add_component(self._create_generate_tool(app_config, annotations))
+        self._local._add_component(self._create_generate_tool(app_config, generate_annotations))
         if self._include_components_tool:
-            self._local._add_component(self._create_components_tool(annotations))
+            self._local._add_component(self._create_components_tool(components_annotations))
         self._local._add_component(_build_renderer_resource(csp))
         self._setup_done = True
 

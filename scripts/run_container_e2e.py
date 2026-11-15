@@ -38,6 +38,30 @@ from scripts.validate_schema import (
 
 HEALTH_FAILURE_CLASSES = ("auth", "unreachable")
 
+# When upstream answers 429, the call is retried after these delays instead of
+# being recorded FAILED. The quota is account-level, so a run can lose it to a
+# neighbouring run or to a burst of pushes; the retry is the backoff path, and it
+# is bounded on purpose - the point is to outlast a rate-limit window, not to
+# Back off on upstream 429s instead of failing on the first collision with
+# Cloudflare or account-level burst limits: 15 + 30 + 60 = 105s across 4 total
+# attempts (DEFAULT_MAX_RETRIES), outlasting a 60s rolling/fixed window.
+# Lightweight inter-call pacing plus a brief pre-write cooldown smooth out
+# back-to-back read/dashboard/write bursts that otherwise trigger 429s on
+# mutation endpoints (PATCH privacy/security, DELETE entries) even when only
+# one workflow run is active.
+RATE_LIMIT_BACKOFF: tuple[float, ...] = (15.0, 30.0, 60.0)
+DEFAULT_MAX_RETRIES: int = len(RATE_LIMIT_BACKOFF) + 1
+READ_PACE_SECONDS: float = 0.15
+WRITE_PACE_SECONDS: float = 0.35
+PHASE_COOLDOWN_SECONDS: float = 3.0
+ADAPTIVE_PACE_MULTIPLIER: float = 2.0
+ADAPTIVE_PACE_CAP_SECONDS: float = 2.0
+
+# The status and upstream code that mean "you are over quota, try later" rather
+# than "this request is wrong".
+RATE_LIMIT_STATUS = 429
+RATE_LIMIT_UPSTREAM_CODE = "rateLimit"
+
 
 def _assert_health_ok(body: Any, health_url: str) -> tuple[bool, str]:
     """Assert the 200 side of the contract: exactly ``{"status": "ok"}``."""
@@ -427,6 +451,10 @@ class ContainerE2ERunner:
         api_key: str = "",
         expect_health_ok: bool = True,
         health_only: bool = False,
+        rate_limit_backoff: tuple[float, ...] = RATE_LIMIT_BACKOFF,
+        read_delay: float = READ_PACE_SECONDS,
+        write_delay: float = WRITE_PACE_SECONDS,
+        phase_cooldown: float = PHASE_COOLDOWN_SECONDS,
     ) -> None:
         self.endpoint = endpoint
         self.variant = variant
@@ -439,6 +467,15 @@ class ContainerE2ERunner:
         self.expect_health_ok = expect_health_ok
         self.health_only = health_only
         self.report_file = artifacts_dir / f"tools_report_{variant}.jsonl"
+
+        # Bounded 429 retry table and inter-call pacing (injected so unit tests
+        # can zero them out without sleeping against the wall clock).
+        self.rate_limit_backoff = rate_limit_backoff
+        self.read_delay = read_delay
+        self.write_delay = write_delay
+        self.phase_cooldown = phase_cooldown
+        self._pace_seconds = read_delay
+        self._has_executed_call = False
 
         # The schemas the served container advertises, kept from the preflight: the
         # read sweep builds each call from them rather than from an argument list
@@ -568,6 +605,34 @@ class ContainerE2ERunner:
         self.schema_errors += 1
         return "INVALID", "; ".join(err_lines)
 
+    @staticmethod
+    def _is_rate_limited(payload: Any) -> bool:
+        """True when a tool payload reports an upstream 429 rather than a real failure.
+
+        The server reports over-quota as a normal result whose payload carries
+        ``status_code: 429`` (and usually ``upstream_code: "rateLimit"``), not
+        as an exception - which is why the exception retry alone let the first
+        429 fail the whole run. This is the same condition, read from the
+        payload.
+        """
+        if not isinstance(payload, dict):
+            return False
+        return (
+            payload.get("status_code") == RATE_LIMIT_STATUS or payload.get("upstream_code") == RATE_LIMIT_UPSTREAM_CODE
+        )
+
+    def _rate_limit_delay(self, payload: dict[str, Any], attempt: int) -> float:
+        """Seconds to wait before retrying a rate-limited call.
+
+        A payload that advertises its own ``retry_after`` (in seconds) is
+        obeyed; otherwise the bounded ``rate_limit_backoff`` table is walked,
+        holding its last entry once attempts outrun the table.
+        """
+        advertised = payload.get("retry_after")
+        if isinstance(advertised, (int, float)) and advertised > 0:
+            return float(advertised)
+        return self.rate_limit_backoff[min(attempt - 1, len(self.rate_limit_backoff) - 1)]
+
     async def _call_with_retries(
         self,
         session: ClientSession,
@@ -577,6 +642,11 @@ class ContainerE2ERunner:
         retry_delay: float,
     ) -> tuple[float, str, Any]:
         """Call the tool, retrying transient failures.
+
+        Two failures are transient and retried: a call that raised, and a call
+        that came back carrying an upstream 429. The second is the one this
+        suite actually meets - the quota is account-level, so a neighbouring
+        run can exhaust it mid-suite.
 
         Returns:
             A (duration, last_error, result) triple; ``result`` is None when every
@@ -591,30 +661,68 @@ class ContainerE2ERunner:
             try:
                 result = await session.call_tool(tool_name, arguments=args)
                 last_error = ""
-                break
             except Exception as e:  # noqa: BLE001
                 last_error = str(e)
                 if attempt < max_retries:
                     log_warn(f"  Error on attempt {attempt}/{max_retries}: {e}; retrying in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
                     attempt += 1
-                else:
-                    break
+                    continue
+                break
+            if not await self._retry_if_rate_limited(tool_name, result, attempt, max_retries):
+                break
+            attempt += 1
 
         return time.time() - start_time, last_error, result
+
+    async def _pace_call(self) -> None:
+        """Space sequential tool calls after the first to avoid burst rate limits."""
+        if self._has_executed_call and self._pace_seconds > 0:
+            await asyncio.sleep(self._pace_seconds)
+        self._has_executed_call = True
+
+    def _bump_pace(self) -> None:
+        """Double inter-call pacing (capped) after observing an upstream 429."""
+        if self._pace_seconds > 0:
+            self._pace_seconds = min(self._pace_seconds * ADAPTIVE_PACE_MULTIPLIER, ADAPTIVE_PACE_CAP_SECONDS)
+
+    async def _enter_write_phase(self) -> None:
+        """Pause briefly after reads/dashboards and adopt the slower write pace."""
+        self._pace_seconds = max(self._pace_seconds, self.write_delay)
+        if self.phase_cooldown > 0:
+            log_info(f"Cooling down {self.phase_cooldown:.1f}s before write operations...")
+            await asyncio.sleep(self.phase_cooldown)
+
+    async def _retry_if_rate_limited(self, tool_name: str, result: Any, attempt: int, max_retries: int) -> bool:
+        """True when this result was an upstream 429 that the caller should retry.
+
+        Waits the advertised or tabulated delay before returning True. On the
+        last attempt it returns False and leaves the payload in place, so
+        ``_call_failure`` records the honest upstream message instead of a
+        retry loop that reports success it never got.
+        """
+        _text, _has_image, parsed = self._parse_response_content(result)
+        if not self._is_rate_limited(parsed) or attempt >= max_retries:
+            return False
+        self._bump_pace()
+        delay = self._rate_limit_delay(parsed, attempt)
+        log_warn(f"  {tool_name}: upstream 429 on attempt {attempt}/{max_retries}; waiting {delay:.0f}s...")
+        await asyncio.sleep(delay)
+        return True
 
     async def execute_call(
         self,
         session: ClientSession,
         tool_name: str,
         args: dict[str, Any],
-        max_retries: int = 3,
+        max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay: float = 5.0,
     ) -> tuple[bool, Any]:
         """Execute a single tool call with retries and schema validation."""
         args_str = " ".join(f"{k}={v}" for k, v in args.items())
         log_info(f"Executing: {tool_name} {args_str}")
 
+        await self._pace_call()
         duration, last_error, result = await self._call_with_retries(session, tool_name, args, max_retries, retry_delay)
 
         if last_error or result is None:
@@ -930,6 +1038,7 @@ class ContainerE2ERunner:
         it again.
         """
         log_info(f"Step 3: Running {len(WRITE_CASES)} live write cases against profile {profile_id}...")
+        await self._enter_write_phase()
         ts = int(time.time())
 
         for tool_name, template in WRITE_CASES:
@@ -1069,7 +1178,14 @@ class ContainerE2ERunner:
                 ClientSession(r, w) as cleanup_session,
             ):
                 await cleanup_session.initialize()
-                await self.execute_call(cleanup_session, "deleteProfile", {"profile_id": created_profile_id})
+                # Teardown gets more attempts than a normal call: a leaked test
+                # profile is not a failed assertion, it is debris in the
+                # operator's account (CI accumulated 28 of them while a 429 on
+                # this delete ended the run). Still bounded - a delete that
+                # cannot outlast the window is logged, not retried forever.
+                await self.execute_call(
+                    cleanup_session, "deleteProfile", {"profile_id": created_profile_id}, max_retries=5
+                )
         except Exception as e:  # noqa: BLE001
             log_warn(f"Failed to delete test profile {created_profile_id}: {e}")
         finally:

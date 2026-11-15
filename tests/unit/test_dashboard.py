@@ -163,8 +163,8 @@ class TestDashboardFetchAndValidation:
         assert err["code"] == "no_data"
 
         data, err = dash_module._validate_card_data({"data": []}, "test", "p1")
-        assert data is None
-        assert err["code"] == "no_data"
+        assert err is None
+        assert data == []
 
     @pytest.mark.asyncio
     async def test_fetch_card_data_error_paths(self, clean_env, monkeypatch):
@@ -179,10 +179,11 @@ class TestDashboardFetchAndValidation:
         _pid, _data, err = await dash_module._fetch_card_data("abc123", "endpoint")
         assert err == upstream_err
 
-        # 3. Empty data returns no_data error
+        # 3. Empty data flows through (no no_data error) for consistent empty-state cards
         monkeypatch.setattr(dash_module, "_fetch_analytics_payload", AsyncMock(return_value=({"data": []}, None)))
         _pid, _data, err = await dash_module._fetch_card_data("abc123", "endpoint")
-        assert err["code"] == "no_data"
+        assert err is None
+        assert _data == []
 
     @pytest.mark.asyncio
     async def test_fetch_analytics_payload_error_classification(self, monkeypatch):
@@ -240,13 +241,19 @@ class TestDashboardToolsExecution:
         res = await dash_module.overviewDashboard(profile_id="abc123", domain_view="bar")
         assert isinstance(res, ToolResult)
         assert "$prefab" in res.structured_content
+        # Full-tree substring is insufficient – check resolved domains explicitly
+        content = str(res.structured_content)
+        assert content.count("BarChart") >= 2
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_all_sections(self, mock_all_endpoints):
-        res = await dash_module.overviewDashboard(profile_id="abc123", section="all")
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all", domain_view="bar")
         assert isinstance(res, ToolResult)
         assert "Rendered NextDNS Dashboard" in res.content[0].text
         assert "$prefab" in res.structured_content
+        content = str(res.structured_content)
+        # At least 6 BarCharts: overview Resolved/Blocked + Reasons/Devices/Root/GAFAM
+        assert content.count("BarChart") >= 6
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_status_fetch_error(self, monkeypatch):
@@ -451,3 +458,34 @@ class TestDashboardToolsExecution:
         assert dash_module._build_destinations_card([{"name": "US", "queries": 10}], view_type="table") is not None
         # Interval unparseable fallback
         assert dash_module._overview_interval("invalid", "now") == 86400
+
+    @pytest.mark.asyncio
+    async def test_overview_dashboard_bounds_concurrent_fanout(self, clean_env, monkeypatch):
+        """overviewDashboard(section='all') must cap concurrent upstream analytics requests."""
+        import asyncio
+
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        in_flight = 0
+        max_in_flight = 0
+        calls: list[str] = []
+
+        async def _tracking_fetch(pid: str, endpoint: str, params=None):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            calls.append(endpoint)
+            try:
+                await asyncio.sleep(0.01)
+                if endpoint == "status;series":
+                    return {"data": [{"status": "default", "queries": [1, 2]}], "meta": {"pagination": {}}}, None
+                if endpoint == "status":
+                    return {"data": [{"status": "default", "queries": 3}]}, None
+                return {"data": [{"domain": "example.com", "queries": 1}]}, None
+            finally:
+                in_flight -= 1
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", _tracking_fetch)
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all")
+        assert isinstance(res, ToolResult)
+        assert len(calls) == 11
+        assert 1 <= max_in_flight <= dash_module.OVERVIEW_FANOUT_CONCURRENCY
