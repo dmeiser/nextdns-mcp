@@ -150,20 +150,69 @@ class TestBuildSeriesChart:
     """Tests for Prefab chart construction helpers."""
 
     def test_build_chart_point_validates_and_aligns(self):
-        series_data = [
-            {"name": "blocked", "queries": [10, 20]},
-            {"name": "allowed", "queries": [5]},
-        ]
-        point0 = plots_module._build_chart_point("2024-01-15T10:00:00Z", 0, series_data)
+        query_lists = plots_module._extract_series_queries(
+            [
+                {"name": "blocked", "queries": [10, 20]},
+                {"name": "allowed", "queries": [5]},
+            ]
+        )
+        point0 = plots_module._build_chart_point("2024-01-15T10:00:00Z", 0, query_lists)
         assert point0 == {"time": "2024-01-15T10:00:00Z", "series_0": 10, "series_1": 5}
 
         # Index beyond series_1 length defaults to 0
-        point1 = plots_module._build_chart_point("2024-01-15T11:00:00Z", 1, series_data)
+        point1 = plots_module._build_chart_point("2024-01-15T11:00:00Z", 1, query_lists)
         assert point1 == {"time": "2024-01-15T11:00:00Z", "series_0": 20, "series_1": 0}
 
     def test_build_chart_point_raises_for_invalid_timestamp(self):
         with pytest.raises(ValueError):
-            plots_module._build_chart_point("bad-timestamp", 0, [{"queries": [1]}])
+            plots_module._build_chart_point("bad-timestamp", 0, [[1]])
+
+    def test_extract_series_queries_coalesces_missing_queries(self):
+        # A series with no ``queries``, a null ``queries`` and a short list all
+        # keep the same shape the per-point build produced before (issue #434).
+        lists = plots_module._extract_series_queries(
+            [{"name": "a"}, {"name": "b", "queries": None}, {"name": "c", "queries": [7]}]
+        )
+        assert lists == [[], [], [7]]
+
+    def test_build_chart_data_reads_each_series_query_list_once(self):
+        # The defect: the query list was re-read from every series for every
+        # timestamp, so a 2,000-point chart over 10 series cost 20,000 lookups.
+        class _CountingSeries(dict):
+            get_calls = 0
+
+            def get(self, key, default=None):
+                if key == "queries":
+                    self.get_calls += 1
+                return super().get(key, default)
+
+        blocked, allowed = (
+            _CountingSeries(name="blocked", queries=[10, 20, 30]),
+            _CountingSeries(name="allowed", queries=[5, 6]),
+        )
+        times = [f"2024-01-15T10:0{idx}:00Z" for idx in range(3)]
+        data = plots_module._build_chart_data(times, [blocked, allowed])
+
+        assert data == [
+            {"time": "2024-01-15T10:00:00Z", "series_0": 10, "series_1": 5},
+            {"time": "2024-01-15T10:01:00Z", "series_0": 20, "series_1": 6},
+            {"time": "2024-01-15T10:02:00Z", "series_0": 30, "series_1": 0},
+        ]
+        assert blocked.get_calls == 1, "query list read once per series, not per timestamp"
+        assert allowed.get_calls == 1, "query list read once per series, not per timestamp"
+
+    def test_build_chart_data_parses_each_timestamp_once(self, monkeypatch):
+        calls: list[str] = []
+
+        def _counting_parse(value: str):
+            calls.append(value)
+            return real_parse(value)
+
+        real_parse = plots_module._parse_series_timestamp
+        monkeypatch.setattr(plots_module, "_parse_series_timestamp", _counting_parse)
+        times = [f"2024-01-15T10:0{idx}:00Z" for idx in range(3)]
+        plots_module._build_chart_data(times, [{"queries": [1, 2, 3]}, {"queries": [4, 5, 6]}])
+        assert calls == times
 
     def test_build_chart_series_extracts_labels(self):
         series_data = [

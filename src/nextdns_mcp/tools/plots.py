@@ -125,16 +125,28 @@ def _parse_series_timestamp(value: str) -> datetime:
     return parsed
 
 
+def _extract_series_queries(series_data: list[dict[str, Any]]) -> list[list[Any]]:
+    """Read each series' query list once, in series order.
+
+    A missing or null ``queries`` value becomes an empty list here, which is the
+    same coalescing the per-point build used to repeat for every timestamp.
+    """
+    return [series.get("queries") or [] for series in series_data]
+
+
 def _build_chart_point(
     time_str: str,
     time_index: int,
-    series_data: list[dict[str, Any]],
+    query_lists: list[list[Any]],
 ) -> dict[str, Any]:
-    """Validate timestamp and return a single time-aligned data point."""
+    """Validate timestamp and return a single time-aligned data point.
+
+    ``query_lists`` is each series' query list prepared once by the caller (see
+    ``_extract_series_queries``), so building a point does no per-series lookups.
+    """
     _parse_series_timestamp(time_str)
     point: dict[str, Any] = {"time": time_str}
-    for s_idx, series in enumerate(series_data):
-        queries = series.get("queries") or []
+    for s_idx, queries in enumerate(query_lists):
         point[f"series_{s_idx}"] = queries[time_index] if time_index < len(queries) else 0
     return point
 
@@ -143,8 +155,14 @@ def _build_chart_data(
     times: list[str],
     series_data: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Build the list of data rows for the Prefab LineChart."""
-    return [_build_chart_point(t, idx, series_data) for idx, t in enumerate(times)]
+    """Build the list of data rows for the Prefab LineChart.
+
+    Each series' query list is extracted before the timestamp loop, so a chart of
+    N intervals over M series reads M query lists instead of N x M of them
+    (issue #434).
+    """
+    query_lists = _extract_series_queries(series_data)
+    return [_build_chart_point(t, idx, query_lists) for idx, t in enumerate(times)]
 
 
 _STATUS_COLORS = {
