@@ -588,6 +588,10 @@ class TestIntermediateSerialization:
         assert isinstance(row["args"], str)
         assert len(row["args"]) <= 600
         assert json.loads(row["args"]) == {"z_key": "1", "a_key": "2"}
+        # The intermediate dump is NOT re-sorted: caller key order survives,
+        # and only the final row serialization sorts keys. Pre-fix this was
+        # ["a_key", "z_key"] (sorted twice); post-fix it is insertion order.
+        assert list(json.loads(row["args"])) == ["z_key", "a_key"]
         # The final row serialization sorts keys exactly once.
         log_file = tmp_path / "calls.jsonl"
         _append_row(str(log_file), row)
@@ -600,3 +604,6 @@ class TestIntermediateSerialization:
         row = mw._record_row("getDenylist", {"profile_id": "p1"}, True, "", self._R({"data": [{"b": 1, "a": 2}]}))
         assert isinstance(row["result"], str)
         assert json.loads(row["result"]) == {"data": [{"b": 1, "a": 2}]}
+        # Same single-sort contract as ``args``: the intermediate dump keeps
+        # caller key order (pre-fix ``sort_keys`` rewrote it to ``a`` first).
+        assert row["result"].index('"b"') < row["result"].index('"a"')
