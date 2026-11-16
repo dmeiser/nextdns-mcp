@@ -23,6 +23,8 @@ directly by file path from the unit tests.
 
 from __future__ import annotations
 
+import contextlib
+
 import os
 import random
 import string
@@ -229,15 +231,34 @@ def write_private_text(path: Any, text: str) -> None:
     file; if it fails, nothing is written and the error propagates - an
     artifact that cannot be made private is an artifact not written.
     """
-    p = Path(path)
-    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with private_open(path, "w") as fh:
+        fh.write(text)
+
+
+
+@contextlib.contextmanager
+def private_open(path: Any, mode: str = "w"):
+    """Open a harness artifact 0600, creating or tightening it.
+
+    The report records tool names with profile ids and call payloads; the
+    container's umask default would leave that readable by every user of the
+    CI host. The mode is applied through the fd so a pre-existing permissive
+    file is tightened too, not only a brand-new one made private. Fail closed:
+    if 0600 cannot be established the artifact is not written at all.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+    fd = os.open(str(Path(path)), flags, 0o600)
     try:
-        os.fchmod(fd, 0o600)  # the creation mode only covers a brand-new file
+        os.fchmod(fd, 0o600)
     except OSError:
         os.close(fd)
         raise
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    fh = os.fdopen(fd, mode, encoding="utf-8")
+    try:
+        yield fh
+    finally:
+        fh.close()
+
 
 
 # =========================================================================== #

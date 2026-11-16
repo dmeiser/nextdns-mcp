@@ -6,7 +6,6 @@ SPDX-License-Identifier: MIT
 
 import argparse
 import asyncio
-import contextlib
 import json
 import os
 import sys
@@ -31,6 +30,9 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 from nextdns_mcp.constants import is_write_operation
 from nextdns_mcp.tools.dashboard import DASHBOARD_SECTIONS
 from scripts import ai_e2e_common, validate_schema
+
+# Backwards-compatible alias for the shared private-file opener.
+_private_open = ai_e2e_common.private_open
 from scripts.validate_schema import (
     assert_operation_coverage,
     load_openapi_spec,
@@ -477,33 +479,6 @@ def _document_reads(operations: dict[str, str]) -> list[str]:
     )
 
 
-@contextlib.contextmanager
-def _private_open(path: Path, mode: str):
-    """Open a report artifact 0600, creating or tightening it.
-
-    The report records tool names with profile ids and call payloads; the
-    container's umask default would leave that readable by every user of the
-    CI host. The mode is applied through the fd so a pre-existing permissive
-    file is tightened too, not only a brand-new one made private.
-    """
-    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC)
-    fd = os.open(str(path), flags, 0o600)
-    try:
-        # Fail closed: if 0600 cannot be established - the file belongs to
-        # someone else, the filesystem has no chmod - the artifact is not
-        # written at all. Raising here aborts the run loudly rather than
-        # leaving profile ids and payloads in a file other users can read.
-        os.fchmod(fd, 0o600)
-    except OSError:
-        os.close(fd)
-        raise
-    fh = os.fdopen(fd, mode, encoding="utf-8")
-    try:
-        yield fh
-    finally:
-        fh.close()
-
-
 class ContainerE2ERunner:
     """Orchestrates E2E testing of the NextDNS MCP container over MCP."""
 
@@ -589,7 +564,7 @@ class ContainerE2ERunner:
         if error_msg:
             record["error"] = error_msg
 
-        with _private_open(self.report_file, "a") as f:
+        with ai_e2e_common.private_open(self.report_file, "a") as f:
             f.write(json.dumps(record) + "\n")
 
     def record_skip(self, tool: str, reason: str) -> None:
@@ -600,7 +575,7 @@ class ContainerE2ERunner:
             "reason": reason,
             "timestamp": datetime.now(UTC).isoformat(),
         }
-        with _private_open(self.report_file, "a") as f:
+        with ai_e2e_common.private_open(self.report_file, "a") as f:
             f.write(json.dumps(record) + "\n")
         self.skipped_count += 1
 
@@ -954,7 +929,7 @@ class ContainerE2ERunner:
         ok, res = await self.execute_call(session, "createProfile", {"name": p_name})
         created_profile_id = _unwrap_id(res) if ok else ""
         if created_profile_id:
-            with _private_open(self.artifacts_dir / "test_profile_id.txt", "w") as f:
+            with ai_e2e_common.private_open(self.artifacts_dir / "test_profile_id.txt", "w") as f:
                 f.write(created_profile_id)
             log_success(f"Created test profile: {created_profile_id}")
         else:
@@ -1255,7 +1230,7 @@ class ContainerE2ERunner:
                 log_error(f"  {key}: {verdict}")
 
         verdict_file = self.artifacts_dir / f"security_toggles_{self.variant}.json"
-        with _private_open(verdict_file, "w") as f:
+        with ai_e2e_common.private_open(verdict_file, "w") as f:
             f.write(json.dumps(toggle_verdicts, indent=2))
         log_info(f"Toggle verdicts written to {verdict_file}")
 
@@ -1416,7 +1391,7 @@ class ContainerE2ERunner:
         """Run the full container E2E suite."""
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         # Clear previous report file
-        with _private_open(self.report_file, "w"):
+        with ai_e2e_common.private_open(self.report_file, "w"):
             pass
 
         log_info("================================")
