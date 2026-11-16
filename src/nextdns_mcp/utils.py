@@ -25,6 +25,7 @@ def is_safe_profile_id(value: str | int) -> bool:
     carry 6-character IDs. Anything else fails fast here instead of 404ing
     upstream.
     """
+    # return the payload
     return bool(SAFE_PROFILE_ID_PATTERN.match(str(value)))
 
 
