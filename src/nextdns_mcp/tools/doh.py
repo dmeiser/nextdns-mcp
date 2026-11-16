@@ -25,12 +25,36 @@ import httpx
 from ..client import _log_safe_error
 from ..coercion import OptionalProfileId
 from ..config import (
-    DNS_STATUS_CODES,
-    VALID_DNS_RECORD_TYPES,
     ProfileAccessControl,
     get_http_timeout,
     load_profile_access_control,
 )
+
+# Valid DNS record types for DoH lookups
+VALID_DNS_RECORD_TYPES = [
+    "A",
+    "AAAA",
+    "CNAME",
+    "MX",
+    "NS",
+    "PTR",
+    "SOA",
+    "TXT",
+    "SRV",
+    "CAA",
+    "DNSKEY",
+    "DS",
+]
+
+# DNS response status codes (RFC 1035)
+DNS_STATUS_CODES = {
+    0: "NOERROR - Success",
+    1: "FORMERR - Format error",
+    2: "SERVFAIL - Server failure",
+    3: "NXDOMAIN - Non-existent domain",
+    4: "NOTIMP - Not implemented",
+    5: "REFUSED - Query refused",
+}
 from ..errors import ErrorCode, error_payload, http_error_payload
 from ..transport import access_denied_payload
 from ..utils import resolve_profile_id
