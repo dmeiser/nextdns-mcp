@@ -36,6 +36,39 @@ jobs:
     if: github.event_name != 'workflow_run'
     uses: ./.github/workflows/unit-tests.yml
 
+  # For workflow_run events, decide whether the merged commit came from a
+  # release PR. A PR merged with the `no-release` label publishes no tags:
+  # the docker-publish job below is skipped entirely.
+  gate:
+    name: Determine release status
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    outputs:
+      is_release: ${{ steps.release.outputs.is_release }}
+    steps:
+      - name: Determine release status
+        id: release
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const headSha = context.payload.workflow_run.head_sha;
+            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: headSha
+            });
+
+            // Identify the PR that was merged via this commit and check for the no-release label.
+            const mergedPr = prs.find(pr => pr.state === 'closed' && pr.merged_at && pr.merge_commit_sha === headSha);
+            const isNoRelease = mergedPr && mergedPr.labels.some(label => label.name === 'no-release');
+            const isRelease = !isNoRelease;
+
+            console.log(`Head SHA: ${headSha}`);
+            console.log(`Merged PR: ${mergedPr ? `#${mergedPr.number}` : 'none'}`);
+            console.log(`Is no-release: ${isNoRelease}`);
+            console.log(`Is release merge: ${isRelease}`);
+            core.setOutput('is_release', isRelease.toString());
+
   docker-publish:
     name: Build and Push Docker Image (${{ matrix.variant }})
     runs-on: ubuntu-latest
@@ -43,12 +76,17 @@ jobs:
       fail-fast: false
       matrix:
         variant: [slim, alpine]
-    needs: [quality]
+    needs: [quality, gate]
     if: |
       always() &&
       !contains(github.event.workflow_run.head_commit.message || '', '[skip-docker]') &&
       (
-        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          needs.gate.outputs.is_release == 'true'
+        ) ||
         (
           (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
           needs.quality.result == 'success'
@@ -126,30 +164,6 @@ jobs:
         id: sha
         run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Determine release status
-        if: github.event_name == 'workflow_run'
-        id: release
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const headSha = context.payload.workflow_run.head_sha;
-            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              commit_sha: headSha
-            });
-
-            // Identify the PR that was merged via this commit and check for the no-release label.
-            const mergedPr = prs.find(pr => pr.state === 'closed' && pr.merged_at && pr.merge_commit_sha === headSha);
-            const isNoRelease = mergedPr && mergedPr.labels.some(label => label.name === 'no-release');
-            const isRelease = !isNoRelease;
-
-            console.log(`Head SHA: ${headSha}`);
-            console.log(`Merged PR: ${mergedPr ? `#${mergedPr.number}` : 'none'}`);
-            console.log(`Is no-release: ${isNoRelease}`);
-            console.log(`Is release merge: ${isRelease}`);
-            core.setOutput('is_release', isRelease.toString());
-
       - name: Extract metadata for Docker (slim)
         if: matrix.variant == 'slim'
         id: meta-slim
@@ -159,16 +173,18 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
             ghcr.io/${{ github.repository }}
           tags: |
-            # Floating 'latest' tag for main merges, scheduled, and manual rebuilds
-            type=raw,value=latest,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Floating 'latest' tag for release merges on main, scheduled, and manual rebuilds.
+            # A no-release merge publishes no tags at all.
+            type=raw,value=latest,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             # Nightly tag for scheduled base-image rebuilds
             type=raw,value=nightly,enable=${{ github.event_name == 'schedule' }}
             # Commit SHA tag used to identify the tested image
-            type=raw,value=${{ steps.sha.outputs.short }}
-            # Immutable version tags are only published for main merges and intentional rebuilds
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
-            type=raw,value=${{ steps.version.outputs.major }},enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
-            type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.sha.outputs.short }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Immutable version tags are only published for release merges on main
+            # and manual rebuilds from refs/heads/main
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+            type=raw,value=${{ steps.version.outputs.major }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+            type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
 
       - name: Extract metadata for Docker (alpine)
         if: matrix.variant == 'alpine'
@@ -179,16 +195,18 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
             ghcr.io/${{ github.repository }}
           tags: |
-            # Floating 'alpine' tag for main merges, scheduled, and manual rebuilds
-            type=raw,value=alpine,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Floating 'alpine' tag for release merges on main, scheduled, and manual rebuilds.
+            # A no-release merge publishes no tags at all.
+            type=raw,value=alpine,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             # Nightly tag for scheduled Alpine base-image rebuilds
             type=raw,value=nightly-alpine,enable=${{ github.event_name == 'schedule' }}
             # Commit SHA tag used to identify the tested Alpine image
-            type=raw,value=${{ steps.sha.outputs.short }}-alpine
-            # Immutable version tags are only published for main merges and intentional rebuilds
-            type=raw,value=${{ steps.version.outputs.version }}-alpine,enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
-            type=raw,value=${{ steps.version.outputs.major }}-alpine,enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
-            type=raw,value=${{ steps.version.outputs.major_minor }}-alpine,enable=${{ (github.event_name == 'workflow_run' && steps.release.outputs.is_release == 'true') || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.sha.outputs.short }}-alpine,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            # Immutable version tags are only published for release merges on main
+            # and manual rebuilds from refs/heads/main
+            type=raw,value=${{ steps.version.outputs.version }}-alpine,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+            type=raw,value=${{ steps.version.outputs.major }}-alpine,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}-alpine,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
 
       - name: Build and push Docker image (${{ matrix.variant }})
         uses: docker/build-push-action@v6
