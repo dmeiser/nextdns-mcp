@@ -26,7 +26,10 @@ def is_safe_profile_id(value: str | int) -> bool:
     upstream.
     """
     # return the payload
-    return bool(SAFE_PROFILE_ID_PATTERN.match(str(value)))
+    # `.match` is enough here only because the pattern carries `$`: without that anchor a
+    # longer value with a valid prefix would pass and be classified as a safe profile id.
+    candidate = str(value)
+    return bool(SAFE_PROFILE_ID_PATTERN.match(candidate))
 
 
 def is_integer_shaped(value: str) -> bool:
