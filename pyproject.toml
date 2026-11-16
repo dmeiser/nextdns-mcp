@@ -60,7 +60,10 @@ target-version = "py312"
 extend-exclude = [".worktrees"]
 
 [tool.ruff.lint]
-extend-select = ["I"]
+# ERA rejects commented-out code and TD/FIX reject ownerless to-do markers: the
+# mechanical half of the `## Comments` contract in AGENT.md. The why-versus-what
+# judgement a linter cannot make stays with the reviewer.
+extend-select = ["I", "ERA", "TD", "FIX"]
 
 [tool.mypy]
 python_version = "3.12"

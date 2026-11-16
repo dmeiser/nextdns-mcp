@@ -1,0 +1,42 @@
+name: Comment Discipline
+
+# Second half of the `## Comments` contract in AGENT.md: the `ruff` job of
+# Unit Tests rejects commented-out code and ownerless TODO markers, and this job
+# rejects a pull request whose whole diff is comments. It triggers on label
+# changes because the `comment-only` exception has to be takeable without a
+# second push.
+on:
+  pull_request:
+    branches: [ main, "fm/*" ]  # stacked feature branches (openapi-only stack)
+    types: [ opened, synchronize, reopened, labeled, unlabeled, ready_for_review ]
+
+permissions:
+  contents: read
+
+jobs:
+  comment-only-diff:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The gate diffs base...head, so it needs both commits, not just the head.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Comment-only diff gate
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # An empty string means the pull request carries no labels, which is
+          # the fail-closed case: no label, no exception.
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          # stdlib-only script, so no dependency sync is needed to judge a diff.
+          uv run --no-project python scripts/check_comment_only_diff.py --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --labels "$PR_LABELS"

@@ -6,6 +6,7 @@ This directory contains helper scripts and validation prompts for the NextDNS MC
 
 - **`run_container_e2e.py`** - Executes the full NextDNS MCP tool suite against a running MCP server container over MCP (HTTP streamable transport), with response schema validation. It also validates the container's `/health` readiness probe over real HTTP.
 - **`validate_schema.py`** - Validates tool responses against OpenAPI response schemas (see [Schema Validation](#schema-validation) below) and fails the E2E run when the served catalog drifts from the spec. The schema check is advisory: it reports drift, it does not enforce a strict response contract.
+- **`check_comment_only_diff.py`** - The gate the `Comment Discipline` workflow runs: it rejects a pull request whose entire diff is comments, blank lines, and docs prose unless the pull request carries the `comment-only` label. Rule and deletion test: the `## Comments` section of `AGENT.md`.
 
 ## Usage
 

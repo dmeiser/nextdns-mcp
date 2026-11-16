@@ -141,7 +141,7 @@ The last commits before a successful validation run MUST be formatting/type-chec
 - **Project-wide**: 100% code coverage
 - **Per-file**: No single file may have <100% coverage
 - **Branch**: The 100% target covers statements *and* branches (`[tool.coverage.run] branch = true` in `pyproject.toml`). A statement-only report cannot see an untested branch, and the `Cover` column is rounded to whole percent, so it can read `100%` while a branch is untaken: check that the `Miss` and `BrPart` columns are `0`, as the CI gate does.
-- **Exceptions**: Only for truly untestable code (e.g., `if __name__ == "__main__"`, module-level `sys.exit()`). Every exception must be covered by an explicit `# pragma: no cover` with a comment explaining why, or `# pragma: no branch` for a branch that cannot be taken.
+- **Exceptions**: Only for truly untestable code (e.g., `if __name__ == "__main__"`, module-level `sys.exit()`). Every exception must be covered by an explicit `# pragma: no cover` plus the why-comment the **Comments** section below requires (the marker says *what* is excluded; only the comment can carry the *why*), or `# pragma: no branch` for a branch that cannot be taken.
 
 **Running Coverage**:
 ```bash
@@ -156,7 +156,7 @@ open htmlcov/index.html
 - Check the `Miss` and `BrPart` columns in the terminal output, not just the rounded `Cover` percentage (see the Branch standard above)
 - Review HTML report for per-file coverage
 - Ensure no file falls below 100% statements and branches
-- Document any intentional gaps with inline comments explaining why they're untestable
+- Document any intentional gap with the why-comment the **Comments** section below requires — a gap note that only says the gap exists is not that comment
 - **All tests must pass** - zero failures, zero errors
 
 ### 3. Cyclomatic Complexity Standards
@@ -195,6 +195,7 @@ Before claiming work is complete:
 - [ ] Run `uv run ruff format src/ tests/`
 - [ ] Run `uv run mypy src/` (0 errors)
 - [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (100% statements and branches, **ALL tests pass**)
+- [ ] Apply the deletion test in the **Comments** section below to every comment this change adds or edits
 - [ ] Verify per-file coverage: all files 100% in `htmlcov/index.html` (statements and branches; see section 2)
 - [ ] Run the complexity gate locally: `uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/run_container_e2e.py` (every block grade A; the rest of `scripts/` is outside this gate — see section 3)
 - [ ] Optionally confirm the report with `uv run radon cc src/ scripts/run_container_e2e.py -nb` (it names the blocks the gate fails on)
@@ -207,11 +208,15 @@ Before claiming work is complete:
 **ruff** (code formatting and linting):
 - Line length: 120 characters
 - Target version: Python 3.12
+- Lint rules selected beyond the defaults: `I` (import order) and `ERA`/`TD`/`FIX` — the mechanical half of the **Comments** section below
 - Configuration in `pyproject.toml`:
   ```toml
   [tool.ruff]
   line-length = 120
   target-version = "py312"
+
+  [tool.ruff.lint]
+  extend-select = ["I", "ERA", "TD", "FIX"]
   ```
 
 **mypy** (type checking):
@@ -255,3 +260,44 @@ Before claiming work is complete:
 - Continue until 100% of quality standards are met
 
 **Never skip quality checks** — they catch bugs before production and ensure code maintainability. Failing tests indicate broken code that must be fixed, not ignored.
+
+## Comments
+
+A comment is code that is not executed, so no test can say whether it earns its place. This section is the contract the reviewer applies; the mechanical half is in "What the machine enforces" at the end of it.
+
+> A comment may exist only to answer: **why does this particular confusing piece of code exist, and what problem was it meant to solve?**
+
+The test to apply: Delete the comment. Does the next reader now do something wrong? No → delete it. Yes → keep it, and make it say what goes wrong.
+
+### Delete
+
+| Kind | Example |
+|---|---|
+| restates what the code says | `# increment the counter` above `count += 1` |
+| narrates a platform or vendor rule | "httpx merges the URL into the exception text" |
+| narrates current repo or package state | "not yet verified"; "for now"; "until the next release" |
+| change history | `# added in #181`; `# since 4.1.0` |
+| factory vocabulary | card keys, lane names, agent names, status names |
+| TODO/FIXME/XXX with no owner and no trigger | `# TODO: fix this` |
+| commented-out code | — |
+
+### Keep
+
+| Kind | Example |
+|---|---|
+| the constraint that forced an odd shape | FastMCP applies middleware outside-in, so add order is load order; `aiobotocore` pins `botocore` exactly |
+| the incident, with its handle | issue number, upstream error string, the run that failed |
+| a guard whose absence is invisible | "a positional forward can bind to the wrong parameter silently" |
+
+Before writing the why-comment, check whether renaming or restructuring removes the need for it. A comment is the last resort for confusing code, not the first.
+
+Platform and vendor facts belong here rather than in a code comment: this file is the rules `.github/copilot-instructions.md` delegates to, so a fact stated once here reaches every reader, and a fact copied into each call site drifts from the others.
+
+### What the machine enforces
+
+Only syntax, because nothing here may read prose to guess at intent:
+
+- `ERA`, `TD` and `FIX` are selected in `[tool.ruff.lint] extend-select` (see "Quality Tools Configuration" above), so commented-out code and ownerless `TODO`/`FIXME` markers fail `uv run ruff check src tests` in the `ruff` job.
+- `scripts/check_comment_only_diff.py`, run by the `Comment Discipline` workflow, rejects a pull request whose *entire* diff is comments, blank lines and docs prose unless the pull request carries the `comment-only` label. The label is the author's assertion that the diff is a deliberate comment fix; the pull request body is where the reader-facing claim that was wrong is stated for the reviewer. The check fails closed when the label is absent, whatever the body says, and stays green for any diff that changes code.
+- Whether a surviving comment answers why instead of what is a review judgement: apply the deletion test above to it.
+
