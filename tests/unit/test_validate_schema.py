@@ -393,10 +393,37 @@ def test_catalog_constants_are_imported_not_restated():
     assert validate_schema.local_tool_names() == published - set(spec_tools.spec_tool_names())
     expected_local = {tool.__name__ for tool, _ in _COMPOSITE_TOOLS}
     if is_generative_ui_enabled():
-        from nextdns_mcp.server import _GENERATIVE_UI_TOOLS
+        from nextdns_mcp.server import generative_ui_tool_names
 
-        expected_local.update(_GENERATIVE_UI_TOOLS)
+        expected_local.update(generative_ui_tool_names())
     assert expected_local == set(validate_schema.local_tool_names())
+
+
+def test_every_generative_ui_name_is_classified_exactly_once():
+    """Every generative-UI name the server publishes is classified exactly once by the validator.
+
+    A content tool has no payload for a schema to describe; a pinned tool's answer is
+    stated in TOOL_RESPONSE_SCHEMAS. A name that falls out of both — a rename that
+    reached the server, or a reclassification that moved only one side — would have its
+    responses silently unchecked forever, which is the drift hole this closes: the
+    catalog names live once, in ``generative_ui_tool_names()``, and the validator's
+    two classifications must cover them without overlapping.
+    """
+    from nextdns_mcp.server import (
+        generative_ui_content_tool_names,
+        generative_ui_data_tool_names,
+        generative_ui_tool_names,
+    )
+    from scripts import validate_schema
+
+    names = set(generative_ui_tool_names())
+    content = names & set(validate_schema.CONTENT_TOOLS)
+    pinned = names & set(validate_schema.TOOL_RESPONSE_SCHEMAS)
+    assert content | pinned == names
+    assert content & pinned == set()
+    # The classification the validator reaches is the server's own partition, not a restatement.
+    assert content == set(generative_ui_content_tool_names())
+    assert pinned == set(generative_ui_data_tool_names())
 
 
 def test_local_tool_names_reflects_generative_ui_toggle_after_import(monkeypatch):
