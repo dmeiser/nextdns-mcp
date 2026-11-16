@@ -1342,8 +1342,9 @@ async def _overview_dashboard_impl(
 
     Args:
         profile_id: Profile ID (falls back to NEXTDNS_DEFAULT_PROFILE when omitted).
-        from_time: Start of time window (e.g. "-30d", "-7d", "-1d", Unix timestamp).
+        from_time: Start of time window (e.g. "-30d", "-7d", "-1d", Unix timestamp). Default "-30d".
         to_time: End of time window (default "now").
+        Default window: from_time="-30d" to to_time="now" (30 days).
         limit: Maximum number of rows to display in lists and tables (default 10).
         section: Dashboard section or widget to render (default "overview").
         view_type: Visualization format: "auto" (default: table or card default), "bar", "table", or "pie".

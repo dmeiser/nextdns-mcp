@@ -647,6 +647,8 @@ async def plotAnalytics(
 
     Time values can be Unix timestamps or relative strings like ``-1d``.
 
+    Default window: ``from_time="-1d"`` to ``to_time="now"`` (1 day).
+
     The ``;series`` endpoint takes no ``limit`` parameter: ``limit`` is part of
     this tool's published surface, is rejected above 500 rather than clamped,
     and is never forwarded, so the requested range is the only thing that bounds
