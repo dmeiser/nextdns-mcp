@@ -1271,7 +1271,9 @@ async def _render_overview_page(
     kpis = _calculate_status_kpis(_payload_data(s_p))
     view = _assemble_overview_layout(kpis, ser_p, r_data, b_data, domain_view=domain_view)
     if section == "all":
-        extra_err = await _append_extra_dashboard_sections(pid, view, from_time, to_time, limit, domain_view=domain_view)
+        extra_err = await _append_extra_dashboard_sections(
+            pid, view, from_time, to_time, limit, domain_view=domain_view
+        )
         if extra_err:
             return extra_err
 
