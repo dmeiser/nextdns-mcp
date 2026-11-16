@@ -490,6 +490,18 @@ class TestDashboardToolsExecution:
         assert isinstance(await dash_module.overviewDashboard(view_type="bar"), ToolResult)
 
     @pytest.mark.asyncio
+    async def test_overview_dashboard_invalid_args(self):
+        res = await dash_module.overviewDashboard(section="domain")
+        assert isinstance(res, dict)
+        assert res["code"] == "invalid_argument"
+        res = await dash_module.overviewDashboard(view_type="bars")
+        assert isinstance(res, dict)
+        assert res["code"] == "invalid_argument"
+        res = await dash_module.overviewDashboard(domain_view="line")
+        assert isinstance(res, dict)
+        assert res["code"] == "invalid_argument"
+
+    @pytest.mark.asyncio
     async def test_specialized_tools_error_paths(self, clean_env, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(
