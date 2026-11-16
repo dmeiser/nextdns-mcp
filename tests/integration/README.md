@@ -31,7 +31,7 @@ Three operations are not plain generated proxies, and the tests treat them accor
   in `src/nextdns_mcp/tools/logs.py`. It answers with a local `file_path` and a bounded
   preview rather than an API document, which is why the schema validator treats it as an
   exception.
-- `plotAnalytics` and `dohLookup` are hand-written composites registered beside the
+- `plotAnalytics`, `dohLookup`, and `overviewDashboard` are hand-written composites registered beside the
   generated ones. They have no endpoint, so the call-log row records no endpoint for
   them and they are scored as reads.
 

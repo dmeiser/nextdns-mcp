@@ -62,7 +62,7 @@ def _with_error_flag(tool_fn: Any) -> Any:
     SUCCESSFUL result, so every one of those failure payloads used to reach
     callers with ``isError=False``. The generated SpecApiTool sets the flag
     explicitly via ``_payload_is_error``; this wrapper applies the same rule
-    to the two hand-written tools, so a refusal or failure never masquerades
+    to the three composite tools (plotAnalytics, dohLookup, overviewDashboard), so a refusal or failure never masquerades
     as a normal answer.
     """
 
@@ -133,12 +133,12 @@ def published_tool_names() -> list[str]:
 
 
 def build_mcp_server() -> FastMCP:
-    """Create the MCP server: one tool per NextDNS API operation, plus the two local ones.
+    """Create the MCP server: one tool per NextDNS API operation, plus the three composite tools (plotAnalytics, dohLookup, overviewDashboard).
 
     The catalog is generated from the shipped OpenAPI document by ``spec_tools`` — a
     tool per operation, named by its ``operationId``, with the spec's own description
-    and parameter schemas. Registered on top of it are the two operations this server
-    performs itself (``plotAnalytics``, ``dohLookup``), which the document cannot
+    and parameter schemas. Registered on top of it are the three operations this server
+    performs itself (``plotAnalytics``, ``dohLookup``, ``overviewDashboard``), which the document cannot
     describe because there is no endpoint to describe.
 
     Returns:
@@ -155,7 +155,7 @@ def build_mcp_server() -> FastMCP:
     for tool, app_enabled in _COMPOSITE_TOOLS:
         # FastMCP publishes only the first text section of a docstring as the tool
         # description, so the accepted values and the worked example further down
-        # would never reach a caller — and for these two tools that is exactly the
+        # would never reach a caller — and for these three tools that is exactly the
         # part a caller needs (a chart's interval range, a lookup's record types).
         server.tool(
             description=inspect.getdoc(tool) or "",

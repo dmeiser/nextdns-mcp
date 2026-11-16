@@ -207,3 +207,23 @@ class TestDocumentedDownloadAndProfileContracts:
             "`NEXTDNS_DEFAULT_PROFILE` is used only by `overviewDashboard`, `dohLookup`, and `plotAnalytics`" in readme
         )
         assert "every generated operation tool requires an explicit `profile_id`" in readme
+
+        faq = (_REPO_ROOT / "docs" / "faq.md").read_text(encoding="utf-8")
+        for name in ("overviewDashboard", "dohLookup", "plotAnalytics"):
+            assert name in faq, f"faq.md omits {name} from the default-profile fallback"
+        assert "Only the two composite tools" not in faq
+
+        troubleshooting = (_REPO_ROOT / "docs" / "troubleshooting.md").read_text(encoding="utf-8")
+        for name in ("overviewDashboard", "dohLookup", "plotAnalytics"):
+            assert name in troubleshooting, f"troubleshooting.md omits {name} from the default-profile fallback"
+        assert "only `dohLookup` and `plotAnalytics` use the default" not in troubleshooting
+
+    def test_agent_docs_count_the_three_composites(self):
+        agent = (_REPO_ROOT / "AGENT.md").read_text(encoding="utf-8")
+        for name in ("plotAnalytics", "dohLookup", "overviewDashboard"):
+            assert name in agent, f"AGENT.md omits {name} from the composite tools"
+        assert "the two operations the document cannot describe" not in agent
+        assert "the two composites" not in agent
+
+        integration_readme = (_REPO_ROOT / "tests" / "integration" / "README.md").read_text(encoding="utf-8")
+        assert "`overviewDashboard`" in integration_readme

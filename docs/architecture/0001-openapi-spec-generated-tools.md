@@ -84,11 +84,11 @@ which only ever fires on a value that would not have meant this tool's operation
 
 ## The composite visual and lookup tools are declared exceptions
 
-`overviewDashboard` and specialized analytics widgets, `plotAnalytics` (compose several series into an interactive Prefab chart), and `dohLookup` (resolve a name over
+`overviewDashboard` (the interactive Prefab dashboard whose sections double as specialized analytics widgets), `plotAnalytics` (compose several series into an interactive Prefab chart), and `dohLookup` (resolve a name over
 the DoH endpoint) do things no endpoint describes, so the published catalog is **not**
 fully derivable from the document: `published_tool_names()` combines the generated names
 with the composite tools, and they are registered beside them. This is the accepted cost of
-the decision, stated rather than discovered later — the document generates 78
+the decision, stated rather than discovered later — the document generates 78 of the 81
 published tools and names none of the composites. Adding a new composite means touching
 the registration list and the validation script's catalog policy, which is the point at
 which a `x-mcp-composite`-style declaration in the YAML would start paying for itself.

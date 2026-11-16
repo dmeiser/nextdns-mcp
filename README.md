@@ -40,8 +40,8 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
 
 - **One tool per operation.** The grouped tools of 3.x are gone. Every published tool is
   one operation of the bundled document, named for its `operationId`, taking that
-  endpoint's own arguments; there is no operation to choose, and the two composite
-  operations (`plotAnalytics`, `dohLookup`) are named for what they do.
+  endpoint's own arguments; there is no operation to choose, and the three composite
+  operations (`overviewDashboard`, `plotAnalytics`, `dohLookup`) are named for what they do.
 - **Disclosure is on by default.** `NEXTDNS_TOOL_SEARCH` defaults to `bm25`, so
   `tools/list` answers with only `search_tools` + `call_tool`. A client that expects to
   see every tool in the listing needs `NEXTDNS_TOOL_SEARCH=off`.

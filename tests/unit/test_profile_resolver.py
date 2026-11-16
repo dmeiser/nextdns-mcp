@@ -1,11 +1,10 @@
 """Unit tests for the centralized profile resolver utility.
 
-``resolve_profile_id`` is used by the hand-written tools that build a request
-URL (``dohLookup``, ``plotAnalytics``, ``overviewDashboard``); the generated
-tools resolve the id as a path placeholder in ``spec_tools`` instead, and a
-missing one is refused there before any request. Every call site is registered
-in ``_PROFILE_ID_SITES`` below, because each decides whether a call is made at
-all.
+``resolve_profile_id`` is used by the three composite tools (``plotAnalytics``,
+``dohLookup``, ``overviewDashboard``); the generated tools resolve the id as a
+path placeholder in ``spec_tools`` instead, and a missing one is refused there
+before any request. Every call site is registered in ``_PROFILE_ID_SITES``
+below, because each decides whether a call is made at all.
 
 SPDX-License-Identifier: MIT
 """

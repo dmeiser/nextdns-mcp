@@ -96,7 +96,7 @@ class TestPublishedExamples:
             if "profile_id=" in description:
                 assert 'profile_id="<profile id>"' in description, name
                 shown += 1
-        # Only the two hand-written tools write a worked call in their own prose; a
+        # Only the three composite tools write a worked call in their own prose; a
         # generated description is the spec's summary plus the endpoint line. Requiring
         # at least one keeps the loop above from passing because nothing was checked.
         assert shown >= 1, "no published description shows a profile_id example"

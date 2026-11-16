@@ -2,8 +2,8 @@
 
 SPDX-License-Identifier: MIT
 
-This is one of the two tools the server performs itself (the other is
-``plotAnalytics``). It deliberately does *not* go through the
+This is one of the three composite tools the server performs itself (alongside
+``plotAnalytics`` and ``overviewDashboard``). It deliberately does *not* go through the
 access-controlled API client: the DoH endpoint is a different host
 (``dns.nextdns.io``, allow-listed in ``client.ALLOWED_DESTINATION_HOSTS``), it
 answers DNS questions rather than REST resources, and its URL carries the

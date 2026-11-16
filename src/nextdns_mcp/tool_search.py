@@ -132,7 +132,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         )
         # tool name -> (method, path template), from the server's single route
         # parse. The full-catalog fallback classifies writes from this map; a
-        # name it does not carry (the two local operations) reads.
+        # name it does not carry (the three composite operations (plotAnalytics, dohLookup, overviewDashboard)) reads.
         self._endpoints: dict[str, tuple[str, str]] = dict(endpoints)
         self._word_memos: dict[tuple[str, ...], _CatalogWords] = {}
         self._compacted_cache: dict[int, tuple[Tool, dict[str, Any], int]] = {}
@@ -206,7 +206,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
                 if endpoint is not None:
                     # The map is the fact of what the call executes.
                     return is_write_operation(endpoint[0])
-                # The map does not carry this name (the two local operations):
+                # The map does not carry this name (the three composite operations (plotAnalytics, dohLookup, overviewDashboard)):
                 # a miss reads, the same reading _endpoint_method applies.
                 return False
 
@@ -679,8 +679,8 @@ class CallToolShapeMiddleware(Middleware):
 
         `endpoints` is the ``tool name -> (method, path template)`` map from
         the server's route parse: the sound read of whether a name executes a
-        write. A name the map does not carry - the two local operations,
-        plotAnalytics and dohLookup - reads.
+        write. A name the map does not carry - one of the three composite tools
+        (``plotAnalytics``, ``dohLookup``, ``overviewDashboard``) - reads.
         """
         self._call_tool_name = call_tool_name
         self._transform = transform
@@ -692,7 +692,7 @@ class CallToolShapeMiddleware(Middleware):
         The catalog fetch exists only to resolve names, and this shape needs
         none: the endpoint map carries every spec operation's name. Parameters
         sent beside ``name`` (the wrapper-shape repair) or an unlisted name
-        (aliases, search answers, the two local operations) take the catalog
+        (aliases, search answers, the three composite operations (plotAnalytics, dohLookup, overviewDashboard)) take the catalog
         path, where resolution happens.
         """
         return (

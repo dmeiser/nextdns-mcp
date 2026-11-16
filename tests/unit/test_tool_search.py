@@ -4,7 +4,7 @@ Covers the config parser (``get_tool_search_mode``) and the server wiring in
 ``create_mcp_server``/``build_mcp_server`` that swaps FastMCP's search
 transforms in: with a mode enabled, ``tools/list`` exposes only the synthetic
 ``search_tools`` + ``call_tool`` pair, while the real tools — the ones generated
-from the OpenAPI document, plus the two hand-written ones — stay callable
+from the OpenAPI document, plus the three composite ones — stay callable
 through the ``call_tool`` proxy.
 """
 

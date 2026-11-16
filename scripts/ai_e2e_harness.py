@@ -89,8 +89,8 @@ The tool contract
 -----------------
 The server publishes one tool per operation of the shipped OpenAPI document
 (``addToDenylist``, ``getAnalyticsDevicesSeries``, …), each taking that
-endpoint's own arguments, plus the two operations it performs itself —
-``plotAnalytics`` and ``dohLookup`` — which no endpoint describes. Progressive
+endpoint's own arguments, plus the three composite operations it performs itself —
+``plotAnalytics``, ``dohLookup``, and ``overviewDashboard`` — which no endpoint describes. Progressive
 disclosure is what the run configures with ``--tool-search``: with it on,
 ``tools/list`` exposes only ``search_tools`` and ``call_tool``, and the catalog
 behind them is the full operation set.
@@ -99,7 +99,7 @@ Condition 1 below is therefore matched on the API endpoint the call executed
 (``POST /profiles/{profile_id}/denylist``): each published tool is bound to
 one, and the server's call log records it. ``plotAnalytics`` and ``dohLookup``
 have no endpoint; their pass rule is their own record instead — the call ran,
-answered, and (for the chart) came back as image content.
+answered, and (for the chart) came back as structured Prefab chart output.
 
 Targeted runs
 -------------
@@ -126,7 +126,7 @@ Three conditions, all of which must hold:
 1. The MCP server recorded a call to the **endpoint this step verifies** — and
    that call succeeded and answered with a payload. Each published tool is
    bound to one endpoint, so this names the API call the step is about no
-   matter which tool the actor found; the two local operations are named by
+   matter which tool the actor found; the three composite operations are named by
    their own record (see ``_expect``). The server writes what it executed to a
    JSONL call log (``NEXTDNS_CALL_LOG``, see ``nextdns_mcp.call_log``); the
    harness reads back the lines its own attempt appended. ``--print-steps``
@@ -233,7 +233,7 @@ make_profile_name = common.make_profile_name
 
 
 # The tool catalog the actor is measured against: one tool per operation of the
-# shipped OpenAPI document, plus the two operations the server performs itself.
+# shipped OpenAPI document, plus the three composite operations the server performs itself.
 # Read from the server rather than typed out here - the document is the
 # contract, and a list kept beside it would drift the moment an operation is
 # added to it.
@@ -1637,8 +1637,8 @@ def _expect_local(
 ) -> dict[str, Any]:
     """A call to an operation the server performs itself: no endpoint, its own record.
 
-    ``plotAnalytics`` and ``dohLookup`` answer with what no endpoint returns - a
-    chart image, a DNS answer - so they are recorded by tool name, and the
+    ``plotAnalytics``, ``dohLookup``, and ``overviewDashboard`` answer with what no
+    endpoint returns - a Prefab chart or dashboard, a DNS answer - so they are recorded by tool name, and the
     payload they answered with is the proof the operation ran.
     """
     expect = {"tool": tool, "args": list(args), "result": list(result), "data": data}
@@ -1886,8 +1886,8 @@ def _expected_call_ok(
        and the call answered with a payload — the API cannot show that a read
        happened. The expectation names the API endpoint the call executed
        (``POST /profiles/{profile_id}/denylist``), which the server knows
-       because every generated tool is bound to one; the two operations the
-       server performs itself are named by their tool instead (see
+       because every generated tool is bound to one; the three composite operations
+       the server performs itself are named by their tool instead (see
        ``_expect_local``). The call's recorded ``profile_id`` must name the
        profile the step targets: matching the endpoint template alone would
        score a call against ANY readable profile as this step's answer, while
@@ -1976,7 +1976,7 @@ def _call_label(record: dict[str, Any]) -> str:
     """How the server's own record of a call is named.
 
     The endpoint says what happened upstream; a call with no endpoint is one of
-    the two operations the server performs itself, so its tool name says it.
+    the three composite operations the server performs itself, so its tool name says it.
     """
     endpoint = str(record.get("endpoint") or "")
     if endpoint:
@@ -2009,7 +2009,7 @@ def build_steps(targets: TaskTargets) -> list[Step]:
 
     Each step names the published tool that performs it and is judged on that
     tool's endpoint, resolved from the shipped OpenAPI document (see
-    ``_endpoint``); the two operations the server performs itself name
+    ``_endpoint``); the three composite operations the server performs itself name
     themselves through ``_expect_local``. The actor decides for itself which
     tool to find and call - the step states the outcome it must produce, not
     the call to make.
