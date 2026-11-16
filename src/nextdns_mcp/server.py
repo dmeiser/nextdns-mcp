@@ -51,7 +51,7 @@ _COMPOSITE_TOOLS = (
 # SpecApiTool derives these hints from the endpoint method; the composites have
 # no endpoint, so the hints are stated here — without them a caller scanning for
 # destructive tools gets no signal either way.
-_COMPOSITE_ANNOTATIONS = ToolAnnotations(read_only_hint=True, destructive_hint=False)
+_COMPOSITE_ANNOTATIONS = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True)
 
 
 def _with_error_flag(tool_fn: Any) -> Any:

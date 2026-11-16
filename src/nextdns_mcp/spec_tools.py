@@ -383,6 +383,7 @@ class SpecApiTool(Tool):
             annotations=ToolAnnotations(
                 read_only_hint=read_only,
                 destructive_hint=destructive,
+                open_world_hint=True,
             ),
         )
         self._route = route

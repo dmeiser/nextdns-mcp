@@ -221,8 +221,8 @@ class NextDNSGenerativeUI(GenerativeUI):
 
         csp = _build_csp()
         app_config = AppConfig(resource_uri=_gen.RESOURCE_URI)
-        generate_annotations = ToolAnnotations(read_only_hint=False, destructive_hint=False)
-        components_annotations = ToolAnnotations(read_only_hint=True, destructive_hint=False)
+        generate_annotations = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
+        components_annotations = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
 
         self._local._add_component(self._create_generate_tool(app_config, generate_annotations))
         if self._include_components_tool:
