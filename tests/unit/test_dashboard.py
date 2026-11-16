@@ -348,6 +348,130 @@ class TestDashboardToolsExecution:
         assert "US" in rendered
 
     @pytest.mark.asyncio
+    async def test_overview_dashboard_all_sections_single_stage_bounded_concurrency(self, monkeypatch):
+        """Assert section='all' gathers all 12 calls in one stage with max concurrency <= 4."""
+        import asyncio
+
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+
+        current_concurrency = 0
+        max_concurrency = 0
+        active_endpoints: list[str] = []
+        started_calls: list[str] = []
+        extra_started_while_overview_active: list[str] = []
+
+        overview_endpoints = {"status", "status;series", "domains"}
+        extra_endpoints = {"reasons", "devices", "ips", "destinations", "encryption", "dnssec"}
+
+        async def fake_fetch(pid, endpoint, params=None):
+            nonlocal current_concurrency, max_concurrency
+            current_concurrency += 1
+            max_concurrency = max(max_concurrency, current_concurrency)
+            active_endpoints.append(endpoint)
+            started_calls.append(endpoint)
+
+            if endpoint in extra_endpoints and any(ep in active_endpoints for ep in overview_endpoints):
+                extra_started_while_overview_active.append(endpoint)
+
+            # status finishes first so slot frees up immediately in the single gather stage
+            sleep_time = 0.005 if endpoint == "status" else 0.02
+            await asyncio.sleep(sleep_time)
+
+            active_endpoints.remove(endpoint)
+            current_concurrency -= 1
+
+            if endpoint == "status":
+                return ({"data": [{"status": "default", "queries": 90}, {"status": "blocked", "queries": 10}]}, None)
+            if endpoint == "status;series":
+                return (
+                    {
+                        "meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}},
+                        "data": [{"name": "blocked", "queries": [10]}],
+                    },
+                    None,
+                )
+            if endpoint == "destinations":
+                return (
+                    {"data": [{"company": "google", "queries": 50}, {"name": "US", "code": "US", "queries": 50}]},
+                    None,
+                )
+            if endpoint == "encryption":
+                return ({"data": [{"encrypted": True, "queries": 80}, {"encrypted": False, "queries": 20}]}, None)
+            if endpoint == "dnssec":
+                return ({"data": [{"validated": True, "queries": 30}, {"validated": False, "queries": 70}]}, None)
+            return ({"data": [{"domain": "test.com", "name": "Test", "ip": "1.1.1.1", "queries": 10}]}, None)
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all")
+        assert isinstance(res, ToolResult)
+        assert "Rendered NextDNS Dashboard" in res.content[0].text
+        assert "$prefab" in res.structured_content
+
+        # Total calls must be exactly 12 (4 overview + 8 extra, including the countries card)
+        assert len(started_calls) == 12
+        # Upstream concurrency must never exceed 4
+        assert max_concurrency <= dash_module.OVERVIEW_FANOUT_CONCURRENCY
+        assert max_concurrency == 4
+        # Single gather stage: extra calls must have started while overview calls were still in flight
+        assert len(extra_started_while_overview_active) > 0
+
+    @pytest.mark.asyncio
+    async def test_overview_dashboard_all_sections_status_error(self, monkeypatch):
+        """Assert section='all' surfaces status error payload."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+
+        async def fake_status_err(pid, endpoint, params=None):
+            if endpoint == "status":
+                return None, {"code": "http_error", "error": "status error"}
+            return ({"data": []}, None)
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_status_err)
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all")
+        assert isinstance(res, dict)
+        assert res["code"] == "http_error"
+
+    @pytest.mark.asyncio
+    async def test_overview_dashboard_overview_concurrency_bounded(self, monkeypatch):
+        """Assert section='overview' issues only 4 calls and respects concurrency limit."""
+        import asyncio
+
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+
+        current_concurrency = 0
+        max_concurrency = 0
+        started_calls: list[str] = []
+
+        async def fake_fetch(pid, endpoint, params=None):
+            nonlocal current_concurrency, max_concurrency
+            current_concurrency += 1
+            max_concurrency = max(max_concurrency, current_concurrency)
+            started_calls.append(endpoint)
+            await asyncio.sleep(0.01)
+            current_concurrency -= 1
+            if endpoint == "status":
+                return ({"data": [{"status": "default", "queries": 90}]}, None)
+            if endpoint == "status;series":
+                return ({"meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}}, "data": []}, None)
+            return ({"data": [{"domain": "test.com", "queries": 10}]}, None)
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="overview")
+        assert isinstance(res, ToolResult)
+        assert len(started_calls) == 4
+        assert max_concurrency <= dash_module.OVERVIEW_FANOUT_CONCURRENCY
+
+    @pytest.mark.asyncio
+    async def test_append_extra_dashboard_sections_standalone(self, mock_all_endpoints):
+        """Verify standalone execution of _append_extra_dashboard_sections."""
+        from prefab_ui.components import Column
+
+        with Column() as col:
+            pass
+        await dash_module._append_extra_dashboard_sections("abc123", col, "-30d", "now", 10)
+        assert len(col.children) > 0
+
+    @pytest.mark.asyncio
     async def test_analytics_dashboard_status_fetch_error(self, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
 

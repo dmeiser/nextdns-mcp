@@ -672,7 +672,7 @@ def _wrap_card_result(card: Card, summary_text: str) -> ToolResult:
     return ToolResult(content=summary_text, structured_content=app)
 
 
-OVERVIEW_FANOUT_CONCURRENCY = 2
+OVERVIEW_FANOUT_CONCURRENCY = 4
 
 
 async def _bounded_fetch_analytics_payload(
@@ -694,19 +694,113 @@ def _first_error(*errs: Any) -> dict[str, Any] | None:
     return None
 
 
+class ExtraDashboardPayloads(NamedTuple):
+    """Named data lists for extra dashboard sections."""
+
+    reasons: list[dict[str, Any]]
+    devices: list[dict[str, Any]]
+    ips: list[dict[str, Any]]
+    root_domains: list[dict[str, Any]]
+    gafam: list[dict[str, Any]]
+    countries: list[dict[str, Any]]
+    encryption: list[dict[str, Any]]
+    dnssec: list[dict[str, Any]]
+
+
+def _build_extra_tasks(
+    sem: asyncio.Semaphore,
+    pid: str,
+    from_time: str | int,
+    to_time: str | int,
+    limit: int,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Build bounded fetch tasks for extra dashboard sections, keyed by payload field name.
+
+    The keys mirror ``ExtraDashboardPayloads`` fields so results gathered in the
+    single overview stage re-bind by name, never by position.
+    """
+    extra_dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
+    return {
+        "reasons": _bounded_fetch_analytics_payload(sem, pid, "reasons", extra_dom_params),
+        "devices": _bounded_fetch_analytics_payload(sem, pid, "devices", extra_dom_params),
+        "ips": _bounded_fetch_analytics_payload(sem, pid, "ips", extra_dom_params),
+        "root_domains": _bounded_fetch_analytics_payload(sem, pid, "domains", {**extra_dom_params, "root": "true"}),
+        "gafam": _bounded_fetch_analytics_payload(sem, pid, "destinations", {**extra_dom_params, "type": "gafam"}),
+        "countries": _bounded_fetch_analytics_payload(sem, pid, "destinations", {**params, "type": "countries"}),
+        "encryption": _bounded_fetch_analytics_payload(sem, pid, "encryption", params),
+        "dnssec": _bounded_fetch_analytics_payload(sem, pid, "dnssec", params),
+    }
+
+
+def _extract_extra_payloads(
+    results: list[Any],
+    extra_names: list[str],
+    include_extra: bool,
+) -> tuple[ExtraDashboardPayloads | None, dict[str, Any] | None]:
+    """Bind the extra-section results gathered in the overview stage to payload fields by name."""
+    if not include_extra:
+        return None, None
+    extra = dict(zip(extra_names, results[4:]))
+    err = _first_error(*(v[1] for v in extra.values()))
+    if err:
+        return None, err
+    return ExtraDashboardPayloads(
+        reasons=_payload_data(extra["reasons"][0]),
+        devices=_payload_data(extra["devices"][0]),
+        ips=_payload_data(extra["ips"][0]),
+        root_domains=_payload_data(extra["root_domains"][0]),
+        gafam=_payload_data(extra["gafam"][0]),
+        countries=_payload_data(extra["countries"][0]),
+        encryption=_payload_data(extra["encryption"][0]),
+        dnssec=_payload_data(extra["dnssec"][0]),
+    ), None
+
+
+def _unpack_overview_results(
+    results: list[Any],
+    extra_names: list[str],
+    include_extra: bool,
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    ExtraDashboardPayloads | None,
+    dict[str, Any] | None,
+]:
+    """Unpack status, series, domain payloads and any extra dashboard rows."""
+    (s_p, s_err), (ser_p, ser_err), (r_p, r_err), (b_p, b_err) = results[:4]
+    err = _first_error(s_err, ser_err, r_err, b_err)
+    if err:
+        return {}, {}, [], [], None, err
+    extra_payloads, extra_err = _extract_extra_payloads(results, extra_names, include_extra)
+    if extra_err:
+        return {}, {}, [], [], None, extra_err
+    return (s_p or {}), (ser_p or {}), _payload_data(r_p), _payload_data(b_p), extra_payloads, None
+
+
 async def _fetch_overview_payloads(
     pid: str,
     from_time: str | int,
     to_time: str | int,
     limit: int,
-) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
-    """Fetch all datasets required for the main overview cards."""
+    include_extra: bool = False,
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    ExtraDashboardPayloads | None,
+    dict[str, Any] | None,
+]:
+    """Fetch all datasets required for main overview cards (and extra sections if include_extra)."""
     from_time = normalize_time_value(from_time)
     to_time = normalize_time_value(to_time)
     interval = _overview_interval(from_time, to_time)
     budget_err = _series_budget_error(from_time, to_time, interval)
     if budget_err:
-        return {}, {}, [], [], budget_err
+        return {}, {}, [], [], None, budget_err
 
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
     dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="default")
@@ -714,27 +808,15 @@ async def _fetch_overview_payloads(
     ser_params = _build_series_params(from_time=from_time, to_time=to_time, interval=interval)
 
     sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
-    status_task = _bounded_fetch_analytics_payload(sem, pid, "status", params)
-    series_task = _bounded_fetch_analytics_payload(sem, pid, "status;series", ser_params)
-    resolved_task = _bounded_fetch_analytics_payload(sem, pid, "domains", dom_params)
-    blocked_task = _bounded_fetch_analytics_payload(sem, pid, "domains", blk_params)
-
-    (
-        (status_payload, status_err),
-        (series_payload, series_err),
-        (resolved_payload, resolved_err),
-        (blocked_payload, blocked_err),
-    ) = await asyncio.gather(status_task, series_task, resolved_task, blocked_task)
-    err = _first_error(status_err, series_err, resolved_err, blocked_err)
-    if err:
-        return {}, {}, [], [], err
-    return (
-        (status_payload or {}),
-        (series_payload or {}),
-        _payload_data(resolved_payload),
-        _payload_data(blocked_payload),
-        None,
+    extra_fetchers = _build_extra_tasks(sem, pid, from_time, to_time, limit, params) if include_extra else {}
+    results = await asyncio.gather(
+        _bounded_fetch_analytics_payload(sem, pid, "status", params),
+        _bounded_fetch_analytics_payload(sem, pid, "status;series", ser_params),
+        _bounded_fetch_analytics_payload(sem, pid, "domains", dom_params),
+        _bounded_fetch_analytics_payload(sem, pid, "domains", blk_params),
+        *extra_fetchers.values(),
     )
+    return _unpack_overview_results(results, list(extra_fetchers), include_extra)
 
 
 def _assemble_overview_layout(
@@ -767,22 +849,9 @@ def _assemble_overview_layout(
     return view
 
 
-class ExtraDashboardPayloads(NamedTuple):
-    """Named data lists for extra dashboard sections."""
-
-    reasons: list[dict[str, Any]]
-    devices: list[dict[str, Any]]
-    ips: list[dict[str, Any]]
-    root_domains: list[dict[str, Any]]
-    gafam: list[dict[str, Any]]
-    countries: list[dict[str, Any]]
-    encryption: list[dict[str, Any]]
-    dnssec: list[dict[str, Any]]
-
-
 async def _fetch_extra_payloads(
     profile_id: str, dom_params: dict[str, Any], params: dict[str, Any]
-) -> ExtraDashboardPayloads | dict[str, Any]:
+) -> ExtraDashboardPayloads:
     """Fetch data lists for extra dashboard sections.
 
     Fetchers are keyed by result-field name and the tuple is built with
@@ -801,9 +870,6 @@ async def _fetch_extra_payloads(
     }
     pending = {name: asyncio.ensure_future(coro) for name, coro in fetchers.items()}
     results = {name: await task for name, task in pending.items()}
-    err = _first_error(*(r[1] for r in results.values()))
-    if err:
-        return err
     return ExtraDashboardPayloads(
         reasons=_payload_data(results["reasons"][0]),
         devices=_payload_data(results["devices"][0]),
@@ -816,22 +882,12 @@ async def _fetch_extra_payloads(
     )
 
 
-async def _append_extra_dashboard_sections(
-    profile_id: str,
+def _render_extra_dashboard_sections(
     view: Column,
-    from_time: str | int,
-    to_time: str | int,
-    limit: int,
+    payloads: ExtraDashboardPayloads,
     domain_view: str = "table",
-) -> dict[str, Any] | None:
-    """Fetch and append reasons, devices, IPs, root domains, GAFAM and security cards."""
-    dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
-    params = _build_analytics_params(from_time=from_time, to_time=to_time)
-
-    payloads = await _fetch_extra_payloads(profile_id, dom_params, params)
-    if isinstance(payloads, dict):
-        return payloads
-
+) -> None:
+    """Append extra dashboard cards from pre-fetched payloads, bound by field name."""
     with view:
         with Row(gap=4):
             _build_reasons_card(payloads.reasons, view_type=domain_view)
@@ -844,7 +900,22 @@ async def _append_extra_dashboard_sections(
             _build_destinations_card(payloads.countries, view_type=domain_view)
         with Row(gap=4):
             _build_security_card(payloads.encryption, payloads.dnssec)
-    return None
+
+
+async def _append_extra_dashboard_sections(
+    profile_id: str,
+    view: Column,
+    from_time: str | int,
+    to_time: str | int,
+    limit: int,
+    domain_view: str = "table",
+) -> None:
+    """Fetch and append reasons, devices, IPs, root domains, GAFAM, destinations and security cards."""
+    dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
+    params = _build_analytics_params(from_time=from_time, to_time=to_time)
+
+    payloads = await _fetch_extra_payloads(profile_id, dom_params, params)
+    _render_extra_dashboard_sections(view, payloads, domain_view=domain_view)
 
 
 def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
@@ -1282,18 +1353,17 @@ async def _render_overview_page(
     domain_view: Literal["table", "bar", "pie"],
 ) -> dict[str, Any] | ToolResult:
     """Fetch payloads, assemble layout, and return ToolResult for overview or all."""
-    s_p, ser_p, r_data, b_data, fetch_err = await _fetch_overview_payloads(pid, from_time, to_time, limit)
+    include_extra = section == "all"
+    s_p, ser_p, r_data, b_data, extra_payloads, fetch_err = await _fetch_overview_payloads(
+        pid, from_time, to_time, limit, include_extra=include_extra
+    )
     if fetch_err:
         return fetch_err
 
     kpis = _calculate_status_kpis(_payload_data(s_p))
     view = _assemble_overview_layout(kpis, ser_p, r_data, b_data, domain_view=domain_view)
-    if section == "all":
-        extra_err = await _append_extra_dashboard_sections(
-            pid, view, from_time, to_time, limit, domain_view=domain_view
-        )
-        if extra_err:
-            return extra_err
+    if include_extra and extra_payloads is not None:
+        _render_extra_dashboard_sections(view, extra_payloads, domain_view=domain_view)
 
     top_summary = _overview_top_summary(r_data, b_data)
     summary = (
