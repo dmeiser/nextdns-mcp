@@ -902,7 +902,7 @@ class TestDashboardParamForwarding:
             {**window, "limit": 25, "root": "true"},
         ]
         assert by_ep["destinations"] == [
-            {**window, "type": "gafam"},
+            {**window, "limit": 25, "type": "gafam"},
             {**window, "type": "countries"},
         ]
         assert by_ep["encryption"] == [dict(window)]
@@ -920,7 +920,7 @@ class TestDashboardParamForwarding:
             ("ips", "ips", {"from": "-1d", "to": "now", "limit": 25}),
             ("root_domains", "domains", {"from": "-1d", "to": "now", "limit": 25, "root": "true"}),
             ("countries", "destinations", {"from": "-1d", "to": "now", "limit": 25, "type": "countries"}),
-            ("gafam", "destinations", {"from": "-1d", "to": "now", "type": "gafam"}),
+            ("gafam", "destinations", {"from": "-1d", "to": "now", "limit": 25, "type": "gafam"}),
         ],
         ids=["kpi", "domains", "blocked_domains", "reasons", "devices", "ips", "root_domains", "countries", "gafam"],
     )

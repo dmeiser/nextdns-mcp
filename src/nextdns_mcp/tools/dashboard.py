@@ -794,7 +794,7 @@ async def _fetch_extra_payloads(
         "devices": _bounded_fetch_analytics_payload(sem, profile_id, "devices", dom_params),
         "ips": _bounded_fetch_analytics_payload(sem, profile_id, "ips", dom_params),
         "root_domains": _bounded_fetch_analytics_payload(sem, profile_id, "domains", {**dom_params, "root": "true"}),
-        "gafam": _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "gafam"}),
+        "gafam": _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**dom_params, "type": "gafam"}),
         "countries": _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "countries"}),
         "encryption": _bounded_fetch_analytics_payload(sem, profile_id, "encryption", params),
         "dnssec": _bounded_fetch_analytics_payload(sem, profile_id, "dnssec", params),
@@ -875,10 +875,13 @@ async def _gafam_analytics_impl(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
     to_time: str | int = "now",
+    limit: int = 10,
     view_type: Literal["auto", "pie", "bar", "table"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the GAFAM dominance donut chart and table."""
-    data, err = await _fetch_card_data(profile_id, "destinations", from_time=from_time, to_time=to_time, type="gafam")
+    data, err = await _fetch_card_data(
+        profile_id, "destinations", from_time=from_time, to_time=to_time, limit=limit, type="gafam"
+    )
     if err:
         return err
     if data is None:
@@ -1224,7 +1227,9 @@ async def _dispatch_gafam(
     limit: int = 10,
     view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
-    return await _gafam_analytics_impl(profile_id, from_time=from_time, to_time=to_time, view_type=view_type)
+    return await _gafam_analytics_impl(
+        profile_id, from_time=from_time, to_time=to_time, limit=limit, view_type=view_type
+    )
 
 
 async def _dispatch_security(
@@ -1323,6 +1328,23 @@ def _validate_overview_dashboard_args(section: Any, view_type: Any, domain_view:
     return None
 
 
+DASHBOARD_LIMIT_MIN = 1
+DASHBOARD_LIMIT_MAX = 500
+
+
+def _validate_dashboard_limit(limit: int) -> dict[str, Any] | None:
+    """Reject out-of-range dashboard limits before any upstream request."""
+    if isinstance(limit, bool) or limit < DASHBOARD_LIMIT_MIN or limit > DASHBOARD_LIMIT_MAX:
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"limit must be between {DASHBOARD_LIMIT_MIN} and {DASHBOARD_LIMIT_MAX}, got {limit}",
+            min_limit=DASHBOARD_LIMIT_MIN,
+            max_limit=DASHBOARD_LIMIT_MAX,
+            limit=limit,
+        )
+    return None
+
+
 async def _overview_dashboard_impl(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
@@ -1395,6 +1417,9 @@ async def overviewDashboard(
     arg_err = _validate_overview_dashboard_args(section, view_type, domain_view)
     if arg_err is not None:
         return arg_err
+    limit_err = _validate_dashboard_limit(limit)
+    if limit_err is not None:
+        return limit_err
     return await _overview_dashboard_impl(
         profile_id=profile_id,
         from_time=from_time,
