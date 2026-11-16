@@ -41,9 +41,9 @@ logger = logging.getLogger(__name__)
 # `dohLookup` resolves a name through a DNS-over-HTTPS resolver, and `plotAnalytics`
 # alongside `overviewDashboard` render interactive Prefab UI views from analytics queries.
 _COMPOSITE_TOOLS = (
-    plotAnalytics,
-    dohLookup,
-    overviewDashboard,
+    (plotAnalytics, True),
+    (dohLookup, None),
+    (overviewDashboard, True),
 )
 
 # None of the composite tools mutate anything: dohLookup answers a DNS question and
@@ -89,7 +89,7 @@ def published_tool_names() -> list[str]:
     the server is constructed — before the tools exist — so the names have to be
     derivable without registering anything.
     """
-    names = [*spec_tool_names(), *(tool.__name__ for tool in _COMPOSITE_TOOLS)]
+    names = [*spec_tool_names(), *(tool.__name__ for tool, _ in _COMPOSITE_TOOLS)]
     if is_generative_ui_enabled():
         names.extend(_GENERATIVE_UI_TOOLS)
     return names
@@ -115,16 +115,15 @@ def build_mcp_server() -> FastMCP:
     routes = spec_routes()
     server = create_mcp_server(tool_names=published_tool_names(), endpoints=endpoints_for_routes(routes))
     register_spec_tools(server, routes)
-    for tool in _COMPOSITE_TOOLS:
+    for tool, app_enabled in _COMPOSITE_TOOLS:
         # FastMCP publishes only the first text section of a docstring as the tool
         # description, so the accepted values and the worked example further down
         # would never reach a caller — and for these two tools that is exactly the
         # part a caller needs (a chart's interval range, a lookup's record types).
-        app_config = True if tool.__name__ != "dohLookup" else None
         server.tool(
             description=inspect.getdoc(tool) or "",
             annotations=_COMPOSITE_ANNOTATIONS,
-            app=app_config,
+            app=app_enabled,
         )(_with_error_flag(tool))
     if is_generative_ui_enabled():
         from .generative import NextDNSGenerativeUI
