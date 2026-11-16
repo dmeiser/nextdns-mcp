@@ -53,10 +53,10 @@ from fastmcp.tools.base import Tool, ToolResult
 from fastmcp.utilities.openapi import HTTPRoute, parse_openapi_to_http_routes
 from mcp.types import ToolAnnotations
 
+from .charts import current_time, resolve_time_point, series_budget_error
 from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
 from .tools import logs as _logs
-from .tools.plots import _now, _resolve_time_point, _series_budget_error
 from .transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload
 from .utils import is_safe_profile_id, normalize_partials, normalize_time_value, resolve_profile_id, schema_required
 
@@ -764,7 +764,7 @@ def _price_series_range(from_time: Any, to_time_raw: Any, interval: int | None) 
         if interval is None:
             return None  # unresolvable range: the endpoint gives its own 400
     to_time = "now" if to_time_raw is None else to_time_raw
-    return _series_budget_error(from_time, to_time, interval)
+    return series_budget_error(from_time, to_time, interval)
 
 
 def _default_interval_estimate(from_time: Any, to_time_raw: Any) -> int | None:
@@ -775,10 +775,10 @@ def _default_interval_estimate(from_time: Any, to_time_raw: Any) -> int | None:
     10800s. Neither range resolving (garbage input) means no price here -
     the endpoint gives its own 400.
     """
-    now = _now()
+    reference = current_time()
     to_time = "now" if to_time_raw is None else to_time_raw
-    start = _resolve_time_point(from_time, now)
-    end = _resolve_time_point(to_time, now)
+    start = resolve_time_point(from_time, reference)
+    end = resolve_time_point(to_time, reference)
     if start is None or end is None:
         return None
     return (

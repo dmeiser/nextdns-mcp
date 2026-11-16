@@ -24,7 +24,6 @@ directly by file path from the unit tests.
 from __future__ import annotations
 
 import contextlib
-
 import os
 import random
 import string
@@ -235,7 +234,6 @@ def write_private_text(path: Any, text: str) -> None:
         fh.write(text)
 
 
-
 @contextlib.contextmanager
 def private_open(path: Any, mode: str = "w"):
     """Open a harness artifact 0600, creating or tightening it.
@@ -258,7 +256,6 @@ def private_open(path: Any, mode: str = "w"):
         yield fh
     finally:
         fh.close()
-
 
 
 # =========================================================================== #
