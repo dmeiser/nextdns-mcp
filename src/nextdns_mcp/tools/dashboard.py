@@ -1285,35 +1285,6 @@ async def _render_overview_page(
     return ToolResult(content=summary, structured_content=PrefabApp(view=view, theme=DASHBOARD_THEME))
 
 
-async def _overview_dashboard_impl(
-    profile_id: OptionalProfileId = None,
-    from_time: str | int = "-30d",
-    to_time: str | int = "now",
-    limit: int = 10,
-    section: DashboardSection = "overview",
-    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
-    domain_view: Literal["table", "bar", "pie"] = "table",
-) -> dict[str, Any] | ToolResult:
-    """Construct an overview dashboard or individual widget matching the NextDNS web UI."""
-    eff_view = _resolve_domain_view(domain_view, view_type)
-
-    if section in _WIDGET_DISPATCH:
-        norm_from = normalize_time_value(from_time)
-        norm_to = normalize_time_value(to_time)
-        budget_err = _series_budget_error(norm_from, norm_to, _overview_interval(norm_from, norm_to))
-        if budget_err is not None:
-            return budget_err
-        return await _WIDGET_DISPATCH[section](profile_id, norm_from, norm_to, limit, eff_view)
-
-    pid, err = await _resolve_profile(profile_id)
-    if err is not None:
-        return err
-    if pid is None:
-        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution returned no id")
-
-    return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
-
-
 async def overviewDashboard(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
@@ -1353,12 +1324,20 @@ async def overviewDashboard(
         view_type: Visualization format: "auto" (default: table or card default), "bar", "table", or "pie".
         domain_view: Visualization format for domain cards in overview mode: "table" (default), "bar", or "pie".
     """
-    return await _overview_dashboard_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-        section=section,
-        view_type=view_type,
-        domain_view=domain_view,
-    )
+    eff_view = _resolve_domain_view(domain_view, view_type)
+
+    if section in _WIDGET_DISPATCH:
+        norm_from = normalize_time_value(from_time)
+        norm_to = normalize_time_value(to_time)
+        budget_err = _series_budget_error(norm_from, norm_to, _overview_interval(norm_from, norm_to))
+        if budget_err is not None:
+            return budget_err
+        return await _WIDGET_DISPATCH[section](profile_id, norm_from, norm_to, limit, eff_view)
+
+    pid, err = await _resolve_profile(profile_id)
+    if err is not None:
+        return err
+    if pid is None:
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution returned no id")
+
+    return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
