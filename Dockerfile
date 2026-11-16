@@ -61,6 +61,11 @@ COPY --from=builder /install /install
 # Copy application code
 COPY src/ /app/src/
 
+# Deno runtime required by Prefab's sandbox when NEXTDNS_GENERATIVE_UI=on
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip \
+    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- --version v2.3.7 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create and switch to a non-root user for security
 RUN useradd --create-home appuser
 USER appuser
@@ -68,6 +73,7 @@ USER appuser
 # Set PYTHONPATH to include the dependency install dir and /app/src so Python can
 # find the installed packages and the nextdns_mcp module
 ENV PYTHONPATH=/install:/app/src \
+    PATH=/usr/local/bin:$PATH \
     FASTMCP_CHECK_FOR_UPDATES=off \
     FASTMCP_HTTP_HOST_ORIGIN_PROTECTION=auto
 

@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -349,6 +349,72 @@ SECURITY_TOGGLE_KEYS = [
 # the summary and the preflight, and the unit test for this script, all read one list.
 EXPECTED_TOOLS = expected_tools(_load_spec_once(SPEC_PATH)) if SPEC_PATH.exists() else []
 
+# Issue #400: Prefab's sandbox shells out to a Deno subprocess, and neither image
+# shipped one, so the generative-UI tools were published but could never succeed.
+# The generating tool, and the pair a container serves with NEXTDNS_GENERATIVE_UI=on.
+PREFAB_UI_TOOL = "generate_prefab_ui"
+GENERATIVE_UI_TOOLS = (PREFAB_UI_TOOL, "search_prefab_components")
+
+# What the sandbox prints when the image has no runnable Deno (upstream
+# RuntimeError from Prefab's sandbox bootstrap). Its presence in any answer means
+# the image regressed, whatever else the answer carried.
+DENO_SANDBOX_ERROR = "Deno is required"
+
+# A program exercising the sandbox end to end: component imports plus a view tree.
+# Prefab UI is the only package the sandbox needs, so this needs no NextDNS
+# credential and cannot be masked by upstream API rate limits.
+PREFAB_VIEW_CODE = 'with Column(gap=4) as view:\n    Text("hello")\napp = PrefabApp(view=view)'
+
+
+def _sandbox_reports_missing_deno(response_text: str) -> bool:
+    """True when the answer carries Prefab's sandbox bootstrap failure.
+
+    The message arrives as plain text or inside an error payload, so both forms
+    are read. It is the one failure this check exists to catch: an image whose
+    Deno runtime is missing, unpinned, off PATH, or built for the wrong libc.
+    """
+    return DENO_SANDBOX_ERROR in response_text or DENO_SANDBOX_ERROR in json.dumps(
+        _parse_json_text(response_text) or {}
+    )
+
+
+def _generative_ui_failure(result: Any, response_text: str) -> str:
+    """Why a generate_prefab_ui answer is not an executed Prefab UI document; '' when it is.
+
+    A container without a runnable Deno answers with the sandbox RuntimeError
+    instead of a ``$prefab`` document, which is the regression this check exists
+    for; it is named explicitly so the CI log says so rather than "no payload".
+    """
+    if _sandbox_reports_missing_deno(response_text):
+        return f"container sandbox reported {DENO_SANDBOX_ERROR!r}: the image has no runnable Deno"
+    if getattr(result, "is_error", False):
+        return f"{PREFAB_UI_TOOL} returned an error result"
+    if not ContainerE2ERunner._is_prefab_payload(result, response_text):
+        return f"{PREFAB_UI_TOOL} returned no $prefab payload"
+    return ""
+
+
+def _view_rule_failure(tool_name: str, is_error: bool, result: Any, has_image: bool, response_text: str) -> str:
+    """How a visual tool's answer fell short; '' when it carries its expected content.
+
+    ``generate_prefab_ui`` is judged by its own rule rather than the generic
+    missing-view one, so an image with an unusable Deno is reported as the image
+    regression it is instead of as unexplained missing content. Non-Prefab
+    visual tools fail when they succeed without returning their chart content.
+    """
+    if tool_name == PREFAB_UI_TOOL:
+        return _generative_ui_failure(result, response_text)
+    if is_error:
+        return ""
+    if ContainerE2ERunner._content_missing_view(tool_name, False, result, has_image, response_text):
+        return f"{tool_name} did not return interactive Prefab UI content"
+    return ""
+
+
+def _missing_generative_ui_tools(served: set[str]) -> list[str]:
+    """Generative-UI tools absent from a container started with NEXTDNS_GENERATIVE_UI=on."""
+    return sorted(set(GENERATIVE_UI_TOOLS) - served)
+
 
 def _input_schema(tool: Any) -> dict[str, Any]:
     """A served tool's published input schema, under whichever name the SDK calls it.
@@ -452,6 +518,7 @@ class ContainerE2ERunner:
         api_key: str = "",
         expect_health_ok: bool = True,
         health_only: bool = False,
+        generative_ui_only: bool = False,
         rate_limit_backoff: tuple[float, ...] = RATE_LIMIT_BACKOFF,
         read_delay: float = READ_PACE_SECONDS,
         write_delay: float = WRITE_PACE_SECONDS,
@@ -467,6 +534,7 @@ class ContainerE2ERunner:
         self.api_key = api_key
         self.expect_health_ok = expect_health_ok
         self.health_only = health_only
+        self.generative_ui_only = generative_ui_only
         self.report_file = artifacts_dir / f"tools_report_{variant}.jsonl"
 
         # Bounded 429 retry table and inter-call pacing (injected so unit tests
@@ -563,17 +631,48 @@ class ContainerE2ERunner:
         return None
 
     @staticmethod
-    def _is_prefab_payload(result: Any) -> bool:
-        """True when the result object carries a Prefab UI document with a view."""
-        structured = getattr(result, "structured_content", None) or getattr(result, "structuredContent", None)
-        return isinstance(structured, dict) and "$prefab" in structured and "view" in structured
+    def _prefab_candidates(result: Any, response_text: str = "") -> list[Any]:
+        """Gather the structured payloads that may carry a Prefab document."""
+        candidates = [
+            getattr(result, "structured_content", None),
+            getattr(result, "structuredContent", None),
+        ]
+        if response_text:
+            try:
+                candidates.append(json.loads(response_text))
+            except (ValueError, TypeError):
+                pass
+        return candidates
+
+    @staticmethod
+    def _is_prefab_payload(result: Any, response_text: str = "") -> bool:
+        """True when the result carries a Prefab UI document.
+
+        The document may arrive as ``structured_content`` on the result or as a
+        JSON body in the text content, so both are checked.
+        """
+        return any(
+            isinstance(c, dict) and "$prefab" in c for c in ContainerE2ERunner._prefab_candidates(result, response_text)
+        )
 
     @classmethod
-    def _has_chart_content(cls, result: Any, has_image: bool, response_text: str) -> bool:
+    def _has_chart_content(cls, result: Any, has_image: bool, response_text: str, tool_name: str = "") -> bool:
         """True when the response carries an image block, structured Prefab UI, or chart/dashboard summary."""
         if has_image:
             return True
-        return cls._is_prefab_payload(result)
+        if tool_name == PREFAB_UI_TOOL:
+            return cls._is_prefab_payload(result, response_text)
+        return ContainerE2ERunner._has_view_payload(ContainerE2ERunner._prefab_candidates(result, response_text))
+
+    @staticmethod
+    def _has_view_payload(candidates: list[Any]) -> bool:
+        """True when any candidate carries a Prefab document with a top-level view."""
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if "$prefab" in candidate and "view" in candidate:
+                return True
+        return False
 
     @classmethod
     def _content_missing_view(
@@ -582,7 +681,7 @@ class ContainerE2ERunner:
         """True when an interactive visual tool succeeded without returning Prefab UI view or summary."""
         if tool_name not in validate_schema.CONTENT_TOOLS or is_error:
             return False
-        return not cls._has_chart_content(result, has_image, response_text)
+        return not cls._has_chart_content(result, has_image, response_text, tool_name)
 
     def _validate_against_schema(self, tool_name: str, parsed_json: Any) -> tuple[str, str]:
         """Validate a parsed payload against the OpenAPI spec.
@@ -765,13 +864,17 @@ class ContainerE2ERunner:
         response_text, has_image, parsed_json = self._parse_response_content(result)
 
         payload_error = self._payload_error(parsed_json)
-        last_error = payload_error if payload_error is not None else ""
         if payload_error is not None:
             is_error = True
+        last_error = payload_error or ""
 
-        if self._content_missing_view(tool_name, is_error, result, has_image, response_text):
+        # Content rules answer only for an errored result: the Prefab UI tool by its
+        # own rule (an image whose Deno runtime cannot run is named as such), every
+        # other visual tool by the missing-view rule.
+        view_failure = _view_rule_failure(tool_name, is_error, result, has_image, response_text)
+        if view_failure:
+            last_error = view_failure
             is_error = True
-            last_error = f"{tool_name} did not return interactive Prefab UI content"
 
         if not is_error:
             return None
@@ -1189,6 +1292,53 @@ class ContainerE2ERunner:
         log_success("/health readiness probe validated over HTTP")
         return 0
 
+    async def _preflight_generative_ui(self) -> bool:
+        """Wait for the endpoint, validate /health, and require the generative-UI pair.
+
+        ``tools/list`` is the first half of the #400 contract: with
+        ``NEXTDNS_GENERATIVE_UI=on`` the container must advertise the tools, and
+        the same answer proves the server booted at all.
+        """
+        if not await self.check_endpoint_readiness() or not self.check_health():
+            return False
+        async with self._open_session() as session:
+            served = {tool.name for tool in (await session.list_tools()).tools}
+        missing = _missing_generative_ui_tools(served)
+        if missing:
+            log_error(f"NEXTDNS_GENERATIVE_UI=on but the container does not serve: {missing}")
+            return False
+        log_success(f"Served catalog includes the generative-UI tools: {', '.join(GENERATIVE_UI_TOOLS)}")
+        return True
+
+    async def _run_generative_ui_check(self, session: ClientSession) -> None:
+        """Call ``generate_prefab_ui`` in the built image and assert a $prefab document.
+
+        Issue #400's enabled-container test: every other check only proved the
+        server starts, so an image whose Deno runtime is missing, unpinned, off
+        PATH, or built for the wrong libc published a tool that can never
+        succeed. This runs the tool itself, in the container, on this matrix
+        variant.
+        """
+        log_info(f"Calling {PREFAB_UI_TOOL} end to end in the {self.variant} container...")
+        ok, _result = await self.execute_call(session, PREFAB_UI_TOOL, {"code": PREFAB_VIEW_CODE})
+        if ok:
+            log_success(f"{PREFAB_UI_TOOL} rendered a Prefab UI document inside the {self.variant} container")
+
+    async def _run_generative_ui_only(self) -> int:
+        """Run the credential-free generative-UI check; returns the process exit code.
+
+        The container for this check is started with an invalid API key on
+        purpose: ``/health`` must report that upstream authentication failure —
+        proving the image runs — while the Prefab sandbox needs nothing but its
+        own Deno runtime. The live-account rate limit therefore cannot turn this
+        check green or red.
+        """
+        if not await self._preflight_generative_ui():
+            return 1
+        async with self._open_session() as session:
+            await self._run_generative_ui_check(session)
+        return self._finish()
+
     @asynccontextmanager
     async def _open_session(self) -> AsyncIterator[ClientSession]:
         """Open an initialized MCP session against the served container."""
@@ -1254,6 +1404,14 @@ class ContainerE2ERunner:
         log_success("All executed E2E calls completed successfully")
         return 0
 
+    def _mode_runner(self) -> Callable[[], Awaitable[int]] | None:
+        """The single-mode runner to run instead of the live suite, if one was selected."""
+        if self.health_only:
+            return self._run_health_only
+        if self.generative_ui_only:
+            return self._run_generative_ui_only
+        return None
+
     async def run(self) -> int:
         """Run the full container E2E suite."""
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -1268,8 +1426,9 @@ class ContainerE2ERunner:
         log_info(f"Artifacts report: {self.report_file}")
         log_info("================================")
 
-        if self.health_only:
-            return await self._run_health_only()
+        mode = self._mode_runner()
+        if mode is not None:
+            return await mode()
 
         # ARCH-3 gate, in the live runner itself and not only in the unit
         # suite: the WRITE_CASES/UNEXERCISED_WRITE_OPERATIONS bookkeeping must
@@ -1366,6 +1525,12 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("HEALTH_ONLY", "false").lower() == "true",
         help="Validate only the /health endpoint and skip the MCP tool suite (default: false)",
     )
+    parser.add_argument(
+        "--generative-ui-only",
+        action="store_true",
+        default=os.environ.get("GENERATIVE_UI_ONLY", "false").lower() == "true",
+        help="Run only the enabled-container generative-UI check: tools/list plus a real generate_prefab_ui call (default: false)",
+    )
     return parser.parse_args()
 
 
@@ -1381,6 +1546,7 @@ def main() -> int:
         api_key=args.api_key,
         expect_health_ok=args.expect_health == "ok",
         health_only=args.health_only,
+        generative_ui_only=args.generative_ui_only,
     )
     return asyncio.run(runner.run())
 
