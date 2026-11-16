@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Gate: a pull request whose entire diff is comments has to justify itself.
 
-Why this exists: a two-file, comment-only pull request passed every check in the
-delivery pipeline, because each check asked "does it still work?" and none asked
-"does this comment need to exist?" (WORK-205). This script asks the one question
-a machine can answer about a comment — whether the diff changed anything but
-comments — and stops there. Whether a surviving comment answers *why* rather
-than *what* is a review judgement, so the scan is syntactic by design: no prose
-parser, no LLM.
+Why this exists: a two-file pull request of pure narration passed six green
+checks in the sibling app repository, because every gate asked "does it still
+work?" and none asked "does this comment need to exist?". This script asks the
+one question a machine can answer about a comment — whether the diff changed
+anything but comments — and stops there. Whether a surviving comment answers
+*why* rather than *what* is a review judgement, so the scan is syntactic by
+design: no prose parser, no LLM.
 
 The label is the author's assertion; the pull request body is where the reader-
 facing claim is stated for the reviewer, and nothing here reads it. The label

@@ -6,8 +6,8 @@ request whose entire diff is comments, blank lines, or docs prose is rejected
 unless it carries the `comment-only` label. These tests execute the workflow's
 own step, verbatim, against throwaway git repositories, which is what a
 developer pushing a pull request actually experiences — and they pin the two
-directions the card is judged on: the gate must reject an unlabelled
-comment-only diff, and it must never reject a diff that contains code.
+directions the gate has to get right: it must reject an unlabelled comment-only
+diff, and it must never reject a diff that contains code.
 
 The step under test is taken from the workflow unmodified; only the `uv` launcher
 is shimmed, so a change to how CI invokes the script fails here instead of
@@ -122,7 +122,7 @@ def _run_gate(repo: Repo, head: str, labels: str = "") -> subprocess.CompletedPr
 
 
 def test_comment_only_diff_is_rejected_without_the_label(tmp_path):
-    """The oracle case: a bare `# return the payload` above a return, no label."""
+    """The case the gate exists for: a bare `# return the payload` above a return, no label."""
     repo = _repo(tmp_path)
     head = _advance(repo, {"src/nextdns_mcp/mod.py": NARRATION}, "narration")
 
