@@ -31,9 +31,15 @@ from prefab_ui.components import (
     Row,
     Text,
 )
-from prefab_ui.components.charts import AreaChart, BarChart, ChartSeries, PieChart
+from prefab_ui.components.charts import BarChart, ChartSeries, PieChart
 
-from ...charts import DASHBOARD_THEME, build_chart_data, build_chart_series, validate_series_payload
+from ...charts import (
+    DASHBOARD_THEME,
+    build_chart_data,
+    build_chart_series,
+    build_timeseries_area_chart,
+    validate_series_payload,
+)
 from .data import (
     ExtraDashboardPayloads,
     _calc_rate,
@@ -88,17 +94,7 @@ def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
             CardTitle("Queries")
             CardDescription("Evolution of queries over time.")
         with CardContent():
-            AreaChart(
-                data=chart_data,
-                series=chart_series,
-                xAxis="time",
-                curve="smooth",
-                showDots=False,
-                height=260,
-                showLegend=True,
-                showTooltip=True,
-                showGrid=True,
-            )
+            build_timeseries_area_chart(chart_data, chart_series)
     return card
 
 

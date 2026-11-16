@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from prefab_ui.app import Theme
-from prefab_ui.components.charts import ChartSeries
+from prefab_ui.components.charts import AreaChart, ChartSeries
 
 from .errors import ErrorCode, error_payload
 
@@ -154,6 +154,33 @@ def build_chart_series(series_data: list[dict[str, Any]]) -> list[ChartSeries]:
         )
         for idx, series in enumerate(series_data)
     ]
+
+
+def build_timeseries_area_chart(
+    data: list[dict[str, Any]],
+    series: list[ChartSeries],
+) -> AreaChart:
+    """Build the time-series ``AreaChart`` both hand-written surfaces render.
+
+    ``tools.plots`` and the dashboard's queries card each carried their own copy
+    of the same component kwargs - smooth curve, no dots, 260px tall, legend,
+    tooltip and grid on, x-axis the ``time`` key of ``build_chart_data`` rows -
+    alongside the shared data and series builders above (issue #439). Copies of
+    a configuration can only drift, and a drift here would show up as the two
+    surfaces rendering the same series differently; this module, which neither
+    surface owns, is where that configuration lives.
+    """
+    return AreaChart(
+        data=data,
+        series=series,
+        xAxis="time",
+        curve="smooth",
+        showDots=False,
+        height=260,
+        showLegend=True,
+        showTooltip=True,
+        showGrid=True,
+    )
 
 
 def current_time() -> float:

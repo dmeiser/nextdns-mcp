@@ -10,12 +10,12 @@ from typing import Any
 from fastmcp.tools.base import ToolResult
 from prefab_ui.app import PrefabApp
 from prefab_ui.components import Column, Heading, Metric, Row
-from prefab_ui.components.charts import AreaChart
 
 from ..charts import (
     DASHBOARD_THEME,
     build_chart_data,
     build_chart_series,
+    build_timeseries_area_chart,
     series_budget_error,
     validate_series_payload,
 )
@@ -105,17 +105,7 @@ def _build_series_chart(
             Metric(label="Total Queries", value=f"{total_queries:,}")
             Metric(label="Data Points", value=str(len(chart_times)))
             Metric(label="Series Count", value=str(len(chart_series_data)))
-        AreaChart(
-            data=chart_data,
-            series=chart_series,
-            xAxis="time",
-            curve="smooth",
-            showDots=False,
-            height=260,
-            showLegend=True,
-            showTooltip=True,
-            showGrid=True,
-        )
+        build_timeseries_area_chart(chart_data, chart_series)
 
     summary = f"NextDNS Analytics: {metric} ({total_queries:,} total queries across {len(chart_times)} intervals)"
     app = PrefabApp(view=view, theme=DASHBOARD_THEME)
