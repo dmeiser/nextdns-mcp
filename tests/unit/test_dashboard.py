@@ -943,3 +943,65 @@ class TestDashboardParamForwarding:
         assert "DataTable" in self._component_types(table) and "BarChart" not in self._component_types(table)
         assert "BarChart" in self._component_types(bar) and "DataTable" not in self._component_types(bar)
         assert "PieChart" in self._component_types(pie) and "DataTable" not in self._component_types(pie)
+
+
+class TestSubRequestErrorPropagation:
+    """Failure-injection for every gathered sub-request (WORK-102)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failing", ["status", "status;series", "resolved", "blocked"])
+    async def test_overview_fetch_propagates_each_error(self, clean_env, monkeypatch, failing):
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        err = {"code": "http_error", "error": "429 upstream"}
+
+        async def fake_fetch(pid, endpoint, params=None):
+            if failing == "status" and endpoint == "status":
+                return None, err
+            if failing == "status;series" and endpoint == "status;series":
+                return None, err
+            if failing == "resolved" and endpoint == "domains" and (params or {}).get("status") == "default":
+                return None, err
+            if failing == "blocked" and endpoint == "domains" and (params or {}).get("status") == "blocked":
+                return None, err
+            if endpoint == "status":
+                return ({"data": [{"status": "default", "queries": 1}]}, None)
+            if endpoint == "status;series":
+                return ({"meta": {"series": {"times": []}}, "data": []}, None)
+            return ({"data": [{"domain": "ok.test", "queries": 1}]}, None)
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="overview")
+        assert isinstance(res, dict)
+        assert res == err
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failing",
+        ["reasons", "devices", "ips", "root", "gafam", "encryption", "dnssec"],
+    )
+    async def test_extra_fetch_propagates_each_error(self, clean_env, monkeypatch, failing):
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        err = {"code": "http_error", "error": "429 upstream"}
+
+        async def fake_fetch(pid, endpoint, params=None):
+            params = params or {}
+            if failing == "reasons" and endpoint == "reasons":
+                return None, err
+            if failing == "devices" and endpoint == "devices":
+                return None, err
+            if failing == "ips" and endpoint == "ips":
+                return None, err
+            if failing == "root" and endpoint == "domains" and params.get("root") == "true":
+                return None, err
+            if failing == "gafam" and endpoint == "destinations":
+                return None, err
+            if failing == "encryption" and endpoint == "encryption":
+                return None, err
+            if failing == "dnssec" and endpoint == "dnssec":
+                return None, err
+            return ({"data": []}, None)
+
+        monkeypatch.setattr(dash_module, "_fetch_analytics_payload", fake_fetch)
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all")
+        assert isinstance(res, dict)
+        assert res == err
