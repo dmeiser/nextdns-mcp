@@ -3,8 +3,8 @@
 SPDX-License-Identifier: MIT
 """
 
-import asyncio
 import ast
+import asyncio
 import json
 from collections.abc import Iterable
 from typing import Any
