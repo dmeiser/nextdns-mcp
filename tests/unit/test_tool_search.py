@@ -1097,6 +1097,130 @@ class TestMultiEntryAnswerWriteGate:
         assert target is plot
 
 
+class TestAWriteOffTheRouteMapIsStillAWrite:
+    """A tool the endpoint map does not carry is a write when its own annotations say so.
+
+    ``generate_prefab_ui`` is not a spec route, so it has no HTTP method to read,
+    and every name the map lacked was classified as ``GET``. A loose or
+    ambiguous match therefore ran sandboxed code the caller never singled out,
+    even though the tool is registered with ``read_only_hint=False``. For a name
+    off the map the tool's own annotation decides; an annotation that reads
+    (the three composite operations) still reads.
+    """
+
+    @staticmethod
+    def _generator():
+        from fastmcp.tools.base import Tool, ToolAnnotations
+
+        return Tool.from_function(
+            lambda code, data="": None,
+            name="generate_prefab_ui",
+            annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False),
+        )
+
+    async def test_a_loosely_matched_name_for_it_is_refused_not_run(self):
+        """Same words, other order: the loose match lands on a write and is refused."""
+        from fastmcp.exceptions import ToolError
+
+        generator = self._generator()
+        middleware = ts.CallToolShapeMiddleware(endpoints={"listProfiles": ("GET", "/profiles")})
+        with pytest.raises(ToolError, match="generate_prefab_ui") as raised:
+            await middleware._resolve_tool_name("ui_prefab_generate", [generator])
+        assert "ui_prefab_generate" in str(raised.value)
+        # The exact name still resolves: only the loose write is refused.
+        resolved, target = await middleware._resolve_tool_name("generate_prefab_ui", [generator])
+        assert resolved == "generate_prefab_ui"
+        assert target is generator
+
+    async def test_a_multi_entry_answer_headed_by_it_is_refused_not_run(self):
+        """Piping the answer into `name` must not reach the sandbox on a guess."""
+        from fastmcp.exceptions import ToolError
+
+        generator = self._generator()
+        middleware = ts.CallToolShapeMiddleware(endpoints={"listProfiles": ("GET", "/profiles")})
+        answer = [{"name": "generate_prefab_ui"}, {"name": "listProfiles"}]
+        with pytest.raises(ToolError, match="generate_prefab_ui") as raised:
+            await middleware._resolve_tool_name(answer, [generator])
+        assert "write" in str(raised.value)
+
+    async def test_a_non_endpoint_tool_annotated_read_only_still_reads(self):
+        """The composites are off the map and marked read-only: they keep resolving loosely."""
+        from fastmcp.tools.base import Tool, ToolAnnotations
+
+        plot = Tool.from_function(
+            lambda: None,
+            name="plotAnalytics",
+            annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True),
+        )
+        middleware = ts.CallToolShapeMiddleware(endpoints={"deleteProfile": ("DELETE", "/p")})
+        resolved, target = await middleware._resolve_tool_name("analytics_plot", [plot])
+        assert resolved == "plotAnalytics"
+        assert target is plot
+
+
+def test_the_fallback_sorts_a_write_off_the_map_with_the_writes():
+    """The full-catalog answer keeps a sandbox-running tool off its head.
+
+    The fallback sorts reads first using the endpoint map, and a name the map
+    does not carry used to sort as a read whatever its annotations said.
+    """
+    import asyncio
+
+    from fastmcp.tools.base import Tool, ToolAnnotations
+
+    tools = [
+        Tool.from_function(
+            lambda code, data="": None,
+            name="generate_prefab_ui",
+            annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False),
+        ),
+        Tool.from_function(lambda: None, name="listProfiles"),
+    ]
+    transform = ts.build_search_transform("bm25", endpoints={"listProfiles": ("GET", "/profiles")})
+    assert transform is not None
+
+    async def main():
+        ranked = [t.name for t in await transform._search(tools, "qxqv zzxj no such tool words")]
+        assert ranked == ["listProfiles", "generate_prefab_ui"]
+
+    asyncio.run(main())
+
+
+def test_a_piped_answer_headed_by_generate_prefab_ui_is_refused_on_a_live_server(monkeypatch):
+    """The exploit end to end: a search answer piped into call_tool must not run code.
+
+    With generative UI on, ``generate_prefab_ui`` is in the catalog and is not a
+    spec route. The multi-entry answer is what a client that pipes
+    ``search_tools`` output into ``name`` sends, so the refusal has to come from
+    the server, not from the caller choosing its entry.
+    """
+    import asyncio
+
+    from fastmcp import Client
+
+    monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+    monkeypatch.setenv("NEXTDNS_GENERATIVE_UI", "on")
+
+    async def main():
+        async with Client(build_mcp_server()) as client:
+            result = await client.call_tool(
+                "call_tool",
+                {
+                    "name": [{"name": "generate_prefab_ui"}, {"name": "listProfiles"}],
+                    "arguments": {"code": "print(1)"},
+                },
+                raise_on_error=False,
+            )
+        assert result.is_error
+        text = " ".join(getattr(block, "text", "") for block in (result.content or []))
+        assert "generate_prefab_ui" in text
+        assert "write" in text
+
+    asyncio.run(main())
+
+
 class TestShapeRepairAnnouncesItself:
     """A re-targeted call says so on the payload and in the log (nemotron PRIN-5, qwen ARCH-5).
 
