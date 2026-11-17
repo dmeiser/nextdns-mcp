@@ -8,7 +8,9 @@ and asserts the host-contract surface the client must honor:
   (Pyodide compat),
 - the renderer resource advertises the CSP domains the client must enforce
   (``resourceDomains``/``connectDomains``),
-- the chart-sizing guard still rejects charts nested in tabs.
+- the chart-sizing guard still rejects charts nested in tabs,
+- oversized generated views are rejected during the bounded stdout read
+  (nextdns-mcp#538), before full JSON decode and host validation.
 
 Requires the Deno binary (the Prefab sandbox backend); skipped without it.
 """
@@ -18,6 +20,8 @@ import shutil
 import pytest
 
 from nextdns_mcp.generative import (
+    MAX_RESULT_BYTES,
+    MAX_WIRE_LINE_BYTES,
     NextDNSGenerativeUI,
     _build_renderer_resource,
     _validate_chart_placement,
@@ -80,3 +84,79 @@ def test_host_smoke_chart_sizing_guard_rejects_charts_in_tabs() -> None:
     """Charts nested in tabs are rejected so they never render at 0px width."""
     with pytest.raises(ValueError, match="cannot be placed"):
         _validate_chart_placement("with Tabs():\n    with Tab('Charts'):\n        BarChart(data=[], series=[])")
+
+
+@requires_deno
+@pytest.mark.asyncio
+async def test_host_smoke_rejects_oversized_result_during_read(monkeypatch) -> None:
+    """Regression (nextdns-mcp#538): a runaway view is rejected during the bounded stdout read.
+
+    The generated Text alone exceeds MAX_WIRE_LINE_BYTES, so rejection must happen
+    before the host buffers the whole line, JSON-decodes it, and validates the app.
+    The decode/validation instrumentation is the discriminating assertion: with the
+    unbounded ``stdout.readline()`` this ticket fixes, the oversized line IS decoded
+    and handed to ``PrefabApp.from_json`` before the host-level size check fires, so
+    the size assertions below fail on pre-fix code even though the error message matches.
+    """
+    import json as real_json
+
+    import prefab_ui.app as prefab_app
+    import prefab_ui.sandbox._pyodide as pyodide_sandbox
+
+    decoded_line_sizes: list[int] = []
+    validated_wire_sizes: list[int] = []
+
+    class _RecordingJson:
+        """Stand-in for the json module inside PyodideSandbox.run's module namespace."""
+
+        @staticmethod
+        def dumps(*args: object, **kwargs: object) -> str:
+            return real_json.dumps(*args, **kwargs)
+
+        @staticmethod
+        def loads(data: bytes, *args: object, **kwargs: object) -> object:
+            decoded_line_sizes.append(len(data))
+            return real_json.loads(data, *args, **kwargs)
+
+    real_from_json = prefab_app.PrefabApp.from_json
+
+    def _recording_from_json(wire: object) -> object:
+        validated_wire_sizes.append(len(real_json.dumps(wire)))
+        return real_from_json(wire)
+
+    monkeypatch.setattr(pyodide_sandbox, "json", _RecordingJson)
+    monkeypatch.setattr(prefab_app.PrefabApp, "from_json", _recording_from_json)
+
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tools = {t.name: t for t in await gen_ui._local.list_tools()}
+    # The string is built at runtime in the worker so the submitted code stays
+    # tiny; only the serialized result exceeds the wire cap.
+    oversized = f'with PrefabApp() as app:\n    with Column(gap=4):\n        Text("x" * {MAX_WIRE_LINE_BYTES + 1})\n'
+    with pytest.raises(ValueError, match="result exceeds maximum size"):
+        await tools["generate_prefab_ui"].fn(code=oversized)
+
+    # The oversized wire must never have been decoded or validated — on pre-fix
+    # code both lists carry a ~MAX_WIRE_LINE_BYTES+ entry and these assertions fail.
+    assert all(size <= MAX_WIRE_LINE_BYTES for size in decoded_line_sizes)
+    assert all(size <= MAX_WIRE_LINE_BYTES for size in validated_wire_sizes)
+
+    # The oversized response stopped the worker mid-stream; the next call must
+    # recover on a fresh worker and render a normal view.
+    app = await tools["generate_prefab_ui"].fn(code=SMOKE_CODE)
+    assert app.model_dump(by_alias=True)["title"] == "Prefab"
+
+
+@requires_deno
+@pytest.mark.asyncio
+async def test_host_smoke_result_just_under_limit_succeeds() -> None:
+    """A view whose wire stays within MAX_RESULT_BYTES is not falsely rejected."""
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tools = {t.name: t for t in await gen_ui._local.list_tools()}
+    # Build the near-limit string at runtime so the code stays under MAX_CODE_BYTES;
+    # the serialized wire stays just inside MAX_RESULT_BYTES.
+    text_len = MAX_RESULT_BYTES - 4096
+    code = f'with PrefabApp() as app:\n    with Column(gap=4):\n        Text("x" * {text_len})\n'
+    app = await tools["generate_prefab_ui"].fn(code=code)
+    assert app.model_dump(by_alias=True)["title"] == "Prefab"
