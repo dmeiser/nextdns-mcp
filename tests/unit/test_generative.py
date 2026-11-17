@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -336,6 +337,78 @@ async def test_generate_ui_code_size_limit():
     oversize = "a" * (MAX_CODE_BYTES + 1)
     with pytest.raises(ValueError, match="code exceeds maximum size"):
         await gen_tool.fn(code=oversize)
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_oversized_code_skips_ast_parsing():
+    """Oversized code is rejected by the byte guard before ast.parse runs."""
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tool_list = await gen_ui._local.list_tools()
+    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    oversize = "a" * (MAX_CODE_BYTES + 1)
+    with (
+        patch("nextdns_mcp.generative._validate_chart_placement") as mock_validate,
+        pytest.raises(ValueError, match="code exceeds maximum size"),
+    ):
+        await gen_tool.fn(code=oversize)
+    mock_validate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_rejects_invalid_data_type_before_serialization():
+    """Non-str/non-dict data raises ValueError from validation, not TypeError from json.dumps."""
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tool_list = await gen_ui._local.list_tools()
+    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    for bad in (123, ["a"], True):
+        with (
+            patch("nextdns_mcp.generative.json") as mock_json,
+            pytest.raises(ValueError, match="data parameter must be a dict or JSON object string"),
+        ):
+            await gen_tool.fn(code="print(1)", data=bad)
+        mock_json.dumps.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_oversized_dict_data():
+    """An oversized dict is rejected after type validation, with a single measurement serialization."""
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tool_list = await gen_ui._local.list_tools()
+    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    oversized_dict = {"payload": "b" * (MAX_DATA_BYTES + 1)}
+    with (
+        patch("nextdns_mcp.generative.json") as mock_json,
+        pytest.raises(ValueError, match="data exceeds maximum size"),
+    ):
+        mock_json.dumps.side_effect = json.dumps
+        await gen_tool.fn(code="print(1)", data=oversized_dict)
+    assert mock_json.dumps.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_serializes_valid_dict_data_once():
+    """Valid dict data is measured with a single json.dumps before sandbox execution."""
+    import json as real_json
+
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    tool_list = await gen_ui._local.list_tools()
+    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+
+    with (
+        patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_sandbox", return_value=MagicMock()),
+        patch("nextdns_mcp.generative.json") as mock_json,
+    ):
+        mock_json.dumps.side_effect = real_json.dumps
+        mock_exec.return_value = "fake_app"
+        res = await gen_tool.fn(code="print('hi')", data={"a": 1})
+        assert res == "fake_app"
+        assert mock_json.dumps.call_count == 1
+        assert mock_exec.call_args[1]["data"] == {"a": 1}
 
 
 @pytest.mark.asyncio
