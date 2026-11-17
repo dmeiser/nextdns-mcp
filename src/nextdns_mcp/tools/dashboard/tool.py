@@ -546,7 +546,7 @@ async def _overview_dashboard_impl(
 
     Sections available via the `section` parameter:
     - "overview" (default): Full overview layout mirroring the NextDNS web UI (KPI cards, queries evolution chart, resolved & blocked domains).
-    - "all": Complete dashboard with overview cards plus reasons, devices, root domains, IPs, GAFAM, and security cards.
+    - "all": Complete dashboard with overview cards plus reasons, devices, root domains, IPs, GAFAM, countries, and security cards.
     - "kpi": Top KPI summary cards (Total Queries, Blocked Queries in red, Queries Blocked rate).
     - "domains": Top resolved domains card with format selection.
     - "blocked_domains": Top blocked domains card with format selection.
