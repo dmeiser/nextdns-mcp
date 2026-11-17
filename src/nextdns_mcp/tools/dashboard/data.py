@@ -363,7 +363,9 @@ def _build_extra_tasks(
         "ips": _bounded_fetch_analytics_payload(sem, pid, "ips", extra_dom_params),
         "root_domains": _bounded_fetch_analytics_payload(sem, pid, "domains", {**extra_dom_params, "root": "true"}),
         "gafam": _bounded_fetch_analytics_payload(sem, pid, "destinations", {**extra_dom_params, "type": "gafam"}),
-        "countries": _bounded_fetch_analytics_payload(sem, pid, "destinations", {**params, "type": "countries"}),
+        "countries": _bounded_fetch_analytics_payload(
+            sem, pid, "destinations", {**extra_dom_params, "type": "countries"}
+        ),
         "encryption": _bounded_fetch_analytics_payload(sem, pid, "encryption", params),
         "dnssec": _bounded_fetch_analytics_payload(sem, pid, "dnssec", params),
     }
