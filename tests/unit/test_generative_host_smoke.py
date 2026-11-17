@@ -160,3 +160,26 @@ async def test_host_smoke_result_just_under_limit_succeeds() -> None:
     code = f'with PrefabApp() as app:\n    with Column(gap=4):\n        Text("x" * {text_len})\n'
     app = await tools["generate_prefab_ui"].fn(code=code)
     assert app.model_dump(by_alias=True)["title"] == "Prefab"
+
+
+async def test_host_smoke_state_does_not_leak_between_calls() -> None:
+    """Mutating shared interpreter state in one call cannot poison the next (issue #541)."""
+    gen_ui = NextDNSGenerativeUI()
+    gen_ui._ensure_setup()
+    gen_tool = {t.name: t for t in await gen_ui._local.list_tools()}["generate_prefab_ui"]
+
+    poison = """import builtins
+builtins._nextdns_poison = "injected"
+with PrefabApp() as app:
+    Heading("poison")
+"""
+    probe = """import builtins
+with PrefabApp() as app:
+    Text(str(getattr(builtins, "_nextdns_poison", "clean")))
+"""
+    await gen_tool.fn(code=poison)
+    app = await gen_tool.fn(code=probe)
+    tree = app.model_dump(by_alias=True)
+    text = tree["view"]["children"][0]
+    assert text["type"] == "Text"
+    assert text["content"] == "clean"
