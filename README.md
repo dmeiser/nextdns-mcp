@@ -150,7 +150,7 @@ Complete documentation can be found in [docs/index.md](docs/index.md).
    docker build -f Dockerfile.alpine -t nextdns-mcp:alpine .
    ```
 
-   The published Alpine tags use the `-alpine` suffix (e.g. `nextdns-mcp:alpine`, `nextdns-mcp:2.0-alpine`). The `python:3.14-slim` image remains the recommended default.
+   The published Alpine tags use the `-alpine` suffix (e.g. `nextdns-mcp:alpine`, `nextdns-mcp:2.0-alpine`). The `python:3.15-slim` image remains the recommended default.
 
 ### Running Locally (Development)
 
@@ -216,11 +216,11 @@ This server uses a modern, declarative approach:
 
 ### Docker Tags
 
-This project publishes official Docker images with a standardized tagging policy. The default image is based on `python:3.14-slim`; an Alpine Linux variant is also available and tagged with an `-alpine` suffix.
+This project publishes official Docker images with a standardized tagging policy. The default image is based on `python:3.15-slim`; an Alpine Linux variant is also available and tagged with an `-alpine` suffix.
 
 A merge to `main` publishes tags only when the merged PR carries a release label (`bump-patch`, `bump-minor`, or `bump-major`). A merge whose PR carries the `no-release` label publishes no tags at all — no `latest`, no `alpine`, no short-SHA tag, and no version tag. Those changes reach `:latest` with the next nightly rebuild or the next release merge.
 
-#### Primary (`python:3.14-slim`) tags
+#### Primary (`python:3.15-slim`) tags
 
 - `:latest`: Floating tag that tracks the most recent release merge on the `main` branch. It is refreshed when a release merge lands on `main` and by the nightly scheduled rebuild for base-image updates.
 - `:<major>`: Floating tag for the most recent release build in a given major series (e.g., `:2`). This tag is updated whenever a new release image for that major line is published.
