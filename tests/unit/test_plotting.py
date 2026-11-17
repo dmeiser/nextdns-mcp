@@ -1040,5 +1040,14 @@ class TestUnresolvableExtremeTimes:
     def test_a_relative_offset_past_the_float_range_is_unresolved(self):
         assert charts_module.resolve_time_point("-" + "9" * 400 + "d", now=1_700_000_000.0) is None
 
+    def test_a_relative_offset_past_the_int_string_limit_is_unresolved(self):
+        """Past CPython's 4300-digit limit ``int()`` raises ValueError, not OverflowError.
+
+        A 5000-digit relative offset used to escape as an unhandled ValueError
+        (only OverflowError was caught), crashing the caller instead of
+        answering the typed "unresolved range" refusal (issue #544).
+        """
+        assert charts_module.resolve_time_point("-" + "9" * 5000 + "d", now=1_700_000_000.0) is None
+
     def test_a_numeric_string_past_the_float_range_is_unresolved(self):
         assert charts_module.resolve_time_point("1" + "0" * 400, now=1_700_000_000.0) is None
