@@ -20,6 +20,7 @@ from prefab_ui.app import Theme
 from prefab_ui.components.charts import AreaChart, ChartSeries
 
 from .errors import ErrorCode, error_payload
+from .utils import sanitize_label
 
 DASHBOARD_THEME = Theme(
     accent=220,
@@ -53,10 +54,14 @@ _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "
 
 
 def _extract_series_label(series: dict[str, Any], index: int) -> str:
-    """Return a human-readable label for a time-series data entry."""
+    """Return a human-readable label for a time-series data entry.
+
+    Series names come from the upstream API, so the label is sanitized here -
+    the single extraction point every chart series passes through.
+    """
     for key, value in ((key, series.get(key)) for key in ("name", "status", "protocol", "version", "id")):
         if value is not None and value != "":
-            return str(value)
+            return sanitize_label(value)
     return _series_boolean_label(series, index)
 
 

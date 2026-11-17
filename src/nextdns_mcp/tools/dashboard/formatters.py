@@ -10,12 +10,18 @@ SPDX-License-Identifier: MIT
 
 from typing import Any
 
-from .data import _domain_label, _item_queries, _sanitize_label
+from ...utils import sanitize_label
+from .data import _domain_label, _item_queries
 
 
 def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
-    """Format top items as 'name (count)' list."""
-    formatted = [f"{_sanitize_label(name)} ({q:,})" for name, q in items[:limit]]
+    """Format top items as 'name (count)' list.
+
+    Names are sanitized at extraction/shaping time by the row and label
+    helpers, so this only formats: a second ``sanitize_label`` pass would
+    re-cap the ellipsis the first pass appended.
+    """
+    formatted = [f"{name} ({q:,})" for name, q in items[:limit]]
     return ", ".join(formatted)
 
 
@@ -39,7 +45,7 @@ def _format_gafam_summary(chart_data: list[dict[str, Any]], total: int) -> str:
 
 def _ip_summary_items(data: list[dict[str, Any]]) -> list[tuple[str, int]]:
     """Format (ip, queries) pairs for IP analytics summary."""
-    return [(str(item.get("ip") or "-"), _item_queries(item)) for item in data]
+    return [(sanitize_label(item.get("ip") or "-"), _item_queries(item)) for item in data]
 
 
 def _overview_top_summary(r_data: list[dict[str, Any]], b_data: list[dict[str, Any]]) -> str:
