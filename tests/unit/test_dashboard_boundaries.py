@@ -14,26 +14,31 @@ from pathlib import Path
 
 import pytest
 
-from nextdns_mcp import charts
+from nextdns_mcp import chart_ui, charts
 from nextdns_mcp.tools import dashboard
 from nextdns_mcp.tools import plots as plots_module
 from nextdns_mcp.tools.dashboard import components as components_module
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = REPO_ROOT / "src" / "nextdns_mcp" / "tools" / "dashboard"
+SRC_DIR = REPO_ROOT / "src" / "nextdns_mcp"
 
 # One concern per module: fetch/shape, UI, summary text, dispatch + tool wrapper.
 PACKAGE_MODULES = ("__init__.py", "data.py", "components.py", "formatters.py", "tool.py")
 
-# The primitives the dashboard and the plotting tool share. They belong to
-# ``nextdns_mcp.charts``, which neither consumer owns.
+# The primitives the dashboard and the plotting tool share. The pure series and
+# budget helpers belong to ``nextdns_mcp.charts``; the builders that construct a
+# Prefab component belong to ``nextdns_mcp.chart_ui`` - the split that keeps
+# ``spec_tools``, and every generated tool behind it, from importing
+# ``prefab_ui`` (issue #550). Neither consumer owns either module.
 SHARED_PRIMITIVES = (
-    "build_chart_data",
-    "build_chart_series",
-    "build_timeseries_area_chart",
-    "resolve_time_point",
-    "series_budget_error",
-    "validate_series_payload",
+    (charts, "build_chart_data"),
+    (charts, "downsample_chart_series"),
+    (charts, "resolve_time_point"),
+    (charts, "series_budget_error"),
+    (charts, "validate_series_payload"),
+    (chart_ui, "build_chart_series"),
+    (chart_ui, "build_timeseries_area_chart"),
 )
 
 
@@ -59,27 +64,27 @@ def test_dashboard_never_imports_a_sibling_tool_module():
                 pytest.fail(f"{module_file.name} imports sibling tool module .{node.module}")
 
 
-def test_dashboard_imports_no_private_name_from_the_shared_charts_module():
-    """Anything crossing into ``charts`` crosses under a public name."""
+def test_dashboard_imports_no_private_name_from_the_shared_charts_modules():
+    """Anything crossing into ``charts`` or ``chart_ui`` crosses under a public name."""
     for module_file in sorted(PACKAGE_DIR.glob("*.py")):
         for node in _import_statements(module_file):
-            if node.module != "charts":
+            if node.module not in {"charts", "chart_ui"}:
                 continue
             for alias in node.names:
-                assert not alias.name.startswith("_"), f"{module_file.name} imports private charts.{alias.name}"
+                assert not alias.name.startswith("_"), f"{module_file.name} imports private {node.module}.{alias.name}"
 
 
-@pytest.mark.parametrize("name", SHARED_PRIMITIVES)
-def test_shared_primitive_is_defined_in_charts(name: str):
-    """The primitives are charts' own API: consumers import them, they do not re-make them.
+@pytest.mark.parametrize(("module", "name"), SHARED_PRIMITIVES)
+def test_shared_primitive_is_defined_in_its_shared_module(module, name: str) -> None:
+    """The primitives are shared modules' own API: consumers import them, they do not re-make them.
 
     The first attempt at this ticket left ``build_chart_data = _build_chart_data`` at
     the bottom of ``tools/plots.py`` and imported the alias - the coupling wearing the
     public name. A top-level assignment of one of these names under ``tools/`` is that
     shape again, so it fails here even though the import would keep working.
     """
-    original = getattr(charts, name)
-    assert original.__module__ == charts.__name__
+    original = getattr(module, name)
+    assert original.__module__ == module.__name__
 
     for consumer in (plots_module, components_module):
         bound = getattr(consumer, name, None)
@@ -91,7 +96,26 @@ def test_shared_primitive_is_defined_in_charts(name: str):
             if isinstance(node, ast.Assign) and any(
                 isinstance(target, ast.Name) and target.id == name for target in node.targets
             ):
-                pytest.fail(f"{module_file.name} re-aliases {name} instead of importing it from charts")
+                pytest.fail(f"{module_file.name} re-aliases {name} instead of importing it from {module.__name__}")
+
+
+def test_charts_module_stays_free_of_the_ui_component_library():
+    """``charts`` is the UI-free half of the split (issue #550).
+
+    ``spec_tools`` reads the series budgets from ``charts``, and every generated
+    tool stands behind it: a ``prefab_ui`` import back in ``charts.py`` pulls the
+    component tree into a process that renders nothing. The behaviour test in
+    ``tests/unit/test_plotting.py`` proves it at import time; this one says which
+    module must stay clean.
+    """
+    tree = ast.parse((SRC_DIR / "charts.py").read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    assert "prefab_ui" not in imported, "charts.py imports prefab_ui again"
 
 
 def test_timeseries_area_chart_is_built_in_one_place():
@@ -99,11 +123,11 @@ def test_timeseries_area_chart_is_built_in_one_place():
 
     ``SHARED_PRIMITIVES`` catches a consumer re-aliasing the factory, but not
     one quietly rebuilding the component by hand - the duplicated-kwargs shape
-    this ticket removed. ``charts.py`` is the only module in the package that
+    this ticket removed. ``chart_ui.py`` is the only module in the package that
     may construct an ``AreaChart``; consumers call ``build_timeseries_area_chart``.
     """
     for module_file in sorted((REPO_ROOT / "src" / "nextdns_mcp").rglob("*.py")):
-        if module_file.name == "charts.py":
+        if module_file.name == "chart_ui.py":
             continue
         tree = ast.parse(module_file.read_text(encoding="utf-8"), filename=str(module_file))
         for node in ast.walk(tree):

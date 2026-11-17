@@ -4,18 +4,20 @@ SPDX-License-Identifier: MIT
 """
 
 import logging
-import math
 from typing import Any
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.app import PrefabApp
 from prefab_ui.components import Column, Heading, Metric, Row
 
-from ..charts import (
+from ..chart_ui import (
     DASHBOARD_THEME,
-    build_chart_data,
     build_chart_series,
     build_timeseries_area_chart,
+)
+from ..charts import (
+    build_chart_data,
+    downsample_chart_series,
     series_budget_error,
     validate_series_payload,
 )
@@ -47,55 +49,21 @@ PLOT_INTERVAL_MAX = 86400
 # silently clamped, so a caller is never told less than the tool enforced.
 PLOT_LIMIT_MAX = 500
 
-# Visual cap for the rendered chart series: even when the series
-# budget allows up to PLOT_MAX_POINTS points, embedding that many raw
-# point dicts in structured_content bloats MCP/LLM client contexts. When a
-# series exceeds this, the visual chart is downsampled into buckets.
-PLOT_CHART_MAX_POINTS = 250
-
-
-def _bucket_series_queries(queries: list[int] | None, n: int, bucket_size: int) -> list[int]:
-    """Sum a single series' query counts into chunks of ``bucket_size``."""
-    q = queries or []
-    return [sum(q[start : min(start + bucket_size, n)]) for start in range(0, n, bucket_size)]
-
-
-def _bucket_single_series(series: dict[str, Any], n: int, bucket_size: int) -> dict[str, Any]:
-    """Return a copy of ``series`` with its query counts bucketed."""
-    updated = dict(series)
-    updated["queries"] = _bucket_series_queries(series.get("queries"), n, bucket_size)
-    return updated
-
-
-def _downsample_chart_series(
-    times: list[str],
-    series_data: list[dict[str, Any]],
-    max_points: int = PLOT_CHART_MAX_POINTS,
-) -> tuple[list[str], list[dict[str, Any]]]:
-    """Downsample the visual chart series into at most ``max_points`` buckets.
-
-    Aggregates each series' per-point query counts by summing within a
-    bucket and keeps a representative timestamp per bucket, so the visual
-    chart stays compact while totals are preserved. Full-resolution data is
-    not retained in the rendered chart.
-    """
-    n = len(times)
-    if n <= max_points:
-        return times, series_data
-    bucket_size = math.ceil(n / max_points)
-    new_times = [times[i] for i in range(0, n, bucket_size)]
-    new_series = [_bucket_single_series(s, n, bucket_size) for s in series_data]
-    return new_times, new_series
-
 
 def _build_series_chart(
     metric: str,
     times: list[str],
     series_data: list[dict[str, Any]],
 ) -> ToolResult:
-    """Build an interactive Prefab chart view and return a ToolResult with summary."""
+    """Build an interactive Prefab chart view and return a ToolResult with summary.
+
+    The rendered rows are downsampled to the shared chart budget, but the
+    reported interval count is the upstream ``len(times)``: the chart was drawn
+    with fewer points, yet the series the caller asked for - and paid the range
+    budget for - still carried all of them (issue #550).
+    """
     total_queries = sum(sum(series.get("queries") or []) for series in series_data)
-    chart_times, chart_series_data = _downsample_chart_series(times, series_data)
+    chart_times, chart_series_data = downsample_chart_series(times, series_data)
     chart_data = build_chart_data(chart_times, chart_series_data)
     chart_series = build_chart_series(chart_series_data)
 
@@ -103,11 +71,11 @@ def _build_series_chart(
         Heading(f"NextDNS Analytics: {metric}", level=2)
         with Row(gap=4):
             Metric(label="Total Queries", value=f"{total_queries:,}")
-            Metric(label="Data Points", value=str(len(chart_times)))
+            Metric(label="Data Points", value=str(len(times)))
             Metric(label="Series Count", value=str(len(chart_series_data)))
         build_timeseries_area_chart(chart_data, chart_series)
 
-    summary = f"NextDNS Analytics: {metric} ({total_queries:,} total queries across {len(chart_times)} intervals)"
+    summary = f"NextDNS Analytics: {metric} ({total_queries:,} total queries across {len(times)} intervals)"
     app = PrefabApp(view=view, theme=DASHBOARD_THEME)
     return ToolResult(content=summary, structured_content=app)
 

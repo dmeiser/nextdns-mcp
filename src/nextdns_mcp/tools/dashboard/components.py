@@ -2,9 +2,9 @@
 
 Every function here answers "what does this card look like": cards, charts, tables,
 progress sections, and the page-level views that hold them. It reads analytics rows
-through ``data`` and the shared chart primitives through ``nextdns_mcp.charts``; it
-never calls the transport itself, and it never writes the summary text a model reads
-back - that is ``formatters``.
+through ``data``, the shared series primitives through ``nextdns_mcp.charts`` and the
+shared chart components through ``nextdns_mcp.chart_ui``; it never calls the transport
+itself, and it never writes the summary text a model reads back - that is ``formatters``.
 
 Names beginning with ``_`` are package-internal: the dashboard package's public
 surface is what ``__init__`` re-exports.
@@ -33,11 +33,14 @@ from prefab_ui.components import (
 )
 from prefab_ui.components.charts import BarChart, ChartSeries, PieChart
 
-from ...charts import (
+from ...chart_ui import (
     DASHBOARD_THEME,
-    build_chart_data,
     build_chart_series,
     build_timeseries_area_chart,
+)
+from ...charts import (
+    build_chart_data,
+    downsample_chart_series,
     validate_series_payload,
 )
 from .data import (
@@ -78,13 +81,20 @@ def _build_kpi_row(kpis: dict[str, Any]) -> Row:
 
 
 def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
-    """Build the queries evolution chart card from a time-series payload."""
+    """Build the queries evolution chart card from a time-series payload.
+
+    The rendered rows are downsampled through the shared chart budget: a
+    multi-year overview answers up to 1,999 intervals, and this card is one of
+    many on the page, so full-resolution rows here bloat the whole
+    ``PrefabApp`` rather than one chart result (issue #550).
+    """
     try:
         times, series_data = validate_series_payload(series_payload)
         if not times or not series_data:
             return None
-        chart_data = build_chart_data(times, series_data)
-        chart_series = build_chart_series(series_data)
+        chart_times, chart_series_data = downsample_chart_series(times, series_data)
+        chart_data = build_chart_data(chart_times, chart_series_data)
+        chart_series = build_chart_series(chart_series_data)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Error preparing queries series data: {exc}")
         return None

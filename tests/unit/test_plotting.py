@@ -9,6 +9,7 @@ import pytest
 from fastmcp.tools.base import ToolResult
 from prefab_ui.components.charts import ChartSeries
 
+from nextdns_mcp import chart_ui as chart_ui_module
 from nextdns_mcp import charts as charts_module
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server, spec_tools
@@ -43,38 +44,60 @@ class TestNoMatplotlibDependency:
         assert result.stdout.strip() == "ok"
 
 
+class TestNoPrefabInGeneratedToolPath:
+    """The generated-tool door stays UI-free (issue #550).
+
+    ``spec_tools`` prices series requests through ``charts``; the Prefab
+    builders that need the component tree live in ``chart_ui``. A ``prefab_ui``
+    import back in ``charts`` pulls that tree into every process that imports
+    the spec tool surface and renders nothing.
+    """
+
+    def test_importing_spec_tools_does_not_import_prefab_ui(self):
+        import subprocess
+        import sys
+
+        code = "import sys\n"
+        code += "import nextdns_mcp.spec_tools\n"
+        code += "assert not any(m == 'prefab_ui' or m.startswith('prefab_ui.') for m in sys.modules)\n"
+        code += "print('ok')\n"
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "ok"
+
+
 class TestExtractSeriesLabel:
     """Tests for _extract_series_label."""
 
     def test_name_label(self):
-        assert charts_module._extract_series_label({"name": "example.com"}, 0) == "example.com"
+        assert chart_ui_module._extract_series_label({"name": "example.com"}, 0) == "example.com"
 
     def test_status_label(self):
-        assert charts_module._extract_series_label({"status": "blocked"}, 0) == "blocked"
+        assert chart_ui_module._extract_series_label({"status": "blocked"}, 0) == "blocked"
 
     def test_protocol_label(self):
-        assert charts_module._extract_series_label({"protocol": "DoH"}, 0) == "DoH"
+        assert chart_ui_module._extract_series_label({"protocol": "DoH"}, 0) == "DoH"
 
     def test_version_label(self):
-        assert charts_module._extract_series_label({"version": "IPv4"}, 0) == "IPv4"
+        assert chart_ui_module._extract_series_label({"version": "IPv4"}, 0) == "IPv4"
 
     def test_id_label(self):
-        assert charts_module._extract_series_label({"id": "device1"}, 0) == "device1"
+        assert chart_ui_module._extract_series_label({"id": "device1"}, 0) == "device1"
 
     def test_validated_true_label(self):
-        assert charts_module._extract_series_label({"validated": True}, 0) == "validated"
+        assert chart_ui_module._extract_series_label({"validated": True}, 0) == "validated"
 
     def test_validated_false_label(self):
-        assert charts_module._extract_series_label({"validated": False}, 0) == "not_validated"
+        assert chart_ui_module._extract_series_label({"validated": False}, 0) == "not_validated"
 
     def test_encrypted_true_label(self):
-        assert charts_module._extract_series_label({"encrypted": True}, 0) == "encrypted"
+        assert chart_ui_module._extract_series_label({"encrypted": True}, 0) == "encrypted"
 
     def test_encrypted_false_label(self):
-        assert charts_module._extract_series_label({"encrypted": False}, 0) == "unencrypted"
+        assert chart_ui_module._extract_series_label({"encrypted": False}, 0) == "unencrypted"
 
     def test_fallback_index_label(self):
-        assert charts_module._extract_series_label({"queries": []}, 3) == "series_3"
+        assert chart_ui_module._extract_series_label({"queries": []}, 3) == "series_3"
 
     def test_series_label_strips_control_characters(self):
         assert charts_module._extract_series_label({"name": "example.com\r\nINJECTED"}, 0) == ("example.comINJECTED")
@@ -93,10 +116,10 @@ class TestSeriesColor:
     """Tests for series color determination."""
 
     def test_series_color(self):
-        assert charts_module._series_color({"status": "blocked"}) == "#ef4444"
-        assert charts_module._series_color({"status": "default"}) == "#3b82f6"
-        assert charts_module._series_color({"name": "allowed"}) == "#3b82f6"
-        assert charts_module._series_color({"name": "something_else"}) is None
+        assert chart_ui_module._series_color({"status": "blocked"}) == "#ef4444"
+        assert chart_ui_module._series_color({"status": "default"}) == "#3b82f6"
+        assert chart_ui_module._series_color({"name": "allowed"}) == "#3b82f6"
+        assert chart_ui_module._series_color({"name": "something_else"}) is None
 
 
 class TestParseSeriesTimestamp:
@@ -230,7 +253,7 @@ class TestBuildSeriesChart:
             {"status": "allowed", "queries": [5]},
             {"queries": [1]},
         ]
-        series = charts_module.build_chart_series(series_data)
+        series = chart_ui_module.build_chart_series(series_data)
         assert len(series) == 3
         assert series[0].data_key == "series_0" and series[0].label == "blocked"
         assert series[1].data_key == "series_1" and series[1].label == "allowed"
@@ -260,7 +283,7 @@ class TestTimeseriesAreaChartFactory:
         return {k: v for k, v in component.model_dump(exclude={"id"}, by_alias=True).items() if v is not None}
 
     def test_build_timeseries_area_chart_carries_the_shared_config(self):
-        chart = charts_module.build_timeseries_area_chart(
+        chart = chart_ui_module.build_timeseries_area_chart(
             [{"time": "2024-01-15T10:00:00Z", "series_0": 10}],
             [ChartSeries(dataKey="series_0", label="blocked", color=None)],
         )
@@ -285,28 +308,28 @@ class TestTimeseriesAreaChartFactory:
         result = plots_module._build_series_chart("status", times, series_data)
         rendered = result.structured_content["view"]["children"][0]["children"][2]
         assert rendered == self._serialized(
-            charts_module.build_timeseries_area_chart(
+            chart_ui_module.build_timeseries_area_chart(
                 charts_module.build_chart_data(times, series_data),
-                charts_module.build_chart_series(series_data),
+                chart_ui_module.build_chart_series(series_data),
             )
         )
 
 
 class TestChartSeriesDownsampling:
-    """Tests for _downsample_chart_series and payload bounding in _build_series_chart."""
+    """Tests for charts.downsample_chart_series and payload bounding in _build_series_chart."""
 
     def test_downsample_at_or_below_budget_retains_full_resolution(self):
         """At or below PLOT_CHART_MAX_POINTS, data is returned unchanged."""
         times = [f"2024-01-01T{i:02d}:00:00Z" for i in range(10)]
         series_data = [{"name": "example.com", "queries": list(range(10))}]
-        out_times, out_series = plots_module._downsample_chart_series(times, series_data)
+        out_times, out_series = charts_module.downsample_chart_series(times, series_data)
         assert out_times == times
         assert out_series == series_data
 
         # Exact boundary at 250 points
         times_250 = [f"2024-01-01T{i:05d}" for i in range(250)]
         series_250 = [{"name": "example.com", "queries": [1] * 250}]
-        out_times_250, out_series_250 = plots_module._downsample_chart_series(times_250, series_250)
+        out_times_250, out_series_250 = charts_module.downsample_chart_series(times_250, series_250)
         assert len(out_times_250) == 250
         assert out_times_250 == times_250
         assert out_series_250 == series_250
@@ -316,9 +339,9 @@ class TestChartSeriesDownsampling:
         # 251 points -> ceil(251/250) = 2 -> ceil(251/2) = 126 buckets
         times_251 = [f"2024-01-01T{i:05d}" for i in range(251)]
         series_251 = [{"name": "s1", "queries": [3] * 251}]
-        out_times_251, out_series_251 = plots_module._downsample_chart_series(times_251, series_251)
+        out_times_251, out_series_251 = charts_module.downsample_chart_series(times_251, series_251)
         assert len(out_times_251) == 126
-        assert len(out_times_251) <= plots_module.PLOT_CHART_MAX_POINTS
+        assert len(out_times_251) <= charts_module.PLOT_CHART_MAX_POINTS
         assert sum(out_series_251[0]["queries"]) == 251 * 3
 
         # 2000 points -> ceil(2000/250) = 8 -> 250 buckets
@@ -327,7 +350,7 @@ class TestChartSeriesDownsampling:
             {"name": "s1", "queries": [2] * 2000},
             {"name": "s2", "queries": [5] * 2000},
         ]
-        out_times_2000, out_series_2000 = plots_module._downsample_chart_series(times_2000, series_2000)
+        out_times_2000, out_series_2000 = charts_module.downsample_chart_series(times_2000, series_2000)
         assert len(out_times_2000) == 250
         assert sum(out_series_2000[0]["queries"]) == 2000 * 2
         assert sum(out_series_2000[1]["queries"]) == 2000 * 5
@@ -335,14 +358,14 @@ class TestChartSeriesDownsampling:
         # 2001 points -> ceil(2001/250) = 9 -> ceil(2001/9) = 223 buckets
         times_2001 = [f"2024-01-01T{i:05d}" for i in range(2001)]
         series_2001 = [{"name": "s1", "queries": [3] * 2001}]
-        out_times_2001, out_series_2001 = plots_module._downsample_chart_series(times_2001, series_2001)
+        out_times_2001, out_series_2001 = charts_module.downsample_chart_series(times_2001, series_2001)
         assert len(out_times_2001) == 223
         assert sum(out_series_2001[0]["queries"]) == 2001 * 3
 
         # 5000 points with 4 series -> ceil(5000/250) = 20 -> 250 buckets
         times_5000 = [f"2024-01-01T{i:05d}" for i in range(5000)]
         series_5000 = [{"name": f"s{i}", "queries": [i + 1] * 5000} for i in range(4)]
-        out_times_5000, out_series_5000 = plots_module._downsample_chart_series(times_5000, series_5000)
+        out_times_5000, out_series_5000 = charts_module.downsample_chart_series(times_5000, series_5000)
         assert len(out_times_5000) == 250
         for i in range(4):
             assert sum(out_series_5000[i]["queries"]) == 5000 * (i + 1)
@@ -355,7 +378,7 @@ class TestChartSeriesDownsampling:
             {"name": "missing_queries"},
             {"name": "short_queries", "queries": [10, 20]},
         ]
-        out_times, out_series = plots_module._downsample_chart_series(times, series_data)
+        out_times, out_series = charts_module.downsample_chart_series(times, series_data)
         assert len(out_times) == 126
         assert out_series[0]["queries"] == [0] * 126
         assert out_series[1]["queries"] == [0] * 126
@@ -372,7 +395,7 @@ class TestChartSeriesDownsampling:
         assert isinstance(result, ToolResult)
         chart = result.structured_content["view"]["children"][0]["children"][2]
         rows = chart["data"]
-        assert len(rows) <= plots_module.PLOT_CHART_MAX_POINTS
+        assert len(rows) <= charts_module.PLOT_CHART_MAX_POINTS
         assert len(rows) == 223
 
         metrics = {
@@ -381,8 +404,10 @@ class TestChartSeriesDownsampling:
             if c.get("type") == "Metric"
         }
         assert metrics["Total Queries"] == "6,003"
-        assert metrics["Data Points"] == "223"
-        assert "6,003 total queries across 223 intervals" in result.content[0].text
+        # The true upstream interval count, not the downsampled row count (issue #550):
+        # the chart carries 223 buckets, the series carried 2001 intervals.
+        assert metrics["Data Points"] == "2001"
+        assert "6,003 total queries across 2001 intervals" in result.content[0].text
 
 
 @pytest.fixture
