@@ -60,6 +60,9 @@ class TestDashboardHelpers:
         assert data_mod._item_queries({"queries": {"nested": 1}}) == 0
         assert data_mod._item_queries({"queries": [1, 2]}) == 0
         assert data_mod._item_queries({"queries": "123"}) == 123
+        assert data_mod._item_queries({"queries": float("inf")}) == 0
+        assert data_mod._item_queries({"queries": float("-inf")}) == 0
+        assert data_mod._item_queries({"queries": json.loads("1e400")}) == 0
         assert data_mod._blocked_queries({"status": "blocked", "queries": 10}) == 10
         assert data_mod._blocked_queries({"status": "allowed", "queries": 10}) == 0
 
