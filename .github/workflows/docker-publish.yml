@@ -41,7 +41,14 @@ jobs:
   # the docker-publish job below is skipped entirely.
   gate:
     name: Determine release status
-    if: github.event_name == 'workflow_run'
+    # Only a push from this repository can produce a release merge. Unit Tests
+    # also runs on pull_request, so a fork PR (even from a branch named main)
+    # completes a workflow_run; without these guards the gate would run
+    # against untrusted fork code with registry-push credentials downstream.
+    if: |
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
       is_release: ${{ steps.release.outputs.is_release }}
@@ -61,7 +68,9 @@ jobs:
             // Identify the PR that was merged via this commit and check for the no-release label.
             const mergedPr = prs.find(pr => pr.state === 'closed' && pr.merged_at && pr.merge_commit_sha === headSha);
             const isNoRelease = mergedPr && mergedPr.labels.some(label => label.name === 'no-release');
-            const isRelease = !isNoRelease;
+            // Fail closed: without a merged PR this is not a release merge, so
+            // an absent mergedPr must not enable release publishing.
+            const isRelease = Boolean(mergedPr) && !isNoRelease;
 
             console.log(`Head SHA: ${headSha}`);
             console.log(`Merged PR: ${mergedPr ? `#${mergedPr.number}` : 'none'}`);
@@ -84,6 +93,8 @@ jobs:
         (
           github.event_name == 'workflow_run' &&
           github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
           github.event.workflow_run.head_branch == 'main' &&
           needs.gate.outputs.is_release == 'true'
         ) ||

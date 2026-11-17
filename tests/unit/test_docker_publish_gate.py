@@ -23,7 +23,12 @@ These tests pin the CI contract the way `test_revert_watchdog.py`,
   `workflow_dispatch` to `github.ref == 'refs/heads/main'`;
 * the gate's github-script, run verbatim under node against the recorded
   payloads of the two `no-release` merges (#516, #522) and one `bump-minor`
-  merge (#386), reports `is_release` `false`, `false` and `true`.
+  merge (#386), reports `is_release` `false`, `false` and `true`, and fails
+  closed (`false`) when no merged PR is found at all (WORK-208);
+* both the `gate` job and the `docker-publish` job condition carry the
+  `workflow_run.event == 'push'` and `head_repository.full_name ==
+  github.repository` guards, so a fork PR completing `Unit Tests` can never
+  reach the registry-push credentials (WORK-208).
 
 Drop the gate again and this file goes red on exactly the pre-fix YAML: the
 `gate` job lookups abort and the unconditional short-SHA tag line fails the
@@ -125,6 +130,20 @@ def test_workflow_run_path_requires_the_gate_and_bypasses_stay_open():
     )
 
 
+def test_workflow_run_guards_require_push_from_own_repo():
+    """WORK-208: Unit Tests also runs on pull_request, so a fork PR completes a
+    workflow_run; only a push from this repository may reach the publish job."""
+    guards = (
+        "github.event.workflow_run.event == 'push'",
+        "github.event.workflow_run.head_repository.full_name == github.repository",
+    )
+    gate_if = str(_gate_job()["if"])
+    publish_if = str(_publish_job()["if"])
+    for guard in guards:
+        assert guard in gate_if, f"the gate job condition lost the guard {guard!r}"
+        assert guard in publish_if, f"the docker-publish job condition lost the guard {guard!r}"
+
+
 def test_floating_and_short_sha_tags_are_gated_on_is_release():
     """The exact defect: these tag lines were unconditional for every merge."""
     for step_id, markers in (
@@ -189,6 +208,14 @@ _SCENARIOS = (
         "bbe2e5c2ab80d402a5fa093b8eaf6a789ae2b46a",
         [_recorded_pr(386, "2026-11-09T15:41:26Z", "bbe2e5c2ab80d402a5fa093b8eaf6a789ae2b46a", ["bump-minor"])],
         "true",
+    ),
+    # WORK-208: a workflow_run whose head SHA has no merged PR (fork PR test
+    # run, direct push, replayed event) must fail closed, not open.
+    (
+        "no-merged-pr",
+        "0000000000000000000000000000000000000000",
+        [],
+        "false",
     ),
 )
 
