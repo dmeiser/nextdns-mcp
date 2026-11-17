@@ -298,16 +298,53 @@ async def _fetch_card_data(
 
 OVERVIEW_FANOUT_CONCURRENCY = 4
 
+# Upstream answers that reject the request itself rather than this one endpoint.
+# Every queued wave of the fan-out sends the same profile id on the same API key,
+# so a wave that has not started yet can only repeat the failure: the 429 spends
+# quota that was already refused, the 401/403 re-proves a credential that just
+# failed, the 404 names a profile no endpoint of this profile can resolve.
+FANOUT_STOP_STATUS_CODES = frozenset({401, 403, 404, 429})
+
+
+class _FanoutStop:
+    """The stop signal one fan-out shares: the first error that condemns every remaining wave.
+
+    A per-request 5xx or an over-large series body says nothing about the other
+    endpoints, so only ``FANOUT_STOP_STATUS_CODES`` latch here.
+    """
+
+    def __init__(self) -> None:
+        self.error: dict[str, Any] | None = None
+
+    def observe(self, err: dict[str, Any] | None) -> None:
+        """Latch the first request-fatal error; later failures keep the first one's payload."""
+        if self.error is not None or err is None:
+            return
+        if err.get("status_code") in FANOUT_STOP_STATUS_CODES:
+            self.error = err
+
 
 async def _bounded_fetch_analytics_payload(
     semaphore: asyncio.Semaphore,
     profile_id: str,
     endpoint: str,
-    params: dict[str, Any] | None = None,
+    params: dict[str, Any] | None,
+    stop: _FanoutStop,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Fetch an analytics payload while bounding concurrent upstream fan-out."""
+    """Fetch an analytics payload while bounding concurrent upstream fan-out.
+
+    The check runs once the slot is won, not before it: a queued wave is woken the
+    moment an in-flight request releases the semaphore, and that is where it learns
+    the fan-out has already failed. The answer handed back is the originating error
+    payload, so the unpacking layer reports the same typed failure it would have
+    reported had the wave run.
+    """
     async with semaphore:
-        return await _fetch_analytics_payload(profile_id, endpoint, params)
+        if stop.error is not None:
+            return None, stop.error
+        payload, err = await _fetch_analytics_payload(profile_id, endpoint, params)
+    stop.observe(err)
+    return payload, err
 
 
 def _first_error(*errs: Any) -> dict[str, Any] | None:
@@ -333,6 +370,7 @@ class ExtraDashboardPayloads(NamedTuple):
 
 def _build_extra_tasks(
     sem: asyncio.Semaphore,
+    stop: _FanoutStop,
     pid: str,
     from_time: str | int,
     to_time: str | int,
@@ -346,16 +384,20 @@ def _build_extra_tasks(
     """
     extra_dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
     return {
-        "reasons": _bounded_fetch_analytics_payload(sem, pid, "reasons", extra_dom_params),
-        "devices": _bounded_fetch_analytics_payload(sem, pid, "devices", extra_dom_params),
-        "ips": _bounded_fetch_analytics_payload(sem, pid, "ips", extra_dom_params),
-        "root_domains": _bounded_fetch_analytics_payload(sem, pid, "domains", {**extra_dom_params, "root": "true"}),
-        "gafam": _bounded_fetch_analytics_payload(sem, pid, "destinations", {**extra_dom_params, "type": "gafam"}),
-        "countries": _bounded_fetch_analytics_payload(
-            sem, pid, "destinations", {**extra_dom_params, "type": "countries"}
+        "reasons": _bounded_fetch_analytics_payload(sem, pid, "reasons", extra_dom_params, stop),
+        "devices": _bounded_fetch_analytics_payload(sem, pid, "devices", extra_dom_params, stop),
+        "ips": _bounded_fetch_analytics_payload(sem, pid, "ips", extra_dom_params, stop),
+        "root_domains": _bounded_fetch_analytics_payload(
+            sem, pid, "domains", {**extra_dom_params, "root": "true"}, stop
         ),
-        "encryption": _bounded_fetch_analytics_payload(sem, pid, "encryption", params),
-        "dnssec": _bounded_fetch_analytics_payload(sem, pid, "dnssec", params),
+        "gafam": _bounded_fetch_analytics_payload(
+            sem, pid, "destinations", {**extra_dom_params, "type": "gafam"}, stop
+        ),
+        "countries": _bounded_fetch_analytics_payload(
+            sem, pid, "destinations", {**extra_dom_params, "type": "countries"}, stop
+        ),
+        "encryption": _bounded_fetch_analytics_payload(sem, pid, "encryption", params, stop),
+        "dnssec": _bounded_fetch_analytics_payload(sem, pid, "dnssec", params, stop),
     }
 
 
@@ -449,12 +491,13 @@ async def _fetch_overview_payloads(
     ser_params = _build_series_params(from_time=from_time, to_time=to_time, interval=interval)
 
     sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
-    extra_fetchers = _build_extra_tasks(sem, pid, from_time, to_time, limit, params) if include_extra else {}
+    stop = _FanoutStop()
+    extra_fetchers = _build_extra_tasks(sem, stop, pid, from_time, to_time, limit, params) if include_extra else {}
     results = await asyncio.gather(
-        _bounded_fetch_analytics_payload(sem, pid, "status", params),
-        _bounded_fetch_analytics_payload(sem, pid, "status;series", ser_params),
-        _bounded_fetch_analytics_payload(sem, pid, "domains", dom_params),
-        _bounded_fetch_analytics_payload(sem, pid, "domains", blk_params),
+        _bounded_fetch_analytics_payload(sem, pid, "status", params, stop),
+        _bounded_fetch_analytics_payload(sem, pid, "status;series", ser_params, stop),
+        _bounded_fetch_analytics_payload(sem, pid, "domains", dom_params, stop),
+        _bounded_fetch_analytics_payload(sem, pid, "domains", blk_params, stop),
         *extra_fetchers.values(),
     )
     return _unpack_overview_results(results, list(extra_fetchers), include_extra)
@@ -479,15 +522,22 @@ async def _fetch_extra_payloads(
     keyword arguments, so reordering entries cannot reassign section data.
     """
     sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
+    stop = _FanoutStop()
     fetchers = {
-        "reasons": _bounded_fetch_analytics_payload(sem, profile_id, "reasons", dom_params),
-        "devices": _bounded_fetch_analytics_payload(sem, profile_id, "devices", dom_params),
-        "ips": _bounded_fetch_analytics_payload(sem, profile_id, "ips", dom_params),
-        "root_domains": _bounded_fetch_analytics_payload(sem, profile_id, "domains", {**dom_params, "root": "true"}),
-        "gafam": _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**dom_params, "type": "gafam"}),
-        "countries": _bounded_fetch_analytics_payload(sem, profile_id, "destinations", {**params, "type": "countries"}),
-        "encryption": _bounded_fetch_analytics_payload(sem, profile_id, "encryption", params),
-        "dnssec": _bounded_fetch_analytics_payload(sem, profile_id, "dnssec", params),
+        "reasons": _bounded_fetch_analytics_payload(sem, profile_id, "reasons", dom_params, stop),
+        "devices": _bounded_fetch_analytics_payload(sem, profile_id, "devices", dom_params, stop),
+        "ips": _bounded_fetch_analytics_payload(sem, profile_id, "ips", dom_params, stop),
+        "root_domains": _bounded_fetch_analytics_payload(
+            sem, profile_id, "domains", {**dom_params, "root": "true"}, stop
+        ),
+        "gafam": _bounded_fetch_analytics_payload(
+            sem, profile_id, "destinations", {**dom_params, "type": "gafam"}, stop
+        ),
+        "countries": _bounded_fetch_analytics_payload(
+            sem, profile_id, "destinations", {**params, "type": "countries"}, stop
+        ),
+        "encryption": _bounded_fetch_analytics_payload(sem, profile_id, "encryption", params, stop),
+        "dnssec": _bounded_fetch_analytics_payload(sem, profile_id, "dnssec", params, stop),
     }
     pending = {name: asyncio.ensure_future(coro) for name, coro in fetchers.items()}
     results = {name: await task for name, task in pending.items()}
