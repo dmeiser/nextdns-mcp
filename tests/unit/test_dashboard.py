@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastmcp.tools.base import ToolResult
+from prefab_ui.components import Card
 
 from nextdns_mcp import chart_ui as chart_ui_module
 from nextdns_mcp import charts as charts_module
@@ -34,11 +35,19 @@ class TestDashboardHelpers:
     """Tests for unit formatting and component builder helpers."""
 
     def test_wrap_card_result_uses_documented_composition(self):
-        import inspect
-
-        src = inspect.getsource(ui._wrap_card_result)
-        assert "children.append" not in src
-        assert "children=[card]" in src
+        """The card is the view's direct child, and wrapping never mutates the card."""
+        card = Card(title="Card title")
+        snapshot = card.model_dump(exclude={"id"})
+        result = ui._wrap_card_result(card, "Summary text")
+        assert isinstance(result, ToolResult)
+        assert result.content[0].text == "Summary text"
+        view = result.structured_content["view"]
+        (column,) = view["children"]
+        assert column["type"] == "Column"
+        (child,) = column["children"]
+        assert child["type"] == "Card"
+        # The wrap builds a fresh view around the card; the card itself is untouched.
+        assert card.model_dump(exclude={"id"}) == snapshot
 
     def test_build_analytics_params(self):
         p = data_mod._build_analytics_params("-1d", "now", limit=5, extra_key="val", none_key=None)

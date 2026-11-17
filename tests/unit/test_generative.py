@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastmcp import FastMCP
 
+from nextdns_mcp import generative as gen_mod
 from nextdns_mcp import generative as generative_module
 from nextdns_mcp import openapi as openapi_module
 from nextdns_mcp.generative import (
@@ -35,8 +36,6 @@ def test_parse_ui_data():
 
 
 def test_parse_ui_data_rejects_malformed_and_non_dict():
-    import pytest
-
     with pytest.raises(ValueError, match="Invalid JSON in data parameter"):
         _parse_ui_data('{"a": ')
     for payload in ("[1,2]", "42", "true", '"hi"', "null"):
@@ -117,18 +116,32 @@ def test_tabstrigger_functional_children_chart_is_rejected():
         _validate_chart_placement(code)
 
 
-def test_repeated_tab_blocks_scale_subquadratically():
-    """Many chart-free Tab blocks must validate in sub-quadratic time (DoS regression)."""
-    small = "".join(f"with Tab('T{i}'):\n    pass\n" for i in range(400))
-    large = "".join(f"with Tab('T{i}'):\n    pass\n" for i in range(1600))
-    start = time.perf_counter()
-    _validate_chart_placement(small)  # should not raise
-    small_elapsed = time.perf_counter() - start
-    start = time.perf_counter()
-    _validate_chart_placement(large)  # should not raise
-    large_elapsed = time.perf_counter() - start
-    assert large_elapsed < 10
-    assert large_elapsed / max(small_elapsed, 1e-6) < 10
+def test_repeated_tab_blocks_scale_subquadratically(monkeypatch):
+    """Many chart-free Tab blocks must validate in one linear walk (DoS regression).
+
+    Wall-clock ratios move with machine load, so the walk's node examinations
+    are counted instead and the scaling claim becomes an exact integer check.
+    """
+
+    def count_examinations(blocks: int) -> int:
+        examinations = {"n": 0}
+        original = gen_mod._node_visits
+
+        def counting(node, in_tab):
+            examinations["n"] += 1
+            return original(node, in_tab)
+
+        monkeypatch.setattr(gen_mod, "_node_visits", counting)
+        code = "".join(f"with Tab('T{i}'):\n    pass\n" for i in range(blocks))
+        _validate_chart_placement(code)  # should not raise
+        return examinations["n"]
+
+    # The walk visits the Module root plus four nodes per Tab block (the
+    # `with`, its Tab call, the tab argument, and the `pass` body). A
+    # re-scanning walk would visit far more; the exact values below pin
+    # that linearity.
+    assert count_examinations(400) == 1 + 4 * 400
+    assert count_examinations(1600) == 1 + 4 * 1600
 
 
 def test_with_alias_context_is_not_a_tab():
@@ -743,9 +756,14 @@ async def test_generate_ui_execution_timeout():
     tool_list = await gen_ui._local.list_tools()
     gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
     sandbox_mock = MagicMock(start=AsyncMock())
+    cancelled = {"seen": False}
 
     async def never_resolves(*args, **kwargs):
-        await asyncio.sleep(9999)
+        try:
+            await asyncio.sleep(9999)
+        except asyncio.CancelledError:
+            cancelled["seen"] = True
+            raise
 
     with (
         patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
@@ -754,8 +772,7 @@ async def test_generate_ui_execution_timeout():
         mock_exec.side_effect = never_resolves
         with pytest.raises(TimeoutError, match="execution exceeded"):
             await gen_tool.fn(code="print(1)")
-        # sandbox reset attempted
-        # at least one reset method may have been accessed
+        assert cancelled["seen"]
 
 
 # --- Sandbox hardening (issue #541) ---
