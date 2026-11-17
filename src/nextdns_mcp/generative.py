@@ -218,8 +218,10 @@ class HardenedPyodideSandbox(PyodideSandbox):
             raise
         self._process = proc
         stdout = getattr(proc, "stdout", None)
-        if stdout is not None and not isinstance(stdout, _BoundedStdout):
-            proc.stdout = _BoundedStdout(stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
+        if stdout is None or isinstance(stdout, _BoundedStdout):
+            return
+        # Note: _start returns None; wrapping stdout here is best-effort.
+        proc.stdout = _BoundedStdout(stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
 
 
 # The sandbox worker answers each request with a single JSON line on stdout:
@@ -369,9 +371,12 @@ class _BoundedResultSandbox(_Sandbox):
     async def _start(self) -> None:
         await super()._start()
         proc = self._process
-        stdout = getattr(proc, "stdout", None) if proc is not None else None
-        if proc is not None and stdout is not None and not isinstance(stdout, _BoundedStdout):
-            proc.stdout = _BoundedStdout(stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
+        if proc is None:
+            return
+        stdout = getattr(proc, "stdout", None)
+        if stdout is None or isinstance(stdout, _BoundedStdout):
+            return
+        proc.stdout = _BoundedStdout(stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
 
 
 class _CombinedSandbox(HardenedPyodideSandbox, _BoundedResultSandbox):
