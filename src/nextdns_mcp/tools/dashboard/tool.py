@@ -435,7 +435,11 @@ def _resolve_domain_view(
     domain_view: Literal["table", "bar", "pie"],
     view_type: Literal["auto", "bar", "table", "pie"],
 ) -> Literal["table", "bar", "pie"]:
-    """Resolve active domain view format."""
+    """Resolve active domain view format.
+
+    Only the domain cards read this: an explicit ``view_type`` overrides the
+    ``domain_view`` default, and ``"auto"`` defers to ``domain_view``.
+    """
     if view_type in ("table", "bar", "pie"):
         return view_type
     return domain_view
@@ -448,13 +452,14 @@ async def _append_extra_dashboard_sections(
     to_time: str | int,
     limit: int,
     domain_view: str = "table",
+    view_type: str = "auto",
 ) -> None:
     """Fetch and append reasons, devices, IPs, root domains, GAFAM, destinations and security cards."""
     dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
 
     payloads = await _fetch_extra_payloads(profile_id, dom_params, params)
-    _append_extra_cards(view, payloads, domain_view=domain_view)
+    _append_extra_cards(view, payloads, domain_view=domain_view, view_type=view_type)
 
 
 async def _render_overview_page(
@@ -463,9 +468,15 @@ async def _render_overview_page(
     to_time: str | int,
     limit: int,
     section: str,
-    domain_view: Literal["table", "bar", "pie"],
+    domain_view: Literal["table", "bar", "pie"] = "table",
+    view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
-    """Fetch payloads, assemble layout, and return ToolResult for overview or all."""
+    """Fetch payloads, assemble layout, and return ToolResult for overview or all.
+
+    ``domain_view`` formats the domain cards; the non-domain cards appended by
+    ``section="all"`` take ``view_type``, so its documented ``"auto"`` default is
+    not coerced to that domain format (#547).
+    """
     include_extra = section == "all"
     s_p, ser_p, r_data, b_data, extra_payloads, fetch_err = await _fetch_overview_payloads(
         pid, from_time, to_time, limit, include_extra=include_extra
@@ -473,10 +484,11 @@ async def _render_overview_page(
     if fetch_err:
         return fetch_err
 
+    eff_domain_view = _resolve_domain_view(domain_view, view_type)
     kpis = _calculate_status_kpis(_payload_data(s_p))
-    view = _assemble_overview_layout(kpis, ser_p, r_data, b_data, domain_view=domain_view)
+    view = _assemble_overview_layout(kpis, ser_p, r_data, b_data, domain_view=eff_domain_view)
     if include_extra and extra_payloads is not None:
-        _append_extra_cards(view, extra_payloads, domain_view=domain_view)
+        _append_extra_cards(view, extra_payloads, domain_view=eff_domain_view, view_type=view_type)
 
     top_summary = _overview_top_summary(r_data, b_data)
     summary = (
@@ -568,15 +580,15 @@ async def _overview_dashboard_impl(
         view_type: Visualization format: "auto" (default: table or card default), "bar", "table", or "pie".
         domain_view: Visualization format for domain cards in overview mode: "table" (default), "bar", or "pie".
     """
-    eff_view = _resolve_domain_view(domain_view, view_type)
-
     if section in _WIDGET_DISPATCH:
         norm_from = normalize_time_value(from_time)
         norm_to = normalize_time_value(to_time)
         budget_err = series_budget_error(norm_from, norm_to, _overview_interval(norm_from, norm_to))
         if budget_err is not None:
             return budget_err
-        return await _WIDGET_DISPATCH[section](profile_id, norm_from, norm_to, limit, eff_view)
+        # Single-widget sections are not domain-card groups: they keep view_type so
+        # "auto" reaches each card's own default (#547).
+        return await _WIDGET_DISPATCH[section](profile_id, norm_from, norm_to, limit, view_type)
 
     pid, err = await _resolve_profile(profile_id)
     if err is not None:
@@ -584,7 +596,7 @@ async def _overview_dashboard_impl(
     if pid is None:
         return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution returned no id")
 
-    return await _render_overview_page(pid, from_time, to_time, limit, section, eff_view)
+    return await _render_overview_page(pid, from_time, to_time, limit, section, domain_view, view_type)
 
 
 async def overviewDashboard(

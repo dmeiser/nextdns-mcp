@@ -410,23 +410,27 @@ def _append_extra_cards(
     view: Column,
     payloads: ExtraDashboardPayloads,
     domain_view: str = "table",
+    view_type: str = "auto",
 ) -> None:
     """Append the reasons, devices, IPs, root-domain, GAFAM, countries and security cards.
 
     The caller fetches; this only lays out. ``payloads`` carries one named field
     per section, so the pairing between a fetch and the card that renders it is
-    carried by name rather than by position.
+    carried by name rather than by position. Only the root-domain card is a domain
+    card, so it alone takes the already-resolved ``domain_view``; the other cards
+    take ``view_type``, which keeps ``"auto"`` and renders each card's own default
+    instead of being coerced to a table (#547).
     """
     with view:
         with Row(gap=4):
-            _build_reasons_card(payloads.reasons, view_type=domain_view)
-            _build_devices_card(payloads.devices, view_type=domain_view)
+            _build_reasons_card(payloads.reasons, view_type=view_type)
+            _build_devices_card(payloads.devices, view_type=view_type)
         with Row(gap=4):
             _build_domains_card("Root Domains", "Aggregate root domains.", payloads.root_domains, view_type=domain_view)
             _build_ips_card(payloads.ips)
         with Row(gap=4):
-            _build_gafam_card(payloads.gafam, view_type=domain_view)
-            _build_destinations_card(payloads.countries, view_type=domain_view)
+            _build_gafam_card(payloads.gafam, view_type=view_type)
+            _build_destinations_card(payloads.countries, view_type=view_type)
         with Row(gap=4):
             _build_security_card(payloads.encryption, payloads.dnssec)
 
