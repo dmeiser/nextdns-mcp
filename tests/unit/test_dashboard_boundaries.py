@@ -30,6 +30,7 @@ PACKAGE_MODULES = ("__init__.py", "data.py", "components.py", "formatters.py", "
 SHARED_PRIMITIVES = (
     "build_chart_data",
     "build_chart_series",
+    "build_timeseries_area_chart",
     "resolve_time_point",
     "series_budget_error",
     "validate_series_payload",
@@ -91,6 +92,23 @@ def test_shared_primitive_is_defined_in_charts(name: str):
                 isinstance(target, ast.Name) and target.id == name for target in node.targets
             ):
                 pytest.fail(f"{module_file.name} re-aliases {name} instead of importing it from charts")
+
+
+def test_timeseries_area_chart_is_built_in_one_place():
+    """No analytics caller re-inlines the ``AreaChart`` kwargs (issue #439).
+
+    ``SHARED_PRIMITIVES`` catches a consumer re-aliasing the factory, but not
+    one quietly rebuilding the component by hand - the duplicated-kwargs shape
+    this ticket removed. ``charts.py`` is the only module in the package that
+    may construct an ``AreaChart``; consumers call ``build_timeseries_area_chart``.
+    """
+    for module_file in sorted((REPO_ROOT / "src" / "nextdns_mcp").rglob("*.py")):
+        if module_file.name == "charts.py":
+            continue
+        tree = ast.parse(module_file.read_text(encoding="utf-8"), filename=str(module_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "AreaChart":
+                pytest.fail(f"{module_file.name} constructs AreaChart instead of calling the shared factory")
 
 
 def test_package_public_surface():

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from fastmcp.tools.base import ToolResult
+from prefab_ui.components.charts import ChartSeries
 
 from nextdns_mcp import charts as charts_module
 from nextdns_mcp import client as client_module
@@ -236,6 +237,47 @@ class TestBuildSeriesChart:
         assert isinstance(result.structured_content, dict)
         assert "$prefab" in result.structured_content
         assert "view" in result.structured_content
+
+
+class TestTimeseriesAreaChartFactory:
+    """The shared AreaChart configuration both analytics surfaces render (issue #439)."""
+
+    @staticmethod
+    def _serialized(component):
+        """The component dict as it reaches structured_content: aliases on, nulls off."""
+        return {k: v for k, v in component.model_dump(exclude={"id"}, by_alias=True).items() if v is not None}
+
+    def test_build_timeseries_area_chart_carries_the_shared_config(self):
+        chart = charts_module.build_timeseries_area_chart(
+            [{"time": "2024-01-15T10:00:00Z", "series_0": 10}],
+            [ChartSeries(dataKey="series_0", label="blocked", color=None)],
+        )
+        config = self._serialized(chart)
+        assert config["type"] == "AreaChart"
+        assert config["xAxis"] == "time"
+        assert config["curve"] == "smooth"
+        assert config["showDots"] is False
+        assert config["height"] == 260
+        assert config["showLegend"] is True
+        assert config["showTooltip"] is True
+        assert config["showGrid"] is True
+
+    def test_plot_call_site_renders_the_factory_chart(self):
+        # The extraction is mechanical if the rendered node is unchanged: the
+        # plot tool's chart is exactly what the factory builds from the same rows.
+        times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
+        series_data = [
+            {"name": "blocked", "queries": [10, 20]},
+            {"name": "allowed", "queries": [5, 8]},
+        ]
+        result = plots_module._build_series_chart("status", times, series_data)
+        rendered = result.structured_content["view"]["children"][0]["children"][2]
+        assert rendered == self._serialized(
+            charts_module.build_timeseries_area_chart(
+                charts_module.build_chart_data(times, series_data),
+                charts_module.build_chart_series(series_data),
+            )
+        )
 
 
 class TestChartSeriesDownsampling:

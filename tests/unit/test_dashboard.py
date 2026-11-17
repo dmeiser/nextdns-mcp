@@ -6,12 +6,24 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastmcp.tools.base import ToolResult
 
+from nextdns_mcp import charts as charts_module
 from nextdns_mcp.tools import dashboard as dash_module
 from nextdns_mcp.tools.dashboard import components as ui
 from nextdns_mcp.tools.dashboard import data as data_mod
 from nextdns_mcp.tools.dashboard import formatters as fmt
 from nextdns_mcp.tools.dashboard import tool as tool_mod
 from nextdns_mcp.transport import MAX_SERIES_RESPONSE_BYTES
+
+
+def _find_component(node, comp_type):
+    """First component of ``comp_type`` in a builder's component tree, or None."""
+    if getattr(node, "type", None) == comp_type:
+        return node
+    for child in getattr(node, "children", None) or []:
+        found = _find_component(child, comp_type)
+        if found is not None:
+            return found
+    return None
 
 
 class TestDashboardHelpers:
@@ -80,6 +92,22 @@ class TestDashboardHelpers:
         }
         card = ui._build_queries_series_card(valid_payload)
         assert card is not None
+
+    def test_build_queries_series_card_uses_the_shared_factory(self):
+        # The dashboard's chart is exactly what the shared factory builds from
+        # the same rows, so the two surfaces cannot drift apart (issue #439).
+        times = ["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z"]
+        series_data = [
+            {"name": "blocked", "queries": [10, 20]},
+            {"name": "allowed", "queries": [5, 8]},
+        ]
+        card = ui._build_queries_series_card({"meta": {"series": {"times": times}}, "data": series_data})
+        chart = _find_component(card, "AreaChart")
+        assert chart is not None
+        assert chart.model_dump(exclude={"id"}, by_alias=True) == charts_module.build_timeseries_area_chart(
+            charts_module.build_chart_data(times, series_data),
+            charts_module.build_chart_series(series_data),
+        ).model_dump(exclude={"id"}, by_alias=True)
 
     def test_build_domains_card(self):
         data = [{"domain": "example.com", "queries": 50}, {}]
