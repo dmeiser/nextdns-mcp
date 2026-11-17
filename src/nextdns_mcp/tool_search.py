@@ -89,6 +89,35 @@ SEARCH_FALLBACK_MAX_BYTES = 131_072
 # other's mode, and asyncio copies the context per task.
 _fallback_answer: contextvars.ContextVar[bool] = contextvars.ContextVar("nextdns_fallback_answer", default=False)
 
+
+def _annotation_says_write(tool: Any) -> bool:
+    """Whether a tool's own annotations state that calling it is not a read.
+
+    The route map can only speak for spec operations. A tool it does not carry
+    (``generate_prefab_ui``, the three composite operations) has no HTTP method
+    to read, and its annotations are the only place its side effects are
+    declared: ``readOnlyHint is False`` is the server saying the call does
+    something. An unset or read-only annotation keeps the traditional reading
+    that a name off the map reads, which is what the composites rely on.
+    """
+    return getattr(getattr(tool, "annotations", None), "read_only_hint", None) is False
+
+
+def _is_write_tool(name: str, endpoints: Mapping[str, tuple[str, str]] | None, tool: Any = None) -> bool:
+    """Whether calling ``name`` changes something: the endpoint map first, then the tool.
+
+    The map is the fact of what a spec route executes. For a name the map does
+    not carry, the tool's own ``readOnlyHint`` decides - defaulting every
+    off-map name to ``GET`` is what let a loose or ambiguous match execute
+    sandboxed code through ``generate_prefab_ui``, a tool registered with
+    ``read_only_hint=False``.
+    """
+    endpoint = (endpoints or {}).get(name)
+    if endpoint is not None:
+        return is_write_operation(endpoint[0])
+    return _annotation_says_write(tool)
+
+
 # camelCase / snake_case / non-word splitter, used for both tool names and
 # queries so 'queryTimeSeries' and 'query time series' compare equal.
 
@@ -132,7 +161,8 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         )
         # tool name -> (method, path template), from the server's single route
         # parse. The full-catalog fallback classifies writes from this map; a
-        # name it does not carry (the three composite operations (plotAnalytics, dohLookup, overviewDashboard)) reads.
+        # name it does not carry - the three composite operations and the
+        # generative-UI pair - is classified from its own readOnlyHint.
         self._endpoints: dict[str, tuple[str, str]] = dict(endpoints)
         self._word_memos: dict[tuple[str, ...], _CatalogWords] = {}
         self._compacted_cache: dict[int, tuple[Tool, dict[str, Any], int]] = {}
@@ -200,17 +230,13 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
             # left, so answer with the catalog and let the name order sort it.
             # Write/read classification comes from the endpoint map (built once
             # from the shipped spec's routes), not from name shapes: the
-            # heuristic this replaced read every list* tool as a write.
-            def _is_write(name: str) -> bool:
-                endpoint = (self._endpoints or {}).get(name)
-                if endpoint is not None:
-                    # The map is the fact of what the call executes.
-                    return is_write_operation(endpoint[0])
-                # The map does not carry this name (the three composite operations (plotAnalytics, dohLookup, overviewDashboard)):
-                # a miss reads, the same reading _endpoint_method applies.
-                return False
-
-            results = sorted(tools, key=lambda t: (_is_write(getattr(t, "name", "")), getattr(t, "name", "")))
+            # heuristic this replaced read every list* tool as a write. A name
+            # the map does not carry is classified from its own readOnlyHint,
+            # so a tool that runs code is never sorted in with the reads.
+            results = sorted(
+                tools,
+                key=lambda t: (_is_write_tool(getattr(t, "name", ""), self._endpoints, t), getattr(t, "name", "")),
+            )
             # The fallback IS the catalog: an unmatchable query gets every tool
             # (reads first), not a six-entry sample - a small model that finds
             # nothing needs the surface, and six entries of it taught it the
@@ -662,7 +688,8 @@ class CallToolShapeMiddleware(Middleware):
     tool the caller did not name, on a server that mutates NextDNS state, is
     kept inside the reads. A multi-entry answer resolving to a WRITE is the
     case where rank order is a guess, and the endpoint map is what makes
-    "write" a fact rather than a name-shape heuristic.
+    "write" a fact rather than a name-shape heuristic; for a name the map does
+    not carry, the tool's own `readOnlyHint` is that fact.
     """
 
     def __init__(
@@ -680,7 +707,9 @@ class CallToolShapeMiddleware(Middleware):
         `endpoints` is the ``tool name -> (method, path template)`` map from
         the server's route parse: the sound read of whether a name executes a
         write. A name the map does not carry - one of the three composite tools
-        (``plotAnalytics``, ``dohLookup``, ``overviewDashboard``) - reads.
+        (``plotAnalytics``, ``dohLookup``, ``overviewDashboard``) or the
+        generative-UI pair - is classified from its own ``readOnlyHint``, so a
+        tool that runs code is not mistaken for a read.
         """
         self._call_tool_name = call_tool_name
         self._transform = transform
@@ -748,9 +777,9 @@ class CallToolShapeMiddleware(Middleware):
         """
         resolved = _name_from_search_answer(supplied)
         _note_search_answer_name(supplied, resolved)
-        self._refuse_ambiguous_write(supplied)
 
         by_name = {tool.name: tool for tool in tools}
+        self._refuse_ambiguous_write(supplied, by_name)
         passthrough = _passthrough_resolution(resolved, by_name)
         if passthrough is not None:
             return passthrough
@@ -763,9 +792,9 @@ class CallToolShapeMiddleware(Middleware):
 
     def _loose_write_refused(self, resolved: str, by_name: dict[str, Tool], entry: tuple[str, Tool]) -> bool:
         """Whether a loosely matched name landed on a write operation."""
-        return resolved not in by_name and is_write_operation(self._endpoint_method(entry[0]))
+        return resolved not in by_name and _is_write_tool(entry[0], self._endpoints, entry[1])
 
-    def _refuse_ambiguous_write(self, supplied: Any) -> None:
+    def _refuse_ambiguous_write(self, supplied: Any, by_name: Mapping[str, Tool]) -> None:
         """Refuse a multi-entry answer whose head is a write; resolve everything else.
 
         A single-entry answer has one reading, and the caller chose it; a
@@ -777,13 +806,9 @@ class CallToolShapeMiddleware(Middleware):
         if not isinstance(supplied, list):
             return
         candidates = _named_entries(supplied)
-        if len(candidates) > 1 and is_write_operation(self._endpoint_method(candidates[0])):
+        head = candidates[0] if candidates else ""
+        if len(candidates) > 1 and _is_write_tool(head, self._endpoints, by_name.get(head)):
             raise ToolError(_ambiguous_write_message(candidates))
-
-    def _endpoint_method(self, name: str) -> str:
-        """The HTTP method the named tool executes; names off the map read."""
-        endpoint = (self._endpoints or {}).get(name)
-        return endpoint[0] if endpoint else "GET"
 
     @staticmethod
     def _lift_flat_arguments(arguments: dict[str, Any], tool: Tool) -> dict[str, Any]:
