@@ -155,24 +155,27 @@ class _BoundedStdout:
         read1 = getattr(self._raw, "read1", self._raw.read)
         return read1(_READ_CHUNK_SIZE)
 
+    def _feed(self, chunk: bytes, chunks: list[bytes], total: int) -> tuple[bool, int]:
+        """Append one chunk, splitting at a newline; return (line_complete, new_total)."""
+        newline = chunk.find(b"\n")
+        if newline != -1:
+            self._pending = chunk[newline + 1 :]
+            chunk = chunk[: newline + 1]
+        chunks.append(chunk)
+        return newline != -1, total + len(chunk)
+
     def readline(self) -> bytes:
         chunks: list[bytes] = []
         total = 0
-        while True:
+        complete = False
+        while not complete and total <= self._limit:
             chunk = self._next_chunk()
             if not chunk:
                 break
-            newline = chunk.find(b"\n")
-            if newline != -1:
-                chunks.append(chunk[: newline + 1])
-                total += newline + 1
-                self._pending = chunk[newline + 1 :]
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > self._limit:
-                self._on_overflow()
-                raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
+            complete, total = self._feed(chunk, chunks, total)
+        if total > self._limit:
+            self._on_overflow()
+            raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
         return b"".join(chunks)
 
     def close(self) -> None:

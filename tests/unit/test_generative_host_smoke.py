@@ -88,12 +88,45 @@ def test_host_smoke_chart_sizing_guard_rejects_charts_in_tabs() -> None:
 
 @requires_deno
 @pytest.mark.asyncio
-async def test_host_smoke_rejects_oversized_result_during_read() -> None:
+async def test_host_smoke_rejects_oversized_result_during_read(monkeypatch) -> None:
     """Regression (nextdns-mcp#538): a runaway view is rejected during the bounded stdout read.
 
     The generated Text alone exceeds MAX_WIRE_LINE_BYTES, so rejection must happen
     before the host buffers the whole line, JSON-decodes it, and validates the app.
+    The decode/validation instrumentation is the discriminating assertion: with the
+    unbounded ``stdout.readline()`` this ticket fixes, the oversized line IS decoded
+    and handed to ``PrefabApp.from_json`` before the host-level size check fires, so
+    the size assertions below fail on pre-fix code even though the error message matches.
     """
+    import json as real_json
+
+    import prefab_ui.app as prefab_app
+    import prefab_ui.sandbox._pyodide as pyodide_sandbox
+
+    decoded_line_sizes: list[int] = []
+    validated_wire_sizes: list[int] = []
+
+    class _RecordingJson:
+        """Stand-in for the json module inside PyodideSandbox.run's module namespace."""
+
+        @staticmethod
+        def dumps(*args: object, **kwargs: object) -> str:
+            return real_json.dumps(*args, **kwargs)
+
+        @staticmethod
+        def loads(data: bytes, *args: object, **kwargs: object) -> object:
+            decoded_line_sizes.append(len(data))
+            return real_json.loads(data, *args, **kwargs)
+
+    real_from_json = prefab_app.PrefabApp.from_json
+
+    def _recording_from_json(wire: object) -> object:
+        validated_wire_sizes.append(len(real_json.dumps(wire)))
+        return real_from_json(wire)
+
+    monkeypatch.setattr(pyodide_sandbox, "json", _RecordingJson)
+    monkeypatch.setattr(prefab_app.PrefabApp, "from_json", _recording_from_json)
+
     gen_ui = NextDNSGenerativeUI()
     gen_ui._ensure_setup()
     tools = {t.name: t for t in await gen_ui._local.list_tools()}
@@ -102,6 +135,11 @@ async def test_host_smoke_rejects_oversized_result_during_read() -> None:
     oversized = f'with PrefabApp() as app:\n    with Column(gap=4):\n        Text("x" * {MAX_WIRE_LINE_BYTES + 1})\n'
     with pytest.raises(ValueError, match="result exceeds maximum size"):
         await tools["generate_prefab_ui"].fn(code=oversized)
+
+    # The oversized wire must never have been decoded or validated — on pre-fix
+    # code both lists carry a ~MAX_WIRE_LINE_BYTES+ entry and these assertions fail.
+    assert all(size <= MAX_WIRE_LINE_BYTES for size in decoded_line_sizes)
+    assert all(size <= MAX_WIRE_LINE_BYTES for size in validated_wire_sizes)
 
     # The oversized response stopped the worker mid-stream; the next call must
     # recover on a fresh worker and render a normal view.

@@ -418,6 +418,28 @@ def test_bounded_stdout_readline_raises_past_limit_and_stops_sandbox():
     overflow.assert_called_once_with()
 
 
+def test_bounded_stdout_readline_rejects_newline_chunk_past_limit():
+    """A line whose newline arrives in the chunk that crosses the limit is still rejected."""
+    from nextdns_mcp.generative import _BoundedStdout
+
+    overflow = MagicMock()
+    raw = _ChunkedRaw(b"x" * 100 + b"\n", chunk_size=128)
+    bounded = _BoundedStdout(raw, limit=32, on_overflow=overflow)
+    with pytest.raises(ValueError, match="result exceeds maximum size"):
+        bounded.readline()
+    overflow.assert_called_once_with()
+
+
+def test_get_sandbox_returns_bounded_result_sandbox():
+    """The wiring that installs the fix: generate_ui must use the bounded sandbox."""
+    from nextdns_mcp.generative import _BoundedResultSandbox
+
+    gen_ui = NextDNSGenerativeUI()
+    sandbox = gen_ui._get_sandbox()
+    assert isinstance(sandbox, _BoundedResultSandbox)
+    assert gen_ui._get_sandbox() is sandbox
+
+
 def test_bounded_stdout_readline_returns_partial_line_at_eof():
     from nextdns_mcp.generative import _BoundedStdout
 
