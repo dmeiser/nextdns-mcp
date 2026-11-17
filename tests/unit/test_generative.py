@@ -970,7 +970,7 @@ class _SpyFuture(asyncio.Future):
         super().__init__()
         self.recorded_callbacks = []
 
-    def add_done_callback(self, fn, *, context=None):  # noqa: ANN001, ANN002, ANN003, ANN202
+    def add_done_callback(self, fn, *, context=None):
         self.recorded_callbacks.append(fn)
         return super().add_done_callback(fn, context=context)
 
