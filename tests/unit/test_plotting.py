@@ -76,6 +76,18 @@ class TestExtractSeriesLabel:
     def test_fallback_index_label(self):
         assert charts_module._extract_series_label({"queries": []}, 3) == "series_3"
 
+    def test_series_label_strips_control_characters(self):
+        assert charts_module._extract_series_label({"name": "example.com\r\nINJECTED"}, 0) == ("example.comINJECTED")
+
+    def test_series_label_caps_oversized_names(self):
+        result = charts_module._extract_series_label({"name": "n" * 300}, 0)
+        assert len(result) == 201
+        assert result.endswith("…")
+
+    def test_chart_series_uses_sanitized_labels(self):
+        series = charts_module.build_chart_series([{"name": "a\x00b"}])
+        assert series[0].label == "ab"
+
 
 class TestSeriesColor:
     """Tests for series color determination."""

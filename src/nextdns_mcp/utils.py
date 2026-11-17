@@ -233,3 +233,24 @@ def schema_required(schema: dict[str, Any] | None) -> list[str]:
     of the same field would be two chances to read it differently.
     """
     return [str(name) for name in ((schema or {}).get("required") or [])]
+
+
+_CONTROL_CHARS_RE = re.compile(r"[\r\n\x00-\x1f\x7f-\x9f]")
+_MAX_LABEL_LENGTH = 200
+
+
+def sanitize_label(value: Any) -> str:
+    """Strip control characters and bound the length of an upstream-controlled label.
+
+    Dashboard rows, model-readable summaries, and chart series labels all carry
+    strings from the analytics API, so every extraction point routes through
+    this one helper instead of trusting the payload. Values longer than
+    ``_MAX_LABEL_LENGTH`` are capped with an ellipsis. Sanitizing must happen
+    exactly once, at extraction/shaping time: the cap appends a character, so
+    a second pass would see a 201-character label and cut it again.
+    """
+    text = str(value)
+    text = _CONTROL_CHARS_RE.sub("", text)
+    if len(text) > _MAX_LABEL_LENGTH:
+        text = text[:_MAX_LABEL_LENGTH] + "…"
+    return text

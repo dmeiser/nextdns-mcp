@@ -10,7 +10,6 @@ SPDX-License-Identifier: MIT
 """
 
 import asyncio
-import re
 import time
 from typing import Any, NamedTuple
 
@@ -23,6 +22,7 @@ from ...utils import (
     _build_series_params,
     normalize_time_value,
     resolve_profile_id,
+    sanitize_label,
 )
 
 
@@ -97,27 +97,14 @@ def _calculate_status_kpis(data: list[dict[str, Any]]) -> dict[str, Any]:
     return {"total": total, "blocked": blocked, "rate": rate}
 
 
-_CONTROL_CHARS_RE = re.compile(r"[\r\n\x00-\x1f\x7f-\x9f]")
-_MAX_LABEL_LENGTH = 200
-
-
-def _sanitize_label(value: Any) -> str:
-    """Strip control characters and bound length of attacker-controlled labels."""
-    text = str(value)
-    text = _CONTROL_CHARS_RE.sub("", text)
-    if len(text) > _MAX_LABEL_LENGTH:
-        text = text[:_MAX_LABEL_LENGTH] + "…"
-    return text
-
-
 def _domain_label(item: dict[str, Any], key_name: str = "domain") -> str:
     """Extract domain label."""
-    return _sanitize_label(item.get(key_name) or item.get("domain") or "-")
+    return sanitize_label(item.get(key_name) or item.get("domain") or "-")
 
 
 def _reason_label(item: dict[str, Any]) -> str:
     """Extract reason or blocklist name."""
-    return _sanitize_label(item.get("name") or item.get("id") or "Unknown")
+    return sanitize_label(item.get("name") or item.get("id") or "Unknown")
 
 
 def _reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
@@ -132,14 +119,14 @@ def _reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
 
 def _device_name(item: dict[str, Any]) -> str:
     """Extract a human-readable device name."""
-    dev_id = _sanitize_label(item.get("id") or "-")
-    return "Unidentified" if dev_id == "__UNIDENTIFIED__" else _sanitize_label(item.get("name") or dev_id)
+    dev_id = sanitize_label(item.get("id") or "-")
+    return "Unidentified" if dev_id == "__UNIDENTIFIED__" else sanitize_label(item.get("name") or dev_id)
 
 
 def _device_label(item: dict[str, Any]) -> str:
     """Extract human-readable device name and model."""
     dev_name = _device_name(item)
-    model = _sanitize_label(item.get("model") or "")
+    model = sanitize_label(item.get("model") or "")
     if model and model != "-" and model != dev_name:
         return f"{dev_name} ({model})"
     return dev_name
@@ -150,7 +137,7 @@ def _device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
     q = _item_queries(item)
     return {
         "device": _device_label(item),
-        "model": str(item.get("model") or "-"),
+        "model": sanitize_label(item.get("model") or "-"),
         "queries": q,
         "share": _format_share(q, total),
     }
@@ -160,9 +147,10 @@ def _location_string(geo: dict[str, Any]) -> str:
     """Format city and country into a readable location string."""
     city = geo.get("city")
     country = geo.get("country")
-    if city and country:
-        return f"{city}, {country}"
-    return str(city or country or "-")
+    if not city and not country:
+        return "-"
+    parts = [sanitize_label(value) for value in (city, country) if value]
+    return ", ".join(parts)
 
 
 def _ip_row(item: dict[str, Any]) -> dict[str, Any]:
@@ -170,8 +158,8 @@ def _ip_row(item: dict[str, Any]) -> dict[str, Any]:
     geo = item.get("geo") or {}
     network = item.get("network") or {}
     return {
-        "ip": str(item.get("ip") or "-"),
-        "isp": str(network.get("isp") or "-"),
+        "ip": sanitize_label(item.get("ip") or "-"),
+        "isp": sanitize_label(network.get("isp") or "-"),
         "location": _location_string(geo),
         "queries": _item_queries(item),
     }
@@ -179,7 +167,7 @@ def _ip_row(item: dict[str, Any]) -> dict[str, Any]:
 
 def _single_gafam_row(item: dict[str, Any], total: int) -> tuple[dict[str, Any], dict[str, Any]]:
     """Format single company entry for GAFAM donut chart and table."""
-    name = str(item.get("company") or "others").capitalize()
+    name = sanitize_label(item.get("company") or "others").capitalize()
     q = _item_queries(item)
     return {"label": name, "company": name, "queries": q}, {
         "company": name,
@@ -211,7 +199,7 @@ def _calc_rate(data: list[dict[str, Any]], flag_key: str) -> tuple[int, int, flo
 
 def _destination_label(item: dict[str, Any]) -> str:
     """Format country destination name."""
-    return _sanitize_label(item.get("name") or item.get("code") or "-")
+    return sanitize_label(item.get("name") or item.get("code") or "-")
 
 
 def _accumulate_domains(domains: list[str] | None, budget: int = 60) -> str:
@@ -225,13 +213,13 @@ def _accumulate_domains(domains: list[str] | None, budget: int = 60) -> str:
     if not domains:
         return ""
     labels: list[str] = []
-    first = str(domains[0])
+    first = sanitize_label(domains[0])
     if len(first) > budget:
         return first[:budget]
     labels.append(first)
     used = len(first)
     for domain in domains[1:]:
-        domain = str(domain)
+        domain = sanitize_label(domain)
         need = used + 2 + len(domain)
         if need > budget:
             break
@@ -245,7 +233,7 @@ def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
     sample = _accumulate_domains(item.get("domains"), budget=60)
     return {
         "country": _destination_label(item),
-        "code": str(item.get("code") or "-"),
+        "code": sanitize_label(item.get("code") or "-"),
         "queries": _item_queries(item),
         "sample_domains": sample or "-",
     }
