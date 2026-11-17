@@ -15,13 +15,18 @@ These tests pin the invariants that made the difference, the same way
 * the job keeps the `contents: write` + `pull-requests: write` scopes its
   branch push and `gh pr create` need;
 * the automated trigger still gates on a failed `push` run on `main`;
-* the duplicate-PR guard still short-circuits when a revert PR is open.
+* the duplicate-PR guard still short-circuits when a revert PR is open;
+* `workflow_dispatch` input is validated — `HEAD_SHA` must be a full 40-hex
+  SHA and an ancestor of `origin/main` before any branch push or PR is opened
+  (WORK-209: the job holds `contents: write` and `pull-requests: write`, and
+  before that guard an arbitrary `sha:` input drove the whole revert flow).
 
-Two behavioural tests run the job's shell script verbatim: once inside a real
+The behavioural tests run the job's shell script verbatim: inside a real
 scratch repository (the fixed flow: branch created, revert committed, PR
-opened against `main`) and once in an empty workspace (the reported failure
-mode, reproduced at exit 128). Only `gh` is shimmed, so every git command the
-CI job runs is the real one.
+opened against `main`), in an empty workspace (the reported failure mode,
+reproduced at exit 128), and with hostile or off-`main` `HEAD_SHA` values (the
+two WORK-209 guards). Only `gh` is shimmed, so every git command the CI job
+runs is the real one.
 """
 
 import os
@@ -91,6 +96,39 @@ def _scratch_repo(tmp_path: Path) -> tuple[Path, Path, str]:
     sha = _git(work, "rev-parse", "HEAD").stdout.strip()
     _git(work, "push", "origin", "main")
     return origin, work, sha
+
+
+def _origin_branches(origin: Path) -> str:
+    """Branch names in the bare origin, one per line."""
+    return subprocess.run(
+        ["git", "--git-dir", str(origin), "for-each-ref", "--format=%(refname)", "refs/heads/"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+def _off_main_commit(work: Path) -> str:
+    """A commit reachable only from a side branch, with the same edit also on `main`.
+
+    Because `main`'s tip carries that edit, reverting the side commit applies
+    cleanly: a script without an ancestry check pushes `auto-revert/<sha8>` and
+    opens a revert PR for a commit `main`'s history never contained — which is
+    exactly what the guard must refuse.
+    """
+    hotfixed = "print('validated')\nraise SystemExit('bad merge')\n# shipped fix\n"
+    _git(work, "checkout", "-b", "side")
+    (work / "app.py").write_text(hotfixed)
+    _git(work, "add", "app.py")
+    _git(work, "commit", "-m", "fix developed on a side branch main never saw")
+    sha = _git(work, "rev-parse", "HEAD").stdout.strip()
+    _git(work, "push", "origin", "side")
+    _git(work, "checkout", "main")
+    (work / "app.py").write_text(hotfixed)
+    _git(work, "add", "app.py")
+    _git(work, "commit", "-m", "the same fix, committed on main")
+    _git(work, "push", "origin", "main")
+    return sha
 
 
 def _run_revert_script(
@@ -224,4 +262,44 @@ def test_script_in_an_empty_workspace_reproduces_the_original_failure(tmp_path):
     assert result.returncode == 128, f"expected exit 128 from git outside a repository, got {result.returncode}"
     assert "not in a git directory" in result.stdout + result.stderr, (
         "the empty-workspace failure must match the reported run 43648601948 signature"
+    )
+
+
+def test_format_guard_rejects_dispatch_input_that_is_not_a_full_sha(tmp_path):
+    """`workflow_dispatch` takes arbitrary text: only a full 40-hex SHA may proceed.
+
+    The truncated abbreviation is the case that distinguishes the guard from
+    luck — the pre-guard script resolved it, pushed `auto-revert/<first8>` and
+    opened a revert PR for it. The injection-shaped input shows why the value
+    is never allowed near a branch name or a PR body at all.
+    """
+    origin, work, sha = _scratch_repo(tmp_path)
+    for bad_sha in ("notasha", sha[:11], "$(touch pwned)"):
+        result, calls = _run_revert_script(work, tmp_path, bad_sha)
+        detail = f"input {bad_sha!r}: exit {result.returncode}\n{result.stdout}{result.stderr}"
+        assert result.returncode != 0, f"the format guard must reject it; {detail}"
+        assert "40-character hex SHA" in result.stderr, f"the rejection must say why; {detail}"
+        assert calls == [], f"no gh call may run before the format guard passes; {detail}"
+        assert "auto-revert" not in _origin_branches(origin), f"no branch may be pushed; {detail}"
+
+
+def test_ancestry_guard_rejects_a_valid_sha_that_is_not_on_main(tmp_path):
+    """A real 40-hex commit outside `origin/main` history must not drive a revert.
+
+    The commit here is revertable from main's tip, so the pre-guard script ran
+    the whole flow for it: branch pushed and `gh pr create` called. The guard
+    must stop it after `git fetch origin main` and before any write action.
+    """
+    origin, work, _ = _scratch_repo(tmp_path)
+    off_main = _off_main_commit(work)
+    result, calls = _run_revert_script(work, tmp_path, off_main)
+    assert result.returncode != 0, f"a commit off main must be refused:\n{result.stdout}{result.stderr}"
+    assert "is not an ancestor of origin/main" in result.stderr, (
+        f"the refusal must name the ancestry check:\n{result.stdout}{result.stderr}"
+    )
+    assert not any(call[:2] == ["pr", "create"] for call in calls), (
+        f"no revert PR may be opened for an off-main commit; gh calls: {calls}"
+    )
+    assert "auto-revert" not in _origin_branches(origin), (
+        f"no auto-revert branch may be pushed for an off-main commit:{_origin_branches(origin)}"
     )
