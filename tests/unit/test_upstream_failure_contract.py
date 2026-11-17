@@ -376,6 +376,7 @@ class TestSharedAnalyticsPayloadContract:
             ),
             pytest.param({"code": "partial", "error": "truncated", "data": []}, False, id="data-wins-over-a-code"),
             pytest.param({"error": "an answer about a domain named error"}, False, id="two-x-x-error-key-is-data"),
+            pytest.param({"code": "a free-text status a 2xx body carried"}, False, id="two-x-x-code-key-is-data"),
             pytest.param({"data": [{"queries": 1}]}, False, id="plain-data"),
             pytest.param(None, False, id="not-a-dict"),
         ],
