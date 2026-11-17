@@ -6,11 +6,13 @@ SPDX-License-Identifier: MIT
 import ast
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
-from weakref import WeakSet
 
 from fastmcp.apps.config import AppConfig
 from fastmcp.apps.generative import (
@@ -28,6 +30,8 @@ from prefab_ui.app import PrefabApp
 from prefab_ui.sandbox import PyodideSandbox
 from prefab_ui.sandbox import Sandbox as _Sandbox
 from prefab_ui.sandbox._pyodide import DENO_LOCK, PREFAB_SRC, RUNNER_JS
+
+logger = logging.getLogger(__name__)
 
 SANDBOX_PRELUDE = """from prefab_ui.app import PrefabApp
 from prefab_ui.components import *
@@ -478,15 +482,25 @@ def _build_renderer_resource(csp: Any) -> TextResource:
     )
 
 
-_ACTIVE_GENERATIVE_UI: "WeakSet[NextDNSGenerativeUI]" = WeakSet()
-
-
 class NextDNSGenerativeUI(GenerativeUI):
     """GenerativeUI provider customized with pre-execution validation and Pyodide prelude."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        _ACTIVE_GENERATIVE_UI.add(self)
+    @asynccontextmanager
+    async def lifespan(self) -> AsyncIterator[None]:
+        """Own this provider's sandbox for exactly one server runtime.
+
+        FastMCP enters each provider's lifespan inside the lifespan of the
+        server it was added to, so teardown here stops only this instance's
+        subprocess - the server that is shutting down. Registering instances in
+        a process-global set instead (issue #542) made one embedded server's
+        shutdown kill the sandboxes of every live sibling.
+        """
+        self._ensure_setup()
+        try:
+            async with self._local.lifespan():
+                yield
+        finally:
+            await self._stop_sandbox()
 
     def _get_sandbox(self) -> Any:
         """Lazily create the hardened, bounded Pyodide sandbox."""
@@ -494,14 +508,22 @@ class NextDNSGenerativeUI(GenerativeUI):
             self._sandbox = _CombinedSandbox()
         return self._sandbox
 
-    def close(self) -> None:
-        """Stop the lazily-started Deno/Pyodide sandbox subprocess, if any."""
-        sandbox = getattr(self, "_sandbox", None)
-        if sandbox is not None:
-            try:
-                sandbox._stop()
-            finally:
-                self._sandbox = None
+    async def _stop_sandbox(self) -> None:
+        """Stop the lazily-started Deno/Pyodide subprocess, off the event loop.
+
+        ``Sandbox._stop()`` terminates the process and waits up to 5s for it,
+        which is blocking I/O: it runs in a worker thread so a slow teardown
+        cannot stall the rest of the server's shutdown.
+        """
+        sandbox = self._sandbox
+        if sandbox is None:
+            return
+        try:
+            await asyncio.to_thread(sandbox._stop)
+        except Exception:  # teardown is best-effort: it must not abort the rest of shutdown
+            logger.warning("Failed to stop the Generative UI sandbox subprocess", exc_info=True)
+        finally:
+            self._sandbox = None
 
     def _create_generate_tool(self, app_config: AppConfig, annotations: ToolAnnotations) -> Tool:
         """Create the generate_prefab_ui tool with interceptor and prelude."""
@@ -586,13 +608,3 @@ class NextDNSGenerativeUI(GenerativeUI):
             self._local._add_component(self._create_components_tool(components_annotations))
         self._local._add_component(_build_renderer_resource(csp))
         self._setup_done = True
-
-
-def close_all_generative_ui() -> None:
-    """Stop every registered GenerativeUI sandbox (called on server shutdown)."""
-    for provider in list(_ACTIVE_GENERATIVE_UI):
-        try:
-            provider.close()
-        except Exception:  # noqa: BLE001, S110
-            pass
-    _ACTIVE_GENERATIVE_UI.clear()
