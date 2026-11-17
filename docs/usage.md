@@ -123,6 +123,10 @@ Use `section` to select what to display:
 - `section="security"`: Encrypted DNS and DNSSEC validation rates.
 
 Supports `view_type="auto" | "table" | "bar" | "pie"` and `domain_view="table" | "bar" | "pie"`.
+`view_type` formats the card the section renders, and `view_type="auto"` keeps each
+card's own default (a bar chart for `reasons`, a donut chart plus its table for
+`gafam`). `domain_view` formats only the domain cards in `section="overview"` and
+`section="all"`, and an explicit `view_type` overrides it there.
 
 ### Generative UI (Beta)
 Generative UI is an opt-in beta feature (disabled by default). When enabled by setting

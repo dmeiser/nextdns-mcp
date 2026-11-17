@@ -367,13 +367,14 @@ class TestDashboardToolsExecution:
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_all_sections(self, mock_all_endpoints):
-        res = await dash_module.overviewDashboard(profile_id="abc123", section="all", domain_view="bar")
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all", view_type="bar")
         assert isinstance(res, ToolResult)
         assert "Rendered NextDNS Dashboard" in res.content[0].text
         assert "$prefab" in res.structured_content
         content = str(res.structured_content)
-        # At least 6 BarCharts: overview Resolved/Blocked + Reasons/Devices/Root/GAFAM
-        assert content.count("BarChart") >= 6
+        # view_type is the global override: overview Resolved/Blocked + Reasons/
+        # Devices/Root/GAFAM/Countries all render bars.
+        assert content.count("BarChart") >= 7
         # Regression guard for #409: section="all" must fetch and render the countries card.
         requested = {(endpoint, params.get("type")) for endpoint, params in mock_all_endpoints}
         assert ("destinations", "countries") in requested
@@ -1126,6 +1127,126 @@ class TestDashboardParamForwarding:
         assert "DataTable" in self._component_types(table) and "BarChart" not in self._component_types(table)
         assert "BarChart" in self._component_types(bar) and "DataTable" not in self._component_types(bar)
         assert "PieChart" in self._component_types(pie) and "DataTable" not in self._component_types(pie)
+
+
+class TestViewTypeScope:
+    """``view_type="auto"`` must not be coerced through ``domain_view`` (#547).
+
+    ``view_type="auto"`` is documented as "table or card default" and
+    ``domain_view`` as the format for the domain cards in overview mode. The
+    overview implementation resolved one from the other before dispatch, so the
+    documented defaults of the single-widget sections (reasons -> BarChart,
+    gafam -> PieChart + DataTable) and of the non-domain cards appended by
+    ``section="all"`` were unreachable with the default ``domain_view="table"``.
+    """
+
+    @pytest.fixture
+    def rows(self, monkeypatch):
+        """Answer every dashboard endpoint with rows that carry their own shape."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+
+        async def fake_fetch(pid, endpoint, params=None):
+            if endpoint == "status":
+                return ({"data": [{"status": "default", "queries": 90}, {"status": "blocked", "queries": 10}]}, None)
+            if endpoint == "status;series":
+                return (
+                    {
+                        "meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}},
+                        "data": [{"name": "blocked", "queries": [10]}],
+                    },
+                    None,
+                )
+            if endpoint == "reasons":
+                return ({"data": [{"name": "Security", "queries": 30}]}, None)
+            if endpoint == "devices":
+                return ({"data": [{"device": "laptop", "type": "computer", "queries": 20}]}, None)
+            if endpoint == "ips":
+                return ({"data": [{"ip": "1.1.1.1", "queries": 20}]}, None)
+            if endpoint == "encryption":
+                return ({"data": [{"encrypted": True, "queries": 80}, {"encrypted": False, "queries": 20}]}, None)
+            if endpoint == "dnssec":
+                return ({"data": [{"validated": True, "queries": 30}, {"validated": False, "queries": 70}]}, None)
+            if endpoint == "destinations":
+                if (params or {}).get("type") == "gafam":
+                    return ({"data": [{"company": "google", "queries": 50}]}, None)
+                return ({"data": [{"name": "US", "code": "US", "queries": 50}]}, None)
+            return ({"data": [{"domain": "test.com", "queries": 10}]}, None)
+
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
+
+    @staticmethod
+    def _counts(res: ToolResult) -> dict[str, int]:
+        """How many of each prefab component type the structured view tree holds."""
+        counts: dict[str, int] = {}
+
+        def walk(node):
+            if isinstance(node, dict):
+                node_type = node.get("type")
+                if isinstance(node_type, str):
+                    counts[node_type] = counts.get(node_type, 0) + 1
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(res.structured_content)
+        return counts
+
+    @pytest.mark.asyncio
+    async def test_reasons_auto_default_renders_its_bar_chart(self, rows):
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="reasons")
+        assert isinstance(res, ToolResult)
+        counts = self._counts(res)
+        assert counts["BarChart"] == 1
+        assert "DataTable" not in counts
+
+    @pytest.mark.asyncio
+    async def test_gafam_auto_default_renders_its_donut_and_table(self, rows):
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="gafam")
+        assert isinstance(res, ToolResult)
+        counts = self._counts(res)
+        assert counts["PieChart"] == 1
+        assert counts["DataTable"] == 1
+        assert "BarChart" not in counts
+
+    @pytest.mark.asyncio
+    async def test_domain_view_does_not_reach_a_single_widget_section(self, rows):
+        """The card defaults survive an explicit ``domain_view`` too (#547)."""
+        reasons = await dash_module.overviewDashboard(profile_id="abc123", section="reasons", domain_view="table")
+        gafam = await dash_module.overviewDashboard(profile_id="abc123", section="gafam", domain_view="table")
+        assert "DataTable" not in self._counts(reasons)
+        assert self._counts(gafam)["PieChart"] == 1
+
+    @pytest.mark.asyncio
+    async def test_explicit_view_type_still_overrides_a_card_default(self, rows):
+        table = await dash_module.overviewDashboard(profile_id="abc123", section="reasons", view_type="table")
+        bar = await dash_module.overviewDashboard(profile_id="abc123", section="gafam", view_type="bar")
+        assert self._counts(table)["DataTable"] == 1
+        assert "BarChart" not in self._counts(table)
+        assert self._counts(bar)["BarChart"] == 1
+        assert "PieChart" not in self._counts(bar)
+
+    @pytest.mark.asyncio
+    async def test_all_appends_domain_bars_and_card_default_others(self, rows):
+        """``domain_view`` formats the domain cards only; the rest keep their auto default."""
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all", domain_view="bar")
+        assert isinstance(res, ToolResult)
+        counts = self._counts(res)
+        # Resolved + Blocked + Root Domains take domain_view="bar"; the reasons
+        # card's own auto default is a bar too. Devices, GAFAM and Countries do
+        # not, which is what the coercion used to force.
+        assert counts["BarChart"] == 4
+        assert counts["PieChart"] == 1
+
+    @pytest.mark.asyncio
+    async def test_all_view_type_override_reaches_every_formatable_card(self, rows):
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all", view_type="bar")
+        assert isinstance(res, ToolResult)
+        counts = self._counts(res)
+        # Resolved, Blocked, Root, Reasons, Devices, GAFAM, Countries; IPs has no chart form.
+        assert counts["BarChart"] == 7
+        assert "PieChart" not in counts
 
 
 class TestSubRequestErrorPropagation:
