@@ -160,6 +160,8 @@ async def test_host_smoke_result_just_under_limit_succeeds() -> None:
     code = f'with PrefabApp() as app:\n    with Column(gap=4):\n        Text("x" * {text_len})\n'
     app = await tools["generate_prefab_ui"].fn(code=code)
     assert app.model_dump(by_alias=True)["title"] == "Prefab"
+
+
 async def test_host_smoke_state_does_not_leak_between_calls() -> None:
     """Mutating shared interpreter state in one call cannot poison the next (issue #541)."""
     gen_ui = NextDNSGenerativeUI()
