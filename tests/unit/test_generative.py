@@ -428,6 +428,7 @@ def test_bounded_stdout_readline_returns_partial_line_at_eof():
 
 
 def test_bounded_result_sandbox_wraps_stdout_after_start():
+    from nextdns_mcp import generative
     from nextdns_mcp.generative import _BoundedResultSandbox, _BoundedStdout
 
     sandbox = _BoundedResultSandbox()
@@ -435,8 +436,6 @@ def test_bounded_result_sandbox_wraps_stdout_after_start():
     proc.stdout = MagicMock()
     sandbox._process = proc
     # Drive the real _BoundedResultSandbox._start with a stubbed base start.
-    from nextdns_mcp import generative
-
     original_start = generative._Sandbox._start
 
     async def fake_start(self):
@@ -445,9 +444,31 @@ def test_bounded_result_sandbox_wraps_stdout_after_start():
     try:
         generative._Sandbox._start = fake_start  # type: ignore[assignment]
         asyncio.run(sandbox._start())
+        assert isinstance(proc.stdout, _BoundedStdout)
+        wrapper = proc.stdout
+        # Re-entering the start path over a live worker must not double-wrap.
+        asyncio.run(sandbox._start())
+        assert proc.stdout is wrapper
     finally:
         generative._Sandbox._start = original_start  # type: ignore[assignment]
-    assert isinstance(proc.stdout, _BoundedStdout)
+
+
+def test_bounded_result_sandbox_start_without_process_is_safe():
+    from nextdns_mcp import generative
+    from nextdns_mcp.generative import _BoundedResultSandbox
+
+    sandbox = _BoundedResultSandbox()
+    original_start = generative._Sandbox._start
+
+    async def fake_start(self):
+        self._process = None
+
+    try:
+        generative._Sandbox._start = fake_start  # type: ignore[assignment]
+        asyncio.run(sandbox._start())  # must not raise
+    finally:
+        generative._Sandbox._start = original_start  # type: ignore[assignment]
+    assert sandbox._process is None
 
 
 def test_result_size_bytes_model_dump_json():
