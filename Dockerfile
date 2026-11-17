@@ -26,6 +26,26 @@ COPY pyproject.toml uv.lock ./
 RUN uv export --frozen --no-dev --no-emit-project --output-file /tmp/requirements.txt && \
     uv pip install --target /install --requirement /tmp/requirements.txt
 
+# Deno runtime required by Prefab's sandbox when NEXTDNS_GENERATIVE_UI=on.
+# Installed in the builder stage only, so curl/unzip never reach the runtime image.
+# The versioned release archive is downloaded and verified against a pinned SHA256
+# for the build architecture before extraction; the resulting binary is copied
+# out via COPY --from=builder below.
+ARG DENO_VERSION=2.3.7
+ARG DENO_X86_64_SHA256=63f55a621441fbbc8830324baf3d9c7a94928c7fb6b8ad54265dc9442dcd1dd2
+ARG DENO_AARCH64_SHA256=fbf420aee4469094bd91e595dd78814c94737dfb1d26e640b13aa938a9663cf8
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
+    && case "$(uname -m)" in \
+         x86_64) DENO_ARCH=x86_64; DENO_SHA256="${DENO_X86_64_SHA256}" ;; \
+         aarch64) DENO_ARCH=aarch64; DENO_SHA256="${DENO_AARCH64_SHA256}" ;; \
+         *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-${DENO_ARCH}-unknown-linux-gnu.zip" -o /tmp/deno.zip \
+    && echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - \
+    && mkdir /deno && unzip -q /tmp/deno.zip -d /deno \
+    && chmod +x /deno/deno \
+    && rm -f /tmp/deno.zip && rm -rf /var/lib/apt/lists/*
+
 # 2. Final stage: Create the runtime image
 FROM python:3.15-slim
 
@@ -61,10 +81,10 @@ COPY --from=builder /install /install
 # Copy application code
 COPY src/ /app/src/
 
-# Deno runtime required by Prefab's sandbox when NEXTDNS_GENERATIVE_UI=on
-RUN apt-get update && apt-get install -y --no-install-recommends curl unzip \
-    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- --version v2.3.7 \
-    && rm -rf /var/lib/apt/lists/*
+# Deno runtime required by Prefab's sandbox when NEXTDNS_GENERATIVE_UI=on.
+# The binary was downloaded and SHA256-verified in the builder stage, so this
+# stage only receives the verified executable and carries no curl or unzip.
+COPY --from=builder /deno/deno /usr/local/bin/deno
 
 # Create and switch to a non-root user for security
 RUN useradd --create-home appuser
