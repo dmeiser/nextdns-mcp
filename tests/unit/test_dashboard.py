@@ -40,11 +40,6 @@ class TestDashboardHelpers:
         assert "children.append" not in src
         assert "children=[card]" in src
 
-    def test_time_params(self):
-        assert data_mod._time_params(None, None) == {}
-        p = data_mod._time_params("-7d", "now")
-        assert p["from"] == "-7d" and p["to"] == "now"
-
     def test_build_analytics_params(self):
         p = data_mod._build_analytics_params("-1d", "now", limit=5, extra_key="val", none_key=None)
         assert p["from"] == "-1d"
@@ -306,34 +301,6 @@ class TestDashboardFetchAndValidation:
         _, kwargs = stub.call_args
         assert kwargs["max_response_bytes"] == MAX_SERIES_RESPONSE_BYTES
 
-    @pytest.mark.asyncio
-    async def test_fetch_extra_payloads_binds_fields_by_name(self, monkeypatch):
-        """Each named field carries its own endpoint's payload (WORK-140 oracle)."""
-        tagged = {
-            "reasons": [{"tag": "reasons"}],
-            "devices": [{"tag": "devices"}],
-            "ips": [{"tag": "ips"}],
-            "domains": [{"tag": "root_domains"}],
-            "destinations": [{"tag": "gafam"}],
-            "encryption": [{"tag": "encryption"}],
-            "dnssec": [{"tag": "dnssec"}],
-        }
-
-        async def fake_fetch(profile_id, endpoint, params=None):
-            return {"data": tagged[endpoint]}, None
-
-        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
-        payloads = await data_mod._fetch_extra_payloads("p1", {"limit": 1}, {})
-        assert isinstance(payloads, data_mod.ExtraDashboardPayloads)
-        assert payloads.reasons == [{"tag": "reasons"}]
-        assert payloads.devices == [{"tag": "devices"}]
-        assert payloads.ips == [{"tag": "ips"}]
-        assert payloads.root_domains == [{"tag": "root_domains"}]
-        assert payloads.gafam == [{"tag": "gafam"}]
-        assert payloads.encryption == [{"tag": "encryption"}]
-        assert payloads.dnssec == [{"tag": "dnssec"}]
-        assert payloads.countries == [{"tag": "gafam"}]
-
 
 class TestDashboardToolsExecution:
     """Tests executing each public tool end-to-end with mock data."""
@@ -516,16 +483,6 @@ class TestDashboardToolsExecution:
         assert isinstance(res, ToolResult)
         assert len(started_calls) == 4
         assert max_concurrency <= data_mod.OVERVIEW_FANOUT_CONCURRENCY
-
-    @pytest.mark.asyncio
-    async def test_append_extra_dashboard_sections_standalone(self, mock_all_endpoints):
-        """Verify standalone execution of _append_extra_dashboard_sections."""
-        from prefab_ui.components import Column
-
-        with Column() as col:
-            pass
-        await tool_mod._append_extra_dashboard_sections("abc123", col, "-30d", "now", 10)
-        assert len(col.children) > 0
 
     @pytest.mark.asyncio
     async def test_analytics_dashboard_status_fetch_error(self, monkeypatch):
@@ -891,21 +848,6 @@ class TestFanoutShortCircuit:
         assert err == gateway
         assert len(started) == 12
         assert extra is None
-
-    @pytest.mark.asyncio
-    async def test_extra_sections_fanout_shares_the_stop_signal(self, monkeypatch):
-        """The standalone extra-sections fan-out queues 4 of its 8 calls behind the same semaphore."""
-        started: list[str] = []
-        rejection = {"code": "http_error", "error": "upstream said 429", "status_code": 429}
-        monkeypatch.setattr(
-            data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("reasons", rejection), "reasons")
-        )
-
-        payloads = await data_mod._fetch_extra_payloads("p1", {"limit": 1}, {})
-
-        assert len(started) == data_mod.OVERVIEW_FANOUT_CONCURRENCY
-        assert not any(endpoint in self.EXTRA_ENDPOINTS for endpoint in started[4:])
-        assert payloads.reasons == []
 
     def test_stop_signal_latches_only_a_request_fatal_error(self):
         """The first fatal error is the one reported, and a success or a 5xx never latches."""

@@ -13,7 +13,6 @@ from collections.abc import Awaitable
 from typing import Any, Literal, Protocol, get_args
 
 from fastmcp.tools.base import ToolResult
-from prefab_ui.components import Column
 
 from ...charts import series_budget_error
 from ...coercion import OptionalProfileId
@@ -41,7 +40,6 @@ from .data import (
     _device_label,
     _domain_label,
     _fetch_card_data,
-    _fetch_extra_payloads,
     _fetch_overview_payloads,
     _fetch_security_payloads,
     _gafam_rows,
@@ -273,9 +271,6 @@ class _WidgetHandler(Protocol):
     ) -> Awaitable[dict[str, Any] | ToolResult]: ...
 
 
-WidgetHandler = _WidgetHandler
-
-
 async def _dispatch_kpi(
     profile_id: OptionalProfileId = None,
     from_time: str | int = "-30d",
@@ -443,23 +438,6 @@ def _resolve_domain_view(
     if view_type in ("table", "bar", "pie"):
         return view_type
     return domain_view
-
-
-async def _append_extra_dashboard_sections(
-    profile_id: str,
-    view: Column,
-    from_time: str | int,
-    to_time: str | int,
-    limit: int,
-    domain_view: str = "table",
-    view_type: str = "auto",
-) -> None:
-    """Fetch and append reasons, devices, IPs, root domains, GAFAM, destinations and security cards."""
-    dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit)
-    params = _build_analytics_params(from_time=from_time, to_time=to_time)
-
-    payloads = await _fetch_extra_payloads(profile_id, dom_params, params)
-    _append_extra_cards(view, payloads, domain_view=domain_view, view_type=view_type)
 
 
 async def _render_overview_page(
