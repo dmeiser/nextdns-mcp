@@ -6,7 +6,6 @@ SPDX-License-Identifier: MIT
 import ast
 import asyncio
 import json
-from collections.abc import Iterable
 from typing import Any
 from weakref import WeakSet
 
@@ -227,66 +226,52 @@ def _is_chart_call(node: ast.AST) -> bool:
     return _call_name(node) in _CHART_NAMES
 
 
-def _any_in_tab(nodes: Iterable[ast.AST], in_tab: bool) -> bool:
-    """Return True if any subtree holds a chart nested in a tab."""
-    for node in nodes:
-        if _chart_in_tab(node, in_tab):
-            return True
-    return False
+def _call_children(node: ast.Call) -> list[ast.AST]:
+    """Return a call's argument expressions, including keyword values."""
+    children: list[ast.AST] = list(node.args)
+    children.extend(keyword.value for keyword in node.keywords)
+    return children
 
 
-def _any_child_in_tab(node: ast.AST, in_tab: bool) -> bool:
-    """Return True if any child subtree holds a chart nested in a tab."""
-    return _any_in_tab(ast.iter_child_nodes(node), in_tab)
-
-
-def _with_item_body_in_tab(item: ast.withitem, body: list[ast.stmt], in_tab: bool) -> bool:
-    """Check one `with` item's body, entering tab scope when it opens a Tab."""
-    entered = in_tab or _is_tab_call(item.context_expr)
-    return _any_in_tab(body, entered)
-
-
-def _with_in_tab(node: ast.With | ast.AsyncWith, in_tab: bool) -> bool:
-    """Check a `with`/`async with` body against each item it opens."""
-    for item in node.items:
-        if _with_item_body_in_tab(item, node.body, in_tab):
-            return True
-    return False
-
-
-def _keyword_value_in_tab(keyword: ast.keyword) -> bool:
-    """Check one keyword argument value inside tab scope."""
-    if keyword.value is None:
-        return False
-    return _any_in_tab([keyword.value], True)
-
-
-def _tab_call_args_in_tab(node: ast.Call) -> bool:
-    """Check a Tab(...)/TabsTrigger(...) call's arguments inside tab scope."""
-    if _any_in_tab(node.args, True):
-        return True
-    for keyword in node.keywords:
-        if _keyword_value_in_tab(keyword):
-            return True
-    return False
-
-
-def _call_in_tab(node: ast.Call, in_tab: bool) -> bool:
-    """Check a call node: a chart in tab scope, a Tab's args, or plain children."""
-    if in_tab and _is_chart_call(node):
-        return True
+def _call_visits(node: ast.Call, in_tab: bool) -> list[tuple[ast.AST, bool]]:
+    """Child visits for a call: a Tab(...) call opens tab scope for its arguments."""
     if _is_tab_call(node):
-        return _tab_call_args_in_tab(node)
-    return _any_child_in_tab(node, in_tab)
+        return [(child, True) for child in _call_children(node)]
+    return [(child, in_tab) for child in ast.iter_child_nodes(node)]
 
 
-def _chart_in_tab(node: ast.AST, in_tab: bool = False) -> bool:
-    """Return True if a chart call occurs inside a Tab/TabsTrigger subtree."""
+def _with_visits(node: ast.With | ast.AsyncWith, in_tab: bool) -> list[tuple[ast.AST, bool]]:
+    """Child visits for a `with`: items keep the current scope; the body opens tab scope."""
+    visits: list[tuple[ast.AST, bool]] = [(item.context_expr, in_tab) for item in node.items]
+    body_scope = in_tab or any(_is_tab_call(item.context_expr) for item in node.items)
+    visits.extend((stmt, body_scope) for stmt in node.body)
+    return visits
+
+
+def _node_visits(node: ast.AST, in_tab: bool) -> list[tuple[ast.AST, bool]]:
+    """Return the (node, scope) pairs to visit for one node's children."""
     if isinstance(node, (ast.With, ast.AsyncWith)):
-        return _with_in_tab(node, in_tab)
+        return _with_visits(node, in_tab)
     if isinstance(node, ast.Call):
-        return _call_in_tab(node, in_tab)
-    return _any_child_in_tab(node, in_tab)
+        return _call_visits(node, in_tab)
+    return [(child, in_tab) for child in ast.iter_child_nodes(node)]
+
+
+def _chart_in_tab(root: ast.AST) -> bool:
+    """Return True if a chart call occurs inside a Tab/TabsTrigger subtree.
+
+    Iterative stack walk: each `with` item's context expression is visited,
+    each `with` body is visited once regardless of item count, and node depth
+    costs no stack frames, so deeply nested expressions cannot raise
+    RecursionError.
+    """
+    stack: list[tuple[ast.AST, bool]] = [(root, False)]
+    while stack:
+        node, in_tab = stack.pop()
+        if in_tab and _is_chart_call(node):
+            return True
+        stack.extend(_node_visits(node, in_tab))
+    return False
 
 
 def _validate_chart_placement(code: str) -> None:

@@ -1,6 +1,5 @@
 """Tests for NextDNSGenerativeUI provider and sizing rules."""
 
-import ast
 import asyncio
 import json
 import time
@@ -15,7 +14,6 @@ from nextdns_mcp.generative import (
     SANDBOX_PRELUDE,
     NextDNSGenerativeUI,
     _build_renderer_resource,
-    _keyword_value_in_tab,
     _parse_ui_data,
     _result_size_bytes,
     _validate_chart_placement,
@@ -164,9 +162,72 @@ def test_syntax_error_is_ignored():
     _validate_chart_placement("with Tab('x':\n")  # should not raise
 
 
-def test_none_keyword_value_is_not_a_chart():
-    """A keyword argument with no value cannot hold a chart."""
-    assert _keyword_value_in_tab(ast.keyword(arg=None, value=None)) is False
+def test_star_kwargs_are_walked_without_a_chart():
+    """`Tab(**config)` is a keyword with arg=None — the **-unpacked Name must be visited."""
+    _validate_chart_placement("Tab(**config)\n")  # should not raise
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement("Tab(children=[AreaChart(data=[], series=[])], **config)\n")
+
+
+def test_with_context_expr_chart_is_rejected():
+    """`with Tab(children=[...])` nests the chart in the context expression, which was never walked."""
+    code = "with Tab(children=[AreaChart(data=[], series=[])]):\n    pass\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_nested_with_context_expr_chart_is_rejected():
+    """A Card(...) context expression inside a Tab block carries the chart through."""
+    code = "with Tab('Charts'):\n    with Card(children=[AreaChart(data=[], series=[])]):\n        pass\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_async_with_context_expr_chart_is_rejected():
+    """`async with` shares the same traversal as `with`."""
+    code = "async def render():\n    async with Tab(children=[LineChart(data=[], series=[])]):\n        pass\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_multi_item_with_body_opens_tab_scope():
+    """Tab need not be the first item of a multi-item `with` for the body to be in scope."""
+    code = "with Card(), Tab('Charts'):\n    AreaChart(data=[], series=[])\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_multi_item_with_scales_linearly_in_items():
+    """One `with` with many items visits its body once, not once per item (quadratic regression)."""
+
+    def with_code(items: int) -> str:
+        head = ", ".join(f"Tab('T{i}')" for i in range(items))
+        body = "".join(f"    v{i} = " + " + ".join(str(j) for j in range(60)) + "\n" for i in range(120))
+        return f"with {head}:\n{body}"
+
+    start = time.perf_counter()
+    _validate_chart_placement(with_code(50))  # should not raise
+    small_elapsed = time.perf_counter() - start
+    start = time.perf_counter()
+    _validate_chart_placement(with_code(800))  # should not raise
+    large_elapsed = time.perf_counter() - start
+    assert large_elapsed < 10
+    assert large_elapsed / max(small_elapsed, 1e-6) < 10
+
+
+def test_deeply_nested_expression_does_not_recurse():
+    """500 chained '+' ops nest hundreds of nodes deep — the walker must not use Python recursion."""
+    expr = " + ".join(str(i) for i in range(500))
+    _validate_chart_placement(f"with Tab('Charts'):\n    value = {expr}\n")  # should not raise
+
+
+def test_deeply_nested_chart_under_tab_is_still_rejected():
+    """Depth must not hide a chart: list literals nested 150 deep keep tripping the rule."""
+    deep = "[AreaChart(data=[], series=[])]"
+    for _ in range(150):
+        deep = f"[{deep}]"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(f"Tab(children={deep})\n")
 
 
 def test_build_renderer_resource():
