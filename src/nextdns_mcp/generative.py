@@ -23,6 +23,7 @@ from fastmcp.resources.types import TextResource
 from fastmcp.tools import Tool
 from fastmcp.tools.base import ToolAnnotations
 from prefab_ui.app import PrefabApp
+from prefab_ui.sandbox import Sandbox as _Sandbox
 
 SANDBOX_PRELUDE = """from prefab_ui.app import PrefabApp
 from prefab_ui.components import *
@@ -53,6 +54,16 @@ MAX_CODE_BYTES = 32 * 1024
 MAX_DATA_BYTES = 128 * 1024
 MAX_RESULT_BYTES = 256 * 1024
 EXECUTION_TIMEOUT = 10.0
+
+# The sandbox worker answers each request with a single JSON line on stdout:
+# {"id": "<32-hex>", "result": <wire>} (or {"id": ..., "error": ...}). The
+# wire is serialized with JSON.stringify, so the raw line is the UTF-8 wire
+# plus a small ASCII envelope — no escaping expansion. Bound the line just
+# above MAX_RESULT_BYTES so a runaway generated view is rejected during the
+# stdout read, before the host buffers, JSON-decodes, and validates it.
+WIRE_LINE_SLACK = 4096
+MAX_WIRE_LINE_BYTES = MAX_RESULT_BYTES + WIRE_LINE_SLACK
+_READ_CHUNK_SIZE = 65536
 
 GENERATE_DOC = (
     "Execute Prefab Python code in a sandbox and render the result.\n\n"
@@ -106,14 +117,90 @@ def _result_size_bytes(result: Any) -> int:
         try:
             return len(json.dumps(to_json()).encode("utf-8"))
         except (TypeError, ValueError):
-            return len(str(result).encode("utf-8"))
+            pass
     dump_json = getattr(result, "model_dump_json", None)
     if callable(dump_json):
         try:
             return len(dump_json().encode("utf-8"))
         except (TypeError, ValueError):
-            return len(str(result).encode("utf-8"))
+            pass
     return len(str(result).encode("utf-8"))
+
+
+class _BoundedStdout:
+    """File-like bounding each stdout line to ``limit`` bytes during the read.
+
+    ``PyodideSandbox.run`` calls ``stdout.readline()`` with no cap, so a
+    runaway generated view buffers unboundedly in the host before the result
+    size check can run. This wrapper reads in chunks, preserves any bytes
+    past the newline for the next response, and raises ``ValueError`` the
+    moment a line exceeds ``limit`` — before JSON decode and
+    ``PrefabApp.from_json`` allocation. ``on_overflow`` stops the sandbox so
+    the next call starts a fresh worker (a partially consumed line would
+    otherwise misalign the wire protocol).
+    """
+
+    def __init__(self, raw: Any, limit: int, on_overflow: Any) -> None:
+        self._raw = raw
+        self._limit = limit
+        self._on_overflow = on_overflow
+        self._pending = b""
+
+    def _next_chunk(self) -> bytes:
+        if self._pending:
+            chunk, self._pending = self._pending, b""
+            return chunk
+        # read1 returns as soon as any bytes are available; read(n) would
+        # block trying to fill the whole chunk and stall short responses.
+        read1 = getattr(self._raw, "read1", self._raw.read)
+        return read1(_READ_CHUNK_SIZE)
+
+    def readline(self) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = self._next_chunk()
+            if not chunk:
+                break
+            newline = chunk.find(b"\n")
+            if newline != -1:
+                chunks.append(chunk[: newline + 1])
+                total += newline + 1
+                self._pending = chunk[newline + 1 :]
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > self._limit:
+                self._on_overflow()
+                raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
+        return b"".join(chunks)
+
+    def close(self) -> None:
+        self._raw.close()
+
+    @property
+    def closed(self) -> bool:
+        return bool(self._raw.closed)
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+
+class _BoundedResultSandbox(_Sandbox):
+    """Sandbox whose worker stdout enforces MAX_RESULT_BYTES during the read.
+
+    Wraps the worker process stdout in :class:`_BoundedStdout` after every
+    start (including auto-restarts after a crash) so an oversized result is
+    rejected while the response line is still being read — before the host
+    buffers the whole line, JSON-decodes it, and allocates the validated
+    ``PrefabApp``.
+    """
+
+    async def _start(self) -> None:
+        await super()._start()
+        proc = self._process
+        if proc is not None and proc.stdout is not None and not isinstance(proc.stdout, _BoundedStdout):
+            proc.stdout = _BoundedStdout(proc.stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
 
 
 _CHART_NAMES = {"AreaChart", "LineChart", "BarChart", "PieChart", "DonutChart"}
@@ -234,6 +321,12 @@ class NextDNSGenerativeUI(GenerativeUI):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         _ACTIVE_GENERATIVE_UI.add(self)
+
+    def _get_sandbox(self) -> Any:
+        """Lazily create the Pyodide sandbox with a bounded result reader."""
+        if self._sandbox is None:
+            self._sandbox = _BoundedResultSandbox()
+        return self._sandbox
 
     def close(self) -> None:
         """Stop the lazily-started Deno/Pyodide sandbox subprocess, if any."""

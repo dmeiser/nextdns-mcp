@@ -369,6 +369,87 @@ async def test_generate_ui_result_size_limit():
             await gen_tool.fn(code="print(1)")
 
 
+class _ChunkedRaw:
+    """Raw stream stub returning fixed-size chunks across read calls."""
+
+    def __init__(self, data: bytes, chunk_size: int) -> None:
+        self._data = data
+        self._chunk_size = chunk_size
+        self._pos = 0
+        self.closed = False
+
+    def read(self, _n: int) -> bytes:
+        if self._pos >= len(self._data):
+            return b""
+        chunk = self._data[self._pos : self._pos + self._chunk_size]
+        self._pos += len(chunk)
+        return chunk
+
+    def read1(self, n: int) -> bytes:
+        return self.read(n)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def fileno(self) -> int:
+        return 0
+
+
+def test_bounded_stdout_readline_reassembles_chunked_line():
+    from nextdns_mcp.generative import _BoundedStdout
+
+    line = b'{"id": "abc", "result": {"view": {}}}\n'
+    raw = _ChunkedRaw(line + b'{"id": "def"}\n', chunk_size=7)
+    bounded = _BoundedStdout(raw, limit=1024, on_overflow=MagicMock())
+    assert bounded.readline() == line
+    # Bytes past the newline belong to the next response.
+    assert bounded.readline() == b'{"id": "def"}\n'
+    assert bounded.readline() == b""
+
+
+def test_bounded_stdout_readline_raises_past_limit_and_stops_sandbox():
+    from nextdns_mcp.generative import _BoundedStdout
+
+    overflow = MagicMock()
+    raw = _ChunkedRaw(b"x" * 100 + b"\n", chunk_size=16)
+    bounded = _BoundedStdout(raw, limit=32, on_overflow=overflow)
+    with pytest.raises(ValueError, match="result exceeds maximum size"):
+        bounded.readline()
+    overflow.assert_called_once_with()
+
+
+def test_bounded_stdout_readline_returns_partial_line_at_eof():
+    from nextdns_mcp.generative import _BoundedStdout
+
+    raw = _ChunkedRaw(b'{"id": "abc"}', chunk_size=4)
+    bounded = _BoundedStdout(raw, limit=1024, on_overflow=MagicMock())
+    assert bounded.readline() == b'{"id": "abc"}'
+    assert bounded.readline() == b""
+
+
+def test_bounded_result_sandbox_wraps_stdout_after_start():
+    from nextdns_mcp.generative import _BoundedResultSandbox, _BoundedStdout
+
+    sandbox = _BoundedResultSandbox()
+    proc = MagicMock()
+    proc.stdout = MagicMock()
+    sandbox._process = proc
+    # Drive the real _BoundedResultSandbox._start with a stubbed base start.
+    from nextdns_mcp import generative
+
+    original_start = generative._Sandbox._start
+
+    async def fake_start(self):
+        self._process = proc
+
+    try:
+        generative._Sandbox._start = fake_start  # type: ignore[assignment]
+        asyncio.run(sandbox._start())
+    finally:
+        generative._Sandbox._start = original_start  # type: ignore[assignment]
+    assert isinstance(proc.stdout, _BoundedStdout)
+
+
 def test_result_size_bytes_model_dump_json():
     class DumpApp:
         def model_dump_json(self):
