@@ -80,7 +80,7 @@ def _item_queries(item: dict[str, Any]) -> int:
     """Extract integer query count from an item dict."""
     try:
         return int(item.get("queries") or 0)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return 0
 
 
