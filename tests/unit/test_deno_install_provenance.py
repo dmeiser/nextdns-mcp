@@ -42,8 +42,10 @@ RUNTIME_FORBIDDEN_PACKAGES = ("curl", "unzip")
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 _ARG = re.compile(r"\AARG\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)\Z", re.IGNORECASE)
 #: A pipe into a shell, optionally behind ``VAR=value`` assignments as the old
-#: Deno installer used. ``| sha256sum`` is not a shell and must not match.
-_PIPE_TO_SHELL = re.compile(r"\|\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s*)*sh\b")
+#: Deno installer used. ``| sha256sum`` is not a shell and must not match. The
+#: possessive quantifiers (Python 3.11+) commit the matcher to each assignment,
+#: which is what keeps CodeQL's py/redos from flagging the repeated group.
+_PIPE_TO_SHELL = re.compile(r"\|\s*+(?:[A-Za-z_][A-Za-z0-9_]*=\S+)*+\s*+(?:sh|bash|dash|ksh|zsh)\b")
 #: The versioned release asset path, e.g. ``releases/download/v${DENO_VERSION}/``.
 _RELEASE_ASSET = re.compile(r"github\.com/\S*releases/download/v")
 
@@ -258,6 +260,15 @@ def test_the_pre_fix_dockerfile_is_rejected_wholesale() -> None:
     violations = provenance_violations(PRE_FIX_DOCKERFILE)
 
     assert len(violations) >= 5, f"expected the pre-fix build to fail several checks, got: {violations}"
+
+
+def test_a_piped_shell_under_another_name_is_still_rejected() -> None:
+    """Renaming the shell is not a way back past the guard."""
+    swapped_shell = PRE_FIX_DOCKERFILE.replace("sh -s", "bash -s")
+
+    assert remote_script_violations(dockerfile_stages(swapped_shell)), (
+        "piping the fetched script into bash should be reported the same as sh"
+    )
 
 
 def test_the_sha256_of_a_tampered_archive_does_not_match_the_pin() -> None:
