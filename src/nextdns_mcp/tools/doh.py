@@ -57,7 +57,7 @@ DNS_STATUS_CODES = {
 }
 from ..errors import ErrorCode, error_payload, http_error_payload
 from ..transport import access_denied_payload
-from ..utils import resolve_profile_id
+from ..utils import resolve_default_profile
 
 logger = logging.getLogger(__name__)
 
@@ -182,11 +182,10 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
 
     See dohLookup() for full documentation.
     """
-    target_profile, error = resolve_profile_id(profile_id)
-    if error:
-        return error
-    if target_profile is None:
-        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
+    resolved = resolve_default_profile(profile_id)
+    if resolved[1] is not None:
+        return resolved[1]
+    target_profile = resolved[0]
 
     # One snapshot for the whole lookup: this decision, the send-time gate in
     # doh_lookup() and the query they authorize all use these values.

@@ -113,6 +113,48 @@ def _resolve_required_profile_id(profile_id: str | int | None) -> tuple[str | No
     return str(profile_id), None
 
 
+def resolve_default_profile(profile_id: str | int | None = None) -> tuple[str, None] | tuple[None, dict[str, Any]]:
+    """Resolve a profile id with the ``NEXTDNS_DEFAULT_PROFILE`` fallback, or the payload that stopped it.
+
+    The three composite tools resolve with the fallback and each used to carry
+    its own guard against a resolver that answers with neither an id nor an
+    error. That guard belongs here: a per-tool ``assert`` is stripped by
+    ``python -O`` and the tool then builds a ``/profiles/None/...`` URL, and
+    three copies of the same ``internal_error`` drift apart one tool at a time.
+    """
+    target, error = resolve_profile_id(profile_id, allow_default=True)
+    if error is not None:
+        return None, error
+    if target is None:
+        return None, error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
+    return target, None
+
+
+# The window a published ``limit`` argument may take. Both composite tools that
+# publish one reject a value outside it rather than clamping the caller's
+# request, so both owe the same bounds and the same error payload.
+ANALYTICS_LIMIT_MIN = 1
+ANALYTICS_LIMIT_MAX = 500
+
+
+def limit_range_error(limit: Any) -> dict[str, Any] | None:
+    """The typed error for a ``limit`` outside ``1..500``, or None when it is usable.
+
+    ``bool`` is refused rather than read as its integer value: ``limit=True`` is
+    a caller that sent a flag, and answering it as ``limit=1`` silently rewrites
+    the request in a way the caller cannot see or correct.
+    """
+    if isinstance(limit, bool) or limit < ANALYTICS_LIMIT_MIN or limit > ANALYTICS_LIMIT_MAX:
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"limit must be between {ANALYTICS_LIMIT_MIN} and {ANALYTICS_LIMIT_MAX}, got {limit}",
+            min_limit=ANALYTICS_LIMIT_MIN,
+            max_limit=ANALYTICS_LIMIT_MAX,
+            limit=limit,
+        )
+    return None
+
+
 def _build_series_params(
     from_time: str | int | None = None,
     to_time: str | int | None = None,

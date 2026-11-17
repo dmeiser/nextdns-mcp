@@ -226,17 +226,6 @@ class TestDashboardHelpers:
 class TestDashboardFetchAndValidation:
     """Tests for data validation and fetching error paths."""
 
-    @pytest.mark.asyncio
-    async def test_resolve_profile_errors(self, clean_env, monkeypatch):
-        _res, err = await data_mod._resolve_profile(None)
-        assert err is not None
-        assert "No profile_id provided" in err["error"]
-
-        monkeypatch.setattr(data_mod, "resolve_profile_id", lambda *a, **kw: (None, None))
-        _res2, err = await data_mod._resolve_profile("any")
-        assert err is not None
-        assert err["code"] == "internal_error"
-
     def test_validate_card_data(self):
         data, err = data_mod._validate_card_data({"data": [{"x": 1}]}, "test", "p1")
         assert err is None
@@ -252,18 +241,15 @@ class TestDashboardFetchAndValidation:
 
     @pytest.mark.asyncio
     async def test_fetch_card_data_error_paths(self, clean_env, monkeypatch):
-        # 1. Profile resolution error
-        _data0, err = await data_mod._fetch_card_data(None, "endpoint")
-        assert err is not None
-
-        # 2. Fetch error from upstream
+        # The profile id arrives resolved: a fetch failure is the only error this helper classifies.
+        # 1. Fetch error from upstream
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         upstream_err = {"code": "http_error", "error": "failed"}
         monkeypatch.setattr(data_mod, "_fetch_analytics_payload", AsyncMock(return_value=(None, upstream_err)))
         _data, err = await data_mod._fetch_card_data("abc123", "endpoint")
         assert err == upstream_err
 
-        # 3. Empty data flows through (no no_data error) for consistent empty-state cards
+        # 2. Empty data flows through (no no_data error) for consistent empty-state cards
         monkeypatch.setattr(data_mod, "_fetch_analytics_payload", AsyncMock(return_value=({"data": []}, None)))
         _data, err = await data_mod._fetch_card_data("abc123", "endpoint")
         assert err is None
@@ -687,7 +673,6 @@ class TestDashboardToolsExecution:
         bad_ranges = [
             ("2026-11-02T00:00:00Z", "2026-11-01T00:00:00Z"),  # inverted: end before start
             ("definitely-not-a-time", "now"),  # unresolvable relative string
-            ("-3650d", "now"),  # over the series point budget
         ]
         for from_time, to_time in bad_ranges:
             calls.clear()
@@ -732,6 +717,54 @@ class TestDashboardToolsExecution:
         res = await tool_mod.overviewDashboard(profile_id="abc123", from_time="-1d", to_time="now", section=section)
         assert calls, section
         assert isinstance(res, ToolResult), section
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", sorted(tool_mod._WIDGET_DISPATCH))
+    async def test_widget_sections_accept_ranges_past_the_series_budget(self, clean_env, monkeypatch, section):
+        """A ten-year window is not an error for a single widget: it never asks for ``;series``.
+
+        A widget's rows are capped by ``limit``, so the 2000-point budget that
+        bounds a series response rejected calls whose response could never
+        breach it, and named an ``interval`` the widget never sends.
+        """
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        calls: list[tuple] = []
+
+        async def fake_fetch(pid, endpoint, params=None):
+            calls.append((endpoint, params))
+            if endpoint == "destinations":
+                return ({"data": [{"company": "google", "queries": 50}]}, None)
+            if endpoint == "encryption":
+                return ({"data": [{"encrypted": True, "queries": 80}, {"encrypted": False, "queries": 20}]}, None)
+            if endpoint == "dnssec":
+                return ({"data": [{"validated": True, "queries": 30}, {"validated": False, "queries": 70}]}, None)
+            return ({"data": [{"domain": "test.com", "name": "Test", "ip": "1.1.1.1", "queries": 10}]}, None)
+
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
+        res = await tool_mod.overviewDashboard(profile_id="abc123", from_time="-3650d", to_time="now", section=section)
+        assert calls, section
+        assert isinstance(res, ToolResult), section
+
+    @pytest.mark.asyncio
+    async def test_overview_pages_keep_the_series_budget(self, clean_env, monkeypatch):
+        """The sections that fetch ``status;series`` still refuse a window past the 2000-point budget."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        calls: list[tuple] = []
+
+        async def fake_fetch(pid, endpoint, params=None):
+            calls.append((endpoint, params))
+            return ({"data": []}, None)
+
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
+        for section in ("overview", "all"):
+            calls.clear()
+            res = await tool_mod.overviewDashboard(
+                profile_id="abc123", from_time="-3650d", to_time="now", section=section
+            )
+            assert isinstance(res, dict), section
+            assert res["code"] == "invalid_argument", section
+            assert "2000-point series budget" in res["error"], section
+            assert calls == [], section
 
     def test_build_queries_series_card_exception_handling(self, monkeypatch):
         monkeypatch.setattr(ui, "validate_series_payload", MagicMock(side_effect=ValueError("bad data")))
@@ -888,7 +921,7 @@ class TestFailClosedNoneGuards:
     @pytest.mark.asyncio
     async def test_resolver_none_is_internal_error_and_skips_fetch(self, clean_env, monkeypatch):
         """``(None, None)`` from the resolver must not build ``/profiles/None/...`` URLs."""
-        monkeypatch.setattr(tool_mod, "_resolve_profile", AsyncMock(return_value=(None, None)))
+        monkeypatch.setattr(utils_mod, "resolve_profile_id", lambda *a, **kw: (None, None))
 
         wrapped = AsyncMock(return_value=({}, None))
         monkeypatch.setattr(data_mod, "_fetch_analytics_payload", wrapped)
@@ -896,17 +929,17 @@ class TestFailClosedNoneGuards:
         res = await dash_module.overviewDashboard(profile_id="abc123", section="security")
         assert isinstance(res, dict)
         assert res["code"] == "internal_error"
-        assert "no id" in res["error"].lower()
+        assert "profile resolution" in res["error"].lower()
         wrapped.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_overview_resolver_none_is_internal_error(self, clean_env, monkeypatch):
-        monkeypatch.setattr(tool_mod, "_resolve_profile", AsyncMock(return_value=(None, None)))
+        monkeypatch.setattr(utils_mod, "resolve_profile_id", lambda *a, **kw: (None, None))
 
         res = await dash_module.overviewDashboard(profile_id="abc123", section="overview")
         assert isinstance(res, dict)
         assert res["code"] == "internal_error"
-        assert "no id" in res["error"].lower()
+        assert "profile resolution" in res["error"].lower()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("section", CARD_SECTIONS)

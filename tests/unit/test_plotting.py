@@ -13,6 +13,7 @@ from nextdns_mcp import chart_ui as chart_ui_module
 from nextdns_mcp import charts as charts_module
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server, spec_tools
+from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools import plots as plots_module
 
 
@@ -699,7 +700,7 @@ class TestPlotAnalyticsSeriesImpl:
         result = await plots_module._plot_analytics_series_impl("status", limit=501)
 
         assert result["code"] == "invalid_argument"
-        assert result["max_limit"] == plots_module.PLOT_LIMIT_MAX
+        assert result["max_limit"] == utils_module.ANALYTICS_LIMIT_MAX
         assert result["limit"] == 501
         assert not mock_api_client.stream_calls
 
@@ -710,7 +711,9 @@ class TestPlotAnalyticsSeriesImpl:
         monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
-        await plots_module._plot_analytics_series_impl("status", from_time="-1d", limit=plots_module.PLOT_LIMIT_MAX)
+        await plots_module._plot_analytics_series_impl(
+            "status", from_time="-1d", limit=utils_module.ANALYTICS_LIMIT_MAX
+        )
 
         params = mock_api_client.stream_calls[-1]["params"]
         assert "limit" not in params
@@ -1014,7 +1017,7 @@ class TestRangeReportingAndProfileGuard:
     @pytest.mark.asyncio
     async def test_a_plot_with_no_resolved_profile_does_not_request_a_series(self, clean_env, monkeypatch):
         """``(None, None)`` from the resolver would otherwise build /profiles//analytics/..."""
-        monkeypatch.setattr(plots_module, "resolve_profile_id", lambda profile_id, **kwargs: (None, None))
+        monkeypatch.setattr(utils_module, "resolve_profile_id", lambda profile_id, **kwargs: (None, None))
 
         wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
         monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)

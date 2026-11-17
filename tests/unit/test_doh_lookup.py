@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 import nextdns_mcp.tools.doh as doh_module
+from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools.doh import _dohLookup_impl as dohLookup
 
 
@@ -424,14 +425,15 @@ class TestProfileResolutionGuard:
     """A lookup with no profile to resolve must not go to the resolver anyway.
 
     ``resolve_profile_id`` returns ``(profile, error)``, and every real failure path
-    fills the error. The guard below is for the case where it answers neither: without
-    it the tool would build a DoH query for an empty profile subdomain, which is a
-    request to a URL nobody chose.
+    fills the error. The fail-closed ``internal_error`` lives in the shared
+    ``resolve_default_profile`` wrapper now, and this test pins it through the
+    tool: without it the lookup would build a DoH query for an empty profile
+    subdomain, which is a request to a URL nobody chose.
     """
 
     @pytest.mark.asyncio
     async def test_a_resolution_with_no_profile_and_no_error_is_an_internal_error(self, monkeypatch):
-        monkeypatch.setattr(doh_module, "resolve_profile_id", lambda profile_id: (None, None))
+        monkeypatch.setattr(utils_module, "resolve_profile_id", lambda profile_id, **kwargs: (None, None))
 
         def no_client() -> httpx.AsyncClient:
             raise AssertionError("a lookup with no resolved profile must not build a DoH client")

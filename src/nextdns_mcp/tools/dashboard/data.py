@@ -14,14 +14,12 @@ import time
 from typing import Any, NamedTuple
 
 from ...charts import resolve_time_point, series_budget_error
-from ...coercion import OptionalProfileId
 from ...errors import ErrorCode, error_payload
 from ...transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ...utils import (
     _build_query_params,
     _build_series_params,
     normalize_time_value,
-    resolve_profile_id,
     sanitize_label,
 )
 
@@ -241,16 +239,6 @@ def _destination_row(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _resolve_profile(profile_id: OptionalProfileId) -> tuple[str | None, dict[str, Any] | None]:
-    """Resolve target profile ID or return typed error payload."""
-    target_profile, val_error = resolve_profile_id(profile_id, allow_default=True)
-    if val_error:
-        return None, val_error
-    if target_profile is None:
-        return None, error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
-    return target_profile, None
-
-
 def _payload_data(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Extract list data rows from an API payload dictionary."""
     return (payload or {}).get("data") or []
@@ -279,17 +267,14 @@ def _validate_card_data(
 
 
 async def _fetch_card_data(
-    profile_id: OptionalProfileId,
+    pid: str,
     endpoint: str,
     from_time: str | int = "-30d",
     to_time: str | int = "now",
     limit: int | None = None,
     **extra: Any,
 ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
-    """Fetch single endpoint data list with profile validation and error classification."""
-    pid, err = await _resolve_profile(profile_id)
-    if err or pid is None:
-        return None, err
+    """Fetch single endpoint data list for an already-resolved profile, with error classification."""
     params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, **extra)
     payload, fetch_err = await _fetch_analytics_payload(pid, endpoint, params)
     if fetch_err:
@@ -479,9 +464,12 @@ async def _fetch_overview_payloads(
     ExtraDashboardPayloads | None,
     dict[str, Any] | None,
 ]:
-    """Fetch all datasets required for main overview cards (and extra sections if include_extra)."""
-    from_time = normalize_time_value(from_time)
-    to_time = normalize_time_value(to_time)
+    """Fetch all datasets required for main overview cards (and extra sections if include_extra).
+
+    The window arrives already normalized from the dashboard preflight, which is
+    the one copy of that rewrite: the interval and the ``;series`` point budget
+    below are priced from the same window the preflight read.
+    """
     interval = _overview_interval(from_time, to_time)
     budget_err = series_budget_error(from_time, to_time, interval)
     if budget_err:
