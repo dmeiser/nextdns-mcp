@@ -28,11 +28,13 @@ if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from nextdns_mcp.constants import is_write_operation
+from nextdns_mcp.server import (
+    generative_ui_content_tool_names,
+    generative_ui_data_tool_names,
+    generative_ui_tool_names,
+)
 from nextdns_mcp.tools.dashboard import DASHBOARD_SECTIONS
 from scripts import ai_e2e_common, validate_schema
-
-# Backwards-compatible alias for the shared private-file opener.
-_private_open = ai_e2e_common.private_open
 from scripts.validate_schema import (
     assert_operation_coverage,
     load_openapi_spec,
@@ -42,18 +44,23 @@ from scripts.validate_schema import (
 HEALTH_FAILURE_CLASSES = ("auth", "unreachable")
 
 # When upstream answers 429, the call is retried after these delays instead of
-# being recorded FAILED. The quota is account-level, so a run can lose it to a
-# neighbouring run or to a burst of pushes; the retry is the backoff path, and it
-# is bounded on purpose - the point is to outlast a rate-limit window, not to
-# Back off on upstream 429s instead of failing on the first collision with
-# Cloudflare or account-level burst limits: 15 + 30 + 60 = 105s across 4 total
-# attempts (DEFAULT_MAX_RETRIES), outlasting a 60s rolling/fixed window.
+# being recorded FAILED: 15 + 30 + 60 = 105s across 4 total attempts
+# (DEFAULT_MAX_RETRIES), outlasting a 60s rolling/fixed window. The quota is
+# account-level, so a run can lose it to a neighbouring run or to a burst of
+# pushes; the retry is the backoff path, and it is bounded on purpose - the
+# point is to outlast a rate-limit window, not to obey an arbitrary one.
 # Lightweight inter-call pacing plus a brief pre-write cooldown smooth out
 # back-to-back read/dashboard/write bursts that otherwise trigger 429s on
 # mutation endpoints (PATCH privacy/security, DELETE entries) even when only
 # one workflow run is active.
 RATE_LIMIT_BACKOFF: tuple[float, ...] = (15.0, 30.0, 60.0)
 DEFAULT_MAX_RETRIES: int = len(RATE_LIMIT_BACKOFF) + 1
+# An advertised ``retry_after`` is obeyed but capped: while a retry sleeps, the
+# run holds the repo-wide ``nextdns-live-api`` concurrency lock, so an extreme
+# Retry-After (hours or days) would stall every other suite, not just this
+# one. The cap is twice the largest table entry - enough to outlast any real
+# window, bounded enough to keep the queue moving.
+MAX_ADVERTISED_RETRY_AFTER_SECONDS: float = RATE_LIMIT_BACKOFF[-1] * 2
 READ_PACE_SECONDS: float = 0.15
 WRITE_PACE_SECONDS: float = 0.35
 PHASE_COOLDOWN_SECONDS: float = 3.0
@@ -353,9 +360,15 @@ EXPECTED_TOOLS = expected_tools(_load_spec_once(SPEC_PATH)) if SPEC_PATH.exists(
 
 # Issue #400: Prefab's sandbox shells out to a Deno subprocess, and neither image
 # shipped one, so the generative-UI tools were published but could never succeed.
-# The generating tool, and the pair a container serves with NEXTDNS_GENERATIVE_UI=on.
-PREFAB_UI_TOOL = "generate_prefab_ui"
-GENERATIVE_UI_TOOLS = (PREFAB_UI_TOOL, "search_prefab_components")
+# The names come from the server's single source (nextdns_mcp.server), so this
+# script cannot drift from the catalog the container actually publishes; the
+# content/data split is the server's classification, imported rather than restated.
+GENERATIVE_UI_CONTENT_TOOLS = generative_ui_content_tool_names()
+GENERATIVE_UI_DATA_TOOLS = generative_ui_data_tool_names()
+GENERATIVE_UI_TOOLS = generative_ui_tool_names()
+# The generating tool: the one exercised end to end below. It is the server's
+# only content tool, so the server is the source of this name too.
+PREFAB_UI_TOOL = GENERATIVE_UI_CONTENT_TOOLS[0]
 
 # What the sandbox prints when the image has no runnable Deno (upstream
 # RuntimeError from Prefab's sandbox bootstrap). Its presence in any answer means
@@ -612,11 +625,9 @@ class ContainerE2ERunner:
             getattr(result, "structured_content", None),
             getattr(result, "structuredContent", None),
         ]
-        if response_text:
-            try:
-                candidates.append(json.loads(response_text))
-            except (ValueError, TypeError):
-                pass
+        parsed = _parse_json_text(response_text)
+        if isinstance(parsed, (dict, list)):
+            candidates.append(parsed)
         return candidates
 
     @staticmethod
@@ -699,12 +710,15 @@ class ContainerE2ERunner:
         """Seconds to wait before retrying a rate-limited call.
 
         A payload that advertises its own ``retry_after`` (in seconds) is
-        obeyed; otherwise the bounded ``rate_limit_backoff`` table is walked,
-        holding its last entry once attempts outrun the table.
+        obeyed up to ``MAX_ADVERTISED_RETRY_AFTER_SECONDS`` - the run holds
+        the repo-wide live-API concurrency lock while it sleeps, so an
+        extreme value is a stall, not a hint; otherwise the bounded
+        ``rate_limit_backoff`` table is walked, holding its last entry once
+        attempts outrun the table.
         """
         advertised = payload.get("retry_after")
         if isinstance(advertised, (int, float)) and advertised > 0:
-            return float(advertised)
+            return min(float(advertised), MAX_ADVERTISED_RETRY_AFTER_SECONDS)
         return self.rate_limit_backoff[min(attempt - 1, len(self.rate_limit_backoff) - 1)]
 
     async def _call_with_retries(
@@ -1272,9 +1286,10 @@ class ContainerE2ERunner:
 
         ``tools/list`` is the first half of the #400 contract: with
         ``NEXTDNS_GENERATIVE_UI=on`` the container must advertise the tools, and
-        the same answer proves the server booted at all.
+        the same answer proves the server booted at all. The boot/health half is
+        ``_preflight_runtime()``, shared with the main suite.
         """
-        if not await self.check_endpoint_readiness() or not self.check_health():
+        if not await self._preflight_runtime():
             return False
         async with self._open_session() as session:
             served = {tool.name for tool in (await session.list_tools()).tools}
