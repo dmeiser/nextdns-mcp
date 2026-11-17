@@ -371,6 +371,25 @@ class TestBoundedProjection:
         projected = _project_value({"data": value})
         assert isinstance(projected, dict)
 
+    def test_a_large_dict_consumes_only_the_key_cap(self):
+        """``_project_dict`` slices lazily: it reads ``PROJECT_MAX_KEYS`` items,
+        never a materialized list of the whole mapping's items."""
+        from nextdns_mcp.call_log import PROJECT_MAX_KEYS, _project_value
+
+        consumed: list[tuple[str, int]] = []
+
+        class CountingDict(dict):
+            def items(self):
+                for item in dict.items(self):
+                    consumed.append(item)
+                    yield item
+
+        source = CountingDict({f"key-{i:03d}": i for i in range(PROJECT_MAX_KEYS + 100)})
+        projected = _project_value(source)
+        assert len(projected) == PROJECT_MAX_KEYS
+        assert projected == {f"key-{i:03d}": i for i in range(PROJECT_MAX_KEYS)}
+        assert len(consumed) == PROJECT_MAX_KEYS
+
 
 class TestOffsetReader:
     """``read_call_log_rows`` reads from an offset, the shared row contract.
@@ -443,6 +462,36 @@ class TestLoggingCannotBreakACall:
         context = SimpleNamespace(message=SimpleNamespace(name="getProfile", arguments={"profile_id": "p1"}))
         with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
             assert await middleware.on_call_tool(context, call_next) is result
+        assert any("call log recording failed" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_a_recording_failure_on_the_exception_path_preserves_the_original_error(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The exception path is recorded too, and a recording fault must not mask the call's error.
+
+        The normal-return path already swallows recording faults with a warning;
+        the ``call_next`` exception path did not, so a row-build defect raised
+        while recording a failed call replaced the tool's own exception. The
+        caller must always see the original error, never the log's.
+        """
+        from types import SimpleNamespace
+
+        middleware = CallLogMiddleware(path=str(tmp_path / "calls.jsonl"), endpoints={})
+        monkeypatch.setattr(
+            "nextdns_mcp.call_log.CallLogMiddleware._record_row_into",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("row build defect")),
+        )
+
+        async def call_next(context):
+            raise ValueError("original tool failure")
+
+        context = SimpleNamespace(message=SimpleNamespace(name="getProfile", arguments={"profile_id": "p1"}))
+        with (
+            caplog.at_level("WARNING", logger="nextdns_mcp.call_log"),
+            pytest.raises(ValueError, match="original tool failure"),
+        ):
+            await middleware.on_call_tool(context, call_next)
         assert any("call log recording failed" in record.getMessage() for record in caplog.records)
 
     def test_an_unreadable_log_reads_as_empty_not_raised(self, tmp_path, monkeypatch, caplog):
@@ -604,6 +653,39 @@ class TestEvidenceColumn:
         prefab_app = {"$prefab": {"version": "0.3"}, "view": {}}
         row = self._row("plotAnalytics", {}, True, prefab_app)
         assert "components" not in row.get("evidence", {})
+
+    def test_the_walk_breaks_container_loops_once_the_bound_is_reached(self):
+        """Sibling iteration stops at ``EVIDENCE_MAX_ITEMS``, not at the container's end.
+
+        Without the break, a container of thousands of id-less siblings keeps
+        the walk visiting each one long after the bound was hit - the recursive
+        guard rejects every append, but the pointless iteration is the cost.
+        """
+        from nextdns_mcp.call_log import EVIDENCE_MAX_ITEMS, _result_evidence
+
+        consumed: list[object] = []
+
+        class CountingDict(dict):
+            def values(self):
+                for value in dict.values(self):
+                    consumed.append(value)
+                    yield value
+
+        container = CountingDict({f"key-{i}": {"id": f"id-{i}", "name": f"entry-{i}"} for i in range(200)})
+        evidence = _result_evidence(self._R({"data": [container]}), write=False)
+        assert len(evidence["ids"]) == EVIDENCE_MAX_ITEMS
+        # The loop stopped at the bound (one item past it, the value pulled
+        # before the body's break check) instead of draining all 200 siblings.
+        assert EVIDENCE_MAX_ITEMS <= len(consumed) <= EVIDENCE_MAX_ITEMS + 1
+        assert len(consumed) < len(container)
+
+    def test_the_walk_refuses_to_start_past_the_bound(self):
+        """The entry guard holds for a direct caller too, not only the container loops."""
+        from nextdns_mcp.call_log import EVIDENCE_MAX_ITEMS, _walk_identities
+
+        out = [{"id": f"id-{i}"} for i in range(EVIDENCE_MAX_ITEMS)]
+        _walk_identities({"id": "too-late", "name": "late-entry"}, out, set())
+        assert len(out) == EVIDENCE_MAX_ITEMS
 
     async def test_prefab_deep_nesting_completes_through_on_call_tool(self, tmp_path):
         """The reporter's oracle: a ~1,200-level Prefab document through the awaited path.

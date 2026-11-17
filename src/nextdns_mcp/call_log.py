@@ -42,6 +42,7 @@ import os
 import threading
 import time
 from collections.abc import Mapping
+from itertools import islice
 from typing import Any
 
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -157,8 +158,13 @@ def _project_list(value: list[Any], depth: int) -> list[Any]:
 
 
 def _project_dict(value: dict[Any, Any], depth: int) -> dict[Any, Any]:
-    """Keep the leading keys; each value is projected one level deeper."""
-    return {key: _project_value(item, depth + 1) for key, item in list(value.items())[:PROJECT_MAX_KEYS]}
+    """Keep the leading keys; each value is projected one level deeper.
+
+    ``islice`` consumes the items view lazily: a huge mapping yields only the
+    first ``PROJECT_MAX_KEYS`` items to the projection instead of materializing
+    the whole item list just to slice it.
+    """
+    return {key: _project_value(item, depth + 1) for key, item in islice(value.items(), PROJECT_MAX_KEYS)}
 
 
 def _project_value(value: Any, depth: int = 0) -> Any:
@@ -212,7 +218,7 @@ class CallLogMiddleware(Middleware):
         try:
             result = await call_next(context)
         except Exception as exc:  # schema validation, unknown tool, transport faults
-            await self._record(name, args, ok=False, error=f"{type(exc).__name__}: {exc}")
+            await self._record_failure(name, args, exc)
             raise
         error = result_error(result)
         try:
@@ -220,6 +226,18 @@ class CallLogMiddleware(Middleware):
         except Exception as exc:  # noqa: BLE001 - logging is optional and must never fail the call
             logger.warning("call log recording failed: %s", exc)
         return result
+
+    async def _record_failure(self, name: str, args: Any, exc: Exception) -> None:
+        """Record a failed call; a recording fault never masks the original error.
+
+        The raise of the call's own exception happens in the caller, after this
+        returns: a defect in row construction surfaces as a warning, not as a
+        replacement for the error the caller must see.
+        """
+        try:
+            await self._record(name, args, ok=False, error=f"{type(exc).__name__}: {exc}")
+        except Exception as record_exc:  # noqa: BLE001 - logging is optional and must never fail the call
+            logger.warning("call log recording failed: %s", record_exc)
 
     def _record_row(self, tool: str, args: Any, ok: bool, error: str, result: Any) -> dict[str, Any]:
         """The one JSON row describing this call."""
@@ -341,13 +359,23 @@ def _identity_entry(node: Any) -> tuple[str, dict[str, str]] | None:
 
 
 def _walk_children(node: Any, out: list[dict[str, str]], seen: set[str]) -> None:
-    """Descend one container level looking for id-carrying objects."""
+    """Descend one container level looking for id-carrying objects.
+
+    The loop breaks once the evidence bound is reached: the recursive guard in
+    ``_walk_identities`` would stop any further append, but without the break a
+    container holding thousands of id-less siblings keeps the walk iterating
+    (and descending into each) long after the bound was hit.
+    """
     if isinstance(node, dict):
-        for value in node.values():
-            _walk_identities(value, out, seen)
+        children: Any = node.values()
     elif isinstance(node, list):
-        for value in node:
-            _walk_identities(value, out, seen)
+        children = node
+    else:
+        return
+    for value in children:
+        if len(out) >= EVIDENCE_MAX_ITEMS:
+            break
+        _walk_identities(value, out, seen)
 
 
 def _walk_identities(node: Any, out: list[dict[str, str]], seen: set[str]) -> None:
