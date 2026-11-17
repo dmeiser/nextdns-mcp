@@ -6,6 +6,9 @@ SPDX-License-Identifier: MIT
 import ast
 import asyncio
 import json
+import os
+import shutil
+import subprocess
 from typing import Any
 from weakref import WeakSet
 
@@ -22,7 +25,9 @@ from fastmcp.resources.types import TextResource
 from fastmcp.tools import Tool
 from fastmcp.tools.base import ToolAnnotations
 from prefab_ui.app import PrefabApp
+from prefab_ui.sandbox import PyodideSandbox
 from prefab_ui.sandbox import Sandbox as _Sandbox
+from prefab_ui.sandbox._pyodide import DENO_LOCK, PREFAB_SRC, RUNNER_JS
 
 SANDBOX_PRELUDE = """from prefab_ui.app import PrefabApp
 from prefab_ui.components import *
@@ -53,6 +58,168 @@ MAX_CODE_BYTES = 32 * 1024
 MAX_DATA_BYTES = 128 * 1024
 MAX_RESULT_BYTES = 256 * 1024
 EXECUTION_TIMEOUT = 10.0
+# Cold-start (Deno + Pyodide boot) gets its own budget so it never consumes
+# the user-code EXECUTION_TIMEOUT (issue #541).
+SANDBOX_START_TIMEOUT = 60.0
+# The sandbox renders component trees headlessly; 1 GiB is generous for that
+# and bounds a runaway worker. The upstream default grants 4 GiB.
+SANDBOX_V8_HEAP_MB = 1024
+
+# Host environment variables matching any of these markers (case-insensitive)
+# are never forwarded to the Deno sandbox subprocess. Generated code executes
+# with Pyodide's full ``os`` module, so anything in the subprocess environment
+# is readable from LLM-generated code; key material such as NEXTDNS_API_KEY
+# must not cross that boundary.
+_SENSITIVE_ENV_MARKERS = (
+    "KEY",
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "PRIVATE",
+    "AUTH",
+)
+
+
+def _sandbox_env() -> dict[str, str]:
+    """Copy of the host environment with secret-bearing variables removed."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not any(marker in name.upper() for marker in _SENSITIVE_ENV_MARKERS)
+    }
+
+
+def _sandbox_startup_env() -> dict[str, str]:
+    """Environment for the Deno worker: sanitized, with a bounded V8 heap."""
+    env = _sandbox_env()
+    env["DENO_V8_FLAGS"] = f"--max-old-space-size={SANDBOX_V8_HEAP_MB}"
+    env["DENO_UNSTABLE_DETECT_CJS"] = "1"
+    return env
+
+
+def _deno_command() -> list[str]:
+    deno = shutil.which("deno")
+    if deno is None:
+        raise RuntimeError("Deno is required for the Prefab sandbox. Install it from https://deno.land")
+    return [
+        deno,
+        "run",
+        "--no-config",
+        f"--lock={DENO_LOCK}",
+        "--frozen",
+        "--unstable-detect-cjs",
+        "--no-prompt",
+        "--allow-read",
+        "--allow-write",
+        "--allow-net=cdn.jsdelivr.net:443",
+        str(RUNNER_JS),
+        str(PREFAB_SRC),
+    ]
+
+
+def _spawn_deno(env: dict[str, str]) -> "asyncio.Future[subprocess.Popen[bytes]]":
+    loop = asyncio.get_event_loop()
+    return loop.run_in_executor(
+        None,
+        lambda: subprocess.Popen(
+            _deno_command(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        ),
+    )
+
+
+def _discard_startup(future: "asyncio.Future[subprocess.Popen[bytes]]") -> None:
+    """Reclaim a worker whose start was cancelled before it completed."""
+    if not future.cancelled() and future.exception() is None:
+        PyodideSandbox._stop_process(future.result())
+
+
+def _startup_error(stderr_lines: list[str]) -> RuntimeError:
+    err = "\n".join(stderr_lines)
+    if len(err) > 2000:
+        err = f"{err[:1000]}\n...\n{err[-1000:]}"
+    return RuntimeError(f"Pyodide sandbox failed to start:\n{err}")
+
+
+async def _read_startup_line(
+    proc: subprocess.Popen[bytes],
+    proc_stderr: Any,
+    stderr_lines: list[str],
+) -> str:
+    """Read one startup stderr line, raising if the worker died before signalling."""
+    loop = asyncio.get_event_loop()
+    line = await loop.run_in_executor(None, proc_stderr.readline)
+    if not line and proc.poll() is not None:
+        raise _startup_error(stderr_lines)
+    decoded = line.decode().rstrip()
+    stderr_lines.append(decoded)
+    return decoded
+
+
+async def _await_ready(proc: subprocess.Popen[bytes]) -> None:
+    """Drain the worker's stderr until it signals readiness, as upstream does."""
+    assert proc.stderr is not None
+    stderr_lines: list[str] = []
+    while True:
+        decoded = await _read_startup_line(proc, proc.stderr, stderr_lines)
+        if "pyodide:ready" in decoded:
+            break
+
+
+class HardenedPyodideSandbox(PyodideSandbox):
+    """PyodideSandbox with host secrets stripped, a bounded V8 heap, and a fresh interpreter per execution.
+
+    ``prefab_ui.sandbox.PyodideSandbox`` copies ``os.environ`` verbatim into the Deno
+    subprocess (exposing ``NEXTDNS_API_KEY`` to generated code), grants the worker a 4 GiB
+    V8 heap, and keeps one warm interpreter whose imported modules are shared across
+    calls, so code from one ``generate_prefab_ui`` invocation can poison later ones.
+    This subclass keeps the upstream subprocess protocol but vendors ``_start`` with a
+    sanitized environment and a bounded heap, and discards the worker after every
+    execution so no interpreter state survives between calls.
+    """
+
+    async def start(self) -> None:
+        """Cold-start the worker, outside the user-code execution timeout."""
+        async with self._lock:
+            if self._process is None or self._process.poll() is not None:
+                await self._start()
+
+    def stop(self) -> None:
+        """Discard the worker so the next execution gets a fresh interpreter."""
+        self._stop()
+
+    async def run(self, code: str, *, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Execute generated code, then discard the interpreter it ran on."""
+        try:
+            return await super().run(code, data=data)
+        finally:
+            self._stop()
+
+    async def _start(self) -> None:
+        # Vendored from PyodideSandbox._start (prefab-ui 0.21.1) with two changes:
+        # the subprocess environment is sanitized and the V8 heap is bounded.
+        # Keep in sync with prefab_ui.sandbox._pyodide on upgrades.
+        starting = _spawn_deno(_sandbox_startup_env())
+        try:
+            proc = await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            # Popen may still be running in its executor thread; reclaim it.
+            starting.add_done_callback(_discard_startup)
+            raise
+        try:
+            await _await_ready(proc)
+        except (Exception, asyncio.CancelledError):
+            PyodideSandbox._stop_process(proc)
+            raise
+        self._process = proc
+        if proc.stdout is not None and not isinstance(proc.stdout, _BoundedStdout):
+            proc.stdout = _BoundedStdout(proc.stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
+
 
 # The sandbox worker answers each request with a single JSON line on stdout:
 # {"id": "<32-hex>", "result": <wire>} (or {"id": ..., "error": ...}). The
@@ -188,7 +355,7 @@ class _BoundedStdout:
         return self._raw.fileno()
 
 
-class _BoundedResultSandbox(_Sandbox):
+class _BoundedResultSandbox(HardenedPyodideSandbox):
     """Sandbox whose worker stdout enforces MAX_RESULT_BYTES during the read.
 
     Wraps the worker process stdout in :class:`_BoundedStdout` after every
@@ -311,7 +478,7 @@ class NextDNSGenerativeUI(GenerativeUI):
         _ACTIVE_GENERATIVE_UI.add(self)
 
     def _get_sandbox(self) -> Any:
-        """Lazily create the Pyodide sandbox with a bounded result reader."""
+        """Lazily create the hardened, bounded Pyodide sandbox."""
         if self._sandbox is None:
             self._sandbox = _BoundedResultSandbox()
         return self._sandbox
@@ -349,14 +516,23 @@ class NextDNSGenerativeUI(GenerativeUI):
             full_code = f"{SANDBOX_PRELUDE}\n{code}"
             sandbox = sandbox_ref._get_sandbox()
             try:
-                result = await asyncio.wait_for(
-                    _gen.execute(full_code, data=parsed_data, sandbox=sandbox),
-                    timeout=EXECUTION_TIMEOUT,
-                )
-            except TimeoutError:
-                # asyncio.wait_for cancels the inner task; PyodideSandbox.run handles
-                # CancelledError by stopping the worker, so the lock is released.
-                raise TimeoutError(f"generate_prefab_ui execution exceeded {EXECUTION_TIMEOUT}s") from None
+                # Cold-start gets its own budget so Pyodide boot never
+                # consumes the user-code EXECUTION_TIMEOUT (issue #541).
+                try:
+                    await asyncio.wait_for(sandbox.start(), timeout=SANDBOX_START_TIMEOUT)
+                except TimeoutError:
+                    raise TimeoutError(f"Pyodide sandbox cold start exceeded {SANDBOX_START_TIMEOUT}s") from None
+                try:
+                    result = await asyncio.wait_for(
+                        _gen.execute(full_code, data=parsed_data, sandbox=sandbox),
+                        timeout=EXECUTION_TIMEOUT,
+                    )
+                except TimeoutError:
+                    # asyncio.wait_for cancels the inner task; PyodideSandbox.run handles
+                    # CancelledError by stopping the worker, so the lock is released.
+                    raise TimeoutError(f"generate_prefab_ui execution exceeded {EXECUTION_TIMEOUT}s") from None
+            finally:
+                sandbox.stop()
             result_size = _result_size_bytes(result)
             if result_size > MAX_RESULT_BYTES:
                 raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
