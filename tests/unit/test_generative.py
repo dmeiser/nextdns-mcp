@@ -1,13 +1,18 @@
 """Tests for NextDNSGenerativeUI provider and sizing rules."""
 
 import asyncio
+import inspect
 import json
 import os
+import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastmcp import FastMCP
 
+from nextdns_mcp import generative as generative_module
+from nextdns_mcp import openapi as openapi_module
 from nextdns_mcp.generative import (
     MAX_CODE_BYTES,
     MAX_DATA_BYTES,
@@ -334,64 +339,135 @@ async def test_nextdns_generative_ui_without_components_tool():
     assert "search_prefab_components" not in tools
 
 
-def test_close_calls_stop_when_sandbox_initialized():
+@pytest.mark.asyncio
+async def test_lifespan_runs_setup_before_yield():
+    """The override keeps the base provider's lazy setup and local-provider lifespan."""
     gen_ui = NextDNSGenerativeUI()
-    sandbox = MagicMock()
+    assert gen_ui._setup_done is False
+
+    async with gen_ui.lifespan():
+        assert gen_ui._setup_done is True
+        tools = {tool.name for tool in await gen_ui._local.list_tools()}
+
+    assert "generate_prefab_ui" in tools
+
+
+@pytest.mark.asyncio
+async def test_lifespan_stops_its_own_sandbox_on_exit():
+    gen_ui = NextDNSGenerativeUI()
+    sandbox = MagicMock(name="sandbox")
     gen_ui._sandbox = sandbox
-    gen_ui.close()
+
+    async with gen_ui.lifespan():
+        pass
+
     sandbox._stop.assert_called_once()
     assert gen_ui._sandbox is None
 
 
-def test_close_noop_when_not_initialized():
+@pytest.mark.asyncio
+async def test_lifespan_is_a_noop_when_no_sandbox_was_started():
     gen_ui = NextDNSGenerativeUI()
-    gen_ui._sandbox = None
-    gen_ui.close()  # should not raise
+
+    async with gen_ui.lifespan():
+        pass
+
     assert gen_ui._sandbox is None
 
 
-def test_close_all_generative_ui():
-    from nextdns_mcp.generative import close_all_generative_ui
+@pytest.mark.asyncio
+async def test_a_sibling_servers_shutdown_leaves_this_servers_sandbox_running():
+    """One server's shutdown stops only its own subprocess (issue #542).
+
+    The process-global registry this replaces emptied `_ACTIVE_GENERATIVE_UI`,
+    so server B starting and finishing while server A was live killed A's
+    sandbox mid-read.
+    """
+    host_a = NextDNSGenerativeUI()
+    host_b = NextDNSGenerativeUI()
+    sandbox_a = MagicMock(name="sandbox-a")
+    sandbox_b = MagicMock(name="sandbox-b")
+    host_a._sandbox = sandbox_a
+    host_b._sandbox = sandbox_b
+
+    async with host_a.lifespan():
+        # Server B starts and finishes WHILE server A is live:
+        async with host_b.lifespan():
+            pass
+        sandbox_b._stop.assert_called_once()
+        sandbox_a._stop.assert_not_called()
+        assert host_b._sandbox is None
+        assert host_a._sandbox is sandbox_a
+
+    # A's own shutdown reclaims its own subprocess:
+    sandbox_a._stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_stops_the_sandbox_off_the_event_loop():
+    """`Sandbox._stop()` waits up to 5s on the subprocess, so it is not run on the loop."""
+    stopped_on: list[threading.Thread] = []
+
+    def blocking_stop() -> None:
+        stopped_on.append(threading.current_thread())
 
     gen_ui = NextDNSGenerativeUI()
-    sandbox = MagicMock()
+    sandbox = MagicMock(name="sandbox")
+    sandbox._stop.side_effect = blocking_stop
     gen_ui._sandbox = sandbox
-    close_all_generative_ui()
-    sandbox._stop.assert_called_once()
+
+    async with gen_ui.lifespan():
+        pass
+
+    assert len(stopped_on) == 1
+    assert stopped_on[0] is not threading.current_thread()
 
 
 @pytest.mark.asyncio
-async def test_server_lifespan_cleanup():
-    from unittest.mock import patch
+async def test_lifespan_teardown_survives_a_failing_stop(caplog):
+    """An unreapable subprocess is logged, and never aborts the rest of shutdown."""
 
-    from nextdns_mcp.openapi import _server_lifespan
-
-    with patch("nextdns_mcp.generative.close_all_generative_ui") as mock_close:
-        async with _server_lifespan(MagicMock()):
-            pass
-        mock_close.assert_called_once()
-
-
-def test_close_all_generative_ui_handles_exception():
-    from nextdns_mcp.generative import close_all_generative_ui
+    def exploding_stop() -> None:
+        raise RuntimeError("terminate failed")
 
     gen_ui = NextDNSGenerativeUI()
-    # Make close raise
-    gen_ui.close = MagicMock(side_effect=RuntimeError("boom"))
-    # Should not propagate
-    close_all_generative_ui()
+    sandbox = MagicMock(name="sandbox")
+    sandbox._stop.side_effect = exploding_stop
+    gen_ui._sandbox = sandbox
+
+    async with gen_ui.lifespan():
+        pass
+
+    assert gen_ui._sandbox is None
+    assert "Failed to stop the Generative UI sandbox" in caplog.text
+
+
+def test_openapi_lifespan_has_no_generative_dependency():
+    """Core `openapi.py` must not reach back into the optional `generative` module."""
+    source = inspect.getsource(openapi_module)
+    assert "close_all_generative_ui" not in source
+    assert "from .generative" not in source
+    assert not hasattr(generative_module, "close_all_generative_ui")
 
 
 @pytest.mark.asyncio
-async def test_server_lifespan_cleanup_handles_exception():
-    from unittest.mock import patch
+async def test_a_real_server_shutdown_stops_the_providers_sandbox():
+    """FastMCP enters provider lifespans, so server teardown reaches this teardown.
 
-    from nextdns_mcp.openapi import _server_lifespan
+    Without the override nothing in the shipped server stops the subprocess
+    (the ~4 GB leak of issue #408).
+    """
+    server = FastMCP("NextDNS MCP Test")
+    gen_ui = NextDNSGenerativeUI()
+    server.add_provider(gen_ui)
+    sandbox = MagicMock(name="sandbox")
+    gen_ui._sandbox = sandbox
 
-    with patch("nextdns_mcp.generative.close_all_generative_ui", side_effect=RuntimeError("boom")):
-        # Should not raise
-        async with _server_lifespan(MagicMock()):
-            pass
+    async with server._lifespan_manager():
+        pass
+
+    sandbox._stop.assert_called_once()
+    assert gen_ui._sandbox is None
 
 
 @pytest.mark.asyncio
