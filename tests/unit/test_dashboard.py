@@ -1,5 +1,6 @@
 """Unit tests for NextDNS interactive analytics dashboard and specialized UI tools."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -815,6 +816,92 @@ class TestDashboardToolsExecution:
         assert isinstance(res, ToolResult)
         assert len(calls) == 12
         assert 1 <= max_in_flight <= data_mod.OVERVIEW_FANOUT_CONCURRENCY
+
+
+class TestFanoutShortCircuit:
+    """A queued fan-out wave is skipped once upstream has rejected the request itself.
+
+    ``overviewDashboard(section='all')`` dispatches 12 endpoints under a semaphore of
+    4, so two thirds of the fan-out is still queued when the first wave answers. A 429,
+    401, 403 or 404 rejects the credential, the profile or the quota — not one endpoint —
+    so the queued waves can only repeat it while spending quota and latency (issue #549).
+    """
+
+    EXTRA_ENDPOINTS = ("reasons", "devices", "ips", "encryption", "dnssec")
+
+    @staticmethod
+    def _fake_fetch(started: list[str], failing: tuple[str, dict], fast: str) -> object:
+        """A transport stub that records which endpoints it was asked for."""
+
+        async def fake_fetch(pid: str, endpoint: str, params=None):
+            started.append(endpoint)
+            await asyncio.sleep(0.0 if endpoint == fast else 0.02)
+            name, payload = failing
+            if endpoint == name:
+                return None, payload
+            return {"data": [{"domain": "example.com", "queries": 1}]}, None
+
+        return fake_fetch
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [401, 403, 404, 429])
+    async def test_early_rejection_skips_queued_waves(self, monkeypatch, status_code):
+        """The wave that hits the rejection reports it, and the 8 queued endpoints never run."""
+        started: list[str] = []
+        rejection = {"code": "http_error", "error": f"upstream said {status_code}", "status_code": status_code}
+        monkeypatch.setattr(
+            data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("status", rejection), "status")
+        )
+
+        _, _, _, _, extra, err = await data_mod._fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
+
+        assert err == rejection
+        assert extra is None
+        assert started == ["status", "status;series", "domains", "domains"]
+
+    @pytest.mark.asyncio
+    async def test_per_endpoint_failure_still_dispatches_every_wave(self, monkeypatch):
+        """A 5xx says nothing about the other endpoints, so the fan-out must not stop."""
+        started: list[str] = []
+        gateway = {"code": "http_error", "error": "upstream said 502", "status_code": 502}
+        monkeypatch.setattr(
+            data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("status", gateway), "status")
+        )
+
+        _, _, _, _, extra, err = await data_mod._fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
+
+        assert err == gateway
+        assert len(started) == 12
+        assert extra is None
+
+    @pytest.mark.asyncio
+    async def test_extra_sections_fanout_shares_the_stop_signal(self, monkeypatch):
+        """The standalone extra-sections fan-out queues 4 of its 8 calls behind the same semaphore."""
+        started: list[str] = []
+        rejection = {"code": "http_error", "error": "upstream said 429", "status_code": 429}
+        monkeypatch.setattr(
+            data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("reasons", rejection), "reasons")
+        )
+
+        payloads = await data_mod._fetch_extra_payloads("p1", {"limit": 1}, {})
+
+        assert len(started) == data_mod.OVERVIEW_FANOUT_CONCURRENCY
+        assert not any(endpoint in self.EXTRA_ENDPOINTS for endpoint in started[4:])
+        assert payloads.reasons == []
+
+    def test_stop_signal_latches_only_a_request_fatal_error(self):
+        """The first fatal error is the one reported, and a success or a 5xx never latches."""
+        stop = data_mod._FanoutStop()
+        stop.observe(None)
+        assert stop.error is None
+        gateway = {"code": "http_error", "error": "upstream said 502", "status_code": 502}
+        stop.observe(gateway)
+        assert stop.error is None
+        rate_limited = {"code": "http_error", "error": "upstream said 429", "status_code": 429}
+        stop.observe(rate_limited)
+        stop.observe({"code": "http_error", "error": "upstream said 401", "status_code": 401})
+        stop.observe(None)
+        assert stop.error is rate_limited
 
 
 class TestFailClosedNoneGuards:
