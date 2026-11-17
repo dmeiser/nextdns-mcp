@@ -217,8 +217,9 @@ class HardenedPyodideSandbox(PyodideSandbox):
             PyodideSandbox._stop_process(proc)
             raise
         self._process = proc
-        if proc.stdout is not None and not isinstance(proc.stdout, _BoundedStdout):
-            proc.stdout = _BoundedStdout(proc.stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
+        stdout = getattr(proc, "stdout", None)
+        if stdout is not None and not isinstance(stdout, _BoundedStdout):
+            proc.stdout = _BoundedStdout(stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
 
 
 # The sandbox worker answers each request with a single JSON line on stdout:
@@ -355,7 +356,7 @@ class _BoundedStdout:
         return self._raw.fileno()
 
 
-class _BoundedResultSandbox(HardenedPyodideSandbox):
+class _BoundedResultSandbox(_Sandbox):
     """Sandbox whose worker stdout enforces MAX_RESULT_BYTES during the read.
 
     Wraps the worker process stdout in :class:`_BoundedStdout` after every
@@ -368,8 +369,13 @@ class _BoundedResultSandbox(HardenedPyodideSandbox):
     async def _start(self) -> None:
         await super()._start()
         proc = self._process
-        if proc is not None and proc.stdout is not None and not isinstance(proc.stdout, _BoundedStdout):
-            proc.stdout = _BoundedStdout(proc.stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
+        stdout = getattr(proc, "stdout", None) if proc is not None else None
+        if proc is not None and stdout is not None and not isinstance(stdout, _BoundedStdout):
+            proc.stdout = _BoundedStdout(stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
+
+
+class _CombinedSandbox(HardenedPyodideSandbox, _BoundedResultSandbox):
+    """Sandbox carrying both the hardened env/heap/isolation and the bounded stdout reader."""
 
 
 _CHART_NAMES = {"AreaChart", "LineChart", "BarChart", "PieChart", "DonutChart"}
@@ -480,7 +486,7 @@ class NextDNSGenerativeUI(GenerativeUI):
     def _get_sandbox(self) -> Any:
         """Lazily create the hardened, bounded Pyodide sandbox."""
         if self._sandbox is None:
-            self._sandbox = _BoundedResultSandbox()
+            self._sandbox = _CombinedSandbox()
         return self._sandbox
 
     def close(self) -> None:

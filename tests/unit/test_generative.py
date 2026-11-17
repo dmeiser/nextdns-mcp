@@ -466,7 +466,7 @@ async def test_generate_ui_serializes_valid_dict_data_once():
 
     with (
         patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_sandbox", return_value=MagicMock()),
+        patch.object(gen_ui, "_get_sandbox", return_value=MagicMock(start=AsyncMock())),
         patch("nextdns_mcp.generative.json") as mock_json,
     ):
         mock_json.dumps.side_effect = real_json.dumps
