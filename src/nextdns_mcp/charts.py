@@ -193,7 +193,10 @@ def _relative_time_seconds(text: str, now: float) -> float | None:
 
     Total: an offset with a huge digit count (``-9`` + 400 digits + ``d``) is
     syntactically a relative offset but cannot be added to a float - the
-    unresolvable-None path covers it, same as an unparseable one.
+    unresolvable-None path covers it, same as an unparseable one. Past
+    CPython's 4300-digit integer-string limit (issue #544) ``int()`` itself
+    raises ``ValueError`` on the same kind of input, and the same None is
+    the answer.
     """
     if text.lower() == "now":
         return now
@@ -203,7 +206,7 @@ def _relative_time_seconds(text: str, now: float) -> float | None:
     sign = -1.0 if match.group(1) else 1.0
     try:
         return now + sign * int(match.group(2)) * _RELATIVE_UNIT_SECONDS[match.group(3)]
-    except OverflowError:
+    except (ValueError, OverflowError):
         return None
 
 
