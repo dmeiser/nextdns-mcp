@@ -345,8 +345,10 @@ async def fetch_analytics_payload(
     ``(None, error_payload)`` on a typed failure - the one place that shape is
     built. ``max_response_bytes`` is passed through unchanged, because the cap
     is the caller's decision: ``;series`` endpoints run under
-    ``MAX_SERIES_RESPONSE_BYTES`` while the bounded analytics endpoints are not
-    capped at all.
+    ``MAX_SERIES_RESPONSE_BYTES`` at every door, and the dashboard's bounded
+    analytics endpoints under its own ``MAX_DASHBOARD_RESPONSE_BYTES``
+    (``tools/dashboard/data.py``, issue #550). A caller that names no cap
+    gets no cap.
     """
     payload = await _api_request_payload("GET", url, params=params, max_response_bytes=max_response_bytes)
     if is_error_payload(payload):

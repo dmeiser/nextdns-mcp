@@ -408,8 +408,9 @@ class TestSharedAnalyticsPayloadContract:
         """The drift guard: neither tool module may hold its own fetch-and-classify.
 
         What each call site keeps is only its own cap decision - the dashboard
-        caps a ``;series`` endpoint and leaves the bounded analytics endpoints
-        uncapped (issue #478), the plot fetch caps every series.
+        caps a ``;series`` endpoint at the series ceiling and every other
+        analytics endpoint at its own dashboard cap (issue #550, follow-up to
+        the uncapped-fetch note in #478), the plot fetch caps every series.
         """
         dashboard_shared = AsyncMock(return_value=({"data": []}, None))
         monkeypatch.setattr(dashboard_module, "fetch_analytics_payload", dashboard_shared)
@@ -422,7 +423,7 @@ class TestSharedAnalyticsPayloadContract:
         )
 
         await dashboard_module._fetch_analytics_payload("abc123", "destinations")
-        assert dashboard_shared.await_args.kwargs["max_response_bytes"] is None
+        assert dashboard_shared.await_args.kwargs["max_response_bytes"] == dashboard_module.MAX_DASHBOARD_RESPONSE_BYTES
 
         assert await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", {}) == (
             {"data": []},
