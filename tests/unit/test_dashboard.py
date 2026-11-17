@@ -1059,10 +1059,22 @@ class TestDashboardParamForwarding:
         ]
         assert by_ep["destinations"] == [
             {**window, "limit": 25, "type": "gafam"},
-            {**window, "type": "countries"},
+            {**window, "limit": 25, "type": "countries"},
         ]
         assert by_ep["encryption"] == [dict(window)]
         assert by_ep["dnssec"] == [dict(window)]
+
+    @pytest.mark.asyncio
+    async def test_all_forwards_limit_for_countries(self, recorded):
+        # Regression for dmeiser/nextdns-mcp#545: section="all" previously built the
+        # countries request from the overview params (no limit), while section="countries"
+        # forwarded limit.
+        res = await dash_module.overviewDashboard(
+            profile_id="abc123", from_time="-1d", to_time="now", limit=25, section="all"
+        )
+        assert isinstance(res, ToolResult)
+        countries_calls = [p for ep, p in recorded if ep == "destinations" and p.get("type") == "countries"]
+        assert countries_calls == [{"from": "-1d", "to": "now", "limit": 25, "type": "countries"}]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
