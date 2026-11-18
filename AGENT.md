@@ -21,7 +21,7 @@ This file contains repository-specific agent rules. Agents should follow these w
 - Provide a readiness endpoint at `/health`: it probes the NextDNS API with the configured API key and returns `200 OK` with `{ "status": "ok" }` only when that probe succeeds; otherwise it returns `503` with `{ "status": "error", "class": "auth" | "unreachable", "reason": "..." }`. The probe uses a 5 second timeout, bypasses profile access control so a local ACL denial cannot mask the upstream auth state, and its result is cached for 30 seconds.
 - Tests: add pytest-based unit tests for new functionality and run them with `uv run pytest`.
   - See "Code Quality Standards" section below for coverage requirements and quality metrics
-- Docker: provide a `Dockerfile` (primary, `python:3.14-slim`) and `Dockerfile.alpine` (Alpine variant) that produce small, runnable images.
+- Docker: provide a `Dockerfile` (primary, `python:3.15-slim`) and `Dockerfile.alpine` (Alpine variant) that produce small, runnable images.
 - **Write Operation Safety Rules:**
   - Write scoping is enforced by the environment: `NEXTDNS_WRITABLE_PROFILES` limits writes to the listed profile ids (unset means writes are denied), the special value `ALL` removes per-profile scoping and grants writes to every profile in the account, production ones included, so it belongs only to a dev account, and `NEXTDNS_READ_ONLY=true` denies every write. See `docs/safety.md`.
   - Always verify the target profile ID before any write operation

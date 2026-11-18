@@ -37,7 +37,7 @@ jobs:
           enable-cache: true
 
       - name: Set up Python
-        run: uv python install 3.14
+        run: uv python install 3.15
 
       - name: Calculate and Update Version
         id: update_version
