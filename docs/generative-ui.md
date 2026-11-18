@@ -22,7 +22,8 @@ If the host cannot provide the above (e.g. clients without iframe sandboxing or 
 
 The server additionally enforces:
 - Chart placement validation (charts may not be nested in `Tab` components).
-- Read-only, non-destructive annotations on generated UI tools.
+- Tool annotations on the UI tools: `generate_prefab_ui` is annotated `read_only_hint=False, destructive_hint=False, open_world_hint=False` — it executes generated code, so it is not published as read-only — while `search_prefab_components` is `read_only_hint=True` (`src/nextdns_mcp/generative.py`).
+- The composite UI tools `overviewDashboard` and `plotAnalytics`, registered with `app=True` in `src/nextdns_mcp/server.py`, publish Prefab UI views without going through `generate_prefab_ui`, and carry `read_only_hint=True, destructive_hint=False, open_world_hint=True`.
 - CSP built via `_build_csp()` applied to the renderer resource.
 
 Hosts remain responsible for the guarantees above; backend guards are defense in depth, not a substitute.
