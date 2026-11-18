@@ -37,16 +37,6 @@ from ...utils import (
 MAX_DASHBOARD_RESPONSE_BYTES = 512_000
 
 
-def _time_params(from_time: str | int | None, to_time: str | int | None) -> dict[str, Any]:
-    """Extract normalized time window parameters."""
-    return _build_query_params(
-        **{
-            "from": normalize_time_value(from_time),
-            "to": normalize_time_value(to_time),
-        }
-    )
-
-
 def _build_analytics_params(
     from_time: str | int | None = "-30d",
     to_time: str | int | None = "now",
@@ -522,44 +512,4 @@ async def _fetch_security_payloads(
     return await asyncio.gather(
         _fetch_analytics_payload(profile_id, "encryption", params),
         _fetch_analytics_payload(profile_id, "dnssec", params),
-    )
-
-
-async def _fetch_extra_payloads(
-    profile_id: str, dom_params: dict[str, Any], params: dict[str, Any]
-) -> ExtraDashboardPayloads:
-    """Fetch data lists for extra dashboard sections.
-
-    Fetchers are keyed by result-field name and the tuple is built with
-    keyword arguments, so reordering entries cannot reassign section data.
-    """
-    sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
-    stop = _FanoutStop()
-    fetchers = {
-        "reasons": _bounded_fetch_analytics_payload(sem, profile_id, "reasons", dom_params, stop),
-        "devices": _bounded_fetch_analytics_payload(sem, profile_id, "devices", dom_params, stop),
-        "ips": _bounded_fetch_analytics_payload(sem, profile_id, "ips", dom_params, stop),
-        "root_domains": _bounded_fetch_analytics_payload(
-            sem, profile_id, "domains", {**dom_params, "root": "true"}, stop
-        ),
-        "gafam": _bounded_fetch_analytics_payload(
-            sem, profile_id, "destinations", {**dom_params, "type": "gafam"}, stop
-        ),
-        "countries": _bounded_fetch_analytics_payload(
-            sem, profile_id, "destinations", {**params, "type": "countries"}, stop
-        ),
-        "encryption": _bounded_fetch_analytics_payload(sem, profile_id, "encryption", params, stop),
-        "dnssec": _bounded_fetch_analytics_payload(sem, profile_id, "dnssec", params, stop),
-    }
-    pending = {name: asyncio.ensure_future(coro) for name, coro in fetchers.items()}
-    results = {name: await task for name, task in pending.items()}
-    return ExtraDashboardPayloads(
-        reasons=_payload_data(results["reasons"][0]),
-        devices=_payload_data(results["devices"][0]),
-        ips=_payload_data(results["ips"][0]),
-        root_domains=_payload_data(results["root_domains"][0]),
-        gafam=_payload_data(results["gafam"][0]),
-        countries=_payload_data(results["countries"][0]),
-        encryption=_payload_data(results["encryption"][0]),
-        dnssec=_payload_data(results["dnssec"][0]),
     )
