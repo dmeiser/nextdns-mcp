@@ -25,7 +25,6 @@ from .config import (
 )
 from .openapi import create_mcp_server
 from .spec_tools import (
-    _payload_is_error,
     endpoints_for_routes,
     register_spec_tools,
     spec_routes,
@@ -34,6 +33,7 @@ from .spec_tools import (
 from .tools.dashboard import overviewDashboard
 from .tools.doh import dohLookup
 from .tools.plots import plotAnalytics
+from .transport import is_error_payload
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ def _with_error_flag(tool_fn: Any) -> Any:
     generated tools - but a bare dict return is wrapped by FastMCP as a
     SUCCESSFUL result, so every one of those failure payloads used to reach
     callers with ``isError=False``. The generated SpecApiTool sets the flag
-    explicitly via ``_payload_is_error``; this wrapper applies the same rule
+    explicitly via ``transport.is_error_payload``; this wrapper applies the same rule
     to the three composite tools (plotAnalytics, dohLookup, overviewDashboard), so a refusal or failure never masquerades
     as a normal answer.
     """
@@ -69,7 +69,7 @@ def _with_error_flag(tool_fn: Any) -> Any:
     @wraps(tool_fn)
     async def _wrapped(*args: Any, **kwargs: Any) -> Any:
         payload = await tool_fn(*args, **kwargs)
-        if _payload_is_error(payload):
+        if is_error_payload(payload):
             return ToolResult(structured_content=payload, is_error=True)
         return payload
 

@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 
-from nextdns_mcp import spec_tools
+from nextdns_mcp import spec_tools, transport
 
 # Operations in nextdns-openapi.yaml, the one that is not offered, and the
 # operations the server performs itself.
@@ -290,6 +290,59 @@ class TestToolCall:
     def test_repr_names_the_endpoint(self, monkeypatch, calls):
         tool = self._tool(monkeypatch, calls, "getDenylist")
         assert repr(tool) == "SpecApiTool(name='getDenylist', method=GET, path=/profiles/{profile_id}/denylist)"
+
+
+class TestTypedErrorClassification:
+    """``is_error_payload`` is the one copy of the typed-error predicate (issue #551).
+
+    ``spec_tools`` used to keep its own looser predicate (``"error" in payload or
+    "code" in payload``), which flagged malformed or partial 2xx bodies - a bare
+    ``{"error": ...}`` or ``{"code": ...}`` - as tool errors. The module now defers
+    to the transport's predicate: only a payload carrying ``code`` AND ``error``
+    AND no ``data`` key is a typed failure. These pin the boundary through the
+    tool surface, not just the predicate in isolation, and that no second copy
+    of the predicate exists to drift from it.
+    """
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param({"error": "an answer about a domain named error"}, id="error-key-without-code"),
+            pytest.param({"code": "a free-text status a 2xx body happened to carry"}, id="code-key-without-error"),
+            pytest.param({"code": "partial", "error": "truncated", "data": []}, id="code-and-error-but-also-data"),
+        ],
+    )
+    async def test_a_malformed_or_partial_payload_is_a_result_not_an_error(self, monkeypatch, calls, payload: Any):
+        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api(payload, calls))
+        tool = spec_tools.SpecApiTool(
+            {route.operation_id: route for route in spec_tools.spec_routes()}["getAnalyticsDomains"]
+        )
+        result = await tool.run({"profile_id": "abc123"})
+        assert result.is_error is False
+        assert result.structured_content == payload
+
+    async def test_a_typed_failure_is_still_flagged_through_the_tool(self, monkeypatch, calls):
+        """The consolidation must not weaken the flag for real error payloads."""
+        monkeypatch.setattr(
+            spec_tools,
+            "_api_request_payload",
+            _fake_api({"code": "http_error", "error": "upstream unavailable", "status_code": 503}, calls),
+        )
+        tool = spec_tools.SpecApiTool(
+            {route.operation_id: route for route in spec_tools.spec_routes()}["getAnalyticsDomains"]
+        )
+        result = await tool.run({"profile_id": "abc123"})
+        assert result.is_error is True
+        assert result.structured_content["code"] == "http_error"
+
+    def test_spec_tools_defers_to_the_transport_predicate(self):
+        """The module keeps no copy of its own: classification routes through transport."""
+        assert not hasattr(spec_tools, "_payload_is_error")
+        assert spec_tools.is_error_payload is transport.is_error_payload
 
 
 class TestRegistration:

@@ -57,7 +57,7 @@ from .charts import current_time, resolve_time_point, series_budget_error
 from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
 from .tools import logs as _logs
-from .transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload
+from .transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload, is_error_payload
 from .utils import is_safe_profile_id, normalize_partials, normalize_time_value, resolve_profile_id, schema_required
 
 logger = logging.getLogger(__name__)
@@ -495,7 +495,7 @@ class SpecApiTool(Tool):
         refused = _series_refusal(self._route, payload)
         if refused is not None:
             return ToolResult(structured_content=refused, is_error=True)
-        return ToolResult(structured_content=payload, is_error=_payload_is_error(payload))
+        return ToolResult(structured_content=payload, is_error=is_error_payload(payload))
 
     async def _run_delegated(self, arguments: dict[str, Any]) -> ToolResult:
         """Serve a delegated operation with its own guarded handler.
@@ -516,7 +516,7 @@ class SpecApiTool(Tool):
         # The delegated handler (downloadLogs) answers errors as typed payloads;
         # they must surface as errors, while a successful download payload must
         # not. Detection is the same rule _wrap_call_result uses.
-        return ToolResult(structured_content=payload, is_error=_payload_is_error(payload))
+        return ToolResult(structured_content=payload, is_error=is_error_payload(payload))
 
     def _unsafe_path_payload(self, names: list[str]) -> dict[str, Any]:
         """A typed error refusing to put an id-shaped argument anywhere but a path segment."""
@@ -545,20 +545,6 @@ class SpecApiTool(Tool):
             f"{self.name} needs {', '.join(missing)} for {self._route.method} {self._route.path}",
             hint=hints.get(missing[0], "required by this endpoint: " + ", ".join(_required(self._route))),
         )
-
-
-def _payload_is_error(payload: Any) -> bool:
-    """Whether a structured payload is a typed error rather than a result.
-
-    Every refusal and failure this module renders goes through
-    :func:`nextdns_mcp.errors.error_payload` (``{"error": ..., "code": ...}``),
-    and a successful API answer carries ``data``; a payload with an
-    ``error``/``code`` key and no ``data`` is therefore an error whatever door
-    produced it. MCP clients surface ``isError`` to the model, so every one of
-    those doors must set the flag — a refusal reported as a successful result
-    teaches the caller the refusal shape is a normal answer.
-    """
-    return isinstance(payload, dict) and ("error" in payload or "code" in payload) and "data" not in payload
 
 
 def _mapped_path_name(name: str, mapped: dict[str, Any] | None) -> tuple[str, str] | None:
