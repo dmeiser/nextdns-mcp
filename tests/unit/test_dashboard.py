@@ -185,18 +185,19 @@ class TestDashboardHelpers:
 
     def test_gafam_card(self):
         data = [{"company": "google", "queries": 100}, {}]
-        card = ui._build_gafam_card(data)
+        chart_data, table_rows = data_mod._gafam_rows(data)
+        card = ui._build_gafam_card(chart_data, table_rows)
         assert card is not None
-        assert ui._build_gafam_card(data, view_type="bar") is not None
-        assert ui._build_gafam_card(data, view_type="table") is not None
+        assert ui._build_gafam_card(chart_data, table_rows, view_type="bar") is not None
+        assert ui._build_gafam_card(chart_data, table_rows, view_type="table") is not None
 
     def test_security_card(self):
         enc = [{"encrypted": True, "queries": 90}, {"encrypted": False, "queries": 10}]
         dnssec = [{"validated": True, "queries": 20}, {"validated": False, "queries": 80}]
-        card = ui._build_security_card(enc, dnssec)
+        card = ui._build_security_card(data_mod._calc_rate(enc, "encrypted"), data_mod._calc_rate(dnssec, "validated"))
         assert card is not None
 
-        empty_card = ui._build_security_card([], [])
+        empty_card = ui._build_security_card(data_mod._calc_rate([], "encrypted"), data_mod._calc_rate([], "validated"))
         assert empty_card is not None
 
     def test_destinations_card(self):
@@ -782,7 +783,7 @@ class TestDashboardToolsExecution:
     def test_empty_cards_rendering(self):
         # Format summary with empty items
         assert fmt._format_items_summary("Test", "items", [], 0) == "[Rendered Test (0 items, 0 queries)]"
-        assert fmt._format_gafam_summary([], 0) == "[Rendered GAFAM Dominance (0 queries)]"
+        assert fmt._format_items_summary("GAFAM Dominance", None, [], 0) == "[Rendered GAFAM Dominance (0 queries)]"
 
         # Empty cards render fallback text
         assert ui._build_domains_card("Domains", "desc", [], view_type="table") is not None
@@ -794,8 +795,8 @@ class TestDashboardToolsExecution:
         assert ui._build_devices_card([], view_type="pie") is not None
         assert ui._build_devices_card([{"name": "iPhone", "queries": 10}], view_type="table") is not None
         assert ui._build_ips_card([]) is not None
-        assert ui._build_gafam_card([], view_type="table") is not None
-        assert ui._build_gafam_card([], view_type="bar") is not None
+        assert ui._build_gafam_card([], [], view_type="table") is not None
+        assert ui._build_gafam_card([], [], view_type="bar") is not None
         assert ui._build_destinations_card([], view_type="table") is not None
         assert ui._build_destinations_card([], view_type="bar") is not None
         assert ui._build_destinations_card([], view_type="pie") is not None
@@ -965,6 +966,16 @@ class TestFailClosedNoneGuards:
 
 class TestWidgetDispatchTypingContract:
     """Regression tests verifying _WIDGET_DISPATCH is typed and mypy guards handler calls."""
+
+    def test_section_tables_have_key_parity(self):
+        """Every section but the two page sections has a widget handler, and vice versa."""
+        assert set(tool_mod.DASHBOARD_SECTIONS) == set(tool_mod._PAGE_SECTIONS) | set(tool_mod._WIDGET_DISPATCH)
+        assert set(tool_mod._PAGE_SECTIONS) == {"overview", "all"}
+
+    def test_section_parity_guard_rejects_drift(self):
+        """A section name with no handler raises instead of falling through to the overview page."""
+        with pytest.raises(RuntimeError, match="drifted"):
+            tool_mod._check_section_parity({"overview", "countries"}, {"overview"}, {"kpi"})
 
     def test_widget_dispatch_runtime_annotations_and_signatures(self):
         """Verify _WIDGET_DISPATCH is annotated with _WidgetHandler and handlers match signature."""

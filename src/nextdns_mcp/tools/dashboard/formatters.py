@@ -25,22 +25,21 @@ def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
     return ", ".join(formatted)
 
 
-def _format_items_summary(title: str, noun: str, items: list[tuple[str, int]], total: int) -> str:
-    """Format compact factual summary for a list-based visual card."""
-    count = len(items)
+def _format_items_summary(title: str, noun: str | None, items: list[tuple[str, int]], total: int) -> str:
+    """Format compact factual summary for a list-based visual card.
+
+    Every card but GAFAM names its row count next to the total; GAFAM reports the
+    query total alone, so it passes ``noun=None`` and the count is omitted.
+    """
     top_str = _format_top_items(items)
-    if top_str:
-        return f"[Rendered {title} ({count} {noun}, {total:,} queries): {top_str}]"
-    return f"[Rendered {title} ({count} {noun}, {total:,} queries)]"
+    count_phrase = f"{len(items)} {noun}, " if noun is not None else ""
+    base = f"[Rendered {title} ({count_phrase}{total:,} queries)"
+    return f"{base}: {top_str}]" if top_str else f"{base}]"
 
 
-def _format_gafam_summary(chart_data: list[dict[str, Any]], total: int) -> str:
-    """Format GAFAM dominance summary."""
-    items = [(row["label"], row["queries"]) for row in chart_data]
-    top_str = _format_top_items(items)
-    if top_str:
-        return f"[Rendered GAFAM Dominance ({total:,} queries): {top_str}]"
-    return f"[Rendered GAFAM Dominance ({total:,} queries)]"
+def _gafam_summary_items(chart_data: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    """Format (label, queries) pairs for the GAFAM dominance summary."""
+    return [(row["label"], row["queries"]) for row in chart_data]
 
 
 def _ip_summary_items(data: list[dict[str, Any]]) -> list[tuple[str, int]]:
@@ -48,8 +47,8 @@ def _ip_summary_items(data: list[dict[str, Any]]) -> list[tuple[str, int]]:
     return [(sanitize_label(item.get("ip") or "-"), _item_queries(item)) for item in data]
 
 
-def _overview_top_summary(r_data: list[dict[str, Any]], b_data: list[dict[str, Any]]) -> str:
+def _overview_top_summary(resolved_data: list[dict[str, Any]], blocked_data: list[dict[str, Any]]) -> str:
     """Summarize leading resolved and blocked domains."""
-    top_res = _format_top_items([(_domain_label(item, "domain"), _item_queries(item)) for item in r_data])
-    top_blk = _format_top_items([(_domain_label(item, "domain"), _item_queries(item)) for item in b_data])
+    top_res = _format_top_items([(_domain_label(item, "domain"), _item_queries(item)) for item in resolved_data])
+    top_blk = _format_top_items([(_domain_label(item, "domain"), _item_queries(item)) for item in blocked_data])
     return f"Top resolved: {top_res or 'none'}; Top blocked: {top_blk or 'none'}"
