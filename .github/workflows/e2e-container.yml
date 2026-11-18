@@ -130,26 +130,7 @@ jobs:
             ${PROTECTED_ENV[@]+"${PROTECTED_ENV[@]}"} \
             nextdns-mcp:${{ matrix.variant }}
 
-          echo "Waiting for container HTTP endpoint to be ready..."
-          READY=0
-          for i in $(seq 1 30); do
-            # curl already prints 000 for a failed request; a `|| echo "000"`
-            # fallback would concatenate into "000000" and defeat the check
-            # below, declaring a still-booting container ready.
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8000/mcp 2>/dev/null || true)
-            if [ "$HTTP_STATUS" != "000" ]; then
-              echo "Container is ready (HTTP $HTTP_STATUS at attempt $i)"
-              READY=1
-              break
-            fi
-            sleep 1
-          done
-
-          if [ "$READY" -ne 1 ]; then
-            echo "❌ Container failed to respond within 30 seconds"
-            docker logs nextdns-container-e2e || true
-            exit 1
-          fi
+          bash scripts/wait_for_container_ready.sh 8000 nextdns-container-e2e
 
       - name: Start container with an invalid credential for the /health check
         run: |
@@ -167,24 +148,7 @@ jobs:
             -e MCP_PORT="8000" \
             nextdns-mcp:${{ matrix.variant }}
 
-          echo "Waiting for container HTTP endpoint to be ready..."
-          READY=0
-          for i in $(seq 1 30); do
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8001/mcp 2>/dev/null || true)
-            if [ "$HTTP_STATUS" != "000" ]; then
-              echo "Container is ready (HTTP $HTTP_STATUS at attempt $i)"
-              READY=1
-              break
-            fi
-            sleep 1
-          done
-
-          if [ "$READY" -ne 1 ]; then
-            echo "❌ Container failed to respond within 30 seconds"
-            docker logs nextdns-container-e2e-health || true
-            docker rm -f nextdns-container-e2e-health || true
-            exit 1
-          fi
+          bash scripts/wait_for_container_ready.sh 8001 nextdns-container-e2e-health
 
       - name: Validate /health readiness probe with an invalid credential (${{ matrix.variant }})
         run: |
@@ -219,24 +183,7 @@ jobs:
             -e MCP_PORT="8000" \
             nextdns-mcp:${{ matrix.variant }}
 
-          echo "Waiting for container HTTP endpoint to be ready..."
-          READY=0
-          for i in $(seq 1 30); do
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:8002/mcp 2>/dev/null || true)
-            if [ "$HTTP_STATUS" != "000" ]; then
-              echo "Container is ready (HTTP $HTTP_STATUS at attempt $i)"
-              READY=1
-              break
-            fi
-            sleep 1
-          done
-
-          if [ "$READY" -ne 1 ]; then
-            echo "❌ Container failed to respond within 30 seconds"
-            docker logs nextdns-container-e2e-prefab || true
-            docker rm -f nextdns-container-e2e-prefab || true
-            exit 1
-          fi
+          bash scripts/wait_for_container_ready.sh 8002 nextdns-container-e2e-prefab
 
       - name: Validate generate_prefab_ui end to end in the container (${{ matrix.variant }})
         run: |

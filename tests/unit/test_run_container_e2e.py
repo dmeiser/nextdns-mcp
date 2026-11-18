@@ -11,7 +11,7 @@ import httpx
 import pytest
 from mcp.types import TextContent, Tool
 
-from scripts import validate_schema
+from scripts import ai_e2e_common, validate_schema
 from scripts.run_container_e2e import (
     EXPECTED_TOOLS,
     PREFAB_UI_TOOL,
@@ -327,6 +327,33 @@ def test_rate_limit_delay_walks_the_backoff_table_and_holds_its_last_entry(tmp_p
     assert runner._rate_limit_delay({}, attempt=9) == 10.0
 
 
+def test_rate_limit_delay_caps_an_extreme_advertised_retry_after(runner: ContainerE2ERunner):
+    """An absurd Retry-After is a stall, not a hint: the delay is capped.
+
+    While a retry sleeps the run holds the repo-wide ``nextdns-live-api``
+    concurrency lock, so an uncapped advertised delay (hours or days) would
+    freeze every other suite, not just this one.
+    """
+    from scripts.run_container_e2e import MAX_ADVERTISED_RETRY_AFTER_SECONDS
+
+    assert MAX_ADVERTISED_RETRY_AFTER_SECONDS == 120.0
+    assert runner._rate_limit_delay({"retry_after": 3600}, attempt=1) == MAX_ADVERTISED_RETRY_AFTER_SECONDS
+    # A boundary value still wins over the table.
+    assert runner._rate_limit_delay({"retry_after": 120}, attempt=1) == 120.0
+    assert runner._rate_limit_delay({"retry_after": 120.001}, attempt=1) == MAX_ADVERTISED_RETRY_AFTER_SECONDS
+
+
+def test_generative_ui_tool_names_come_from_the_server_catalog():
+    """The script's generative-UI names are the server's, not a second copy."""
+    from nextdns_mcp import server as mcp_server
+    from scripts import run_container_e2e as e2e
+
+    assert e2e.GENERATIVE_UI_TOOLS == mcp_server.generative_ui_tool_names()
+    assert e2e.GENERATIVE_UI_CONTENT_TOOLS == mcp_server.generative_ui_content_tool_names()
+    assert e2e.GENERATIVE_UI_DATA_TOOLS == mcp_server.generative_ui_data_tool_names()
+    assert e2e.PREFAB_UI_TOOL in mcp_server.generative_ui_content_tool_names()
+
+
 @pytest.mark.asyncio
 async def test_execute_call_plot_prefab_content(runner: ContainerE2ERunner):
     """Test plotAnalytics returns interactive Prefab UI content."""
@@ -557,6 +584,35 @@ class TestE2EWorkflowSecretHandling:
         # an id literally named "", so the flag is added only when set.
         assert 'NEXTDNS_PROTECTED_PROFILES="${NEXTDNS_PLOT_PROFILE}"' in step["run"]
         assert 'if [ -n "${NEXTDNS_PLOT_PROFILE}" ]' in step["run"]
+
+
+class TestE2EWorkflowReadinessWait:
+    """The three container-start steps share one parameterized readiness loop.
+
+    The loop used to be copy-pasted into each start step, varying only by port
+    and container name; it now lives in scripts/wait_for_container_ready.sh so
+    the 000-status curl guard and the 30s budget cannot drift between copies.
+    """
+
+    WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "e2e-container.yml"
+
+    def _steps(self) -> dict:
+        import yaml
+
+        doc = yaml.safe_load(self.WORKFLOW.read_text(encoding="utf-8"))
+        return {step.get("name", ""): step for step in doc["jobs"]["e2e"]["steps"]}
+
+    def test_each_container_start_calls_the_shared_wait_script(self):
+        expected = {
+            "Start MCP Server Container": ("8000", "nextdns-container-e2e"),
+            "Start container with an invalid credential": ("8001", "nextdns-container-e2e-health"),
+            "Start container with generative UI enabled": ("8002", "nextdns-container-e2e-prefab"),
+        }
+        steps = self._steps()
+        for prefix, (port, container) in expected.items():
+            step = next(s for name, s in steps.items() if name.startswith(prefix))
+            assert f"bash scripts/wait_for_container_ready.sh {port} {container}" in step["run"]
+            assert "seq 1 30" not in step["run"], f"{prefix} still carries its own readiness loop"
 
 
 class TestE2EWorkflowLiveSerialization:
@@ -1371,14 +1427,12 @@ class TestPrivateArtifacts:
         import os
         import stat
 
-        from scripts.run_container_e2e import _private_open
-
         path = tmp_path / "report.jsonl"
-        with _private_open(path, "a") as fh:
+        with ai_e2e_common.private_open(path, "a") as fh:
             fh.write('{"x": 1}\n')
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         os.chmod(path, 0o644)
-        with _private_open(path, "a") as fh:
+        with ai_e2e_common.private_open(path, "a") as fh:
             fh.write('{"x": 2}\n')
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert len(path.read_text().splitlines()) == 2
@@ -1388,14 +1442,12 @@ def test_private_open_refuses_when_the_mode_cannot_be_established(tmp_path, monk
     """No 0600, no artifact: the report carries profile ids and payloads."""
     import os
 
-    from scripts.run_container_e2e import _private_open
-
     def boom(fd: int, mode: int) -> None:
         raise PermissionError("not ours")
 
     monkeypatch.setattr(os, "fchmod", boom)
     path = tmp_path / "report.jsonl"
-    with pytest.raises(PermissionError), _private_open(path, "a"):
+    with pytest.raises(PermissionError), ai_e2e_common.private_open(path, "a"):
         pass
     assert not path.exists() or path.stat().st_size == 0
 
