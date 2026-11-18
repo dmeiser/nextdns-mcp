@@ -24,7 +24,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .errors import ErrorCode, error_payload
-from .utils import sanitize_label
 
 # Maximum number of data points a single series response may contain (issue #267).
 # The point count is the requested range divided by the interval, so bounding the
@@ -51,27 +50,6 @@ PLOT_CHART_MAX_POINTS = 250
 # would size a months-long range as minutes.
 _RELATIVE_TIME_RE = re.compile(r"^(-?)(\d+)([smhdwy])$")
 _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
-
-
-def _extract_series_label(series: dict[str, Any], index: int) -> str:
-    """Return a human-readable label for a time-series data entry.
-
-    Series names come from the upstream API, so the label is sanitized here -
-    the single extraction point every chart series passes through.
-    """
-    for key, value in ((key, series.get(key)) for key in ("name", "status", "protocol", "version", "id")):
-        if value is not None and value != "":
-            return sanitize_label(value)
-    return _series_boolean_label(series, index)
-
-
-def _series_boolean_label(series: dict[str, Any], index: int) -> str:
-    """Label a status-shaped entry by its boolean flag, or by position when it has neither."""
-    if "validated" in series:
-        return "validated" if series["validated"] else "not_validated"
-    if "encrypted" in series:
-        return "encrypted" if series["encrypted"] else "unencrypted"
-    return f"series_{index}"
 
 
 def _parse_series_timestamp(value: str) -> datetime:

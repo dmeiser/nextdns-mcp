@@ -100,10 +100,10 @@ class TestExtractSeriesLabel:
         assert chart_ui_module._extract_series_label({"queries": []}, 3) == "series_3"
 
     def test_series_label_strips_control_characters(self):
-        assert charts_module._extract_series_label({"name": "example.com\r\nINJECTED"}, 0) == ("example.comINJECTED")
+        assert chart_ui_module._extract_series_label({"name": "example.com\r\nINJECTED"}, 0) == ("example.comINJECTED")
 
     def test_series_label_caps_oversized_names(self):
-        result = charts_module._extract_series_label({"name": "n" * 300}, 0)
+        result = chart_ui_module._extract_series_label({"name": "n" * 300}, 0)
         assert len(result) == 201
         assert result.endswith("…")
 
