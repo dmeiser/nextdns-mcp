@@ -108,7 +108,7 @@ class TestExtractSeriesLabel:
         assert result.endswith("…")
 
     def test_chart_series_uses_sanitized_labels(self):
-        series = charts_module.build_chart_series([{"name": "a\x00b"}])
+        series = chart_ui_module.build_chart_series([{"name": "a\x00b"}])
         assert series[0].label == "ab"
 
 
