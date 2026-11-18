@@ -371,6 +371,14 @@ class TestBoundedProjection:
         projected = _project_value({"data": value})
         assert isinstance(projected, dict)
 
+        node = projected["data"]
+        for _ in range(PROJECT_MAX_DEPTH - 1):
+            assert isinstance(node, list) and len(node) == 1
+            node = node[0]
+        # The nesting past PROJECT_MAX_DEPTH is projected to None: the list at
+        # the depth limit is the last one kept, so nothing deeper survives.
+        assert node == [None]
+
     def test_a_large_dict_consumes_only_the_key_cap(self):
         """``_project_dict`` slices lazily: it reads ``PROJECT_MAX_KEYS`` items,
         never a materialized list of the whole mapping's items."""

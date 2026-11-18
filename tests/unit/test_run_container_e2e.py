@@ -744,6 +744,7 @@ def test_plot_sweep_runs_on_supplied_profile_when_instance_state_is_unset(tmp_pa
         allow_live_writes=True,
         plot_profile="",
         artifacts_dir=tmp_path,
+        read_delay=0.0,
     )
     asyncio.run(runner._run_plot_sweep(session, "reporter-profile"))
     calls = session.call_tool.call_args_list
@@ -766,6 +767,7 @@ def test_dashboard_sweep_runs_on_supplied_profile_when_instance_state_is_unset(t
         allow_live_writes=True,
         plot_profile="",
         artifacts_dir=tmp_path,
+        read_delay=0.0,
     )
     asyncio.run(runner._run_dashboard_sweep(session, "reporter-profile"))
     calls = session.call_tool.call_args_list
