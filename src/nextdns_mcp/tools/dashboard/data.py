@@ -25,6 +25,17 @@ from ...utils import (
     sanitize_label,
 )
 
+# Byte ceiling on the bounded (non-``;series``) analytics endpoints this
+# dashboard fetches. A ``;series`` answer is capped at MAX_SERIES_RESPONSE_BYTES
+# at every door; the eleven non-series endpoints take a ``limit`` (<= 500 rows),
+# and the widest honest answer - 500 destination rows carrying domain samples -
+# fits well inside this ceiling, so the cap only ever fires on a pathological
+# upstream document. overviewDashboard was the analytics door that capped
+# nothing: with ``section="all"`` it fans out to 12 endpoints, and an uncapped
+# aggregate went straight into a rendered PrefabApp (issue #550, follow-up to
+# #424).
+MAX_DASHBOARD_RESPONSE_BYTES = 512_000
+
 
 def _time_params(from_time: str | int | None, to_time: str | int | None) -> dict[str, Any]:
     """Extract normalized time window parameters."""
@@ -64,10 +75,11 @@ async def _fetch_analytics_payload(
     - shared with ``plots._fetch_series_payload`` so the error contract cannot be
     copied twice and drift. What stays here is the decision only a dashboard
     endpoint can make: a ``;series`` response is capped at
-    ``MAX_SERIES_RESPONSE_BYTES``, the bounded analytics endpoints are not.
+    ``MAX_SERIES_RESPONSE_BYTES``, and every other analytics endpoint at
+    ``MAX_DASHBOARD_RESPONSE_BYTES`` - an uncapped fetch is an unbounded page.
     """
     url = f"/profiles/{profile_id}/analytics/{endpoint}"
-    max_bytes = MAX_SERIES_RESPONSE_BYTES if ";series" in endpoint else None
+    max_bytes = MAX_SERIES_RESPONSE_BYTES if ";series" in endpoint else MAX_DASHBOARD_RESPONSE_BYTES
     return await fetch_analytics_payload(url, params, max_response_bytes=max_bytes)
 
 

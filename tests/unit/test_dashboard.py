@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastmcp.tools.base import ToolResult
 
+from nextdns_mcp import chart_ui as chart_ui_module
 from nextdns_mcp import charts as charts_module
 from nextdns_mcp import utils as utils_mod
 from nextdns_mcp.tools import dashboard as dash_module
@@ -14,6 +15,7 @@ from nextdns_mcp.tools.dashboard import components as ui
 from nextdns_mcp.tools.dashboard import data as data_mod
 from nextdns_mcp.tools.dashboard import formatters as fmt
 from nextdns_mcp.tools.dashboard import tool as tool_mod
+from nextdns_mcp.tools.dashboard.data import MAX_DASHBOARD_RESPONSE_BYTES
 from nextdns_mcp.transport import MAX_SERIES_RESPONSE_BYTES
 
 
@@ -109,10 +111,25 @@ class TestDashboardHelpers:
         card = ui._build_queries_series_card({"meta": {"series": {"times": times}}, "data": series_data})
         chart = _find_component(card, "AreaChart")
         assert chart is not None
-        assert chart.model_dump(exclude={"id"}, by_alias=True) == charts_module.build_timeseries_area_chart(
+        assert chart.model_dump(exclude={"id"}, by_alias=True) == chart_ui_module.build_timeseries_area_chart(
             charts_module.build_chart_data(times, series_data),
-            charts_module.build_chart_series(series_data),
+            chart_ui_module.build_chart_series(series_data),
         ).model_dump(exclude={"id"}, by_alias=True)
+
+    def test_build_queries_series_card_downsamples_to_the_chart_budget(self):
+        # A multi-year overview answers up to 1,999 intervals; the card must
+        # render under the shared chart budget, like plotAnalytics does, or the
+        # raw rows inflate every other card on the page (issue #550).
+        n = 1999
+        times = [f"2024-01-01T{(i // 3600) % 24:02d}:{(i // 60) % 60:02d}:{i % 60:02d}Z" for i in range(n)]
+        series_data = [{"name": "blocked", "queries": [2] * n}]
+        card = ui._build_queries_series_card({"meta": {"series": {"times": times}}, "data": series_data})
+        chart = _find_component(card, "AreaChart")
+        assert chart is not None
+        assert len(chart.data) <= charts_module.PLOT_CHART_MAX_POINTS
+        assert len(chart.data) == 250  # ceil(1999 / ceil(1999/250)) = 250 buckets
+        # Bucketing sums, so the rendered series still carries the upstream total.
+        assert sum(row["series_0"] for row in chart.data) == 2 * n
 
     def test_build_domains_card(self):
         data = [{"domain": "example.com", "queries": 50}, {}]
@@ -273,14 +290,15 @@ class TestDashboardFetchAndValidation:
         assert payload == {"data": [{"ok": True}]} and err is None
 
     @pytest.mark.asyncio
-    async def test_fetch_analytics_payload_series_cap_only_for_series(self, monkeypatch):
+    async def test_fetch_analytics_payload_caps_series_and_bounded_endpoints(self, monkeypatch):
+        """`;series` runs under the series ceiling, every other endpoint under the dashboard cap."""
         stub = AsyncMock(return_value={"data": []})
         monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", stub)
 
         payload, err = await data_mod._fetch_analytics_payload("p1", "status")
         assert payload == {"data": []} and err is None
         _, kwargs = stub.call_args
-        assert kwargs["max_response_bytes"] is None
+        assert kwargs["max_response_bytes"] == MAX_DASHBOARD_RESPONSE_BYTES
 
         stub.reset_mock()
         payload, err = await data_mod._fetch_analytics_payload("p1", "status;series")

@@ -11,8 +11,9 @@ The package is split by responsibility, one concern per module:
 
 Import the surface from here (``from nextdns_mcp.tools.dashboard import
 overviewDashboard``); names beginning with ``_`` inside the submodules are
-package-internal. Shared chart and time-resolution primitives are not here - they
-live in ``nextdns_mcp.charts``, which neither this package nor ``tools.plots`` owns.
+package-internal. Shared chart and time-resolution primitives are not here -
+the pure ones live in ``nextdns_mcp.charts`` and the Prefab chart builders in
+``nextdns_mcp.chart_ui``, neither of which this package or ``tools.plots`` owns.
 
 SPDX-License-Identifier: MIT
 """

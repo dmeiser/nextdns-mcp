@@ -1,4 +1,4 @@
-"""Shared time-series primitives: range resolution, payload shape, chart rows and series.
+"""Shared time-series primitives: range resolution, payload shape, chart rows and series budgets.
 
 Both hand-written analytics surfaces consume this module - ``tools.plots`` plots one
 series, ``tools.dashboard`` renders many - and neither one owns it. The primitives
@@ -6,6 +6,13 @@ used to live in ``tools.plots`` and be imported by name from there, which made a
 rename inside the plotting tool a silent break in the dashboard and left a 1,100-line
 module reaching across a module boundary for ``_``-prefixed names. Public names here
 are the contract; the ``_``-prefixed helpers are this module's own detail.
+
+Nothing in this module imports the Prefab UI component library. The builders that
+need it - the dashboard theme, the ``ChartSeries`` metadata, the shared
+``AreaChart`` factory - live beside it in ``chart_ui`` (issue #550). The split is
+what lets ``spec_tools``, the door every generated tool stands behind, price a
+series request through this module without pulling the component tree into a
+process that renders nothing.
 
 SPDX-License-Identifier: MIT
 """
@@ -16,24 +23,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from prefab_ui.app import Theme
-from prefab_ui.components.charts import AreaChart, ChartSeries
-
 from .errors import ErrorCode, error_payload
-from .utils import sanitize_label
-
-DASHBOARD_THEME = Theme(
-    accent=220,
-    css="""
-:root, .dark {
-  --chart-1: #3b82f6;
-  --chart-2: #10b981;
-  --chart-3: #f59e0b;
-  --chart-4: #ef4444;
-  --chart-5: #8b5cf6;
-}
-""",
-)
 
 # Maximum number of data points a single series response may contain (issue #267).
 # The point count is the requested range divided by the interval, so bounding the
@@ -44,6 +34,15 @@ DASHBOARD_THEME = Theme(
 # bound on the ``interval`` argument itself stays with the tool that publishes it.
 PLOT_MAX_POINTS = 2000
 
+# Visual cap on the points one rendered chart carries: even when the series budget
+# allows up to PLOT_MAX_POINTS points, embedding that many raw point dicts in
+# structured_content bloats MCP/LLM client contexts. When a series exceeds this,
+# the visual chart is downsampled into buckets by ``downsample_chart_series``.
+# The plotting tool set this ceiling; the dashboard's queries card must render
+# under it too - it sits inside a page of other cards, so an unbudgeted chart
+# there is worse, not better, than in a single-chart result (issue #550).
+PLOT_CHART_MAX_POINTS = 250
+
 # Relative from/to values such as "-1d" or "-7d", with their unit in seconds.
 # "y" is a 365-day year, matching how the analytics endpoints read a year. The
 # unit is matched case-sensitively: an upper-case letter is a different unit
@@ -51,27 +50,6 @@ PLOT_MAX_POINTS = 2000
 # would size a months-long range as minutes.
 _RELATIVE_TIME_RE = re.compile(r"^(-?)(\d+)([smhdwy])$")
 _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
-
-
-def _extract_series_label(series: dict[str, Any], index: int) -> str:
-    """Return a human-readable label for a time-series data entry.
-
-    Series names come from the upstream API, so the label is sanitized here -
-    the single extraction point every chart series passes through.
-    """
-    for key, value in ((key, series.get(key)) for key in ("name", "status", "protocol", "version", "id")):
-        if value is not None and value != "":
-            return sanitize_label(value)
-    return _series_boolean_label(series, index)
-
-
-def _series_boolean_label(series: dict[str, Any], index: int) -> str:
-    """Label a status-shaped entry by its boolean flag, or by position when it has neither."""
-    if "validated" in series:
-        return "validated" if series["validated"] else "not_validated"
-    if "encrypted" in series:
-        return "encrypted" if series["encrypted"] else "unencrypted"
-    return f"series_{index}"
 
 
 def _parse_series_timestamp(value: str) -> datetime:
@@ -133,59 +111,42 @@ def build_chart_data(
     return [_build_chart_point(t, idx, query_lists) for idx, t in enumerate(times)]
 
 
-_STATUS_COLORS = {
-    "blocked": "#ef4444",
-    "default": "#3b82f6",
-    "allowed": "#3b82f6",
-}
+def _bucket_series_queries(queries: list[int] | None, n: int, bucket_size: int) -> list[int]:
+    """Sum a single series' query counts into chunks of ``bucket_size``."""
+    q = queries or []
+    return [sum(q[start : min(start + bucket_size, n)]) for start in range(0, n, bucket_size)]
 
 
-def _series_color(series: dict[str, Any]) -> str | None:
-    """Color blocked queries red and allowed/default queries blue."""
-    for key in ("status", "name"):
-        val = str(series.get(key) or "").lower()
-        if val in _STATUS_COLORS:
-            return _STATUS_COLORS[val]
-    return None
+def _bucket_single_series(series: dict[str, Any], n: int, bucket_size: int) -> dict[str, Any]:
+    """Return a copy of ``series`` with its query counts bucketed."""
+    updated = dict(series)
+    updated["queries"] = _bucket_series_queries(series.get("queries"), n, bucket_size)
+    return updated
 
 
-def build_chart_series(series_data: list[dict[str, Any]]) -> list[ChartSeries]:
-    """Build the series metadata list for the Prefab LineChart."""
-    return [
-        ChartSeries(
-            dataKey=f"series_{idx}",
-            label=_extract_series_label(series, idx),
-            color=_series_color(series),
-        )
-        for idx, series in enumerate(series_data)
-    ]
+def downsample_chart_series(
+    times: list[str],
+    series_data: list[dict[str, Any]],
+    max_points: int = PLOT_CHART_MAX_POINTS,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Downsample the visual chart series into at most ``max_points`` buckets.
 
+    Aggregates each series' per-point query counts by summing within a
+    bucket and keeps a representative timestamp per bucket, so the visual
+    chart stays compact while totals are preserved. Full-resolution data is
+    not retained in the rendered chart.
 
-def build_timeseries_area_chart(
-    data: list[dict[str, Any]],
-    series: list[ChartSeries],
-) -> AreaChart:
-    """Build the time-series ``AreaChart`` both hand-written surfaces render.
-
-    ``tools.plots`` and the dashboard's queries card each carried their own copy
-    of the same component kwargs - smooth curve, no dots, 260px tall, legend,
-    tooltip and grid on, x-axis the ``time`` key of ``build_chart_data`` rows -
-    alongside the shared data and series builders above (issue #439). Copies of
-    a configuration can only drift, and a drift here would show up as the two
-    surfaces rendering the same series differently; this module, which neither
-    surface owns, is where that configuration lives.
+    Callers that also *report* the interval count report the upstream
+    ``len(times)``, not the downsampled length: the chart was drawn with
+    fewer points, but the series the caller asked for still had all of them.
     """
-    return AreaChart(
-        data=data,
-        series=series,
-        xAxis="time",
-        curve="smooth",
-        showDots=False,
-        height=260,
-        showLegend=True,
-        showTooltip=True,
-        showGrid=True,
-    )
+    n = len(times)
+    if n <= max_points:
+        return times, series_data
+    bucket_size = math.ceil(n / max_points)
+    new_times = [times[i] for i in range(0, n, bucket_size)]
+    new_series = [_bucket_single_series(s, n, bucket_size) for s in series_data]
+    return new_times, new_series
 
 
 def current_time() -> float:
