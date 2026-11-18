@@ -15,10 +15,10 @@ from fastmcp.tools.base import ToolResult
 
 from nextdns_mcp import charts as charts_module
 from nextdns_mcp import client as client_module
+from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools import dashboard as dash_module
 from nextdns_mcp.tools import plots as plots_module
 from nextdns_mcp.tools.dashboard import data as data_mod
-from nextdns_mcp.tools.dashboard import tool as tool_mod
 
 
 class _StreamedResponse:
@@ -58,11 +58,11 @@ def mock_api_client(monkeypatch):
 
 
 class TestValidateDashboardLimit:
-    """Unit tests for the dashboard limit gate."""
+    """Unit tests for the shared 1..500 limit gate the dashboard and plots use."""
 
     @pytest.mark.parametrize("limit", [0, -1, -100, 501, 1000, 10_000_000, True])
     def test_out_of_range_limits_rejected(self, limit):
-        err = tool_mod._validate_dashboard_limit(limit)
+        err = utils_module.limit_range_error(limit)
         assert err is not None
         assert err["code"] == "invalid_argument"
         assert err["min_limit"] == 1
@@ -71,7 +71,7 @@ class TestValidateDashboardLimit:
 
     @pytest.mark.parametrize("limit", [1, 10, 500])
     def test_boundary_limits_accepted(self, limit):
-        assert tool_mod._validate_dashboard_limit(limit) is None
+        assert utils_module.limit_range_error(limit) is None
 
 
 class TestOverviewDashboardLimitValidation:
@@ -146,8 +146,9 @@ class TestPlotAnalyticsLimitLowerBound:
     """``plotAnalytics`` rejects non-positive limits (issue #415)."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("limit", [0, -1, -100])
+    @pytest.mark.parametrize("limit", [0, -1, -100, True])
     async def test_non_positive_limit_rejected(self, mock_api_client, monkeypatch, limit):
+        """``True`` is refused with the lower bound, not answered as ``limit=1``."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()

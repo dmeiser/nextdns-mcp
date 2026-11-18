@@ -27,9 +27,10 @@ from ..transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ..utils import (
     PARTIALS_VALUES,
     _build_series_params,
+    limit_range_error,
     normalize_partials,
     normalize_time_value,
-    resolve_profile_id,
+    resolve_default_profile,
 )
 from .metrics import PLOT_METRICS, PlotMetric
 
@@ -42,12 +43,6 @@ logger = logging.getLogger(__name__)
 # rewriting the caller's request: the ``;series`` endpoints take no ``limit``
 # parameter, so the range is the only exposure knob.
 PLOT_INTERVAL_MAX = 86400
-
-# Ceiling on the tool's published ``limit`` parameter, matching the sibling
-# tools' caps. The ``;series`` endpoints consume no limit, so the value is
-# validated but never forwarded; an over-cap value is rejected rather than
-# silently clamped, so a caller is never told less than the tool enforced.
-PLOT_LIMIT_MAX = 500
 
 
 def _build_series_chart(
@@ -97,22 +92,7 @@ def _validate_interval_and_limit(interval: int, limit: int) -> dict[str, Any] | 
             interval=interval,
         )
 
-    if limit < 1:
-        return error_payload(
-            ErrorCode.INVALID_ARGUMENT,
-            f"limit must be at least 1, got {limit}",
-            min_limit=1,
-            limit=limit,
-        )
-
-    if limit > PLOT_LIMIT_MAX:
-        return error_payload(
-            ErrorCode.INVALID_ARGUMENT,
-            f"limit must not exceed {PLOT_LIMIT_MAX}, got {limit}",
-            max_limit=PLOT_LIMIT_MAX,
-            limit=limit,
-        )
-    return None
+    return limit_range_error(limit)
 
 
 def _validate_plot_params(
@@ -122,7 +102,7 @@ def _validate_plot_params(
     from_time: str | int = "-1d",
     to_time: str | int = "now",
     limit: int = 10,
-) -> tuple[str | None, dict[str, Any] | None]:
+) -> tuple[str, None] | tuple[None, dict[str, Any]]:
     """Validate metric, interval, limit, range, and profile ID parameters for plotting."""
     if metric not in PLOT_METRICS:
         return None, error_payload(
@@ -139,7 +119,7 @@ def _validate_plot_params(
     if budget_error:
         return None, budget_error
 
-    return resolve_profile_id(profile_id, allow_default=True)
+    return resolve_default_profile(profile_id)
 
 
 async def _fetch_series_payload(
@@ -184,11 +164,9 @@ async def _plot_analytics_series_impl(
     if partials_error:
         return partials_error
 
-    target_profile, val_error = _validate_plot_params(metric, interval, profile_id, from_time, to_time, limit)
-    if val_error:
-        return val_error
-    if target_profile is None:
-        return error_payload(ErrorCode.INTERNAL_ERROR, "Profile resolution failed")
+    resolved = _validate_plot_params(metric, interval, profile_id, from_time, to_time, limit)
+    if resolved[1] is not None:
+        return resolved[1]
 
     params: dict[str, Any] = _build_series_params(
         from_time=from_time,
@@ -199,7 +177,7 @@ async def _plot_analytics_series_impl(
         partials=partials,
     )
 
-    return await _fetch_plot_series(metric, target_profile, params)
+    return await _fetch_plot_series(metric, resolved[0], params)
 
 
 def _validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:
@@ -286,14 +264,14 @@ async def plotAnalytics(
     Default window: ``from_time="-1d"`` to ``to_time="now"`` (1 day).
 
     The ``;series`` endpoint takes no ``limit`` parameter: ``limit`` is part of
-    this tool's published surface, is rejected above 500 rather than clamped,
-    and is never forwarded, so the requested range is the only thing that bounds
-    the response. Three server-side limits are enforced before the request is
-    built, and each is rejected with an ``invalid_argument`` error naming the
-    limit rather than silently adjusted:
+    this tool's published surface, is rejected outside ``1..500`` rather than
+    clamped, and is never forwarded, so the requested range is the only thing
+    that bounds the response. Three server-side limits are enforced before the
+    request is built, and each is rejected with an ``invalid_argument`` error
+    naming the limit rather than silently adjusted:
 
     - ``interval`` must be between 60 and 86400 seconds.
-    - ``limit`` must not exceed 500.
+    - ``limit`` must be between 1 and 500.
     - The range must be interpretable (a Unix timestamp, an ISO 8601
       timestamp, ``now``, or a relative offset such as ``-7d``; a relative
       unit letter is read case-sensitively and a timestamp with no timezone is

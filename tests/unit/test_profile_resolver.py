@@ -17,11 +17,12 @@ import pytest
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import spec_tools
+from nextdns_mcp import utils as utils_module
 from nextdns_mcp.errors import ErrorCode
 from nextdns_mcp.tools.dashboard import overviewDashboard
 from nextdns_mcp.tools.doh import dohLookup
 from nextdns_mcp.tools.plots import plotAnalytics
-from nextdns_mcp.utils import resolve_profile_id
+from nextdns_mcp.utils import resolve_default_profile, resolve_profile_id
 
 
 @pytest.fixture
@@ -177,6 +178,39 @@ class TestResolveProfileIdMandatory:
         assert error is not None
         assert error["code"] == ErrorCode.INVALID_PROFILE_ID
         assert error["error"] == f"Invalid profile_id format: {invalid_id}"
+
+
+class TestResolveDefaultProfile:
+    """The shared fail-closed wrapper the three composite tools resolve through.
+
+    ``resolve_default_profile`` answers ``(id, None)`` or ``(None, error)`` and
+    fills in ``internal_error`` when the resolver itself answers neither, so no
+    composite tool needs its own ``if pid is None`` guard again - a per-tool
+    ``assert`` would be stripped by ``python -O`` into a ``/profiles/None/...`` URL.
+    """
+
+    def test_resolves_with_default_fallback(self, clean_env):
+        clean_env("NEXTDNS_DEFAULT_PROFILE", "abc123")
+        assert resolve_default_profile(None) == ("abc123", None)
+
+    def test_missing_profile_stays_missing(self, clean_env):
+        resolved = resolve_default_profile(None)
+        assert resolved[0] is None
+        assert resolved[1] is not None
+        assert resolved[1]["code"] == ErrorCode.MISSING_PROFILE_ID
+
+    def test_malformed_profile_stays_invalid(self):
+        resolved = resolve_default_profile("nope!")
+        assert resolved[0] is None
+        assert resolved[1] is not None
+        assert resolved[1]["code"] == ErrorCode.INVALID_PROFILE_ID
+
+    def test_resolver_answering_neither_is_internal_error(self, monkeypatch):
+        monkeypatch.setattr(utils_module, "resolve_profile_id", lambda *a, **kw: (None, None))
+        resolved = resolve_default_profile("any")
+        assert resolved[0] is None
+        assert resolved[1] is not None
+        assert resolved[1]["code"] == ErrorCode.INTERNAL_ERROR
 
 
 class TestProfileIdCallSites:

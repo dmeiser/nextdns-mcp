@@ -32,6 +32,7 @@ PACKAGE_MODULES = ("__init__.py", "data.py", "components.py", "formatters.py", "
 # ``spec_tools``, and every generated tool behind it, from importing
 # ``prefab_ui`` (issue #550). Neither consumer owns either module.
 SHARED_PRIMITIVES = (
+    (charts, "analytics_range_error"),
     (charts, "build_chart_data"),
     (charts, "downsample_chart_series"),
     (charts, "resolve_time_point"),

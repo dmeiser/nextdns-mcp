@@ -299,24 +299,40 @@ def _budget_exceeded_error(start: float, end: float, span: float, interval: int)
     )
 
 
-def _span_budget_error(
-    start: float, end: float, from_time: str | int, to_time: str | int, interval: int
-) -> dict[str, Any] | None:
-    """Typed error for a resolved span that is empty or blows the point budget.
+def _range_bounds_or_error(
+    from_time: str | int, to_time: str | int, now: float
+) -> tuple[float, float] | dict[str, Any]:
+    """The resolved ``(start, end)`` of a readable, ordered window, or the typed error for one that is not.
 
-    The budget boundary is exact, not approximate: a series answers one point
-    per interval *including both endpoints*, so a span of ``n * interval`` is
-    ``n + 1`` points. A span must stay strictly under
-    ``PLOT_MAX_POINTS * interval`` for the answer to fit inside the
-    ``PLOT_MAX_POINTS`` cap - the old ``<=`` admitted exactly the span that
-    answers 2001 points while naming a 2000-point budget.
+    The check fails closed: a range that does not resolve to a positive span is
+    rejected, because an unbounded request is exactly what the budget below
+    exists to prevent.
     """
-    span = end - start
-    if span <= 0:
+    start = resolve_time_point(from_time, now)
+    end = resolve_time_point(to_time, now)
+    if start is None or end is None:
+        return _unresolved_range_error(from_time, to_time)
+    if end <= start:
         return _empty_range_error(from_time, to_time)
-    if span < PLOT_MAX_POINTS * interval:
-        return None
-    return _budget_exceeded_error(start, end, span, interval)
+    return start, end
+
+
+def analytics_range_error(
+    from_time: str | int,
+    to_time: str | int,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    """Typed error for a ``from``/``to`` window that cannot be read or does not end after it starts.
+
+    Every analytics call owes this much, series or not: an unparseable window
+    reaches upstream as a value the API reads differently, where it answers 200
+    with no rows or a 400 that names neither argument, so the caller has nothing
+    to correct. The point budget in ``series_budget_error`` is the stricter
+    check only a ``;series`` call can breach - a non-series endpoint answers
+    top-N rows, so its response is bounded by ``limit``, not by the span.
+    """
+    bounds = _range_bounds_or_error(from_time, to_time, current_time() if now is None else now)
+    return bounds if isinstance(bounds, dict) else None
 
 
 def series_budget_error(
@@ -334,15 +350,21 @@ def series_budget_error(
     naming the limit, never as a silent substitution of the caller's interval,
     which would return a different series than the one asked for (issue #267).
 
-    The check fails closed: a range that does not resolve to a positive span is
-    rejected, because an unbounded request is exactly what the budget exists to
-    prevent.
+    The budget boundary is exact, not approximate: a series answers one point
+    per interval *including both endpoints*, so a span of ``n * interval`` is
+    ``n + 1`` points. A span must stay strictly under
+    ``PLOT_MAX_POINTS * interval`` for the answer to fit inside the
+    ``PLOT_MAX_POINTS`` cap - the old ``<=`` admitted exactly the span that
+    answers 2001 points while naming a 2000-point budget.
     """
-    resolved_now = current_time() if now is None else now
-    start, end = resolve_time_point(from_time, resolved_now), resolve_time_point(to_time, resolved_now)
-    if start is None or end is None:
-        return _unresolved_range_error(from_time, to_time)
-    return _span_budget_error(start, end, from_time, to_time, interval)
+    bounds = _range_bounds_or_error(from_time, to_time, current_time() if now is None else now)
+    if isinstance(bounds, dict):
+        return bounds
+    start, end = bounds
+    span = end - start
+    if span < PLOT_MAX_POINTS * interval:
+        return None
+    return _budget_exceeded_error(start, end, span, interval)
 
 
 def validate_series_payload(payload: dict[str, Any]) -> tuple[list[Any], list[Any]]:
