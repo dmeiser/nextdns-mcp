@@ -11,6 +11,7 @@ SPDX-License-Identifier: MIT
 
 import asyncio
 import time
+from itertools import islice
 from typing import Any, NamedTuple
 
 from ...charts import resolve_time_point, series_budget_error
@@ -218,7 +219,7 @@ def _accumulate_domains(domains: list[str] | None, budget: int = 60) -> str:
         return first[:budget]
     labels.append(first)
     used = len(first)
-    for domain in domains[1:]:
+    for domain in islice(domains, 1, None):
         domain = sanitize_label(domain)
         need = used + 2 + len(domain)
         if need > budget:

@@ -61,9 +61,9 @@ def local_tool_names() -> frozenset[str]:
 # Of those, the ones that answer with content instead of a JSON document. A chart is an
 # interactive Prefab UI view, so there is no payload for a schema to describe; the runner's assertion for it
 # is that the call came back with chart content, which is what run_container_e2e checks.
-# The generative-UI names are not restated here (WORK-142): they arrive through the server's
-# own content/data partition, so a rename there moves this set with it, and WORK-97's split —
-# ``search_prefab_components`` answers with data, not content — lives only on the server.
+# The generative-UI names are not restated here: they arrive through the server's
+# own content/data partition — ``search_prefab_components`` answers with data, not content —
+# so a rename there moves this set with it, and the split lives only on the server.
 CONTENT_TOOLS = frozenset({"plotAnalytics", "overviewDashboard", *generative_ui_content_tool_names()})
 
 # Response shapes for tools whose answer is not the document their endpoint returns.
@@ -114,7 +114,7 @@ TOOL_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     # The generative-UI data tools answer with a JSON string no endpoint returns, so their
-    # shape is pinned here; the names come from the server's content/data partition (WORK-142),
+    # shape is pinned here; the names come from the server's content/data partition,
     # so a rename moves the pin with it and cannot silently orphan it.
     **{name: {"type": "string"} for name in generative_ui_data_tool_names()},
 }

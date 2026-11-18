@@ -53,7 +53,8 @@ def _extract_series_label(series: dict[str, Any], index: int) -> str:
     Series names come from the upstream API, so the label is sanitized here -
     the single extraction point every chart series passes through.
     """
-    for key, value in ((key, series.get(key)) for key in ("name", "status", "protocol", "version", "id")):
+    for key in ("name", "status", "protocol", "version", "id"):
+        value = series.get(key)
         if value is not None and value != "":
             return sanitize_label(value)
     return _series_boolean_label(series, index)
