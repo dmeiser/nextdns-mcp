@@ -10,6 +10,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from .constants import SAFE_PROFILE_ID_PATTERN
 
@@ -150,8 +151,6 @@ def get_default_profile() -> str | None:
     return os.getenv("NEXTDNS_DEFAULT_PROFILE")
 
 
-# Canonical token sets for boolean environment flags. Keep these in sync with
-# the documented values in the README and tests.
 _BOOL_TRUE_TOKENS = frozenset(("true", "1", "yes", "on"))
 _BOOL_FALSE_TOKENS = frozenset(("false", "0", "no", "off", ""))
 _BOOL_TOKENS = _BOOL_TRUE_TOKENS | _BOOL_FALSE_TOKENS
@@ -578,7 +577,7 @@ def validate_configuration() -> None:
     _log_access_control_settings()
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     if name in {"DNS_STATUS_CODES", "VALID_DNS_RECORD_TYPES"}:
         from .tools.doh import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES
 

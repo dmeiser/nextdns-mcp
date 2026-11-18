@@ -190,16 +190,17 @@ class TestBuildSeriesChart:
                 {"name": "allowed", "queries": [5]},
             ]
         )
-        point0 = charts_module._build_chart_point("2024-01-15T10:00:00Z", 0, query_lists)
+        series_keys = ["series_0", "series_1"]
+        point0 = charts_module._build_chart_point("2024-01-15T10:00:00Z", 0, query_lists, series_keys)
         assert point0 == {"time": "2024-01-15T10:00:00Z", "series_0": 10, "series_1": 5}
 
         # Index beyond series_1 length defaults to 0
-        point1 = charts_module._build_chart_point("2024-01-15T11:00:00Z", 1, query_lists)
+        point1 = charts_module._build_chart_point("2024-01-15T11:00:00Z", 1, query_lists, series_keys)
         assert point1 == {"time": "2024-01-15T11:00:00Z", "series_0": 20, "series_1": 0}
 
     def test_build_chart_point_raises_for_invalid_timestamp(self):
         with pytest.raises(ValueError):
-            charts_module._build_chart_point("bad-timestamp", 0, [[1]])
+            charts_module._build_chart_point("bad-timestamp", 0, [[1]], ["series_0"])
 
     def test_extract_series_queries_coalesces_missing_queries(self):
         # A series with no ``queries``, a null ``queries`` and a short list all

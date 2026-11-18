@@ -84,16 +84,18 @@ def _build_chart_point(
     time_str: str,
     time_index: int,
     query_lists: list[list[Any]],
+    series_keys: list[str],
 ) -> dict[str, Any]:
     """Validate timestamp and return a single time-aligned data point.
 
     ``query_lists`` is each series' query list prepared once by the caller (see
-    ``_extract_series_queries``), so building a point does no per-series lookups.
+    ``_extract_series_queries``) and ``series_keys`` the matching ``series_<n>`` keys,
+    so building a point does no per-series lookups or key formatting.
     """
     _parse_series_timestamp(time_str)
     point: dict[str, Any] = {"time": time_str}
-    for s_idx, queries in enumerate(query_lists):
-        point[f"series_{s_idx}"] = queries[time_index] if time_index < len(queries) else 0
+    for key, queries in zip(series_keys, query_lists, strict=True):
+        point[key] = queries[time_index] if time_index < len(queries) else 0
     return point
 
 
@@ -108,7 +110,8 @@ def build_chart_data(
     (issue #434).
     """
     query_lists = _extract_series_queries(series_data)
-    return [_build_chart_point(t, idx, query_lists) for idx, t in enumerate(times)]
+    series_keys = [f"series_{idx}" for idx in range(len(query_lists))]
+    return [_build_chart_point(t, idx, query_lists, series_keys) for idx, t in enumerate(times)]
 
 
 def _bucket_series_queries(queries: list[int] | None, n: int, bucket_size: int) -> list[int]:

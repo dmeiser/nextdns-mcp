@@ -60,7 +60,6 @@ from .data import (
 
 logger = logging.getLogger(__name__)
 
-# Reusable table columns shared across dashboard builders.
 QUERIES_COLUMN = DataTableColumn(key="queries", header="Queries", sortable=True, format="number")
 SHARE_COLUMN = DataTableColumn(key="share", header="Share", sortable=True)
 
