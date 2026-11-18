@@ -302,9 +302,13 @@ def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
     )
 
 
-def _build_gafam_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
-    """Build the GAFAM dominance donut chart and table card."""
-    chart_data, table_rows = _gafam_rows(data)
+def _build_gafam_card(
+    chart_data: list[dict[str, Any]],
+    table_rows: list[dict[str, Any]],
+    view_type: str = "auto",
+) -> Card:
+    """Build the GAFAM dominance donut chart and table card from prefetched rows."""
+    # ``chart_data`` holds one row per upstream item, so an empty chart means empty data.
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle("GAFAM Dominance")
@@ -312,7 +316,7 @@ def _build_gafam_card(data: list[dict[str, Any]], view_type: str = "auto") -> Ca
                 "Traffic share of dominant internet companies (Google, Apple, Facebook, Amazon, Microsoft)."
             )
         with CardContent():
-            if not data:
+            if not chart_data:
                 Text("No GAFAM traffic recorded for this period.", css_class="text-sm text-muted-foreground py-4")
             elif view_type == "bar":
                 _bar_chart(chart_data, "Queries", "#3b82f6")
@@ -334,13 +338,10 @@ def _build_security_section(title: str, val: int, total: int, pct: float) -> Col
     return col
 
 
-def _build_security_card(
-    encryption_data: list[dict[str, Any]],
-    dnssec_data: list[dict[str, Any]],
-) -> Card:
-    """Build the security card for encrypted DNS and DNSSEC rates."""
-    enc_val, enc_total, enc_pct = _calc_rate(encryption_data, "encrypted")
-    dnssec_val, dnssec_total, dnssec_pct = _calc_rate(dnssec_data, "validated")
+def _build_security_card(encryption_rate: tuple[int, int, float], dnssec_rate: tuple[int, int, float]) -> Card:
+    """Build the security card from the encrypted DNS and DNSSEC rate tuples."""
+    enc_val, enc_total, enc_pct = encryption_rate
+    dnssec_val, dnssec_total, dnssec_pct = dnssec_rate
 
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
@@ -439,10 +440,14 @@ def _append_extra_cards(
             _build_domains_card("Root Domains", "Aggregate root domains.", payloads.root_domains, view_type=domain_view)
             _build_ips_card(payloads.ips)
         with Row(gap=4):
-            _build_gafam_card(payloads.gafam, view_type=view_type)
+            gafam_chart, gafam_table = _gafam_rows(payloads.gafam)
+            _build_gafam_card(gafam_chart, gafam_table, view_type=view_type)
             _build_destinations_card(payloads.countries, view_type=view_type)
         with Row(gap=4):
-            _build_security_card(payloads.encryption, payloads.dnssec)
+            _build_security_card(
+                _calc_rate(payloads.encryption, "encrypted"),
+                _calc_rate(payloads.dnssec, "validated"),
+            )
 
 
 def _build_page_app(view: Column) -> PrefabApp:
