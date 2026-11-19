@@ -9,6 +9,7 @@ through the ``call_tool`` proxy.
 """
 
 import json
+import re
 
 import pytest
 
@@ -1334,8 +1335,10 @@ class TestFastMCPPrivateSurface:
             assert hasattr(BM25SearchTransform, name), name
         # The pyproject floor, not an exact pin: uv.lock decides the resolved
         # version, and this guard fails when it drifts below the floor the
-        # borrowed surface was validated against.
-        assert tuple(map(int, fastmcp.__version__.split(".")[:3])) >= (4, 1, 8), fastmcp.__version__
+        # borrowed surface was validated against. Leading numeric segments so
+        # a pre-release string fails the assert, not the parse.
+        version = tuple(int(part) for part in re.findall(r"\d+", fastmcp.__version__)[:3])
+        assert version >= (4, 1, 8), fastmcp.__version__
 
 
 def test_a_loosely_matched_write_name_is_refused_with_the_catalog(monkeypatch):

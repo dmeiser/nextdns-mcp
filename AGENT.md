@@ -64,7 +64,7 @@ Why exactly that order:
 
 ## FastMCP integration surface
 
-These are the FastMCP internals this server leans on. `fastmcp` is version-pinned and Dependabot-bumped, so every bump should re-check this list; a rename in any of them fails at request time rather than at import, and mypy will not see most of it.
+These are the FastMCP internals this server leans on. `fastmcp` carries a `>=4.1.8` floor in `pyproject.toml` and is deliberately unpinned — the library is updated regularly, and the weekly Dependabot run bumps the version resolved in `uv.lock` — so every bump should re-check this list; a rename in any of them fails at request time rather than at import, and mypy will not see most of it.
 
 | Borrowed from | What we do with it | Invariant it carries |
 |---|---|---|
