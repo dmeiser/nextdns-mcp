@@ -1332,7 +1332,10 @@ class TestFastMCPPrivateSurface:
 
         for name in ("_search", "_make_search_tool", "_make_call_tool", "_render_results"):
             assert hasattr(BM25SearchTransform, name), name
-        assert fastmcp.__version__ == "4.1.2"
+        # The pyproject floor, not an exact pin: uv.lock decides the resolved
+        # version, and this guard fails when it drifts below the floor the
+        # borrowed surface was validated against.
+        assert tuple(map(int, fastmcp.__version__.split(".")[:3])) >= (4, 1, 8), fastmcp.__version__
 
 
 def test_a_loosely_matched_write_name_is_refused_with_the_catalog(monkeypatch):

@@ -1167,7 +1167,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "coverage", marker = "extra == 'dev'" },
-    { name = "fastmcp", specifier = "==4.1.8" },
+    { name = "fastmcp", specifier = ">=4.1.8" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.20.1" },
