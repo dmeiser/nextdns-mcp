@@ -131,8 +131,9 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
     ``_make_call_tool`` and ``_render_results`` private, and
     ``BaseSearchTransform.__init__`` sets ``_max_results`` privately too; this
     subclass borrows exactly that surface, on the only subclass there is, and
-    pins ``fastmcp==4.1.2`` with it - the annotations below name the borrowed
-    attributes so a FastMCP bump finds them instead of failing at request time.
+    keeps the ``fastmcp>=4.1.8`` floor with it - the annotations below name the
+    borrowed attributes so a FastMCP bump finds them instead of failing at
+    request time.
 
     The catalog-derived word structures, the compacted per-tool payloads, and
     the two synthetic Tools are memoized on the instance: all of them are
