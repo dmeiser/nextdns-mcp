@@ -142,9 +142,17 @@ def limit_range_error(limit: Any) -> dict[str, Any] | None:
 
     ``bool`` is refused rather than read as its integer value: ``limit=True`` is
     a caller that sent a flag, and answering it as ``limit=1`` silently rewrites
-    the request in a way the caller cannot see or correct.
+    the request in a way the caller cannot see or correct. A non-numeric value
+    (e.g. a string reaching this helper from a direct Python caller, bypassing
+    the tool schema) is refused with the same typed payload instead of raising
+    ``TypeError`` on the range comparison.
     """
-    if isinstance(limit, bool) or limit < ANALYTICS_LIMIT_MIN or limit > ANALYTICS_LIMIT_MAX:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, (int, float))
+        or limit < ANALYTICS_LIMIT_MIN
+        or limit > ANALYTICS_LIMIT_MAX
+    ):
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,
             f"limit must be between {ANALYTICS_LIMIT_MIN} and {ANALYTICS_LIMIT_MAX}, got {limit}",
