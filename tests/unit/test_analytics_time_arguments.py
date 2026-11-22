@@ -29,6 +29,9 @@ class TestTimeValues:
             # A bare negative number is an offset, never an absolute time.
             (-86400, "-86400s"),
             (-1, "-1s"),
+            # The API accepts only whole-second offsets: a fractional offset is
+            # truncated toward zero, not emitted as "-86400.5s" which it rejects.
+            (-86400.5, "-86400s"),
             ("-86400", "-86400s"),
             # The Grafana/Prometheus spelling, in the API's own relative form.
             ("now-1d", "-1d"),

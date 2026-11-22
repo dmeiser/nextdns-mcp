@@ -200,7 +200,10 @@ def normalize_time_value(value: Any) -> Any:
       caller has nothing to correct: across three runs the model retried that
       call ~40 times, varying the interval each time. A negative absolute time
       is not a thing, so it is read as the offset it means, in the API's own
-      relative-seconds spelling (``-86400s``, verified accepted).
+      relative-seconds spelling (``-86400s``, verified accepted). Only integer
+      seconds are accepted in that spelling; a fractional offset like
+      ``-86400.5`` is truncated toward zero (``-86400s``) rather than emitted
+      as ``-86400.5s``, which the API rejects.
     - ``now-1d``, the Grafana/Prometheus spelling. Upstream answers "`from` must
       be number"; the same span in its own spelling (``-1d``) works.
 
@@ -210,7 +213,10 @@ def normalize_time_value(value: Any) -> Any:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return f"{value}s" if value < 0 else value
+        if value >= 0:
+            return value
+        # The API accepts only whole-second offsets; truncate toward zero.
+        return f"{int(value)}s"
     return _normalize_time_text(value)
 
 
