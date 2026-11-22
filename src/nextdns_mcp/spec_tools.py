@@ -158,7 +158,7 @@ def load_spec(path: Path = SPEC_PATH) -> dict[str, Any]:
     return spec
 
 
-_OFFERABLE_ROUTES: list[HTTPRoute] | None = None
+_OFFERABLE_ROUTES: tuple[HTTPRoute, ...] | None = None
 
 
 def _is_offerable(route: HTTPRoute) -> bool:
@@ -176,17 +176,18 @@ def spec_routes(spec: dict[str, Any] | None = None) -> list[HTTPRoute]:
     and the coverage check all ask the same question about the same file, and
     re-reading and re-parsing it for each was the cold-start cost. A caller
     that hands in a spec (tests do, with modified documents) always gets a
-    fresh parse - the cache is for the shipped one only. The cached list is
-    shared; callers must treat it as read-only.
+    fresh parse - the cache is for the shipped one only. The cache itself is
+    stored as a tuple and never handed out: every call gets its own list, so
+    a caller that mutates its result cannot corrupt what later calls see.
     """
     global _OFFERABLE_ROUTES
     if spec is None and _OFFERABLE_ROUTES is not None:
-        return _OFFERABLE_ROUTES
+        return list(_OFFERABLE_ROUTES)
     parsed = parse_openapi_to_http_routes(load_spec() if spec is None else spec)
-    offerable = sorted(filter(_is_offerable, parsed), key=lambda route: str(route.operation_id))
+    offerable = tuple(sorted(filter(_is_offerable, parsed), key=lambda route: str(route.operation_id)))
     if spec is None:
         _OFFERABLE_ROUTES = offerable
-    return offerable
+    return list(offerable)
 
 
 def endpoints_for_routes(routes: list[HTTPRoute] | None = None) -> dict[str, tuple[str, str]]:

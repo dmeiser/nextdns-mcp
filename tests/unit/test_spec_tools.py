@@ -59,6 +59,23 @@ class TestGeneratedCatalog:
         names = spec_tools.spec_tool_names()
         assert names == sorted(names)
 
+    def test_mutating_a_returned_list_cannot_corrupt_the_cache(self):
+        """The process-wide cache is never handed out: a caller mutating the list
+        ``spec_routes()`` returned must not change what any later call sees."""
+        original = [route.operation_id for route in spec_tools.spec_routes()]
+        routes = spec_tools.spec_routes()
+        routes.pop()
+        routes.clear()
+        after = [route.operation_id for route in spec_tools.spec_routes()]
+        assert after == original
+
+    def test_an_explicit_spec_still_gets_a_fresh_parse(self):
+        """The cache is for the shipped document only; handing in a spec parses it."""
+        parsed = spec_tools.spec_routes(spec_tools.load_spec())
+        assert [route.operation_id for route in parsed] == [route.operation_id for route in spec_tools.spec_routes()]
+        parsed.pop()
+        assert len(spec_tools.spec_routes(spec_tools.load_spec())) == len(spec_tools.spec_routes())
+
     def test_parameters_keep_their_descriptions_and_types(self, routes):
         properties = routes["getAnalyticsDomains"].flat_param_schema["properties"]
         assert properties["profile_id"]["type"] == "string"
