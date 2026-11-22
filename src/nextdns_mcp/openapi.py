@@ -60,7 +60,7 @@ from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import close_doh_client
 from .tools.logs import _download_registry, cleanup_successful_downloads
 from .usage import server_instructions
-from .utils import _BARE_NEGATIVE_RE, _NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
+from .utils import BARE_NEGATIVE_RE, NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
 
@@ -356,7 +356,7 @@ def _coerce_float_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
 
 def _preserves_time_string(value: str, schema_types: set[str]) -> bool:
     """Whether a string time value must survive coercion untouched."""
-    return "string" in schema_types and bool(_BARE_NEGATIVE_RE.match(value) or _NOW_OFFSET_RE.match(value))
+    return "string" in schema_types and bool(BARE_NEGATIVE_RE.match(value) or NOW_OFFSET_RE.match(value))
 
 
 class StripExtraFieldsMiddleware(Middleware):
