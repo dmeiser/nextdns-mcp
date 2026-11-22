@@ -15,7 +15,7 @@ from typing import Any
 
 from .config import _BOOL_FALSE_TOKENS, _BOOL_TRUE_TOKENS, get_default_profile
 from .constants import PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
-from .errors import ErrorCode, error_payload
+from .errors import ErrorCode, _cap_with_marker, error_payload
 
 
 def is_safe_profile_id(value: str | int) -> bool:
@@ -300,6 +300,7 @@ def schema_required(schema: dict[str, Any] | None) -> list[str]:
 
 _CONTROL_CHARS_RE = re.compile(r"[\r\n\x00-\x1f\x7f-\x9f]")
 _MAX_LABEL_LENGTH = 200
+_LABEL_TRUNCATION_MARKER = "…"
 
 
 def sanitize_label(value: Any) -> str:
@@ -312,8 +313,8 @@ def sanitize_label(value: Any) -> str:
     exactly once, at extraction/shaping time: the cap appends a character, so
     a second pass would see a 201-character label and cut it again.
     """
-    text = str(value)
-    text = _CONTROL_CHARS_RE.sub("", text)
-    if len(text) > _MAX_LABEL_LENGTH:
-        text = text[:_MAX_LABEL_LENGTH] + "…"
-    return text
+    text = _CONTROL_CHARS_RE.sub("", str(value))
+    # errors._cap_with_marker holds the one cap-and-marker implementation; re-inlining
+    # the comparison here is the second copy of the cut both callers must make identically.
+    capped, _ = _cap_with_marker(text, _MAX_LABEL_LENGTH, _LABEL_TRUNCATION_MARKER)
+    return capped

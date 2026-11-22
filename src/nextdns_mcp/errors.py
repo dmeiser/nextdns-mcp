@@ -463,3 +463,14 @@ class NextDNSResponseTooLargeError(NextDNSError):
     def __init__(self, message: str, max_response_bytes: int):
         super().__init__(message, status_code=None)
         self.max_response_bytes = max_response_bytes
+
+
+def _cap_with_marker(text: str, limit: int, marker: str) -> tuple[str, bool]:
+    """Cut ``text`` past ``limit`` characters, marking the cut and flagging it.
+
+    Shared cap-and-marker implementation: the comparison, prefix slice, marker
+    append, and truncation flag live in :func:`json_bounds.bound_json` (via
+    :class:`json_bounds.BoundSpec`), so this is a thin adapter keeping the
+    ``(text, limit, marker)`` call shape both callers use.
+    """
+    return bound_json(text, BoundSpec(max_string_chars=limit, string_marker=marker))
