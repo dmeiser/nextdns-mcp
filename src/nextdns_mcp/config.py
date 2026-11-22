@@ -10,9 +10,13 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from typing import Any
 
-from .constants import SAFE_PROFILE_ID_PATTERN
+# DNS_STATUS_CODES and VALID_DNS_RECORD_TYPES are re-exported here: callers
+# already read them off this module, and the definitions now live in
+# ``constants`` so the tool layer owns nothing that the base layer republishes.
+# The import is eager rather than lazy because ``constants`` imports nothing
+# from this package, so this edge cannot close a cycle.
+from .constants import DNS_STATUS_CODES, SAFE_PROFILE_ID_PATTERN, VALID_DNS_RECORD_TYPES  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -575,11 +579,3 @@ def validate_configuration() -> None:
             raise ConfigurationError(f"Invalid {env_name}: {raw!r}. Expected one of {sorted(_BOOL_TOKENS - {''})}.")
 
     _log_access_control_settings()
-
-
-def __getattr__(name: str) -> Any:
-    if name in {"DNS_STATUS_CODES", "VALID_DNS_RECORD_TYPES"}:
-        from .tools.doh import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES
-
-        return {"DNS_STATUS_CODES": DNS_STATUS_CODES, "VALID_DNS_RECORD_TYPES": VALID_DNS_RECORD_TYPES}[name]
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
