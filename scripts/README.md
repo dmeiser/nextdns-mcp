@@ -101,7 +101,7 @@ startup, which hard-fails the E2E run when the served catalog drifts from the sp
 ### MCP-Native, API-Verified E2E Harness
 
 - **`ai_e2e_harness.py`** - Python. An MCP-native LLM harness is the actor; the script measures.
-- **`ai_e2e_common.py`** - Python. Shared, pure (network-free) helpers (result model, constant tables, REST read-back).
+- **`ai_e2e_common.py`** - Python. Shared, pure (network-free) helpers (result model, constant tables, MCP content-block readers, REST read-back).
 
 The harness provisions its own isolated test profile, drives the live MCP server
 through an MCP-native actor (default `opencode`, configurable), then independently
