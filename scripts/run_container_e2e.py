@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import ImageContent, TextContent
+from mcp.types import ImageContent
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -340,8 +340,17 @@ def _load_spec_once(path: Path) -> dict[str, Any]:
 
 
 # The "unwrap `data`, read `id`" idiom a create/add answer needs, shared with
-# the actor harness rather than re-typed per site.
+# the actor harness rather than re-typed per site, and the id-to-string
+# fallback that same unwrap uses.
 _unwrap_id = ai_e2e_common._unwrap_id
+_id_text = ai_e2e_common._id_text
+# The blocks of a tool result, and the text field of each one, are read by the
+# same implementation the actor harness uses for the payloads its actor prints:
+# a change to how a text block is recognised then lands once. What stays in this
+# script is its own response handling - the image flag and the
+# last-text-block-wins rule in ``ContainerE2ERunner._parse_response_content``.
+_content_blocks = ai_e2e_common._content_blocks
+_content_block_text = ai_e2e_common._content_block_text
 
 # Early-access security toggles reported from the NextDNS dashboard but not
 # listed in the official API docs. This E2E verifies whether the API actually
@@ -455,13 +464,6 @@ def _parse_json_text(text: str) -> Any:
         return text
 
 
-def _content_block_text(block: Any) -> str | None:
-    """The text of a text content block; None for anything that is not one."""
-    if isinstance(block, TextContent) or getattr(block, "type", "") == "text":
-        return getattr(block, "text", "")
-    return None
-
-
 def _skips_schema_validation(spec: dict[str, Any], parsed_json: Any) -> bool:
     """Nothing to validate: no spec loaded, no payload, or an empty-success answer."""
     return not spec or parsed_json is None or parsed_json == {"success": True}
@@ -480,7 +482,7 @@ def _first_profile_id(res: Any) -> str:
     """The id of the first profile in a listProfiles answer, '' when there is none."""
     if not isinstance(res, dict) or not res.get("data"):
         return ""
-    return str(res["data"][0].get("id") or "")
+    return _id_text(res["data"][0].get("id"))
 
 
 def _document_reads(operations: dict[str, str]) -> list[str]:
@@ -596,9 +598,8 @@ class ContainerE2ERunner:
         """Split a tool result into (response_text, has_image, parsed_json)."""
         response_text = ""
         has_image = False
-        parsed_json: Any = None
 
-        for content_block in getattr(result, "content", []):
+        for content_block in _content_blocks(result):
             if isinstance(content_block, ImageContent) or getattr(content_block, "type", "") == "image":
                 has_image = True
                 continue
