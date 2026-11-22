@@ -29,6 +29,10 @@ scripts/*.jsonl
 .env
 .env.*
 !.env.example
+# Local MCP client config: the real one carries the API key inline, and the
+# example is never needed at runtime. Keep both out of the build context.
+opencode.json
+opencode.json.example
 
 # Documentation (not needed at runtime)
 docs/
