@@ -498,12 +498,3 @@ async def overviewDashboard(
         view_type=view_type,
         domain_view=domain_view,
     )
-    return await _overview_dashboard_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-        section=section,
-        view_type=view_type,
-        domain_view=domain_view,
-    )
