@@ -488,9 +488,8 @@ def validate_schema(data: Any, schema: dict[str, Any], path: str = "$") -> list[
                 errors.extend(item_errors)
 
     # Handle primitive types
-    elif schema_type:
-        if not validate_field_type(data, schema_type):
-            errors.append(f"{path}: expected {schema_type}, got {type(data).__name__}")
+    elif schema_type and not validate_field_type(data, schema_type):
+        errors.append(f"{path}: expected {schema_type}, got {type(data).__name__}")
 
     return errors
 
