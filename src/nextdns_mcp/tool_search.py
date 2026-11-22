@@ -57,7 +57,7 @@ from .tool_search_rank import (
     _word_scorer,
     _words,
 )
-from .utils import schema_required
+from .utils import _truncate_at_boundary, schema_required
 
 logger = logging.getLogger(__name__)
 
@@ -385,10 +385,7 @@ def _truncate_description(dumped: dict[str, Any]) -> None:
     description = str(dumped.get("description") or "")
     if len(description) <= SEARCH_DESCRIPTION_CHARS:
         return
-    cut = description.rfind("\n", 0, SEARCH_DESCRIPTION_CHARS)
-    if cut < SEARCH_DESCRIPTION_CHARS // 2:
-        cut = SEARCH_DESCRIPTION_CHARS
-    dumped["description"] = description[:cut].rstrip() + "\n[description truncated]"
+    dumped["description"] = _truncate_at_boundary(description, SEARCH_DESCRIPTION_CHARS) + "\n[description truncated]"
 
 
 def _compact_entry(tool: Tool) -> tuple[dict[str, Any], int]:
