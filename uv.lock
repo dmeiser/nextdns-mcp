@@ -1144,6 +1144,7 @@ dependencies = [
     { name = "prefab-ui" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "referencing" },
 ]
 
 [package.optional-dependencies]
@@ -1178,6 +1179,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "radon", marker = "extra == 'dev'", specifier = ">=6.0.1" },
+    { name = "referencing", specifier = ">=0.28" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.10" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250915" },
 ]

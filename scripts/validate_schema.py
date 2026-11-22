@@ -14,9 +14,11 @@ Because most vendored schemas declare no ``required`` fields, a match is weak
 evidence rather than a conformance proof; assert_operation_coverage() is what
 keeps the catalog honest about what the spec says exists.
 
-Known limitation: a cyclic $ref whose target has no unambiguous expected type
-(e.g. a mixed anyOf/oneOf union) falls back to permissive validation of that
-subtree rather than guessing a type.
+Validation itself is delegated to ``jsonschema.Draft202012Validator`` — the
+same validator class the server's spec tools compile per route — with the
+document registered as the resolution target for local ``$ref`` pointers, so
+the check enforces the whole schema (``required``, ``enum``, ``pattern``,
+``additionalProperties``, array bounds, composed schemas) instead of a subset.
 """
 
 import json
@@ -25,7 +27,11 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import yaml
+from referencing import Registry, Resource
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import DRAFT202012
 
 # Same bootstrap the harness uses: the catalog's source of truth lives in the
 # package, so it is importable whether this script is run directly
@@ -234,10 +240,10 @@ def titled_non_object_bodies(spec: dict[str, Any]) -> list[str]:
             # $ref'd bodies resolve to their target; only a non-object effective
             # type mis-names the argument (an undecidable type is not "object"
             # either, and FastMCP's namer reads the title from the raw schema).
-            if _extract_schema_type(spec, body_schema) == "object":
+            resolved = _resolve_body_schema(spec, body_schema)
+            if _declared_schema_type(resolved) == "object":
                 continue
-            resolved = resolve_schema(spec, body_schema)
-            if isinstance(resolved, dict) and resolved.get("title") and operation.get("operationId"):
+            if resolved.get("title") and operation.get("operationId"):
                 offenders.append(str(operation["operationId"]))
     return sorted(set(offenders))
 
@@ -295,203 +301,128 @@ def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str
         )
 
 
-def validate_field_type(value: Any, expected_type: str) -> bool:
-    """Validate that a value matches the expected OpenAPI type."""
-    # bool is a subclass of int in Python, so isinstance(True, int) is True;
-    # an exact-type check keeps a boolean from satisfying an integer schema.
-    if expected_type == "integer":
-        return type(value) is int
-
-    type_map: dict[str, type | tuple[type, ...]] = {
-        "string": str,
-        "number": (int, float),
-        "boolean": bool,
-        "array": list,
-        "object": dict,
-        "null": type(None),
-    }
-
-    if isinstance(expected_type, list):
-        # OpenAPI 3.1 writes "a string, or nothing" as ``type: [string, null]``. A value
-        # satisfies that if it satisfies any member; every member is a type name this
-        # validator knows or skips, so the union needs no special case beyond the loop.
-        return any(validate_field_type(value, member) for member in expected_type)
-
-    if expected_type not in type_map:
-        return True  # Unknown type, skip validation
-
-    expected_python_type = type_map[expected_type]
-    return isinstance(value, expected_python_type)
+# Canonical address of the OpenAPI document inside the validator registry. A
+# response schema is a subschema of the document: its ``$ref`` pointers are
+# document-local, so the document is registered as a resource and each local
+# pointer is restated to address it (``#/components/schemas/X`` ->
+# ``nextdns-openapi#/components/schemas/X``). Restating a pointer is addressing
+# plumbing, not validation logic — resolution itself, including recursive
+# schemas, is the library's job, and no cycle guard is needed because the
+# resolver follows references lazily.
+_DOC_URI = "nextdns-openapi"
 
 
-def _resolve_json_pointer(spec: dict[str, Any], pointer: str) -> Any:
-    """Resolve a local JSON pointer (e.g. '#/components/schemas/Foo') in the spec."""
-    if not pointer.startswith("#/"):
+def _with_absolute_refs(node: Any) -> Any:
+    """Restate document-local ``$ref`` pointers to address the registered document."""
+
+    def rewrite(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: f"{_DOC_URI}{item}"
+                if key == "$ref" and isinstance(item, str) and item.startswith("#")
+                else rewrite(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [rewrite(item) for item in value]
+        return value
+
+    return rewrite(node)
+
+
+_spec_registry_memo: tuple[dict[str, Any], Registry[Any]] | None = None
+
+
+def _registry_for_spec(spec: dict[str, Any]) -> Registry[Any]:
+    """The validator registry holding the spec document as its only resource.
+
+    One registry per spec object: callers pass whatever dict they hold — the
+    shipped spec, or a test fixture — and a swapped spec must not be served the
+    previous document's resolution context.
+    """
+    global _spec_registry_memo
+    if _spec_registry_memo is not None and _spec_registry_memo[0] is spec:
+        return _spec_registry_memo[1]
+    resource: Resource[Any] = Resource(contents=spec, specification=DRAFT202012)
+    registry: Registry[Any] = Registry().with_resource(_DOC_URI, resource)
+    _spec_registry_memo = (spec, registry)
+    return registry
+
+
+def _validation_errors(spec: dict[str, Any], schema: dict[str, Any], data: Any) -> list[str]:
+    """Validate ``data`` against ``schema``, resolving ``$ref`` pointers in ``spec``.
+
+    Delegates to ``jsonschema.Draft202012Validator`` — the same validator class
+    the server's spec tools compile per route — so the E2E check enforces the
+    whole document (``required``, ``enum``, ``pattern``, ``additionalProperties``,
+    array bounds, composed schemas) instead of the subset a local
+    re-implementation happened to cover. Returns one ``path: message`` string
+    per violation; a reference the document cannot resolve is reported as a
+    violation rather than crashing the run or passing silently.
+    """
+    if not isinstance(schema, dict):
+        return []
+    validator = jsonschema.Draft202012Validator(_with_absolute_refs(schema), registry=_registry_for_spec(spec))
+    try:
+        return sorted(f"{error.json_path}: {error.message}" for error in validator.iter_errors(data))
+    except Unresolvable as error:
+        return [f"$: unresolvable schema reference: {error}"]
+    except RecursionError:
+        # A ``$ref`` cycle that re-enters the same (instance, schema) pair with no
+        # intervening keyword — a pure ``{"$ref": ...}`` loop — has no constraints
+        # to check and recurses forever; the hand-rolled resolver this replaced
+        # fell back to a permissive subtree in exactly this case. Finite API
+        # payloads cannot reach the recursion limit through keyword-descended
+        # cycles (each step consumes instance depth), so this stays a
+        # same-pair-cycle fallback rather than a depth limit.
+        return []
+
+
+def _resolve_schema_ref(spec: dict[str, Any], ref: str) -> Any:
+    """Resolve one document-local ``$ref`` against the spec document."""
+    try:
+        resolver = _registry_for_spec(spec).resolver(base_uri=_DOC_URI)
+        return resolver.lookup(ref).contents
+    except Unresolvable:
         return None
-    parts = pointer[2:].split("/")
-    target: Any = spec
-    for part in parts:
-        if isinstance(target, dict):
-            target = target.get(part)
-        else:
-            return None
-    return target
 
 
-def _extract_schema_type(
-    spec: dict[str, Any] | None,
-    schema: Any,
-    _visited: set[str] | None = None,
-) -> str | None:
-    """Extract the expected OpenAPI type string from a schema or ref."""
+def _resolve_body_schema(spec: dict[str, Any], schema: Any) -> Any:
+    """Follow a top-level ``$ref`` chain to the schema document it names.
+
+    The title guard reads the schema document itself rather than a payload, so
+    it needs the named schema, not a validation result; resolution goes through
+    the same registry as validation rather than a second pointer-walker.
+    """
+    seen: set[str] = set()
+    while isinstance(schema, dict) and "$ref" in schema:
+        ref = schema["$ref"]
+        if not isinstance(ref, str) or ref in seen:
+            return {}
+        seen.add(ref)
+        target = _resolve_schema_ref(spec, ref)
+        if not isinstance(target, dict):
+            return {}
+        schema = target
+    return schema
+
+
+def _declared_schema_type(schema: Any) -> str | None:
+    """The JSON type a schema document declares, for guards that read specs.
+
+    An explicit ``type`` wins; a schema with ``properties`` or ``items``
+    declares its shape implicitly, the same inference the document relies on.
+    """
     if not isinstance(schema, dict):
         return None
-
-    if _visited is None:
-        _visited = set()
-
-    if "$ref" in schema:
-        ref = schema["$ref"]
-        if ref in _visited:
-            return None
-        target = _resolve_json_pointer(spec, ref) if spec else None
-        if target is None:
-            return None
-        return _extract_schema_type(spec, target, _visited | {ref})
-
     schema_type = schema.get("type")
     if isinstance(schema_type, str):
         return schema_type
-
     if "properties" in schema:
         return "object"
-
     if "items" in schema:
         return "array"
-
     return None
-
-
-def resolve_schema(spec: dict[str, Any] | None, schema: Any, _seen: set[str] | None = None) -> Any:
-    """Recursively resolve ``$ref`` pointers and nested schema references.
-
-    Returns a schema dict with all local references expanded. Cyclic references
-    are broken by returning a schema with the expected type for the repeated
-    reference (or an empty dict if the type cannot be determined), preventing
-    infinite recursion while still enforcing type validation.
-    """
-    if _seen is None:
-        _seen = set()
-    if not isinstance(schema, dict):
-        return schema
-    if "$ref" in schema:
-        ref = schema["$ref"]
-        target = _resolve_json_pointer(spec, ref) if spec else None
-        if target is None:
-            return {}
-        if ref in _seen:
-            # Cycle guard: avoid infinite recursion on self-referential schemas.
-            # Validate the unresolved ref's expected type instead of returning
-            # an empty schema that passes everything.
-            expected_type = _extract_schema_type(spec, target, _seen | {ref})
-            if expected_type:
-                return {"type": expected_type}
-            return {}
-        return resolve_schema(spec, target, _seen | {ref})
-    resolved: dict[str, Any] = {}
-    for key, value in schema.items():
-        if key == "properties" and isinstance(value, dict):
-            resolved[key] = {k: resolve_schema(spec, v, _seen) for k, v in value.items()}
-        elif key == "items":
-            resolved[key] = resolve_schema(spec, value, _seen)
-        elif key in ("allOf", "anyOf", "oneOf") and isinstance(value, list):
-            resolved[key] = [resolve_schema(spec, item, _seen) for item in value]
-        else:
-            resolved[key] = value
-    return resolved
-
-
-def validate_schema(data: Any, schema: dict[str, Any], path: str = "$") -> list[str]:
-    """
-    Recursively validate data against an OpenAPI schema.
-
-    ``$ref`` pointers must already be resolved with ``resolve_schema``.
-    Returns a list of validation error messages.
-    """
-    errors = []
-
-    if schema is None:
-        return errors
-
-    if not isinstance(schema, dict):
-        return errors
-
-    # Handle composed schemas
-    if "allOf" in schema:
-        for i, sub_schema in enumerate(schema["allOf"]):
-            sub_errors = validate_schema(data, sub_schema, f"{path}.allOf[{i}]")
-            errors.extend(sub_errors)
-        if errors:
-            return errors
-
-    if "anyOf" in schema:
-        for i, sub_schema in enumerate(schema["anyOf"]):
-            sub_errors = validate_schema(data, sub_schema, f"{path}.anyOf[{i}]")
-            if not sub_errors:
-                return []
-        errors.append(f"{path}: expected anyOf schema to match")
-        return errors
-
-    if "oneOf" in schema:
-        matches = 0
-        for sub_schema in schema["oneOf"]:
-            sub_errors = validate_schema(data, sub_schema, path)
-            if not sub_errors:
-                matches += 1
-        if matches != 1:
-            errors.append(f"{path}: expected exactly one oneOf schema to match, got {matches}")
-        return errors
-
-    schema_type = schema.get("type")
-
-    # Handle object types
-    if schema_type == "object":
-        if not isinstance(data, dict):
-            errors.append(f"{path}: expected object, got {type(data).__name__}")
-            return errors
-
-        # Check required properties
-        required = schema.get("required", [])
-        for req_field in required:
-            if req_field not in data:
-                errors.append(f"{path}: missing required field '{req_field}'")
-
-        # Validate properties
-        properties = schema.get("properties", {})
-        for field_name, field_schema in properties.items():
-            if field_name in data:
-                field_path = f"{path}.{field_name}"
-                field_errors = validate_schema(data[field_name], field_schema, field_path)
-                errors.extend(field_errors)
-
-    # Handle array types
-    elif schema_type == "array":
-        if not isinstance(data, list):
-            errors.append(f"{path}: expected array, got {type(data).__name__}")
-            return errors
-
-        items_schema = schema.get("items")
-        if items_schema:
-            for i, item in enumerate(data):
-                item_path = f"{path}[{i}]"
-                item_errors = validate_schema(item, items_schema, item_path)
-                errors.extend(item_errors)
-
-    # Handle primitive types
-    elif schema_type and not validate_field_type(data, schema_type):
-        errors.append(f"{path}: expected {schema_type}, got {type(data).__name__}")
-
-    return errors
 
 
 def validate_tool_response(
@@ -533,8 +464,7 @@ def validate_tool_response(
     # one candidate is reported by which one it failed.
     all_errors: list[str] = []
     for op_id, schema in schemas:
-        resolved_schema = resolve_schema(spec, schema)
-        errors = validate_schema(response_data, resolved_schema)
+        errors = _validation_errors(spec, schema, response_data)
         if not errors:
             return "VALID", []
         all_errors.append(f"{op_id}:")
