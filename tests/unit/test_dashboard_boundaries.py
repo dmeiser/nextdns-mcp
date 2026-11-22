@@ -65,6 +65,28 @@ def test_dashboard_never_imports_a_sibling_tool_module():
                 pytest.fail(f"{module_file.name} imports sibling tool module .{node.module}")
 
 
+def test_dashboard_imports_no_private_name_from_a_sibling_dashboard_module():
+    """Cross-module helpers cross under public names (issue #637).
+
+    The package modules shared row shapers, card builders, and summary
+    helpers by importing each other's ``_``-prefixed names, so a private
+    rename in the owning module silently broke its siblings. A name that
+    crosses a module boundary is that module's API and lives without the
+    underscore; ``_``-prefixed names stay module-internal, like the
+    dashboard-internal ``data._fetch_analytics_payload`` documented in
+    AGENT.md. This fails if a cited private import is restored.
+    """
+    sibling_modules = {"data", "components", "formatters", "tool"}
+    for module_file in sorted(PACKAGE_DIR.glob("*.py")):
+        for node in _import_statements(module_file):
+            if not node.level or not node.module:
+                continue
+            if node.module.split(".")[0] not in sibling_modules:
+                continue
+            for alias in node.names:
+                assert not alias.name.startswith("_"), f"{module_file.name} imports private .{node.module}.{alias.name}"
+
+
 def test_dashboard_imports_no_private_name_from_the_shared_charts_modules():
     """Anything crossing into ``charts`` or ``chart_ui`` crosses under a public name."""
     for module_file in sorted(PACKAGE_DIR.glob("*.py")):
