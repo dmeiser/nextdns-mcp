@@ -16,9 +16,11 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import ClassVar
+from types import SimpleNamespace
+from typing import Any, ClassVar
 
 import pytest
+from mcp.types import ImageContent, TextContent
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO_ROOT / "scripts" / "ai_e2e_harness.py"
@@ -577,6 +579,142 @@ class TestParseActorEvents:
     def test_empty_stream(self, h):
         calls, final = h.parse_actor_events([])
         assert calls == [] and final == ""
+
+
+# =========================================================================== #
+# MCP content blocks — the readers both E2E runners share (issue #620)
+# =========================================================================== #
+
+
+@pytest.fixture(scope="module")
+def common(h):
+    """The shared helper module the harness imports.
+
+    Depends on ``h`` so the scripts directory is on ``sys.path`` and the module
+    object is the very one the harness bound to ``common`` — importing it earlier
+    would hand the tests a second copy of the same file.
+    """
+    import ai_e2e_common
+
+    return ai_e2e_common
+
+
+def _tool_result(text_blocks: list[str], with_image: bool = False) -> SimpleNamespace:
+    """A live tool result carrying `text_blocks` as text blocks, optionally an image."""
+    content: list[Any] = [TextContent(type="text", text=text) for text in text_blocks]
+    if with_image:
+        content.insert(1, ImageContent(type="image", data="Zm9v", mimeType="image/png"))
+    return SimpleNamespace(content=content, data=None, structured_content=None, is_error=False)
+
+
+class TestSharedContentReaders:
+    """One implementation reads the text field of a content block (issue #620).
+
+    Each runner used to carry its own reader, and each knew only one of the two
+    shapes a block arrives in: an SDK object on a live tool call, a plain dict in
+    the JSON the actor prints. These pin the behaviour both runners rely on.
+    """
+
+    def test_text_field_read_from_both_shapes(self, common):
+        assert common._content_block_text(TextContent(type="text", text="alpha")) == "alpha"
+        assert common._content_block_text({"type": "text", "text": "alpha"}) == "alpha"
+        # the event JSON an actor prints often omits the type; the payload decides
+        assert common._content_block_text({"text": "alpha"}) == "alpha"
+
+    def test_non_text_block_answers_none_not_the_empty_string(self, common):
+        # None, not "", is what tells the container runner to keep looking.
+        image = ImageContent(type="image", data="Zm9v", mimeType="image/png")
+        assert common._content_block_text(image) is None
+        assert common._content_block_text({"type": "image", "data": "Zm9v"}) is None
+        assert common._content_block_text(SimpleNamespace(type="image", data="Zm9v")) is None
+
+    def test_text_block_carrying_nothing_is_the_empty_string(self, common):
+        assert common._content_block_text({"type": "text", "text": ""}) == ""
+        assert common._content_block_text({"type": "text"}) == ""
+
+    def test_texts_keep_send_order_and_drop_other_block_types(self, common):
+        res = _tool_result(["first ", "second"], with_image=True)
+        assert common._content_texts(res) == ["first ", "second"]
+        # the dict shape the actor harness sees reads the same way
+        assert common._content_texts(
+            {"content": [{"type": "text", "text": "one"}, {"type": "image", "data": "Zm9v"}, {"text": "two"}]}
+        ) == ["one", "two"]
+
+    def test_payload_without_content_blocks_carries_no_blocks(self, common):
+        assert common._content_blocks("a bare string") == []
+        assert common._content_blocks({"result": "no content key"}) == []
+        assert common._content_blocks(SimpleNamespace(content=None)) == []
+        assert common._content_texts(SimpleNamespace(content=[])) == []
+
+    def test_the_harness_uses_this_implementation(self, h, common):
+        """The harness holds no private copy of the reader — its name IS the shared one."""
+        assert h._content_texts is common._content_texts
+
+
+class TestSharedIdNormalisation:
+    """One implementation turns a payload's id into the string callers compare (issue #620)."""
+
+    def test_every_absent_id_is_the_empty_string(self, common):
+        for missing in (None, "", 0, False):
+            assert common._id_text(missing) == ""
+        assert common._id_text("p1") == "p1"
+        assert common._id_text(42) == "42"
+
+    def test_envelope_unwrap_delegates_to_it(self, common):
+        assert common._unwrap_id({"data": {"id": "p1"}}) == "p1"
+        assert common._unwrap_id({"id": "p1"}) == "p1"
+        assert common._unwrap_id({"data": {}}) == ""
+        assert common._unwrap_id({"data": [{"id": "p1"}]}) == ""
+        assert common._unwrap_id(None) == ""
+
+
+class TestFlattenActorToolOutput:
+    """The harness joins every text block when it reports what a tool answered."""
+
+    def test_joins_every_text_block_and_skips_the_image(self, h):
+        res = {
+            "content": [
+                {"type": "text", "text": "boom: "},
+                {"type": "image", "data": "Zm9v"},
+                {"type": "text", "text": "profile not found"},
+            ]
+        }
+        assert h._flatten_text(res) == "boom: profile not found"
+
+    def test_result_whose_only_block_is_an_image_flattens_to_empty(self, h):
+        assert h._flatten_text({"content": [{"type": "image", "data": "Zm9v"}]}) == ""
+
+    def test_payloads_that_are_not_tool_results_keep_their_string_form(self, h):
+        assert h._flatten_text("boom") == "boom"
+        assert h._flatten_text(None) == ""
+        assert h._flatten_text({"error": "boom"}) == str({"error": "boom"})
+
+    def test_output_stays_bounded(self, h):
+        assert len(h._flatten_text("x" * 9000)) == 5000
+        assert len(h._flatten_text({"content": [{"text": "x" * 9000}]})) == 5000
+
+    def test_the_harness_mcp_call_path_reports_the_joined_text(self, h, monkeypatch):
+        """A harness-owned lifecycle call names the failure across its text blocks."""
+
+        class _FakeClient:
+            def __init__(self, transport):
+                self._transport = transport
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def call_tool(self, tool, arguments):
+                answer = _tool_result(["unsupported: ", "no such profile"], with_image=True)
+                answer.is_error = True
+                return answer
+
+        monkeypatch.setattr("fastmcp.Client", _FakeClient)
+        answer = asyncio.run(h._mcp_call({"command": "x", "args": [], "env": {}}, "getProfile", {}))
+        assert answer["ok"] is False
+        assert answer["error"] == "unsupported: no such profile"
 
 
 # =========================================================================== #
