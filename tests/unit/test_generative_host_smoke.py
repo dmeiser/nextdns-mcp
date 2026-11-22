@@ -162,6 +162,8 @@ async def test_host_smoke_result_just_under_limit_succeeds() -> None:
     assert app.model_dump(by_alias=True)["title"] == "Prefab"
 
 
+@requires_deno
+@pytest.mark.asyncio
 async def test_host_smoke_state_does_not_leak_between_calls() -> None:
     """Mutating shared interpreter state in one call cannot poison the next (issue #541)."""
     gen_ui = NextDNSGenerativeUI()

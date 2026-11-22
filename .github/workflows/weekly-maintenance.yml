@@ -143,6 +143,13 @@ jobs:
       - name: Set up Python
         run: uv python install 3.15
 
+      # The Prefab sandbox shells out to the Deno binary, so the smoke tests in
+      # tests/unit/test_generative_host_smoke.py need it here too. Without it
+      # they skip, and the release gate silently runs fewer tests than the PR
+      # gate (unit-tests.yml installs Deno the same way).
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+
       - name: Bump patch version
         id: bump
         run: |
