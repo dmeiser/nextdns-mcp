@@ -68,7 +68,7 @@ Everything the server says about its own catalog comes from the document it gene
 - Error hints name a call the caller can actually make: the hint that points at profile discovery reads `listProfiles()`.
 - Each tool's description is the document's own description of the operation, so what a call accepts is stated where the caller finds the tool.
 
-`NEXTDNS_TOOL_SEARCH` composes with the catalog: with progressive disclosure on — the default, `bm25` — `tools/list` exposes only `search_tools` + `call_tool` and the search index covers the full operation set, so the catalog is read by searching it; `NEXTDNS_TOOL_SEARCH=off` restores the full listing. The instructions list the tool names only when the catalog is small enough for that to be cheaper than searching; the 81-tool catalog points at `search_tools` and leaves the names to `tools/list`.
+`NEXTDNS_TOOL_SEARCH` composes with the catalog: with progressive disclosure on — the default, `bm25` — `tools/list` exposes only `search_tools` + `call_tool` and the search index covers the full operation set, so the catalog is read by searching it; `NEXTDNS_TOOL_SEARCH=off` restores the full listing. The instructions list the tool names only when the catalog is small enough for that to be cheaper than searching; the 81-tool catalog points at `search_tools` and leaves the names to `tools/list`. Why disclosure defaults to `bm25` and how its fallback answers an unmatchable query are recorded in [ADR 0003](architecture/0003-bm25-progressive-tool-disclosure.md).
 
 ## Examples
 
