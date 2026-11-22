@@ -52,7 +52,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .call_log import CallLogMiddleware, call_log_path
-from .client import close_api_client, get_api_client
+from .client import close_api_client, close_raw_probe_client, get_raw_probe_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
 from .constants import SYNTHETIC_TOOL_NAMES
 from .spec_tools import endpoints_for_routes
@@ -598,6 +598,7 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         try:
             await close_api_client()
         finally:
+            await close_raw_probe_client()
             await close_doh_client()
             # The lazily-started Pyodide/Deno sandbox subprocess (issue #408) is
             # stopped by NextDNSGenerativeUI.lifespan(), which FastMCP unwinds
@@ -811,18 +812,18 @@ async def check_nextdns_readiness() -> _HealthFailure | None:
 async def _run_health_probe() -> _HealthFailure | None:
     """Probe the NextDNS API once with the configured credentials.
 
-    The request goes through the client's RAW transport (``raw_request``), which
-    bypasses profile access control: a local ACL denial must not mask the true
-    upstream authentication state. Only the status code and the exception type
-    name are reported, never the API key, the auth headers, or the response
-    body.
+    The request goes through the raw probe transport
+    (``client.get_raw_probe_client()``), which bypasses profile access control:
+    a local ACL denial must not mask the true upstream authentication state.
+    Only the status code and the exception type name are reported, never the
+    API key, the auth headers, or the response body.
 
     Returns:
         None when NextDNS accepted the credentials, otherwise a _HealthFailure.
     """
     try:
-        client = get_api_client()
-        response = await client.raw_request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
+        probe_client = get_raw_probe_client()
+        response = await probe_client.request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
     except ConfigurationError:
         return _configuration_failure()
     except httpx.TimeoutException:
