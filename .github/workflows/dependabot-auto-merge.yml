@@ -2,8 +2,11 @@ name: Dependabot Auto-Merge
 
 on:
   # Use pull_request_target so Dependabot PRs run in the base repository context with a
-  # GITHUB_TOKEN that may write to pull requests (approve/comment/auto-merge). The token
-  # has read-only contents access, so it cannot push to any branch, including main.
+  # GITHUB_TOKEN that may write to pull requests (approve/comment/auto-merge). The job
+  # grants contents:write, so the token can push to any branch, including main; that
+  # grant is what the enablePullRequestAutoMerge call needs (see the permissions block
+  # below), and tests/unit/test_workflow_token_permissions.py guards that this workflow
+  # never uses it against a contents endpoint.
   # This workflow does NOT check out or execute any PR code; it only queries
   # workflow-run statuses and calls the GitHub PR API (review + auto-merge), which is the
   # documented safe pattern for pull_request_target.
