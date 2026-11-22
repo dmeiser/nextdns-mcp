@@ -4,8 +4,10 @@ import asyncio
 import inspect
 import json
 import os
+import tempfile
 import threading
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -962,6 +964,84 @@ def test_deno_command_raises_when_deno_missing(monkeypatch):
     monkeypatch.setattr(generative.shutil, "which", lambda _name: None)
     with pytest.raises(RuntimeError, match="Deno is required"):
         generative._deno_command()
+
+
+def _flag_paths(flag: str, cmd: list[str]) -> list[str]:
+    """Paths carried by one ``--allow-*`` launch flag; empty for a bare (unscoped) flag."""
+    for arg in cmd:
+        if arg == flag:
+            return []  # bare flag: the whole host filesystem
+        if arg.startswith(f"{flag}="):
+            return arg[len(flag) + 1 :].split(",")
+    raise AssertionError(f"{flag} missing from the Deno launch arguments")
+
+
+def test_deno_command_scopes_host_filesystem_access(monkeypatch):
+    """Regression (dmeiser/nextdns-mcp#593): the Deno launch bounds host filesystem access.
+
+    Before the fix `_deno_command` passed bare ``--allow-read`` and ``--allow-write``,
+    so the subprocess running LLM-generated Prefab/Pyodide code could read or write
+    every file the server process can touch — a mounted ``NEXTDNS_API_KEY_FILE``
+    secret and the application source tree included. The fix scopes reads to the
+    sandbox assets plus its own cache directory, and writes to that cache directory
+    alone.
+    """
+    from prefab_ui.sandbox._pyodide import DENO_LOCK, PREFAB_SRC, RUNNER_JS
+
+    from nextdns_mcp import generative
+
+    monkeypatch.setattr(generative.shutil, "which", lambda _name: "/usr/local/bin/deno")
+    cmd = generative._deno_command()
+
+    # Neither bare flag may survive: each must carry an explicit path list.
+    assert "--allow-read" not in cmd
+    assert "--allow-write" not in cmd
+    read_paths = {Path(p).resolve() for p in _flag_paths("--allow-read", cmd)}
+    write_paths = {Path(p).resolve() for p in _flag_paths("--allow-write", cmd)}
+    assert read_paths, "--allow-read must be scoped to explicit paths"
+    assert write_paths, "--allow-write must be scoped to explicit paths"
+
+    sandbox_dir = generative._sandbox_deno_dir().resolve()
+
+    # Reads cover the sandbox assets the runner needs — the runner itself, the
+    # Prefab source tree it walks, the frozen lockfile — and its own cache dir.
+    assert {Path(RUNNER_JS).resolve(), Path(PREFAB_SRC).resolve(), Path(DENO_LOCK).resolve()} <= read_paths
+    # ...and nothing else: no path outside the assets and the sandbox cache dir.
+    assert read_paths <= {
+        Path(RUNNER_JS).resolve(),
+        Path(PREFAB_SRC).resolve(),
+        Path(DENO_LOCK).resolve(),
+        sandbox_dir,
+    }
+    # The server's own source tree is not readable: no read path is inside src/.
+    source_tree = Path(generative.__file__).resolve().parents[1]
+    assert not any(p == source_tree or p.is_relative_to(source_tree) for p in read_paths)
+
+    # Writes reach only the dedicated sandbox cache directory.
+    assert write_paths == {sandbox_dir}
+    assert sandbox_dir != Path(tempfile.gettempdir()).resolve()
+
+
+def test_sandbox_cache_dir_is_dedicated_and_user_keyed(monkeypatch):
+    """The writable sandbox directory is a dedicated, private temp directory."""
+    from nextdns_mcp import generative
+
+    monkeypatch.setattr(generative.shutil, "which", lambda _name: "/usr/local/bin/deno")
+    sandbox_dir = generative._sandbox_deno_dir()
+    assert sandbox_dir.name.startswith("nextdns-mcp-sandbox-")
+    assert sandbox_dir.parent == Path(tempfile.gettempdir()).resolve()
+    assert sandbox_dir.is_dir()
+    assert sandbox_dir.stat().st_mode & 0o777 == 0o700
+
+
+def test_sandbox_startup_env_relocates_deno_cache(monkeypatch):
+    """DENO_DIR points at the sandbox cache dir so the wheel cache lands inside the only writable path."""
+    from nextdns_mcp import generative
+
+    monkeypatch.setenv("NEXTDNS_API_KEY", "super-secret-key")
+    env = generative._sandbox_startup_env()
+    assert env["DENO_DIR"] == str(generative._sandbox_deno_dir())
+    assert "NEXTDNS_API_KEY" not in env
 
 
 def test_discard_startup_reclaims_only_completed_workers():

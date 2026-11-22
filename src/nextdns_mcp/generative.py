@@ -10,8 +10,10 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastmcp.apps.config import AppConfig
@@ -100,13 +102,38 @@ def _sandbox_startup_env() -> dict[str, str]:
     env = _sandbox_env()
     env["DENO_V8_FLAGS"] = f"--max-old-space-size={SANDBOX_V8_HEAP_MB}"
     env["DENO_UNSTABLE_DETECT_CJS"] = "1"
+    # Point the Deno cache at the sandbox's dedicated temp directory so the
+    # module/wheel cache (Pyodide's downloaded wheels included) is the only
+    # writable surface the worker can reach.
+    env["DENO_DIR"] = str(_sandbox_deno_dir())
     return env
+
+
+def _sandbox_deno_dir() -> Path:
+    """Dedicated temp directory that is the sandbox's only writable path.
+
+    Prefab's bootstrap lands its caches inside this directory: Deno keeps its
+    npm/remote module cache here (DENO_DIR), Pyodide serves its runtime files
+    from the cached package directory, and downloaded wheels are cached there.
+    Keyed per user so two OS accounts never share a cache.
+    """
+    uid = os.getuid() if hasattr(os, "getuid") else "user"
+    base = Path(tempfile.gettempdir()) / f"nextdns-mcp-sandbox-{uid}"
+    base.mkdir(mode=0o700, exist_ok=True)
+    return base
 
 
 def _deno_command() -> list[str]:
     deno = shutil.which("deno")
     if deno is None:
         raise RuntimeError("Deno is required for the Prefab sandbox. Install it from https://deno.land")
+    sandbox_dir = _sandbox_deno_dir()
+    # Generated code executes in this subprocess with Pyodide's full ``os``
+    # module, so the launch flags are the sandbox's filesystem boundary
+    # (dmeiser/nextdns-mcp#593): reads are confined to the Prefab sandbox
+    # assets plus the sandbox's own cache dir, and the cache dir is the only
+    # writable path — a mounted NEXTDNS_API_KEY_FILE secret or the
+    # application source tree is unreachable.
     return [
         deno,
         "run",
@@ -115,8 +142,8 @@ def _deno_command() -> list[str]:
         "--frozen",
         "--unstable-detect-cjs",
         "--no-prompt",
-        "--allow-read",
-        "--allow-write",
+        f"--allow-read={RUNNER_JS},{PREFAB_SRC},{DENO_LOCK},{sandbox_dir}",
+        f"--allow-write={sandbox_dir}",
         "--allow-net=cdn.jsdelivr.net:443",
         str(RUNNER_JS),
         str(PREFAB_SRC),
@@ -180,10 +207,11 @@ class HardenedPyodideSandbox(PyodideSandbox):
 
     ``prefab_ui.sandbox.PyodideSandbox`` copies ``os.environ`` verbatim into the Deno
     subprocess (exposing ``NEXTDNS_API_KEY`` to generated code), grants the worker a 4 GiB
-    V8 heap, and keeps one warm interpreter whose imported modules are shared across
-    calls, so code from one ``generate_prefab_ui`` invocation can poison later ones.
-    This subclass keeps the upstream subprocess protocol but vendors ``_start`` with a
-    sanitized environment and a bounded heap, and discards the worker after every
+    V8 heap and unrestricted host filesystem access, and keeps one warm interpreter whose
+    imported modules are shared across calls, so code from one ``generate_prefab_ui``
+    invocation can poison later ones. This subclass keeps the upstream subprocess protocol
+    but vendors ``_start`` with a sanitized environment, a bounded heap, and the bounded
+    launch arguments built by :func:`_deno_command`, and discards the worker after every
     execution so no interpreter state survives between calls.
     """
 
