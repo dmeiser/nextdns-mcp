@@ -38,6 +38,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import logging
 import time
+import weakref
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, NamedTuple
@@ -380,15 +381,20 @@ class StripExtraFieldsMiddleware(Middleware):
     served (everything is registered at startup), so re-fetching each tool's
     schema through FastMCP re-decodes the same large JSON Schema on every
     single call, and rebuilding the owner index re-walks the whole catalog.
-    The caches key on the server identity, so a second server instance in the
-    same process cannot read the first one's catalog.
+    The caches key on the server object itself — never ``id(server)``, whose
+    value Python recycles after garbage collection — so a second server
+    instance in the same process cannot read a dead server's catalog.
     """
 
     def __init__(self, tool_names: Sequence[str] = ()) -> None:
-        # (server identity, tool name) -> that tool's parameter schema.
-        self._schema_cache: dict[tuple[int, str], dict[str, Any]] = {}
-        # (server identity) -> argument-name owner index, built on first use.
-        self._owner_cache: tuple[int, dict[str, tuple[str, ...]]] | None = None
+        # server -> tool name -> that tool's parameter schema. The weak key is
+        # the server object, not id(server): id() values are reused once an
+        # object is collected, which let a new server read a dead server's
+        # cached schema. Entries vanish with the server they belong to.
+        self._schema_cache: weakref.WeakKeyDictionary[FastMCP, dict[str, dict[str, Any]]] = weakref.WeakKeyDictionary()
+        # server -> argument-name owner index, built on first use. Same weak
+        # keying as _schema_cache, for the same id()-reuse reason.
+        self._owner_cache: weakref.WeakKeyDictionary[FastMCP, dict[str, tuple[str, ...]]] = weakref.WeakKeyDictionary()
         # The server's registration list: the only source that enumerates the
         # real tools under disclosure (see _catalog_argument_index).
         self._tool_names: tuple[str, ...] = tuple(tool_names)
@@ -400,22 +406,27 @@ class StripExtraFieldsMiddleware(Middleware):
         be shadowed by it, and misses are off the served path anyway (FastMCP
         rejects unknown names right after this middleware returns).
         """
-        key = (id(fastmcp_server), tool_name)
-        cached = self._schema_cache.get(key)
+        server_cache = self._schema_cache.get(fastmcp_server)
+        if server_cache is None:
+            server_cache = {}
+            self._schema_cache[fastmcp_server] = server_cache
+        cached = server_cache.get(tool_name)
         if cached is not None:
             return cached
         tool = await fastmcp_server.get_tool(tool_name)
         if tool is None:
             return None
         parameters: dict[str, Any] = tool.parameters or {}
-        self._schema_cache[key] = parameters
+        server_cache[tool_name] = parameters
         return parameters
 
     async def _owner_index(self, fastmcp_server: FastMCP) -> dict[str, tuple[str, ...]]:
         """The registered catalog's argument-owner index, built once per server."""
-        if self._owner_cache is None or self._owner_cache[0] != id(fastmcp_server):
-            self._owner_cache = (id(fastmcp_server), await _catalog_argument_index(fastmcp_server, self._tool_names))
-        return self._owner_cache[1]
+        cached = self._owner_cache.get(fastmcp_server)
+        if cached is None:
+            cached = await _catalog_argument_index(fastmcp_server, self._tool_names)
+            self._owner_cache[fastmcp_server] = cached
+        return cached
 
     def _get_schema_property_types(self, prop_schema: Any) -> set[str]:
         """Extract JSON Schema type(s) from a property schema.
