@@ -1017,6 +1017,8 @@ class TestAnswerByteBudget:
         """Skip-and-continue: breaking at the first overflow hid the small results after it."""
         from fastmcp.tools.base import Tool
 
+        import nextdns_mcp.tool_search_answer
+
         small_one = Tool.from_function(lambda: None, name="smallOne", description="a")
         huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
         small_two = Tool.from_function(lambda: None, name="smallTwo", description="b")
@@ -1025,7 +1027,7 @@ class TestAnswerByteBudget:
         cost_two = ts._compact_entry(small_two)[1]
         assert cost_huge > cost_one and cost_huge > cost_two
         # The budget fits exactly the two small results, framing comma counted.
-        monkeypatch.setattr(ts, "SEARCH_ANSWER_MAX_BYTES", cost_one + len(",") + cost_two)
+        monkeypatch.setattr(nextdns_mcp.tool_search_answer, "SEARCH_ANSWER_MAX_BYTES", cost_one + len(",") + cost_two)
         names = [result["name"] for result in ts._compact_search_results([small_one, huge, small_two])]
         assert names == ["smallOne", "smallTwo"]
 
@@ -1033,7 +1035,9 @@ class TestAnswerByteBudget:
         """An empty answer is worse than a big one: the head stays no matter its size."""
         from fastmcp.tools.base import Tool
 
-        monkeypatch.setattr(ts, "SEARCH_ANSWER_MAX_BYTES", 1)
+        import nextdns_mcp.tool_search_answer
+
+        monkeypatch.setattr(nextdns_mcp.tool_search_answer, "SEARCH_ANSWER_MAX_BYTES", 1)
         huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
         small = Tool.from_function(lambda: None, name="smallOne", description="b")
         assert [result["name"] for result in ts._compact_search_results([huge, small])] == ["hugeOne"]
@@ -1242,7 +1246,7 @@ class TestShapeRepairAnnouncesItself:
 
         from fastmcp import Client
 
-        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search_shape"):
             async with Client(build_mcp_server()) as client:
                 result = await client.call_tool(
                     "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
@@ -1258,20 +1262,22 @@ class TestShapeRepairAnnouncesItself:
 
         from fastmcp import Client
 
-        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search_shape"):
             async with Client(build_mcp_server()) as client:
                 result = await client.call_tool(
                     "call_tool", {"name": "getDenylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
                 )
         assert "resolved_from" not in (getattr(result, "structured_content", None) or {})
-        assert not [r for r in caplog.records if r.name == "nextdns_mcp.tool_search" and r.levelno >= logging.WARNING]
+        assert not [
+            r for r in caplog.records if r.name == "nextdns_mcp.tool_search_shape" and r.levelno >= logging.WARNING
+        ]
 
     async def test_a_lifted_argument_repair_logs_at_warning(self, caplog):
         import logging
 
         from fastmcp import Client
 
-        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search_shape"):
             async with Client(build_mcp_server()) as client:
                 await client.call_tool(
                     "call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False
@@ -1283,7 +1289,7 @@ class TestShapeRepairAnnouncesItself:
 
         from fastmcp import Client
 
-        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search_shape"):
             async with Client(build_mcp_server()) as client:
                 found = await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
                 await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}}, raise_on_error=False)

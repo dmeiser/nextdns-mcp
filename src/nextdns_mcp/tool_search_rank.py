@@ -1,8 +1,9 @@
 """Name- and word-aware ranking machinery for the search transforms.
 
-Split out of ``tool_search`` so the serving side (transform overrides, answer
-budgeting, call-shape middleware) and the ranking side stay separately
-readable. Everything here is a pure function of the catalog's tool names,
+Split out of ``tool_search`` so the ranking side and the serving side stay
+separately readable: the transform overrides sit in ``tool_search``, answer
+construction in ``tool_search_answer``, call-shape handling in
+``tool_search_shape``. Everything here is a pure function of the catalog's tool names,
 descriptions, and parameter schemas: query word folding, morphological
 variants, catalog-wide shared-word discounting, and the name-overlap re-rank
 that keeps a tool whose name is literally what the caller asked for ahead of
