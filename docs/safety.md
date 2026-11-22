@@ -49,7 +49,7 @@ Reduce risk when operating on real NextDNS profiles.
 ## Log redaction
 - Query strings can carry DNS search terms, device IDs, and cursor tokens, so any log record at INFO or above that names a request URL or an exception message carries the request path only, never the query; the full URL is logged at DEBUG (issue #139). httpx builds `HTTPStatusError` text from the fully merged request URL, so only the status is logged for those. `_redacted()` and `_log_safe_error()` in `src/nextdns_mcp/client.py` implement both rules — route any new WARNING-or-higher log site through them.
 - Redaction applies to log records, not to what the caller receives: a denied request still returns the URL it asked for (e.g. `Forbidden URL: <url>`), so the caller can correlate the denial with its own request.
-- The `httpx` and `httpcore` loggers are pinned to WARNING by `configure_logging()` (`src/nextdns_mcp/config.py`), because httpx logs every completed request at INFO with the fully merged URL — including the pre-signed object-store URL fetched by `downloadLogs` — which would otherwise re-introduce what the client redacts.
+- The `httpx` and `httpcore` loggers are pinned to WARNING by `configure_logging()` (`src/nextdns_mcp/logging_config.py`), because httpx logs every completed request at INFO with the fully merged URL — including the pre-signed object-store URL fetched by `downloadLogs` — which would otherwise re-introduce what the client redacts.
 
 ## CI credentials
 - GitHub Actions logs are world-readable on a public repository; never print the API key or any file that contains it to CI logs.
