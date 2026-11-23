@@ -28,6 +28,13 @@ class BoundSpec:
     failure the marker exists to prevent. ``max_keys`` keeps that many leading
     dict keys. ``max_depth`` projects anything deeper than that level to ``None``
     instead of recursing into it. A limit a caller does not want stays ``None``.
+
+    ``bound_keys`` applies ``max_string_chars`` to mapping *keys* as well as
+    values, which a caller that inlines a document it did not write needs: the
+    document names its own fields, so a key is as much a size cost as a value
+    (issue #600). Cutting is not injective, so a key the cap made equal to one
+    already in the result is named ``<cut key> [duplicate N]`` rather than
+    overwriting it and losing a field the document carried.
     """
 
     max_string_chars: int
@@ -36,6 +43,7 @@ class BoundSpec:
     omitted_key: str | None = None
     max_keys: int | None = None
     max_depth: int | None = None
+    bound_keys: bool = False
 
 
 def bound_json(value: Any, spec: BoundSpec, depth: int = 0) -> tuple[Any, bool]:
@@ -75,18 +83,45 @@ def _bound_string(value: str, spec: BoundSpec) -> tuple[str, bool]:
 
 
 def _bound_dict(value: dict[Any, Any], spec: BoundSpec, depth: int) -> tuple[dict[Any, Any], bool]:
-    """Rebuild a dict with every value bounded; ``max_keys`` keeps the leading keys.
+    """Rebuild a dict with every key and value bounded; ``max_keys`` keeps the leading keys.
 
     ``islice`` consumes the items view lazily, so a huge mapping yields only the
     kept items to the walk instead of a materialized list of all of them.
     """
     items = value.items() if spec.max_keys is None else islice(value.items(), spec.max_keys)
     bounded: dict[Any, Any] = {}
-    truncated = False
+    cuts: list[bool] = []
     for key, item in items:
-        bounded[key], cut = bound_json(item, spec, depth + 1)
-        truncated = truncated or cut
-    return bounded, truncated
+        bounded_key, key_cut = bound_key(bounded, key, spec)
+        bounded[bounded_key], value_cut = bound_json(item, spec, depth + 1)
+        cuts.extend((key_cut, value_cut))
+    return bounded, any(cuts)
+
+
+def bound_key(bounded: dict[Any, Any], key: Any, spec: BoundSpec) -> tuple[Any, bool]:
+    """Bound one key of the mapping under construction (``bounded``).
+
+    A caller that walks a mapping itself — because it exempts some of its own
+    keys from the value cap — still gets the key rule from here, so the cap and
+    the collision naming cannot drift between the two paths. A key is capped by
+    ``max_string_chars`` only when the spec sets ``bound_keys``; a non-string
+    key cannot come from ``json``, but it must not fail the walk either, so it
+    passes through untouched.
+    """
+    if not spec.bound_keys or not isinstance(key, str):
+        return key, False
+    cut_key, truncated = _bound_string(key, spec)
+    if cut_key in bounded:
+        cut_key = _distinct_key(bounded, cut_key)
+    return cut_key, truncated
+
+
+def _distinct_key(bounded: dict[Any, Any], key: str) -> str:
+    """Name a cut key that now equals a key the result already holds."""
+    numbered = 2
+    while f"{key} [duplicate {numbered}]" in bounded:
+        numbered += 1
+    return f"{key} [duplicate {numbered}]"
 
 
 def _bound_list(value: list[Any], spec: BoundSpec, depth: int) -> tuple[list[Any], bool]:
