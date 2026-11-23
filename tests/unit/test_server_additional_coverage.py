@@ -11,6 +11,19 @@ from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools import doh as doh_module
 
 
+class _FakeServer(SimpleNamespace):
+    """Server stand-in weakref-able, unlike plain ``types.SimpleNamespace``.
+
+    StripExtraFieldsMiddleware keys its caches on the server object via a
+    WeakKeyDictionary; fixture servers must support weak references the way
+    real FastMCP servers do.
+    """
+
+    __slots__ = ("__weakref__",)
+    __hash__ = object.__hash__  # identity, like the real FastMCP server key
+    __eq__ = object.__eq__
+
+
 @pytest.fixture(autouse=True)
 def allow_doh_read_access(monkeypatch):
     """Allow all DoH lookups by opening the readable profile gate via the env."""
@@ -41,7 +54,7 @@ async def test_middleware_leaves_leading_zero_identifiers_alone():
             return StringDummyTool()
 
     context = DummyContext("tool", {})
-    context.fastmcp_context.fastmcp = SimpleNamespace(get_tool=StringToolManager().get_tool, list_tools=_no_tools)
+    context.fastmcp_context.fastmcp = _FakeServer(get_tool=StringToolManager().get_tool, list_tools=_no_tools)
     context.message.arguments = {"password": "0012"}
     result = await mw.on_call_tool(context, _dummy_call_next)
     assert result == {"password": "0012"}
@@ -89,7 +102,7 @@ class DummyFastMCPContext:
     def __init__(self, raise_exc=False):
         # A real FastMCP server answers get_tool and list_tools; the owner hint
         # builds its index from list_tools, so the dummy must carry both.
-        self.fastmcp = SimpleNamespace(get_tool=DummyToolManager(raise_exc=raise_exc).get_tool, list_tools=_no_tools)
+        self.fastmcp = _FakeServer(get_tool=DummyToolManager(raise_exc=raise_exc).get_tool, list_tools=_no_tools)
 
 
 class DummyMessage:
@@ -127,9 +140,7 @@ async def test_strip_extra_fields_middleware_basic_and_exception():
             return StringDummyTool()
 
     string_context = DummyContext("tool", {})
-    string_context.fastmcp_context.fastmcp = SimpleNamespace(
-        get_tool=StringToolManager().get_tool, list_tools=_no_tools
-    )
+    string_context.fastmcp_context.fastmcp = _FakeServer(get_tool=StringToolManager().get_tool, list_tools=_no_tools)
     string_context.message.arguments = {"profile_id": "315244"}
     result = await mw.on_call_tool(string_context, _dummy_call_next)
     assert result == {"profile_id": "315244"}
