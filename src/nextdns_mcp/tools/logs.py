@@ -41,20 +41,39 @@ from ..transport import access_denied_payload_for, buffered_response, read_body_
 logger = logging.getLogger(__name__)
 
 
-def _unlink_temp_file(path: str) -> None:
-    """Best-effort removal of the temp file AND its mkdtemp parent; never masks the original error."""
+def _remove_temp_file(path: str) -> bool:
+    """Best-effort removal of a download temp file AND its mkdtemp parent.
+
+    Returns True when the file is gone (or never existed) and False when the
+    unlink failed. A failed unlink is logged, never raised, so it cannot mask
+    the download's own error; the caller that tracks the path (the download
+    registry) keeps a False path registered so a later cleanup can retry.
+    Parent-directory removal is attempted on every exit and its errors are
+    tolerated: another download may be writing in the same parent, and that is
+    not worth replacing the download's own error with an unrelated one about a
+    directory.
+    """
     try:
         os.unlink(path)
     except FileNotFoundError:
         # Nothing was ever written (e.g. the ACL refused before the file was
         # opened), so there is nothing to remove and nothing to report.
-        pass
+        removed = True
     except OSError:
         logger.warning(f"Failed to remove temp log file: {path}")
+        removed = False
+    else:
+        removed = True
     try:
         os.rmdir(os.path.dirname(path))  # the mkdtemp() parent is empty once the CSV is gone
     except OSError:
         pass
+    return removed
+
+
+def _unlink_temp_file(path: str) -> None:
+    """Fire-and-forget cleanup of a failed download's temp file; ignores the outcome."""
+    _remove_temp_file(path)
 
 
 # Successful downloads this process has handed out. The CSV must outlive the
@@ -91,28 +110,8 @@ def _current_registry() -> dict[str, None]:
 
 
 def _remove_downloaded_file(path: str) -> bool:
-    """Remove a finished download's temp file and its mkdtemp parent.
-
-    Returns True when the file is gone (or never existed) and the path may be
-    unregistered; False when the unlink failed, so the caller KEEPS the path
-    registered and a later cleanup can retry. (The old cleanup popped each
-    path before unlinking and only logged an ``OSError``, so one failed
-    deletion was forgotten forever.)
-    """
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        # Nothing was ever written (e.g. the ACL refused before the file was
-        # opened), so there is nothing to remove and nothing to report.
-        pass
-    except OSError:
-        logger.warning(f"Failed to remove temp log file: {path}")
-        return False
-    try:
-        os.rmdir(os.path.dirname(path))  # the mkdtemp() parent is empty once the CSV is gone
-    except OSError:
-        pass
-    return True
+    """Registry-side cleanup of a finished download; see ``_remove_temp_file``."""
+    return _remove_temp_file(path)
 
 
 def cleanup_successful_downloads() -> None:
