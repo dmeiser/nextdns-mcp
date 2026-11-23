@@ -17,6 +17,8 @@ from typing import Any
 
 from fastmcp.tools.base import Tool
 
+from .utils import _truncate_at_boundary
+
 # Per-result budget for the description in a search answer. Sized so the parts
 # that decide the call - the list types, the operations, the metrics - fit, and
 # the parts that do not (long prose, worked examples) do not ride along on every
@@ -49,8 +51,8 @@ _fallback_answer: contextvars.ContextVar[bool] = contextvars.ContextVar("nextdns
 def _truncate_description(dumped: dict[str, Any]) -> None:
     """Cut one dumped tool definition's description to the per-result budget.
 
-    The cut lands on a line boundary when one falls inside the first half of
-    the budget; a description with no usable early line boundary (a hard-
+    The cut lands on a line boundary at or after the halfway point of the
+    budget; a description with no qualifying line boundary that late (a hard-
     wrapped docstring can wrap mid-sentence) is cut at the budget itself, so
     the cut CAN be mid-sentence. The input schema, which decides whether a
     call is valid, is never touched.
@@ -58,10 +60,7 @@ def _truncate_description(dumped: dict[str, Any]) -> None:
     description = str(dumped.get("description") or "")
     if len(description) <= SEARCH_DESCRIPTION_CHARS:
         return
-    cut = description.rfind("\n", 0, SEARCH_DESCRIPTION_CHARS)
-    if cut < SEARCH_DESCRIPTION_CHARS // 2:
-        cut = SEARCH_DESCRIPTION_CHARS
-    dumped["description"] = description[:cut].rstrip() + "\n[description truncated]"
+    dumped["description"] = _truncate_at_boundary(description, SEARCH_DESCRIPTION_CHARS) + "\n[description truncated]"
 
 
 def _compact_entry(tool: Tool) -> tuple[dict[str, Any], int]:
