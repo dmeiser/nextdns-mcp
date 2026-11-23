@@ -471,8 +471,9 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     # record's tail - arriving in a later chunk, after the carry was dropped -
     # would be appended to the preview as if it were a new record.
     dropping_record = False
-    # fdopen (not open) so the file handle stays usable from the event loop
-    # without tripping ASYNC230; per-chunk writes are small and cheap.
+    # os.open, not open(): 0o600 is the requested mode only at open() time, and
+    # builtin open() takes the system default, so a customer CSV would land
+    # group- and world-readable.
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out:
         async for raw, text in _stream_pieces(response, decoder):
             if written_bytes + len(raw) > max_total:
@@ -482,7 +483,12 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
                 )
             written_bytes += len(raw)
             if raw:
-                out.write(raw)
+                # A write issued here runs on the event loop, and one download is
+                # thousands of writes: while one is in flight every other request
+                # on this server waits for it. The worker thread keeps the loop
+                # free; awaiting each write before pulling the next chunk is what
+                # keeps the bytes in stream order.
+                await asyncio.to_thread(out.write, raw)
             row_count += text.count("\n")
             open_line = not text.endswith("\n")
             piece, preview_carry = _previewable(preview_carry, text)
