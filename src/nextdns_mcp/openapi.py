@@ -777,7 +777,7 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             # it is closed at shutdown.
             await close_redirect_client()
             # The lazily-started Pyodide/Deno sandbox subprocess (issue #408) is
-            # stopped by NextDNSGenerativeUI.lifespan(), which FastMCP unwinds
+            # stopped by PrefabGenerativeUI.lifespan(), which FastMCP unwinds
             # before this lifespan: this module has no dependency on the optional
             # generative module, and one server's shutdown no longer reaches into
             # its siblings' sandboxes (issue #542).

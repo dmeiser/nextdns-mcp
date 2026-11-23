@@ -19,8 +19,9 @@ import shutil
 
 import pytest
 
+from nextdns_mcp import generative_sandbox as sandbox_module
 from nextdns_mcp.chart_placement import _validate_chart_placement
-from nextdns_mcp.generative import NextDNSGenerativeUI, _build_renderer_resource
+from nextdns_mcp.generative import PrefabGenerativeUI, _build_renderer_resource, _renderer_csp
 from nextdns_mcp.generative_sandbox import MAX_RESULT_BYTES, MAX_WIRE_LINE_BYTES
 
 requires_deno = pytest.mark.skipif(
@@ -39,14 +40,17 @@ SMOKE_CODE = """with PrefabApp() as app:
 """
 
 
+async def _generate_tool(gen_ui: PrefabGenerativeUI):
+    """The published generate_prefab_ui tool, as a client would call it."""
+    return {tool.name: tool for tool in await gen_ui.list_tools()}["generate_prefab_ui"]
+
+
 @requires_deno
 @pytest.mark.asyncio
 async def test_host_smoke_executes_generated_tree() -> None:
     """Generated Prefab code executes in the real sandbox and renders a chart."""
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tools = {t.name: t for t in await gen_ui._local.list_tools()}
-    app = await tools["generate_prefab_ui"].fn(code=SMOKE_CODE)
+    gen_ui = PrefabGenerativeUI()
+    app = await (await _generate_tool(gen_ui)).fn(code=SMOKE_CODE)
     tree = app.model_dump(by_alias=True)
     assert tree["title"] == "Prefab"
     column = tree["view"]["children"][0]
@@ -59,13 +63,10 @@ async def test_host_smoke_executes_generated_tree() -> None:
     ]
 
 
-@requires_deno
 @pytest.mark.asyncio
 async def test_host_smoke_renderer_resource_advertises_csp() -> None:
     """The renderer resource carries the CSP domains the host must enforce."""
-    from fastmcp.apps.generative import _build_csp
-
-    resource = _build_renderer_resource(_build_csp())
+    resource = _build_renderer_resource(_renderer_csp())
     assert resource.mime_type == "text/html;profile=mcp-app"
     csp = resource.meta["ui"]["csp"]
     assert csp["resourceDomains"] == ["https://cdn.jsdelivr.net"]
@@ -97,13 +98,14 @@ async def test_host_smoke_rejects_oversized_result_during_read(monkeypatch) -> N
     import json as real_json
 
     import prefab_ui.app as prefab_app
-    import prefab_ui.sandbox._pyodide as pyodide_sandbox
 
     decoded_line_sizes: list[int] = []
     validated_wire_sizes: list[int] = []
 
     class _RecordingJson:
-        """Stand-in for the json module inside PyodideSandbox.run's module namespace."""
+        """Stand-in for the json module in the sandbox's answer-decoding namespace."""
+
+        JSONDecodeError = real_json.JSONDecodeError
 
         @staticmethod
         def dumps(*args: object, **kwargs: object) -> str:
@@ -120,17 +122,18 @@ async def test_host_smoke_rejects_oversized_result_during_read(monkeypatch) -> N
         validated_wire_sizes.append(len(real_json.dumps(wire)))
         return real_from_json(wire)
 
-    monkeypatch.setattr(pyodide_sandbox, "json", _RecordingJson)
+    # The worker protocol is owned by generative_sandbox since WORK-283, so the
+    # decode that must stay bounded happens in that module's namespace.
+    monkeypatch.setattr(sandbox_module, "json", _RecordingJson)
     monkeypatch.setattr(prefab_app.PrefabApp, "from_json", _recording_from_json)
 
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tools = {t.name: t for t in await gen_ui._local.list_tools()}
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = await _generate_tool(gen_ui)
     # The string is built at runtime in the worker so the submitted code stays
     # tiny; only the serialized result exceeds the wire cap.
     oversized = f'with PrefabApp() as app:\n    with Column(gap=4):\n        Text("x" * {MAX_WIRE_LINE_BYTES + 1})\n'
     with pytest.raises(ValueError, match="result exceeds maximum size"):
-        await tools["generate_prefab_ui"].fn(code=oversized)
+        await gen_tool.fn(code=oversized)
 
     # The oversized wire must never have been decoded or validated — on pre-fix
     # code both lists carry a ~MAX_WIRE_LINE_BYTES+ entry and these assertions fail.
@@ -139,7 +142,7 @@ async def test_host_smoke_rejects_oversized_result_during_read(monkeypatch) -> N
 
     # The oversized response stopped the worker mid-stream; the next call must
     # recover on a fresh worker and render a normal view.
-    app = await tools["generate_prefab_ui"].fn(code=SMOKE_CODE)
+    app = await gen_tool.fn(code=SMOKE_CODE)
     assert app.model_dump(by_alias=True)["title"] == "Prefab"
 
 
@@ -147,14 +150,13 @@ async def test_host_smoke_rejects_oversized_result_during_read(monkeypatch) -> N
 @pytest.mark.asyncio
 async def test_host_smoke_result_just_under_limit_succeeds() -> None:
     """A view whose wire stays within MAX_RESULT_BYTES is not falsely rejected."""
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tools = {t.name: t for t in await gen_ui._local.list_tools()}
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = await _generate_tool(gen_ui)
     # Build the near-limit string at runtime so the code stays under MAX_CODE_BYTES;
     # the serialized wire stays just inside MAX_RESULT_BYTES.
     text_len = MAX_RESULT_BYTES - 4096
     code = f'with PrefabApp() as app:\n    with Column(gap=4):\n        Text("x" * {text_len})\n'
-    app = await tools["generate_prefab_ui"].fn(code=code)
+    app = await gen_tool.fn(code=code)
     assert app.model_dump(by_alias=True)["title"] == "Prefab"
 
 
@@ -162,9 +164,8 @@ async def test_host_smoke_result_just_under_limit_succeeds() -> None:
 @pytest.mark.asyncio
 async def test_host_smoke_state_does_not_leak_between_calls() -> None:
     """Mutating shared interpreter state in one call cannot poison the next (issue #541)."""
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    gen_tool = {t.name: t for t in await gen_ui._local.list_tools()}["generate_prefab_ui"]
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = await _generate_tool(gen_ui)
 
     poison = """import builtins
 builtins._nextdns_poison = "injected"

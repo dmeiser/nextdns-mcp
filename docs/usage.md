@@ -132,7 +132,7 @@ card's own default (a bar chart for `reasons`, a donut chart plus its table for
 
 ### Generative UI (Beta)
 Generative UI is an opt-in beta feature (disabled by default). When enabled by setting
-`NEXTDNS_GENERATIVE_UI=on` (or `true`, `1`, `yes`), the server mounts FastMCP's Generative UI provider
+`NEXTDNS_GENERATIVE_UI=on` (or `true`, `1`, `yes`), the server mounts its Prefab Generative UI provider
 (`generate_prefab_ui` and `search_prefab_components`), enabling host apps like OpenWebUI to
 dynamically author and render ad-hoc Prefab UI layouts in Pyodide. Why the provider is opt-in and how
 its sandbox is bounded is recorded in [ADR 0002](architecture/0002-generative-ui-opt-in-provider.md).
