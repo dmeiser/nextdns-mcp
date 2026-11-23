@@ -226,6 +226,80 @@ class TestErrorPayloadShape:
         assert payload["meta"] == {"reason": "y" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER, "ok": True}
         assert payload["response_body_truncated"] is True
 
+    def test_http_error_payload_bounds_oversized_structured_field_key(self):
+        # Issue #600: the #297 bound covered values only, so the *name* of a
+        # free-form field could carry a megabyte of text straight into the tool
+        # result the LLM reads. A key of an inlined upstream document costs the
+        # reader exactly what a value costs, so it is cut at the same cap and
+        # flagged. A key within the cap keeps its text and its value.
+        huge_key = "k" * (100 * 1024)
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 400
+        exc.response.json.return_value = {
+            "error": "Bad Request",
+            huge_key: "the field at fault",
+            "detail": "quota exceeded",
+        }
+        payload = http_error_payload("msg", exc)
+        bounded_key = "k" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER
+        assert huge_key not in payload
+        assert payload[bounded_key] == "the field at fault"
+        assert payload["detail"] == "quota exceeded"
+        assert payload["response_body_truncated"] is True
+
+    def test_http_error_payload_bounds_nested_dict_keys(self):
+        # The key bound reaches every depth: a blob of a key nested inside a
+        # free-form object is cut just like a top-level field, while the short
+        # keys beside it and the strings in their lists are untouched.
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 429
+        exc.response.json.return_value = {
+            "error": "rate limit exceeded",
+            "meta": {"k" * (100 * 1024): ["retry in 10s"], "ok": True},
+        }
+        payload = http_error_payload("msg", exc)
+        assert payload["meta"] == {
+            "k" * MAX_RESPONSE_BODY_CHARS + TRUNCATION_MARKER: ["retry in 10s"],
+            "ok": True,
+        }
+        assert payload["response_body_truncated"] is True
+
+    def test_http_error_payload_truncated_keys_do_not_overwrite_each_other(self):
+        # Cutting a key is not injective: three names sharing their first
+        # MAX_RESPONSE_BODY_CHARS characters all bound to the same string.
+        # Writing one over the next would drop fields the upstream document
+        # carried, so every survivor keeps its own name.
+        prefix = "p" * MAX_RESPONSE_BODY_CHARS
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 400
+        exc.response.json.return_value = {
+            "error": "Bad Request",
+            prefix + " one": "first",
+            prefix + " two": "second",
+            prefix + " three": "third",
+        }
+        payload = http_error_payload("msg", exc)
+        cut_key = prefix + TRUNCATION_MARKER
+        assert payload[cut_key] == "first"
+        assert payload[f"{cut_key} [duplicate 2]"] == "second"
+        assert payload[f"{cut_key} [duplicate 3]"] == "third"
+        assert payload["response_body_truncated"] is True
+
+    def test_http_error_payload_non_string_keys_pass_through(self):
+        # ``json`` never decodes a non-string key, but the failure handler must
+        # not turn a document built by something else into a second crash: a key
+        # the string bound cannot be applied to is carried through untouched.
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 400
+        exc.response.json.return_value = {"error": "Bad Request", 422: "the upstream status"}
+        payload = http_error_payload("msg", exc)
+        assert payload[422] == "the upstream status"
+        assert "response_body_truncated" not in payload
+
     def test_http_error_payload_nested_small_document_is_complete(self):
         # Nested content within the cap is surfaced whole, with no flag.
         exc = httpx.HTTPError("boom")

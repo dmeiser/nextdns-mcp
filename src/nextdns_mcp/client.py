@@ -9,7 +9,8 @@ import re
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 import httpx
 
@@ -197,8 +198,112 @@ def _unmatchable_profile_url(request_path: str | None) -> bool:
     return _is_unclassifiable_profiles_path(request_path)
 
 
-class AccessControlledClient(httpx.AsyncClient):
-    """HTTP client wrapper that enforces profile access control."""
+def _destination_host(base_url: Any, url: Any) -> str:
+    """Return the host a request would actually be sent to.
+
+    Relative URLs resolve against the client's ``base_url``, exactly as
+    httpx merges them, so a client built on a non-NextDNS base is caught
+    here too. A relative URL on a client with no base URL yields "".
+    """
+    parsed = httpx.URL(str(url))
+    if parsed.is_absolute_url or parsed.scheme or parsed.host:
+        return _normalized_host(parsed.host)
+    return _normalized_host(httpx.URL(str(base_url)).host)
+
+
+def _check_destination(base_url: Any, method: str, url: Any) -> None:
+    """Refuse a request whose destination host is not an approved NextDNS host.
+
+    Runs before the request is handed to httpx, so nothing is sent and the
+    X-Api-Key header never leaves the process. The message carries the host
+    only - never the URL (which may hold query-string PII) and never any
+    credential.
+    """
+    host = _destination_host(base_url, url)
+    if not host:
+        # No host resolves: the request is relative and this client has no
+        # base URL, so httpx itself rejects it before any I/O. There is no
+        # destination to allow or to protect, and no key to leak.
+        return
+    if host in _allowed_destination_hosts():
+        return
+
+    error_msg = f"Blocked request to non-NextDNS host: {host}"
+    logger.warning(f"{error_msg} (method={method})")
+    raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED)
+
+
+class AccessControlledClient:
+    """HTTP client that enforces profile access control (issue #639).
+
+    Composition wrapper around a private ``httpx.AsyncClient`` — the ACL
+    client used to subclass the concrete httpx class, which leaked the
+    base's whole public transport surface (``send``, ``build_request``, ...)
+    past the ACL door. Here the wrapped client is private, and the only ways
+    to move a request through this class are :meth:`request` and
+    :meth:`stream` plus the method conveniences built on ``request()``;
+    every one of them runs the single :meth:`_authorize` decision, so the
+    ACL is the one doorway rather than an inheritance-narrowed one.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str | httpx.URL | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: Any = None,
+        transport: Any = None,
+        follow_redirects: bool = False,
+    ) -> None:
+        kwargs: dict[str, Any] = {"headers": headers, "follow_redirects": follow_redirects}
+        if base_url is not None:
+            kwargs["base_url"] = base_url
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if transport is not None:
+            kwargs["transport"] = transport
+        self._client = httpx.AsyncClient(**kwargs)
+
+    async def __aenter__(self) -> Self:
+        await self._client.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self._client.__aexit__(exc_type, exc_value, traceback)
+
+    async def aclose(self) -> None:
+        """Close the wrapped httpx client."""
+        await self._client.aclose()
+
+    @property
+    def base_url(self) -> httpx.URL:
+        """The base URL the wrapped client resolves relative requests against."""
+        return self._client.base_url
+
+    @property
+    def headers(self) -> httpx.Headers:
+        """The client-level default headers, including the X-Api-Key credential."""
+        return self._client.headers
+
+    @property
+    def timeout(self) -> httpx.Timeout:
+        """The configured request timeout."""
+        return self._client.timeout
+
+    @property
+    def follow_redirects(self) -> bool:
+        """Whether the wrapped client follows redirects (always False here)."""
+        return self._client.follow_redirects
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the wrapped client has been closed."""
+        return self._client.is_closed
 
     def _check_write_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
         """Check write access against the request snapshot; raise AccessDeniedError if denied."""
@@ -267,68 +372,6 @@ class AccessControlledClient(httpx.AsyncClient):
         else:
             self._check_collection_read_access(method, url, access)
 
-    async def raw_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        """Make an HTTP request WITHOUT any profile access-control check.
-
-        This is the raw transport path: it goes straight to ``httpx`` and is
-        used by server-level probes that must observe the true upstream state.
-        The ``/health`` readiness check uses it because a local ACL denial (for
-        example a deny-all readable-profile configuration) would otherwise be
-        indistinguishable from a real NextDNS authentication failure.
-
-        The destination allow-list is still enforced (issue #262): this path
-        carries the X-Api-Key client header just like every other one, so the
-        key must never leave for a non-NextDNS host. Only the profile ACL is
-        skipped.
-
-        Args:
-            method: HTTP method
-            url: Request URL
-            **kwargs: Additional request arguments
-
-        Returns:
-            The unmodified response from the API.
-
-        Raises:
-            AccessDeniedError: If the destination host is not an approved
-                NextDNS host. No network request is made.
-        """
-        self._check_destination(method, url)
-        return await super().request(method, url, **kwargs)
-
-    def _destination_host(self, url: Any) -> str:
-        """Return the host a request would actually be sent to.
-
-        Relative URLs resolve against this client's ``base_url``, exactly as
-        httpx merges them, so a client built on a non-NextDNS base is caught
-        here too. A relative URL on a client with no base URL yields "".
-        """
-        parsed = httpx.URL(str(url))
-        if parsed.is_absolute_url or parsed.scheme or parsed.host:
-            return _normalized_host(parsed.host)
-        return _normalized_host(httpx.URL(str(self.base_url)).host)
-
-    def _check_destination(self, method: str, url: Any) -> None:
-        """Refuse a request whose destination host is not an approved NextDNS host.
-
-        Runs before the request is handed to httpx, so nothing is sent and the
-        X-Api-Key header never leaves the process. The message carries the host
-        only - never the URL (which may hold query-string PII) and never any
-        credential.
-        """
-        host = self._destination_host(url)
-        if not host:
-            # No host resolves: the request is relative and this client has no
-            # base URL, so httpx itself rejects it before any I/O. There is no
-            # destination to allow or to protect, and no key to leak.
-            return
-        if host in _allowed_destination_hosts():
-            return
-
-        error_msg = f"Blocked request to non-NextDNS host: {host}"
-        logger.warning(f"{error_msg} (method={method})")
-        raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED)
-
     def _authorize(self, method: str, url: Any) -> None:
         """Apply the destination allow-list and the profile ACL to one request.
 
@@ -336,7 +379,7 @@ class AccessControlledClient(httpx.AsyncClient):
         no request leaves the process without both an approved destination host
         and an access-control decision.
         """
-        self._check_destination(method, url)
+        _check_destination(self._client.base_url, method, url)
 
         url_str = str(url)
         request_path = _normalized_request_path(url_str)
@@ -357,7 +400,7 @@ class AccessControlledClient(httpx.AsyncClient):
         else:
             self._check_collection_access(method, url_str, access)
 
-    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
+    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Make an HTTP request with access control checks.
 
         Args:
@@ -386,10 +429,38 @@ class AccessControlledClient(httpx.AsyncClient):
         # unchanged. Schema-aware coercion of tool arguments already happens in
         # StripExtraFieldsMiddleware, so blindly coercing body values would corrupt
         # string fields such as profile names ("12345") or passwords ("0012").
-        return await super().request(method, url, **kwargs)
+        return await self._client.request(method, url, **kwargs)
+
+    async def get(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a GET request with access control checks (httpx convenience)."""
+        return await self.request("GET", url, **kwargs)
+
+    async def post(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a POST request with access control checks (httpx convenience)."""
+        return await self.request("POST", url, **kwargs)
+
+    async def put(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a PUT request with access control checks (httpx convenience)."""
+        return await self.request("PUT", url, **kwargs)
+
+    async def patch(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a PATCH request with access control checks (httpx convenience)."""
+        return await self.request("PATCH", url, **kwargs)
+
+    async def delete(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a DELETE request with access control checks (httpx convenience)."""
+        return await self.request("DELETE", url, **kwargs)
+
+    async def head(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a HEAD request with access control checks (httpx convenience)."""
+        return await self.request("HEAD", url, **kwargs)
+
+    async def options(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make an OPTIONS request with access control checks (httpx convenience)."""
+        return await self.request("OPTIONS", url, **kwargs)
 
     @asynccontextmanager
-    async def stream(self, method: str, url: Any, **kwargs: Any) -> AsyncIterator[httpx.Response]:  # type: ignore[override]
+    async def stream(self, method: str, url: Any, **kwargs: Any) -> AsyncIterator[httpx.Response]:
         """Stream a response with the destination allow-list and access control checks.
 
         httpx's ``stream()`` does not call ``request()``, so the guards are
@@ -409,8 +480,33 @@ class AccessControlledClient(httpx.AsyncClient):
         # decision and cannot drift apart again (issues #262, #285).
         self._authorize(method, url)
 
-        async with super().stream(method, url, **kwargs) as response:
+        async with self._client.stream(method, url, **kwargs) as response:
             yield response
+
+
+def _authenticated_client_kwargs() -> dict[str, Any]:
+    """Validate the configuration and return the shared client constructor kwargs.
+
+    Both the ACL client and the raw probe client are built from these kwargs,
+    so they always carry the same credentials, base URL, and timeout.
+    """
+    key = get_api_key()
+    if not key or not key.strip():
+        raise ConfigurationError(
+            "NEXTDNS_API_KEY is required. Set the NEXTDNS_API_KEY environment "
+            "variable or NEXTDNS_API_KEY_FILE pointing to a Docker secret."
+        )
+
+    return {
+        "base_url": NEXTDNS_BASE_URL,
+        "headers": {
+            "X-Api-Key": key.strip(),
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        "timeout": get_http_timeout(),
+        "follow_redirects": False,
+    }
 
 
 def create_nextdns_client() -> AccessControlledClient:
@@ -424,25 +520,86 @@ def create_nextdns_client() -> AccessControlledClient:
         ConfigurationError: If the API key is absent or empty, or
             NEXTDNS_HTTP_TIMEOUT is not a positive number of seconds.
     """
-    key = get_api_key()
-    if not key or not key.strip():
-        raise ConfigurationError(
-            "NEXTDNS_API_KEY is required. Set the NEXTDNS_API_KEY environment "
-            "variable or NEXTDNS_API_KEY_FILE pointing to a Docker secret."
-        )
+    return AccessControlledClient(**_authenticated_client_kwargs())
 
-    headers = {
-        "X-Api-Key": key.strip(),
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
 
-    return AccessControlledClient(
-        base_url=NEXTDNS_BASE_URL,
-        headers=headers,
-        timeout=get_http_timeout(),
-        follow_redirects=False,
-    )
+class RawProbeTransport:
+    """ACL-free transport for server-level probes (the /health readiness check).
+
+    Composition wrapper around a private ``httpx.AsyncClient``, kept separate
+    from :class:`AccessControlledClient` so the profile ACL has no bypass
+    doorway on the class that enforces it: a probe here deliberately skips the
+    profile ACL because a local ACL denial (for example a deny-all
+    readable-profile configuration) would otherwise be indistinguishable from a
+    real NextDNS authentication failure.
+
+    The destination allow-list is still enforced on every request (issue #262):
+    this path carries the X-Api-Key client header just like every other one, so
+    the key must never leave for a non-NextDNS host. Only the profile ACL is
+    skipped.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self._client = httpx.AsyncClient(**kwargs)
+
+    async def __aenter__(self) -> Self:
+        await self._client.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self._client.__aexit__(exc_type, exc_value, traceback)
+
+    async def aclose(self) -> None:
+        """Close the wrapped httpx client."""
+        await self._client.aclose()
+
+    @property
+    def base_url(self) -> httpx.URL:
+        """The base URL the wrapped client resolves relative requests against."""
+        return self._client.base_url
+
+    @property
+    def headers(self) -> httpx.Headers:
+        """The client-level default headers, including the X-Api-Key credential."""
+        return self._client.headers
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the wrapped client has been closed."""
+        return self._client.is_closed
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Send a request with NO profile ACL check; the destination allow-list still applies.
+
+        Args:
+            method: HTTP method
+            url: Request URL
+            **kwargs: Additional request arguments
+
+        Returns:
+            The unmodified response from the API.
+
+        Raises:
+            AccessDeniedError: If the destination host is not an approved
+                NextDNS host. No network request is made.
+        """
+        _check_destination(self._client.base_url, method, url)
+        return await self._client.request(method, url, **kwargs)
+
+
+def create_raw_probe_client() -> RawProbeTransport:
+    """Create the authenticated, ACL-free transport used by server-level probes.
+
+    Raises:
+        ConfigurationError: If the API key is absent or empty, or
+            NEXTDNS_HTTP_TIMEOUT is not a positive number of seconds.
+    """
+    return RawProbeTransport(**_authenticated_client_kwargs())
 
 
 class ApiClientOwner:
@@ -483,6 +640,33 @@ class ApiClientOwner:
             await client.aclose()
 
 
+class RawProbeOwner:
+    """Owns one authenticated, ACL-free probe transport for one explicit lifetime.
+
+    Explicit owner for the probe transport state that used to live in the
+    module-global ``_raw_probe_client`` singleton. The /health readiness
+    check sends through this transport so the profile ACL's enforcing class
+    exposes no bypass; each owner lazily creates its transport on first use
+    and closes it on :meth:`aclose`.
+    """
+
+    def __init__(self) -> None:
+        self._transport: RawProbeTransport | None = None
+
+    def get(self) -> RawProbeTransport:
+        """Return this owner's probe transport, creating it on first use."""
+        if self._transport is None:
+            self._transport = create_raw_probe_client()
+        return self._transport
+
+    async def aclose(self) -> None:
+        """Close this owner's probe transport if one exists and reset it."""
+        if self._transport is not None:
+            transport = self._transport
+            self._transport = None
+            await transport.aclose()
+
+
 # The owner whose client the current context uses. A server lifespan sets this
 # to the owner its ServerResources holds (see nextdns_mcp.openapi), as may
 # standalone callers (tests, scripts) with ``api_client_owned`` for work that
@@ -493,6 +677,7 @@ class ApiClientOwner:
 # module-level default: an absent owner fails loudly instead of silently
 # serving one process-global client to independent servers.
 api_client_owner: ContextVar[ApiClientOwner | None] = ContextVar("nextdns_api_client_owner", default=None)
+raw_probe_owner: ContextVar[RawProbeOwner | None] = ContextVar("nextdns_raw_probe_owner", default=None)
 
 
 def current_api_client_owner() -> ApiClientOwner:
@@ -527,6 +712,46 @@ def api_client_owned(owner: ApiClientOwner) -> Iterator[ApiClientOwner]:
         yield owner
     finally:
         api_client_owner.reset(token)
+
+
+@contextmanager
+def raw_probe_owned(owner: RawProbeOwner) -> Iterator[RawProbeOwner]:
+    """Publish ``owner`` as the current context's raw probe owner for the block."""
+    token = raw_probe_owner.set(owner)
+    try:
+        yield owner
+    finally:
+        raw_probe_owner.reset(token)
+
+
+def _current_raw_probe_owner() -> RawProbeOwner:
+    owner = raw_probe_owner.get()
+    if owner is None:
+        resources = request_resources()
+        if resources is not None:
+            owner = resources.raw_probe
+    if owner is None:
+        raise StateOwnershipError(
+            "No raw probe owner is active in this context. Server code runs inside a server "
+            "lifespan, which publishes one; standalone callers must wrap the work in "
+            "`with client_module.raw_probe_owned(client_module.RawProbeOwner()):`."
+        )
+    return owner
+
+
+def get_raw_probe_client() -> RawProbeTransport:
+    """Return the current owner's ACL-free probe transport, creating it on first use.
+
+    The /health readiness check uses this instead of :func:`get_api_client` so
+    the class that enforces the profile ACL exposes no bypass at all, while the
+    probe still observes the true upstream state.
+    """
+    return _current_raw_probe_owner().get()
+
+
+async def close_raw_probe_client() -> None:
+    """Close the current owner's probe transport if one exists and reset it."""
+    await _current_raw_probe_owner().aclose()
 
 
 def get_api_client() -> AccessControlledClient:

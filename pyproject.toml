@@ -15,6 +15,10 @@ classifiers = [
 dependencies = [
     "fastmcp>=4.1.8",
     "httpx>=0.28.1",
+    # Transitive via fastmcp/mcp; floor excludes the releases affected by
+    # CVE-2026-126360 (GHSA-mf5v-w3w3-f6cg), so a fresh resolve from
+    # pyproject.toml alone can no longer pick a vulnerable version.
+    "opentelemetry-api>=1.45.2",
     "pyyaml>=6.0.3",
     "python-dotenv>=1.2.2",
     "jsonschema>=4.23",

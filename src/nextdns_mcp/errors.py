@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
-from .json_bounds import BoundSpec, bound_json
+from .json_bounds import BoundSpec, bound_json, bound_key
 
 # Server-side cap on the number of characters of an unparseable upstream
 # response body inlined into an error payload. The tool result is read by an
@@ -83,10 +83,12 @@ def error_payload(code: str, message: str, **extra: Any) -> dict[str, Any]:
 
 
 # The caps this module applies to an upstream document: strings are cut at the
-# body cap and cut values carry the marker, and nothing else is trimmed - the
-# structure of an upstream error document is the diagnosis, so only its size
-# is not. Containers are rebuilt, never edited in place.
-_BODY_BOUNDS = BoundSpec(max_string_chars=MAX_RESPONSE_BODY_CHARS, string_marker=TRUNCATION_MARKER)
+# body cap and cut values carry the marker, dict keys are cut by the same cap
+# because an upstream document names its own fields and a key is as much a size
+# cost as a value (issue #600), and nothing else is trimmed - the structure of
+# an upstream error document is the diagnosis, so only its size is not.
+# Containers are rebuilt, never edited in place.
+_BODY_BOUNDS = BoundSpec(max_string_chars=MAX_RESPONSE_BODY_CHARS, string_marker=TRUNCATION_MARKER, bound_keys=True)
 
 
 def _bound_value(value: Any) -> tuple[Any, bool]:
@@ -106,29 +108,36 @@ def _bound_value(value: Any) -> tuple[Any, bool]:
 
 
 def _bound_structured_fields(payload: dict[str, Any]) -> bool:
-    """Bound free-form values in an inlined structured error document.
+    """Bound free-form keys and values in an inlined structured error document.
 
-    Every free-form string is capped at ``MAX_RESPONSE_BODY_CHARS`` (nested in
-    dicts and lists too) and cut values are flagged with ``TRUNCATION_MARKER``,
-    so a multi-hundred-KB upstream ``details`` field cannot crowd the LLM
-    context for a request that already failed (issue #297). The typed string
-    fields (``code``, ``error``) are exempt: the issue #148 contract has callers
-    branch on them, so their text is surfaced verbatim. A container under one of
-    those keys is *not* exempt - a whole document can be hidden there.
+    Every free-form string is capped at ``MAX_RESPONSE_BODY_CHARS`` (dict keys,
+    and strings nested in dicts and lists too) and cut strings are flagged with
+    ``TRUNCATION_MARKER``, so a multi-hundred-KB upstream ``details`` field
+    cannot crowd the LLM context for a request that already failed (issue
+    #297), and neither can a field whose *name* is the blob (issue #600). The
+    typed string fields (``code``, ``error``) are exempt: the issue #148
+    contract has callers branch on them, so their text is surfaced verbatim.
+    A container under one of those keys is *not* exempt - a whole document can
+    be hidden there.
 
     Args:
-        payload: The structured error document; bounded in place.
+        payload: The structured error document; replaced with its bounded copy.
 
     Returns:
-        True when at least one field was truncated.
+        True when at least one key or value was truncated.
     """
-    truncated = False
+    bounded: dict[str, Any] = {}
+    cuts: list[bool] = []
     for key, value in payload.items():
         if key in _UNBOUNDED_STRUCTURED_FIELDS and isinstance(value, str):
+            bounded[key] = value
             continue
-        payload[key], cut = _bound_value(value)
-        truncated = truncated or cut
-    return truncated
+        bounded_key, key_cut = bound_key(bounded, key, _BODY_BOUNDS)
+        bounded[bounded_key], value_cut = _bound_value(value)
+        cuts.extend((key_cut, value_cut))
+    payload.clear()
+    payload.update(bounded)
+    return any(cuts)
 
 
 def _upstream_error_items(body: Any) -> list[dict[str, Any]]:

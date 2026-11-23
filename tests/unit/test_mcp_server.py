@@ -207,16 +207,23 @@ class TestServerLifespan:
 
         with (
             client_module.api_client_owned(resources.api_client),
+            client_module.raw_probe_owned(resources.raw_probe),
             doh_module.doh_client_owned(resources.doh_client),
         ):
             async with server._lifespan_manager():
                 api_client = client_module.get_api_client()
+                probe_client = client_module.get_raw_probe_client()
                 doh_client = doh_module.current_doh_client_owner().get()
                 assert not api_client.is_closed
+                assert not probe_client.is_closed
                 assert not doh_client.is_closed
 
         assert api_client.is_closed
+        assert probe_client.is_closed
         assert doh_client.is_closed
+        assert resources.api_client._client is None
+        assert resources.raw_probe._transport is None
+        assert resources.doh_client._client is None
 
     @pytest.mark.asyncio
     async def test_real_client_session_closes_http_clients_on_disconnect(self, mock_api_key, monkeypatch):

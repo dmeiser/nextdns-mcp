@@ -60,7 +60,7 @@ class TestCreateNextDNSClient:
 
         client = create_nextdns_client()
 
-        assert isinstance(client, httpx.AsyncClient)
+        assert not isinstance(client, httpx.AsyncClient)  # composition, not inheritance (issue #639)
         # API key is set at initialization in static headers
         assert "X-Api-Key" in client.headers
         assert client.base_url == "https://api.nextdns.io"
