@@ -1,20 +1,92 @@
-"""Extra tests to exercise conftest fixtures and improve coverage."""
+"""Behavioral tests that feed the conftest fixtures into application code.
 
-from pathlib import Path
+These replace fixture-introspection asserts (path exists, value is not None)
+with assertions on observable behavior: each fixture drives a real code path -
+config key loading, profile access gates, DoH response parsing - so a
+regression in that behavior fails the test instead of the suite merely
+confirming a fixture returned a value.
+"""
+
+from nextdns_mcp import config
+from nextdns_mcp.tools import doh as doh_module
 
 
-def test_conftest_temp_files_exist(temp_api_key_file):
-    # Ensure temporary files created by fixtures exist and contain expected content
-    assert isinstance(temp_api_key_file, Path)
-    assert temp_api_key_file.exists()
+class _JsonResponse:
+    """Minimal stand-in for an httpx.Response carrying a JSON body."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
 
 
-def test_conftest_env_and_profiles(
-    clean_env, set_env_api_key, mock_profile_id, mock_profiles_response, mock_doh_response, mock_nextdns_base_url
+class _FakeDohClient:
+    """Async client answering every GET with the given DNS JSON payload."""
+
+    def __init__(self, payload):
+        self._payload = payload
+        self.requests = []
+
+    async def get(self, doh_url, params=None, headers=None):
+        self.requests.append({"url": doh_url, "params": params, "headers": headers})
+        return _JsonResponse(dict(self._payload))
+
+
+def _allow_all_access() -> config.ProfileAccessControl:
+    """An open read/write snapshot, matching the suite's default gate."""
+    return config.ProfileAccessControl(read_only=False, readable=frozenset(), writable=frozenset())
+
+
+def test_api_key_file_fixture_loads_through_config(monkeypatch, temp_api_key_file):
+    """The temp key file must be readable via the Docker-secret env path."""
+    monkeypatch.setenv("NEXTDNS_API_KEY_FILE", str(temp_api_key_file))
+    assert config.get_api_key() == "test_api_key_12345"
+
+    # A missing secret file must yield None, not raise.
+    monkeypatch.setenv("NEXTDNS_API_KEY_FILE", f"{temp_api_key_file}.missing")
+    assert config.get_api_key() is None
+
+
+def test_env_api_key_fixture_and_profiles_drive_access_gate(set_env_api_key, mock_profile_id, mock_profiles_response):
+    """set_env_api_key must reach the config layer, and the profile ids from
+    mock_profiles_response must be honored by the read gate."""
+    assert config.get_api_key() == "test_api_key_12345"
+
+    listed_ids = {p["id"] for p in mock_profiles_response["data"]}
+    assert mock_profile_id in listed_ids
+
+    allow_one = config.ProfileAccessControl(read_only=False, readable=frozenset({mock_profile_id}), writable=None)
+    assert allow_one.can_read(mock_profile_id) is True
+    other_id = next(pid for pid in listed_ids if pid != mock_profile_id)
+    assert allow_one.can_read(other_id) is False
+
+
+async def test_doh_response_fixture_drives_lookup(
+    monkeypatch, mock_profile_id, mock_doh_response, mock_nextdns_base_url
 ):
-    # Ensure fixtures return values as expected
-    assert set_env_api_key is not None
-    assert isinstance(mock_profile_id, str)
-    assert "data" in mock_profiles_response
-    assert mock_doh_response.get("Status") == 0
-    assert mock_nextdns_base_url.startswith("https://")
+    """A fixture DoH answer must survive doh_lookup's parsing and metadata
+    mapping - these assertions fail if the status-code mapping or the answer
+    shape regress."""
+    fake = _FakeDohClient(mock_doh_response)
+    monkeypatch.setattr(doh_module, "_doh_client", fake)
+
+    doh_url = f"{mock_nextdns_base_url}/{mock_profile_id}/dns-query"
+    result = await doh_module.doh_lookup(doh_url, "google.com", "A", mock_profile_id, _allow_all_access())
+
+    assert result["data"] == mock_doh_response
+    metadata = result["_metadata"]
+    assert metadata["profile_id"] == mock_profile_id
+    assert metadata["query_domain"] == "google.com"
+    assert metadata["query_type"] == "A"
+    assert metadata["status_description"] == "NOERROR - Success"
+    assert metadata["doh_endpoint"] == f"{doh_url}?name=google.com&type=A"
+
+    # The request the tool actually sent is pinned too.
+    (sent,) = fake.requests
+    assert sent["url"] == doh_url
+    assert sent["params"] == {"name": "google.com", "type": "A"}
+    assert sent["headers"] == {"accept": "application/dns-json"}
