@@ -15,7 +15,7 @@ from typing import Any
 
 from .config import _BOOL_FALSE_TOKENS, _BOOL_TRUE_TOKENS, get_default_profile
 from .constants import PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
-from .errors import ErrorCode, error_payload
+from .errors import ErrorCode, _cap_with_marker, error_payload
 
 
 def is_safe_profile_id(value: str | int) -> bool:
@@ -130,6 +130,31 @@ def resolve_default_profile(profile_id: str | int | None = None) -> tuple[str, N
     return target, None
 
 
+def _truncate_at_boundary(text: str, limit: int, *, sentence: bool = False) -> str:
+    """Cut ``text`` to ``limit`` chars, preferring a boundary near the budget over a mid-word cut.
+
+    Text at or below ``limit`` is returned unchanged. Otherwise the cut lands on
+    the last newline at or after the halfway point of the budget (``limit // 2``)
+    — and, when ``sentence`` is true, the last ``". "`` sentence break as well,
+    keeping the sentence's period. A boundary earlier than halfway would discard
+    more than half the budget, so it does not qualify: a text with no qualifying
+    boundary is hard-cut at the budget itself, and the cut CAN land mid-sentence.
+    Both truncate-to-budget callers (published spec descriptions and
+    search-result descriptions) share this one boundary selection so the two
+    paths cannot drift apart.
+    """
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    boundary = cut.rfind("\n")
+    if sentence:
+        boundary = max(boundary, cut.rfind(". "))
+    if boundary < limit // 2:
+        return cut.rstrip()
+    step = 1 if cut[boundary] == "\n" else 2
+    return cut[: boundary + step].rstrip()
+
+
 # The window a published ``limit`` argument may take. Both composite tools that
 # publish one reject a value outside it rather than clamping the caller's
 # request, so both owe the same bounds and the same error payload.
@@ -142,9 +167,17 @@ def limit_range_error(limit: Any) -> dict[str, Any] | None:
 
     ``bool`` is refused rather than read as its integer value: ``limit=True`` is
     a caller that sent a flag, and answering it as ``limit=1`` silently rewrites
-    the request in a way the caller cannot see or correct.
+    the request in a way the caller cannot see or correct. A non-numeric value
+    (e.g. a string reaching this helper from a direct Python caller, bypassing
+    the tool schema) is refused with the same typed payload instead of raising
+    ``TypeError`` on the range comparison.
     """
-    if isinstance(limit, bool) or limit < ANALYTICS_LIMIT_MIN or limit > ANALYTICS_LIMIT_MAX:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, (int, float))
+        or limit < ANALYTICS_LIMIT_MIN
+        or limit > ANALYTICS_LIMIT_MAX
+    ):
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,
             f"limit must be between {ANALYTICS_LIMIT_MIN} and {ANALYTICS_LIMIT_MAX}, got {limit}",
@@ -155,7 +188,7 @@ def limit_range_error(limit: Any) -> dict[str, Any] | None:
     return None
 
 
-def _build_series_params(
+def build_series_params(
     from_time: str | int | None = None,
     to_time: str | int | None = None,
     interval: int | None = None,
@@ -171,7 +204,7 @@ def _build_series_params(
     endpoints take no ``limit``, so callers that expose one (as the plot tool
     does) keep it out of this set and validate it on its own.
     """
-    return _build_query_params(
+    return build_query_params(
         **{
             "from": from_time,
             "to": to_time,
@@ -186,8 +219,8 @@ def _build_series_params(
 # The spellings of a relative range that the analytics endpoints do NOT accept
 # but callers reach for: `now-1d` (Grafana/Prometheus) and a bare negative
 # number, which upstream reads as an absolute Unix timestamp.
-_NOW_OFFSET_RE = re.compile(r"^now\s*(?:-\s*(\d+\s*[smhdwy]))?$", re.IGNORECASE)
-_BARE_NEGATIVE_RE = re.compile(r"^-\d+$")
+NOW_OFFSET_RE = re.compile(r"^now\s*(?:-\s*(\d+\s*[smhdwy]))?$", re.IGNORECASE)
+BARE_NEGATIVE_RE = re.compile(r"^-\d+$")
 
 
 def normalize_time_value(value: Any) -> Any:
@@ -217,10 +250,10 @@ def normalize_time_value(value: Any) -> Any:
 def _normalize_time_text(value: Any) -> Any:
     """Rewrite the two text spellings the API reads wrongly (see normalize_time_value)."""
     text = str(value).strip()
-    match = _NOW_OFFSET_RE.match(text)
+    match = NOW_OFFSET_RE.match(text)
     if match:
         return "now" if match.group(1) is None else f"-{match.group(1).replace(' ', '')}"
-    if _BARE_NEGATIVE_RE.match(text):
+    if BARE_NEGATIVE_RE.match(text):
         return f"{text}s"
     return value
 
@@ -257,7 +290,7 @@ def _query_bool(value: Any) -> Any:
     return value
 
 
-def _build_query_params(**kwargs: Any) -> dict[str, Any]:
+def build_query_params(**kwargs: Any) -> dict[str, Any]:
     """Build a query-param dict, dropping None values and normalizing booleans."""
     return {k: _query_bool(v) for k, v in kwargs.items() if v is not None}
 
@@ -275,6 +308,7 @@ def schema_required(schema: dict[str, Any] | None) -> list[str]:
 
 _CONTROL_CHARS_RE = re.compile(r"[\r\n\x00-\x1f\x7f-\x9f]")
 _MAX_LABEL_LENGTH = 200
+_LABEL_TRUNCATION_MARKER = "…"
 
 
 def sanitize_label(value: Any) -> str:
@@ -287,8 +321,8 @@ def sanitize_label(value: Any) -> str:
     exactly once, at extraction/shaping time: the cap appends a character, so
     a second pass would see a 201-character label and cut it again.
     """
-    text = str(value)
-    text = _CONTROL_CHARS_RE.sub("", text)
-    if len(text) > _MAX_LABEL_LENGTH:
-        text = text[:_MAX_LABEL_LENGTH] + "…"
-    return text
+    text = _CONTROL_CHARS_RE.sub("", str(value))
+    # errors._cap_with_marker holds the one cap-and-marker implementation; re-inlining
+    # the comparison here is the second copy of the cut both callers must make identically.
+    capped, _ = _cap_with_marker(text, _MAX_LABEL_LENGTH, _LABEL_TRUNCATION_MARKER)
+    return capped

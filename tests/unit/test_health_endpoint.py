@@ -23,7 +23,7 @@ from nextdns_mcp.server import get_mcp_server
 
 
 class FakeApiClient:
-    """Stand-in for the shared API client that records raw probe calls.
+    """Stand-in for the raw probe transport that records probe calls.
 
     ``outcomes`` are consumed in order; each entry is either an
     ``httpx.Response`` to return or an exception instance to raise.
@@ -33,7 +33,7 @@ class FakeApiClient:
         self._outcomes = list(outcomes)
         self.calls: list[tuple[str, str, dict]] = []
 
-    async def raw_request(self, method: str, url: str, **kwargs) -> httpx.Response:
+    async def request(self, method: str, url: str, **kwargs) -> httpx.Response:
         self.calls.append((method, url, kwargs))
         outcome = self._outcomes.pop(0) if self._outcomes else self._outcomes
         if isinstance(outcome, Exception):
@@ -51,9 +51,9 @@ def _response(status_code: int, body: str = '{"error":"Forbidden"}') -> httpx.Re
 
 
 def _install_client(monkeypatch, *outcomes: httpx.Response | Exception) -> FakeApiClient:
-    """Point the health probe at a fake client and reset the result cache."""
+    """Point the health probe at a fake probe transport and reset the result cache."""
     client = FakeApiClient(*outcomes)
-    monkeypatch.setattr(openapi, "get_api_client", lambda: client)
+    monkeypatch.setattr(openapi, "get_raw_probe_client", lambda: client)
     openapi._health_probe_cache = None
     return client
 
@@ -120,6 +120,7 @@ async def test_health_returns_503_auth_class_when_no_api_key_is_usable(monkeypat
     monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
     monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
     monkeypatch.setattr(client_module, "_client", None)
+    monkeypatch.setattr(client_module, "_raw_probe_client", None)
     openapi._health_probe_cache = None
 
     status_code, body = await _call_health()
@@ -135,6 +136,7 @@ async def test_health_reports_an_invalid_http_timeout_as_unreachable(monkeypatch
     monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
     monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "not-a-number")
     monkeypatch.setattr(client_module, "_client", None)
+    monkeypatch.setattr(client_module, "_raw_probe_client", None)
     openapi._health_probe_cache = None
 
     status_code, body = await _call_health()
@@ -149,6 +151,7 @@ async def test_configuration_failure_is_cached_like_any_other_probe_result(monke
     monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
     monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
     monkeypatch.setattr(client_module, "_client", None)
+    monkeypatch.setattr(client_module, "_raw_probe_client", None)
     openapi._health_probe_cache = None
 
     assert (await _call_health())[0] == 503
@@ -220,7 +223,7 @@ async def test_cached_failure_is_reused_and_expires_after_the_ttl(monkeypatch, m
 
 
 async def test_probe_issues_a_raw_request_with_the_short_timeout(monkeypatch, mock_api_key):
-    """The probe calls the client's raw transport with the 5 second timeout."""
+    """The probe hits the raw probe transport with the 5 second timeout."""
     client = _install_client(monkeypatch, _response(200, "[]"))
 
     assert (await _call_health())[0] == 200

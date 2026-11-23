@@ -5,7 +5,6 @@
 
 # Artifacts (E2E test outputs)
 artifacts/
-!artifacts/README.md
 
 # Python
 __pycache__/
@@ -56,6 +55,10 @@ htmlcov/
 
 # Local settings
 .claude/
+
+# Local MCP client config: carries the API key inline, never commit it.
+# Copy opencode.json.example to opencode.json and fill in your own values.
+opencode.json
 
 # Logs
 *.log

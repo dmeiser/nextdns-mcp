@@ -58,7 +58,14 @@ from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
 from .tools import logs as _logs
 from .transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload, is_error_payload
-from .utils import is_safe_profile_id, normalize_partials, normalize_time_value, resolve_profile_id, schema_required
+from .utils import (
+    _truncate_at_boundary,
+    is_safe_profile_id,
+    normalize_partials,
+    normalize_time_value,
+    resolve_profile_id,
+    schema_required,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +165,7 @@ def load_spec(path: Path = SPEC_PATH) -> dict[str, Any]:
     return spec
 
 
-_OFFERABLE_ROUTES: list[HTTPRoute] | None = None
+_OFFERABLE_ROUTES: tuple[HTTPRoute, ...] | None = None
 
 
 def _is_offerable(route: HTTPRoute) -> bool:
@@ -176,17 +183,18 @@ def spec_routes(spec: dict[str, Any] | None = None) -> list[HTTPRoute]:
     and the coverage check all ask the same question about the same file, and
     re-reading and re-parsing it for each was the cold-start cost. A caller
     that hands in a spec (tests do, with modified documents) always gets a
-    fresh parse - the cache is for the shipped one only. The cached list is
-    shared; callers must treat it as read-only.
+    fresh parse - the cache is for the shipped one only. The cache itself is
+    stored as a tuple and never handed out: every call gets its own list, so
+    a caller that mutates its result cannot corrupt what later calls see.
     """
     global _OFFERABLE_ROUTES
     if spec is None and _OFFERABLE_ROUTES is not None:
-        return _OFFERABLE_ROUTES
+        return list(_OFFERABLE_ROUTES)
     parsed = parse_openapi_to_http_routes(load_spec() if spec is None else spec)
-    offerable = sorted(filter(_is_offerable, parsed), key=lambda route: str(route.operation_id))
+    offerable = tuple(sorted(filter(_is_offerable, parsed), key=lambda route: str(route.operation_id)))
     if spec is None:
         _OFFERABLE_ROUTES = offerable
-    return offerable
+    return list(offerable)
 
 
 def endpoints_for_routes(routes: list[HTTPRoute] | None = None) -> dict[str, tuple[str, str]]:
@@ -204,14 +212,7 @@ def endpoints_for_routes(routes: list[HTTPRoute] | None = None) -> dict[str, tup
 
 def _truncate_description(text: str, limit: int) -> str:
     """Truncate ``text`` to ``limit`` chars, preferring a sentence/paragraph boundary."""
-    if len(text) <= limit:
-        return text
-    cut = text[:limit]
-    boundary = max(cut.rfind("\n"), cut.rfind(". "))
-    if boundary < limit // 2:
-        return cut.rstrip()
-    step = 1 if cut[boundary] == "\n" else 2
-    return cut[: boundary + step].rstrip()
+    return _truncate_at_boundary(text, limit, sentence=True)
 
 
 def describe(route: HTTPRoute) -> str:
@@ -434,9 +435,12 @@ class SpecApiTool(Tool):
             return None
         from . import config as _config
 
-        writable = _config.get_writable_profiles_set()
-        protected = _config.get_protected_profiles()
-        if writable is not None and writable and writable.issubset(protected):
+        # One snapshot per invocation: the writable set and the protected
+        # denylist must come from the same read of the environment, and the
+        # snapshot loader already calls get_protected_profiles().
+        access = _config.load_profile_access_control()
+        writable = access.writable
+        if writable is not None and writable and writable.issubset(access.protected):
             return ToolResult(
                 structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no writable profile available"),
                 is_error=True,
@@ -781,6 +785,13 @@ def _capped_transport_kwargs(route: HTTPRoute, request: Callable[..., Any]) -> d
     return {}
 
 
+# A capability answer belongs to one transport object, so the memo is keyed on
+# identity rather than equality: a transport whose class defines __eq__ would
+# otherwise let one transport answer for another. The callable is kept beside
+# its answer so the key's id cannot be recycled while the entry lives.
+_CAP_SUPPORT_BY_REQUEST: dict[int, tuple[Callable[..., Any], bool]] = {}
+
+
 def _transport_accepts_cap(request: Callable[..., Any]) -> bool:
     """Whether the resolved transport accepts a ``max_response_bytes`` keyword.
 
@@ -794,7 +805,21 @@ def _transport_accepts_cap(request: Callable[..., Any]) -> bool:
     whose signature cannot be introspected is treated as legacy for the same
     reason - the unpriced path still enforces the ceiling, the priced one
     must not guess.
+
+    The transport is fixed per route and a callable's signature cannot change
+    while the callable lives, so the answer is memoized per callable: reading
+    the signature again on every dispatch can only return what was just read.
     """
+    cached = _CAP_SUPPORT_BY_REQUEST.get(id(request))
+    if cached is not None and cached[0] is request:
+        return cached[1]
+    accepted = _probe_transport_cap(request)
+    _CAP_SUPPORT_BY_REQUEST[id(request)] = (request, accepted)
+    return accepted
+
+
+def _probe_transport_cap(request: Callable[..., Any]) -> bool:
+    """Read the capability out of the callable's signature."""
     try:
         parameters = inspect.signature(request).parameters
     except (TypeError, ValueError):

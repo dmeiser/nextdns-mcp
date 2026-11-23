@@ -19,13 +19,9 @@ import shutil
 
 import pytest
 
-from nextdns_mcp.generative import (
-    MAX_RESULT_BYTES,
-    MAX_WIRE_LINE_BYTES,
-    NextDNSGenerativeUI,
-    _build_renderer_resource,
-    _validate_chart_placement,
-)
+from nextdns_mcp.chart_placement import _validate_chart_placement
+from nextdns_mcp.generative import NextDNSGenerativeUI, _build_renderer_resource
+from nextdns_mcp.generative_sandbox import MAX_RESULT_BYTES, MAX_WIRE_LINE_BYTES
 
 requires_deno = pytest.mark.skipif(
     shutil.which("deno") is None,

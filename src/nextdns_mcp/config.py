@@ -9,10 +9,15 @@ SPDX-License-Identifier: MIT
 import logging
 import math
 import os
+from collections.abc import Collection
 from dataclasses import dataclass
-from typing import Any
 
-from .constants import SAFE_PROFILE_ID_PATTERN
+# DNS_STATUS_CODES and VALID_DNS_RECORD_TYPES are re-exported here: callers
+# already read them off this module, and the definitions now live in
+# ``constants`` so the tool layer owns nothing that the base layer republishes.
+# The import is eager rather than lazy because ``constants`` imports nothing
+# from this package, so this edge cannot close a cycle.
+from .constants import DNS_STATUS_CODES, SAFE_PROFILE_ID_PATTERN, VALID_DNS_RECORD_TYPES  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -196,8 +201,7 @@ def get_readable_profiles() -> set[str] | None:
         None if empty/unset (deny all), empty set if "ALL" (allow all),
         or set of specific profile IDs
     """
-    profiles = os.getenv("NEXTDNS_READABLE_PROFILES", "")
-    return parse_profile_list(profiles)
+    return _profile_list_env("NEXTDNS_READABLE_PROFILES")
 
 
 def get_writable_profiles() -> set[str] | None:
@@ -209,8 +213,7 @@ def get_writable_profiles() -> set[str] | None:
     """
     if is_read_only():
         return None  # Read-only mode = deny all writes
-    profiles = os.getenv("NEXTDNS_WRITABLE_PROFILES", "")
-    return parse_profile_list(profiles)
+    return _profile_list_env("NEXTDNS_WRITABLE_PROFILES")
 
 
 # Tool-search modes accepted by NEXTDNS_TOOL_SEARCH. "bm25" (the default)
@@ -300,6 +303,35 @@ def parse_profile_list(profile_str: str) -> set[str] | None:
     return ids
 
 
+def _profile_list_env(name: str) -> set[str] | None:
+    """Read one profile-list environment variable and parse it as an allowlist.
+
+    The one place an allowlist is read from the environment, so the empty
+    default and the parser cannot drift between the direct readers
+    (``get_readable_profiles`` / ``get_writable_profiles``) and the snapshot
+    loader that feeds the per-request access checks.
+
+    Returns:
+        The same shape as :func:`parse_profile_list`: ``None`` for deny all,
+        the empty set for allow all, else the normalized ids.
+    """
+    return parse_profile_list(os.getenv(name, ""))
+
+
+def _profile_ids_env(name: str) -> set[str]:
+    """Read one profile-list environment variable as bare normalized ids.
+
+    For lists that are not allowlists and therefore have no deny-all/allow-all
+    sentinel - the protected-profile denylist reads its members through here so
+    its parsing cannot diverge from the allowlists' (see
+    :func:`_normalized_profile_ids`).
+
+    Returns:
+        set[str]: Lowercased ids, empty when the variable is unset or blank.
+    """
+    return _normalized_profile_ids(os.getenv(name, ""))
+
+
 @dataclass(frozen=True)
 class ProfileAccessControl:
     """Immutable snapshot of the profile access control environment.
@@ -370,8 +402,7 @@ def get_protected_profiles() -> frozenset[str]:
     Raises:
         ConfigurationError: If any entry is not a valid profile-id shape.
     """
-    raw = os.getenv("NEXTDNS_PROTECTED_PROFILES", "")
-    ids = _normalized_profile_ids(raw)
+    ids = _profile_ids_env("NEXTDNS_PROTECTED_PROFILES")
     invalid = sorted(pid for pid in ids if not SAFE_PROFILE_ID_PATTERN.match(pid))
     if invalid:
         raise ConfigurationError(
@@ -394,9 +425,9 @@ def load_profile_access_control() -> ProfileAccessControl:
     effect on the next request, never retroactively on one already in flight.
     """
     read_only = _read_only_from_env()
-    readable = parse_profile_list(os.getenv("NEXTDNS_READABLE_PROFILES", ""))
+    readable = _profile_list_env("NEXTDNS_READABLE_PROFILES")
     # Read-only mode denies all writes, so the writable set stays None.
-    writable = None if read_only else parse_profile_list(os.getenv("NEXTDNS_WRITABLE_PROFILES", ""))
+    writable = None if read_only else _profile_list_env("NEXTDNS_WRITABLE_PROFILES")
     return ProfileAccessControl(
         read_only=read_only,
         readable=_combine_readable(readable, writable),
@@ -435,6 +466,17 @@ def _combine_set_readable(readable: set[str], writable: set[str]) -> frozenset[s
     return frozenset(readable | writable)
 
 
+def _mutable_profile_set(profiles: frozenset[str] | None) -> set[str] | None:
+    """Copy a snapshot frozenset into a fresh set, keeping the ``None`` sentinel.
+
+    The snapshot holds frozensets so no caller can mutate the decision another
+    check already made; the convenience accessors hand back a mutable copy.
+    ``None`` means deny all and must survive the copy as ``None`` - rewriting
+    it to an empty set would read as allow all.
+    """
+    return None if profiles is None else set(profiles)
+
+
 def get_readable_profiles_set() -> set[str] | None:
     """Get the set of profiles that are allowed to be read.
 
@@ -447,8 +489,7 @@ def get_readable_profiles_set() -> set[str] | None:
         empty set if all profiles are readable (allow all),
         or set of specific profile IDs
     """
-    readable = load_profile_access_control().readable
-    return None if readable is None else set(readable)
+    return _mutable_profile_set(load_profile_access_control().readable)
 
 
 def get_writable_profiles_set() -> set[str] | None:
@@ -463,8 +504,7 @@ def get_writable_profiles_set() -> set[str] | None:
         empty set if all profiles are writable (allow all),
         or set of specific profile IDs
     """
-    writable = load_profile_access_control().writable
-    return None if writable is None else set(writable)
+    return _mutable_profile_set(load_profile_access_control().writable)
 
 
 def can_read_profile(profile_id: str) -> bool:
@@ -505,8 +545,12 @@ def _log_api_key_error() -> None:
     logger.critical("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret")
 
 
-def _log_profile_access(profile_set: set[str] | None, access_type: str) -> None:
-    """Log profile access configuration."""
+def _log_profile_access(profile_set: Collection[str] | None, access_type: str) -> None:
+    """Log profile access configuration.
+
+    Takes the snapshot's frozensets as-is: this function only reads the value
+    to decide which of the three sentences to log, so it needs no mutable copy.
+    """
     if profile_set is None:
         logger.info(f"No profiles are {access_type} (deny all by default)")
     elif not profile_set:
@@ -531,16 +575,14 @@ def _log_protected_profiles(access: ProfileAccessControl) -> None:
 def _log_access_control_settings() -> None:
     """Log current access control configuration."""
     access = load_profile_access_control()
-    readable = None if access.readable is None else set(access.readable)
-    writable = None if access.writable is None else set(access.writable)
     read_only = access.read_only
 
     if read_only:
         logger.info("Read-only mode is ENABLED - all write operations are disabled")
 
-    _log_profile_access(readable, "readable")
+    _log_profile_access(access.readable, "readable")
     if not read_only:
-        _log_profile_access(writable, "writable")
+        _log_profile_access(access.writable, "writable")
     _log_protected_profiles(access)
 
 
@@ -575,11 +617,3 @@ def validate_configuration() -> None:
             raise ConfigurationError(f"Invalid {env_name}: {raw!r}. Expected one of {sorted(_BOOL_TOKENS - {''})}.")
 
     _log_access_control_settings()
-
-
-def __getattr__(name: str) -> Any:
-    if name in {"DNS_STATUS_CODES", "VALID_DNS_RECORD_TYPES"}:
-        from .tools.doh import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES
-
-        return {"DNS_STATUS_CODES": DNS_STATUS_CODES, "VALID_DNS_RECORD_TYPES": VALID_DNS_RECORD_TYPES}[name]
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
