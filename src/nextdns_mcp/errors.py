@@ -163,7 +163,7 @@ _UPSTREAM_CODE_GLOSS = {
 }
 
 
-def upstream_error_summary(body: Any) -> str:
+def _upstream_error_summary(body: Any) -> str:
     """One clause naming what upstream rejected: details, or the codes alone.
 
     Some failures carry a `detail` naming the parameter; others carry only a
@@ -411,7 +411,7 @@ def _add_upstream_diagnosis(payload: dict[str, Any], parsed: Any) -> None:
     if codes:
         payload["upstream_code"] = codes[0]
         payload["upstream_codes"] = codes
-    summary = upstream_error_summary(parsed)
+    summary = _upstream_error_summary(parsed)
     if summary:
         payload["error"] = f"{payload['error']} | {summary}"
 

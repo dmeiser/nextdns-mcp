@@ -86,7 +86,7 @@ HEALTH_FAILURE_UNREACHABLE = "unreachable"
 """Failure class: NextDNS could not be probed, or answered unusably."""
 
 
-class HealthFailure(NamedTuple):
+class _HealthFailure(NamedTuple):
     """A failed readiness probe.
 
     Attributes:
@@ -102,7 +102,7 @@ class HealthFailure(NamedTuple):
 
 
 # Cached probe result as (monotonic timestamp, failure or None when healthy).
-_health_probe_cache: tuple[float, HealthFailure | None] | None = None
+_health_probe_cache: tuple[float, _HealthFailure | None] | None = None
 
 # Guards probe *construction*, not cache reads: concurrent ``/health`` pollers
 # that all miss an empty (or just-expired) cache used to each fire their own
@@ -767,7 +767,7 @@ def _register_compat_endpoints(mcp: FastMCP) -> None:
     mcp.custom_route("/v1/models", methods=["GET"])(v1_models)
 
 
-def _cached_readiness() -> tuple[bool, HealthFailure | None]:
+def _cached_readiness() -> tuple[bool, _HealthFailure | None]:
     """Whether the cached probe result is still valid, and what it said.
 
     ``(fresh, failure)``; ``failure`` is the cached result (``None`` meaning
@@ -779,7 +779,7 @@ def _cached_readiness() -> tuple[bool, HealthFailure | None]:
     return True, cached[1]
 
 
-async def check_nextdns_readiness() -> HealthFailure | None:
+async def check_nextdns_readiness() -> _HealthFailure | None:
     """Return the readiness result, probing NextDNS at most once per cache window.
 
     Single-flight: concurrent pollers that all miss an empty or expired cache
@@ -789,7 +789,7 @@ async def check_nextdns_readiness() -> HealthFailure | None:
 
     Returns:
         None when the configured credentials work against NextDNS, otherwise a
-        HealthFailure describing why the service is not ready.
+        _HealthFailure describing why the service is not ready.
     """
     global _health_probe_cache
 
@@ -808,7 +808,7 @@ async def check_nextdns_readiness() -> HealthFailure | None:
         return failure
 
 
-async def _run_health_probe() -> HealthFailure | None:
+async def _run_health_probe() -> _HealthFailure | None:
     """Probe the NextDNS API once with the configured credentials.
 
     The request goes through the client's RAW transport (``raw_request``), which
@@ -818,7 +818,7 @@ async def _run_health_probe() -> HealthFailure | None:
     body.
 
     Returns:
-        None when NextDNS accepted the credentials, otherwise a HealthFailure.
+        None when NextDNS accepted the credentials, otherwise a _HealthFailure.
     """
     try:
         client = get_api_client()
@@ -826,12 +826,12 @@ async def _run_health_probe() -> HealthFailure | None:
     except ConfigurationError:
         return _configuration_failure()
     except httpx.TimeoutException:
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_UNREACHABLE,
             f"NextDNS API did not respond within {HEALTH_PROBE_TIMEOUT:g}s",
         )
     except httpx.HTTPError as exc:
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_UNREACHABLE,
             f"Could not reach the NextDNS API ({type(exc).__name__})",
         )
@@ -841,24 +841,24 @@ async def _run_health_probe() -> HealthFailure | None:
     return _probe_status_failure(response)
 
 
-def _configuration_failure() -> HealthFailure:
+def _configuration_failure() -> _HealthFailure:
     """Classify a ConfigurationError from building the client: no key at all is auth."""
     if not get_api_key():
-        return HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
-    return HealthFailure(
+        return _HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
+    return _HealthFailure(
         HEALTH_FAILURE_UNREACHABLE,
         "NextDNS client configuration is invalid (check NEXTDNS_HTTP_TIMEOUT)",
     )
 
 
-def _probe_status_failure(response: httpx.Response) -> HealthFailure:
+def _probe_status_failure(response: httpx.Response) -> _HealthFailure:
     """Classify a non-success probe answer: 401/403 is auth, anything else unreachable."""
     if response.status_code in (401, 403):
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_AUTH,
             f"NextDNS API rejected the configured credentials (HTTP {response.status_code})",
         )
-    return HealthFailure(
+    return _HealthFailure(
         HEALTH_FAILURE_UNREACHABLE,
         f"NextDNS API answered with an unusable status (HTTP {response.status_code})",
     )
