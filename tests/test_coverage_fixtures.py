@@ -65,17 +65,14 @@ def test_env_api_key_fixture_and_profiles_drive_access_gate(set_env_api_key, moc
     assert allow_one.can_read(other_id) is False
 
 
-async def test_doh_response_fixture_drives_lookup(
-    monkeypatch, mock_profile_id, mock_doh_response, mock_nextdns_base_url
-):
+async def test_doh_response_fixture_drives_lookup(mock_profile_id, mock_doh_response, mock_nextdns_base_url):
     """A fixture DoH answer must survive doh_lookup's parsing and metadata
     mapping - these assertions fail if the status-code mapping or the answer
     shape regress."""
     fake = _FakeDohClient(mock_doh_response)
-    monkeypatch.setattr(doh_module, "_doh_client", fake)
-
-    doh_url = f"{mock_nextdns_base_url}/{mock_profile_id}/dns-query"
-    result = await doh_module.doh_lookup(doh_url, "google.com", "A", mock_profile_id, _allow_all_access())
+    with doh_module.doh_client_owned(doh_module.DohClientOwner(client=fake)):
+        doh_url = f"{mock_nextdns_base_url}/{mock_profile_id}/dns-query"
+        result = await doh_module.doh_lookup(doh_url, "google.com", "A", mock_profile_id, _allow_all_access())
 
     assert result["data"] == mock_doh_response
     metadata = result["_metadata"]

@@ -84,6 +84,26 @@ def reset_logs_redirect_client() -> Iterator[None]:
     logs_redirects._redirect_client = None
 
 
+@pytest.fixture(autouse=True)
+def restore_lazy_singletons() -> Iterator[None]:
+    """Write back the module-global lazy singleton a test touched through its seam.
+
+    Tests set and reset ``client._raw_probe_client`` (the one process-global
+    state left after #730 moved the other singletons onto explicit owners)
+    through ``nextdns_mcp.client``'s ``*_raw_probe_client_singleton_for_tests``
+    seam. Unlike ``monkeypatch.setattr`` on the private name, a plain function
+    call has no automatic teardown, so the value each test started with is
+    captured here and written back on teardown: a test that cleared the
+    singleton to exercise lazy creation cannot leave the cleared state — or a
+    live transport built with its configuration — for whichever test runs next.
+    """
+    from nextdns_mcp import client as client_module
+
+    original = client_module._get_raw_probe_client_singleton_for_tests()
+    yield
+    client_module._set_raw_probe_client_singleton_for_tests(original)
+
+
 @pytest.fixture
 def set_env_api_key(monkeypatch, mock_api_key: str) -> str:
     """Set NEXTDNS_API_KEY environment variable."""
