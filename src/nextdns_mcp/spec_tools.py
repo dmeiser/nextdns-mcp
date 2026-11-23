@@ -58,7 +58,14 @@ from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
 from .tools import logs as _logs
 from .transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload, is_error_payload
-from .utils import is_safe_profile_id, normalize_partials, normalize_time_value, resolve_profile_id, schema_required
+from .utils import (
+    _truncate_at_boundary,
+    is_safe_profile_id,
+    normalize_partials,
+    normalize_time_value,
+    resolve_profile_id,
+    schema_required,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -205,14 +212,7 @@ def endpoints_for_routes(routes: list[HTTPRoute] | None = None) -> dict[str, tup
 
 def _truncate_description(text: str, limit: int) -> str:
     """Truncate ``text`` to ``limit`` chars, preferring a sentence/paragraph boundary."""
-    if len(text) <= limit:
-        return text
-    cut = text[:limit]
-    boundary = max(cut.rfind("\n"), cut.rfind(". "))
-    if boundary < limit // 2:
-        return cut.rstrip()
-    step = 1 if cut[boundary] == "\n" else 2
-    return cut[: boundary + step].rstrip()
+    return _truncate_at_boundary(text, limit, sentence=True)
 
 
 def describe(route: HTTPRoute) -> str:
