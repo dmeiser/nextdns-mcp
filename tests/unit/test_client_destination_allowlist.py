@@ -176,7 +176,7 @@ class TestApprovedDestinationsProceed:
             with pytest.raises(AccessDeniedError) as exc_info:
                 await stale.request("GET", "https://proxy-b.internal.example.com/profiles/abc123/settings")
 
-        assert "proxy-b.internal.example.com" in str(exc_info.value)
+        assert str(exc_info.value) == "Blocked request to non-NextDNS host: proxy-b.internal.example.com"
         assert seen == []
 
         fresh, fresh_seen = recorder(base_url="https://proxy-b.internal.example.com")
@@ -208,8 +208,9 @@ class TestAllowListFollowsTheCreationTimeBase:
         monkeypatch.setenv("NEXTDNS_API_BASE", "https://proxy-b.internal.example.com")
         hosts = client_module._allowed_destination_hosts("https://proxy-a.internal.example.com")
 
-        assert "proxy-a.internal.example.com" in hosts
-        assert "proxy-b.internal.example.com" not in hosts
+        assert hosts == client_module.ALLOWED_DESTINATION_HOSTS | client_module.LOOPBACK_HOSTS | {
+            "proxy-a.internal.example.com"
+        }
 
     def test_allow_list_without_a_configured_base_holds_only_the_built_ins(
         self, monkeypatch: pytest.MonkeyPatch
