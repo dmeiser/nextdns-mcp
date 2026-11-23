@@ -728,7 +728,7 @@ class TestRateLimitHeaders:
         assert payload["rate_limit_reset"] == "1700000000"
 
     def test_parse_retry_after_edge_cases(self):
-        from nextdns_mcp.errors import _parse_retry_after
+        from nextdns_mcp.errors.rate_limit import _parse_retry_after
 
         assert _parse_retry_after(None) is None
         assert _parse_retry_after("") is None

@@ -144,7 +144,7 @@ class TestDepthCap:
 
 class TestCallerSpecs:
     def test_the_error_path_spec_matches_the_module_constants(self):
-        from nextdns_mcp.errors import _BODY_BOUNDS
+        from nextdns_mcp.errors.body import _BODY_BOUNDS
 
         assert _BODY_BOUNDS.max_string_chars == errors.MAX_RESPONSE_BODY_CHARS
         assert _BODY_BOUNDS.string_marker == errors.TRUNCATION_MARKER
@@ -165,7 +165,7 @@ class TestCallerSpecs:
 
     def test_the_error_path_spec_bounds_keys_and_the_call_log_one_does_not(self):
         from nextdns_mcp.call_log import _PROJECTION_BOUNDS
-        from nextdns_mcp.errors import _BODY_BOUNDS
+        from nextdns_mcp.errors.body import _BODY_BOUNDS
 
         # The errors caller inlines documents it did not write, so keys are
         # capped there (issue #600); the call log writes its own projection
