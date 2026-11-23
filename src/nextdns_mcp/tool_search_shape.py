@@ -30,7 +30,10 @@ from .constants import is_write_operation
 from .tool_search_rank import _WORD_SPLIT, _name_words, _tool_properties, _vocabulary_words, _word_scorer, _words
 from .utils import schema_required
 
-logger = logging.getLogger(__name__)
+# The shape-repair WARNING records are a log contract: filters keyed to
+# "nextdns_mcp.tool_search" must keep seeing them even though this module is no
+# longer named tool_search — pin the name explicitly instead of using __name__.
+logger = logging.getLogger("nextdns_mcp.tool_search")
 
 
 def _annotation_says_write(tool: Any) -> bool:

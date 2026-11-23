@@ -1246,7 +1246,7 @@ class TestShapeRepairAnnouncesItself:
 
         from fastmcp import Client
 
-        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search_shape"):
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
                 result = await client.call_tool(
                     "call_tool", {"name": "get_denylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
@@ -1262,22 +1262,20 @@ class TestShapeRepairAnnouncesItself:
 
         from fastmcp import Client
 
-        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search_shape"):
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
                 result = await client.call_tool(
                     "call_tool", {"name": "getDenylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
                 )
         assert "resolved_from" not in (getattr(result, "structured_content", None) or {})
-        assert not [
-            r for r in caplog.records if r.name == "nextdns_mcp.tool_search_shape" and r.levelno >= logging.WARNING
-        ]
+        assert not [r for r in caplog.records if r.name == "nextdns_mcp.tool_search" and r.levelno >= logging.WARNING]
 
     async def test_a_lifted_argument_repair_logs_at_warning(self, caplog):
         import logging
 
         from fastmcp import Client
 
-        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search_shape"):
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
                 await client.call_tool(
                     "call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False
@@ -1289,7 +1287,7 @@ class TestShapeRepairAnnouncesItself:
 
         from fastmcp import Client
 
-        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search_shape"):
+        with caplog.at_level(logging.WARNING, logger="nextdns_mcp.tool_search"):
             async with Client(build_mcp_server()) as client:
                 found = await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
                 await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}}, raise_on_error=False)
