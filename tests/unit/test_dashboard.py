@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import Mapping
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -905,6 +906,111 @@ class TestFanoutShortCircuit:
         stop.observe({"code": "http_error", "error": "upstream said 401", "status_code": 401})
         stop.observe(None)
         assert stop.error is rate_limited
+
+
+class TestExtraSectionBinding:
+    """Each extra dashboard section keeps the payload of its own endpoint.
+
+    ``_build_extra_tasks`` keys its fetch tasks by ``ExtraDashboardPayloads`` field
+    name and the overview gather carries that name through to the unpacking layer, so
+    no layer pairs a payload with a field by position. A reordered task literal, a
+    fifth leading fetch, or a name list built somewhere else cannot then rotate every
+    section at once - ``countries`` rows read as ``gafam``, ``dnssec`` as
+    ``encryption`` - with no exception and no assertion to fail on.
+    """
+
+    EXTRA_SECTIONS = ("reasons", "devices", "ips", "root_domains", "gafam", "countries", "encryption", "dnssec")
+
+    class _DesyncedTasks(Mapping):
+        """A task mapping whose name-list order differs from its fetch order.
+
+        Models the hazard the ticket names - a caller that builds the name list
+        differently from the order the fetches were gathered in. Before the
+        name-keyed binding, ``list(extra_fetchers)`` supplied the names while
+        ``extra_fetchers.values()`` supplied the gather arguments, so this
+        desync silently rotated every section; now each fetch carries its own
+        name and the order pair cannot disagree.
+        """
+
+        def __init__(self, tasks):
+            self._tasks = tasks
+            self._names = list(reversed(list(tasks)))
+
+        def __iter__(self):
+            return iter(self._names)
+
+        def __len__(self):
+            return len(self._tasks)
+
+        def __getitem__(self, key):
+            return self._tasks[key]
+
+        def values(self):
+            return (self._tasks[name] for name in self._tasks)
+
+    @staticmethod
+    def _distinct_fetch(started):
+        """A transport stub where every endpoint answers with a row only it could produce."""
+
+        async def fake_fetch(pid, endpoint, params=None):
+            query = params or {}
+            started.append((endpoint, query.get("type") or query.get("root")))
+            if endpoint == "status":
+                return {"data": [{"status": "default", "queries": 1}]}, None
+            if endpoint == "status;series":
+                return {"data": [], "meta": {"series": {"times": []}}}, None
+            marker = endpoint
+            if endpoint == "domains" and query.get("root") == "true":
+                marker = "root_domains"
+            elif endpoint == "destinations":
+                marker = str(query.get("type"))
+            return {"data": [{"label": marker, "queries": 1}]}, None
+
+        return fake_fetch
+
+    @pytest.mark.asyncio
+    async def test_name_list_built_differently_from_fetch_order_keeps_sections_on_their_own_payloads(self, monkeypatch):
+        """With the name list reversed against the fetch order, each field still carries its own endpoint's rows."""
+        started = []
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", self._distinct_fetch(started))
+        real_build = data_mod._build_extra_tasks
+
+        def desynced_build(*args, **kwargs):
+            return self._DesyncedTasks(real_build(*args, **kwargs))
+
+        monkeypatch.setattr(data_mod, "_build_extra_tasks", desynced_build)
+
+        _, _, _, _, extra, err = await data_mod.fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
+
+        assert err is None
+        assert extra is not None
+        assert {section: getattr(extra, section)[0]["label"] for section in self.EXTRA_SECTIONS} == {
+            "reasons": "reasons",
+            "devices": "devices",
+            "ips": "ips",
+            "root_domains": "root_domains",
+            "gafam": "gafam",
+            "countries": "countries",
+            "encryption": "encryption",
+            "dnssec": "dnssec",
+        }
+        # All 12 endpoints were fetched: the 4 overview cards plus the 8 extra sections.
+        assert len(started) == 12
+
+    def test_extraction_reads_the_extra_results_from_a_name_keyed_mapping(self):
+        """The unpacking layer indexes the results by field name, so the mapping's own order is irrelevant."""
+        results = {name: ({"data": [{"label": name, "queries": 1}]}, None) for name in reversed(self.EXTRA_SECTIONS)}
+
+        extra, err = data_mod._extract_extra_payloads(results, include_extra=True)
+
+        assert err is None
+        assert extra is not None
+        assert [getattr(extra, section)[0]["label"] for section in self.EXTRA_SECTIONS] == list(self.EXTRA_SECTIONS)
+
+        failure = {"code": "http_error", "error": "upstream said 502", "status_code": 502}
+        results["gafam"] = (None, failure)
+        assert data_mod._extract_extra_payloads(results, include_extra=True) == (None, failure)
+        assert data_mod._extract_extra_payloads({}, include_extra=False) == (None, None)
 
 
 class TestFailClosedNoneGuards:
