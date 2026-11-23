@@ -242,7 +242,7 @@ def _check_destination(base_url: Any, method: str, url: Any) -> None:
         return
 
     error_msg = f"Blocked request to non-NextDNS host: {host}"
-    logger.warning(f"{error_msg} (method={method})")
+    logger.warning(error_msg)
     raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED)
 
 
@@ -330,7 +330,7 @@ class AccessControlledClient:
         else:
             error_msg = f"Write access denied for profile: {profile_id}"
 
-        logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
+        logger.warning(error_msg)
         raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED, profile_id=profile_id)
 
     def _check_read_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -339,7 +339,7 @@ class AccessControlledClient:
             return
 
         error_msg = f"Read access denied for profile: {profile_id}"
-        logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
+        logger.warning(error_msg)
         raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED, profile_id=profile_id)
 
     def _check_collection_write_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -351,12 +351,12 @@ class AccessControlledClient:
         """
         if access.read_only:
             error_msg = "Write operation denied: server is in read-only mode"
-            logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
+            logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
         if not access.any_writable:
             error_msg = "Write access denied: no profiles are writable"
-            logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
+            logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
     def _check_collection_read_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -368,7 +368,7 @@ class AccessControlledClient:
         """
         if not access.any_readable:
             error_msg = "Read access denied: no profiles are readable"
-            logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
+            logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED)
 
     def _check_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -407,8 +407,11 @@ class AccessControlledClient:
             self._check_access(profile_id, method, url_str, access)
         elif _unmatchable_profile_url(request_path):
             # Fail closed: a URL whose profile cannot be classified is denied
-            # instead of being allowed to bypass the profile ACL check.
-            logger.warning(f"Forbidden URL: {_redacted(url_str)} (method={method})")
+            # instead of being allowed to bypass the profile ACL check. The log
+            # record names the refusal only: no safe profile id or host exists
+            # for an unclassifiable URL, so no request metadata is logged. The
+            # caller-facing error still carries the full URL.
+            logger.warning("Forbidden URL: request could not be classified against the profile ACL")
             raise AccessDeniedError(f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id="")
         else:
             self._check_collection_access(method, url_str, access)

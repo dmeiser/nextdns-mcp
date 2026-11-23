@@ -17,6 +17,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import io
 import ipaddress
+import logging
 import os
 import socket
 import tempfile
@@ -866,6 +867,41 @@ class TestDownloadTool:
         payload = await logs_module._download_logs_to_tempfile("abc123")
         assert payload["code"] == ErrorCode.READ_ACCESS_DENIED
         assert "Read access denied for profile: abc123" in payload["error"]
+
+    async def test_an_acl_denial_warns_server_side(self, monkeypatch, caplog):
+        """WORK-250: an ACL denial mid-download leaves a server-side WARNING, not just a payload."""
+        caplog.set_level(logging.WARNING, logger="nextdns_mcp.tools.logs")
+
+        class Denied:
+            def stream(self, method, url, **kwargs):
+                raise AccessDeniedError(
+                    "Read access denied for profile: abc123",
+                    code=ErrorCode.READ_ACCESS_DENIED,
+                    profile_id="abc123",
+                )
+
+        monkeypatch.setattr(client_module, "api_client", Denied())
+        payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert payload["code"] == ErrorCode.READ_ACCESS_DENIED
+        assert any("Access denied downloading logs" in record.getMessage() for record in caplog.records)
+
+    async def test_a_refused_redirect_warns_server_side(self, monkeypatch, caplog, unauthenticated):
+        """WORK-250: a refused redirect leaves a server-side WARNING, not just a payload."""
+        caplog.set_level(logging.WARNING, logger="nextdns_mcp.tools.logs")
+        unauthenticated([])
+
+        class Redirect:
+            def stream(self, method, url, **kwargs):
+                return _FakeResponse(
+                    "https://api.nextdns.io/profiles/abc123/logs/download", location="https://169.254.169.254/x"
+                )
+
+        monkeypatch.setattr(client_module, "api_client", Redirect())
+        payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert payload["code"] == ErrorCode.HTTP_ERROR
+        assert any("Refusing log download redirect" in record.getMessage() for record in caplog.records)
 
     async def test_a_refused_redirect_leaves_no_temp_directory(self, monkeypatch, unauthenticated):
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
