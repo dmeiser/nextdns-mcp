@@ -117,15 +117,18 @@ def _startup_error(stderr_lines: list[str]) -> RuntimeError:
     return RuntimeError(f"Pyodide sandbox failed to start:\n{err}")
 
 
-async def _read_startup_line(
-    proc: subprocess.Popen[bytes],
-    proc_stderr: Any,
-    stderr_lines: list[str],
-) -> str:
-    """Read one startup stderr line, raising if the worker died before signalling."""
+async def _read_startup_line(proc_stderr: Any, stderr_lines: list[str]) -> str:
+    """Read one startup stderr line, raising if the worker stopped signalling before readiness.
+
+    An empty read from a pipe is EOF, not a quiet moment: it means every write end of
+    the worker's stderr is closed, so the ``pyodide:ready`` signal can never arrive —
+    whether the worker died or is still alive with that pipe closed. Returning the
+    empty line instead would leave ``_await_ready`` submitting reads forever, one
+    executor future per spin, until the caller's cold-start timeout cancelled it.
+    """
     loop = asyncio.get_event_loop()
     line = await loop.run_in_executor(None, proc_stderr.readline)
-    if not line and proc.poll() is not None:
+    if not line:
         raise _startup_error(stderr_lines)
     decoded = line.decode().rstrip()
     stderr_lines.append(decoded)
@@ -133,11 +136,15 @@ async def _read_startup_line(
 
 
 async def _await_ready(proc: subprocess.Popen[bytes]) -> None:
-    """Drain the worker's stderr until it signals readiness, as upstream does."""
+    """Drain the worker's stderr until it signals readiness, as upstream does.
+
+    Raises once stderr reaches EOF: the readiness signal can no longer arrive, so
+    there is nothing left to wait for and ``_start`` reclaims the worker.
+    """
     assert proc.stderr is not None
     stderr_lines: list[str] = []
     while True:
-        decoded = await _read_startup_line(proc, proc.stderr, stderr_lines)
+        decoded = await _read_startup_line(proc.stderr, stderr_lines)
         if "pyodide:ready" in decoded:
             break
 
