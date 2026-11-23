@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .errors import ErrorCode, error_payload
+from .utils import RELATIVE_AMOUNT_PATTERN, RELATIVE_UNIT_CLASS, RELATIVE_UNIT_SECONDS
 
 # Maximum number of data points a single series response may contain (issue #267).
 # The point count is the requested range divided by the interval, so bounding the
@@ -43,13 +44,13 @@ PLOT_MAX_POINTS = 2000
 # there is worse, not better, than in a single-chart result (issue #550).
 PLOT_CHART_MAX_POINTS = 250
 
-# Relative from/to values such as "-1d" or "-7d", with their unit in seconds.
-# "y" is a 365-day year, matching how the analytics endpoints read a year. The
-# unit is matched case-sensitively: an upper-case letter is a different unit
-# upstream ("-1M" reads as months), so folding it onto its lower-case twin
-# would size a months-long range as minutes.
-_RELATIVE_TIME_RE = re.compile(r"^(-?)(\d+)([smhdwy])$")
-_RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+# The relative-offset grammar (amount matcher, unit alphabet and unit table) is
+# shared through ``utils``: this module owns resolution to Unix seconds and
+# ``utils`` owns rewriting spellings for the API, both recognizing the same
+# amount and units. Resolution stays strict here - the unit letter is read
+# case-sensitively and no space separates amount from unit - because that is the
+# form the analytics endpoints accept.
+_RELATIVE_TIME_RE = re.compile(rf"^(-?)({RELATIVE_AMOUNT_PATTERN})({RELATIVE_UNIT_CLASS})$")
 
 
 def _parse_series_timestamp(value: str) -> datetime:
@@ -174,7 +175,7 @@ def _relative_time_seconds(text: str, now: float) -> float | None:
         return None
     sign = -1.0 if match.group(1) else 1.0
     try:
-        return now + sign * int(match.group(2)) * _RELATIVE_UNIT_SECONDS[match.group(3)]
+        return now + sign * int(match.group(2)) * RELATIVE_UNIT_SECONDS[match.group(3)]
     except (ValueError, OverflowError):
         return None
 
