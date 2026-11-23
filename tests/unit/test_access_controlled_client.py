@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from nextdns_mcp import transport
-from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
+from nextdns_mcp.client import AccessControlledClient, AccessDeniedError, RawProbeTransport
 from nextdns_mcp.config import configure_logging
 from nextdns_mcp.tools import logs as logs_module
 
@@ -1018,31 +1018,52 @@ class TestAccessControlledClientCallerPayloadIsolation:
         assert payload == before
 
 
-class TestAccessControlledClientRawRequest:
-    """The raw transport bypasses access control for server-level probes."""
+class TestRawProbeTransportSkipsTheProfileAcl:
+    """The raw probe transport bypasses access control for server-level probes."""
 
     @pytest.mark.asyncio
-    async def test_raw_request_bypasses_read_denial(
+    async def test_probe_request_bypasses_read_denial(
         self, mock_super_request: Any, clean_env: Callable[[str, str], None]
     ) -> None:
         """A deny-all readable-profile config must not block a raw probe."""
         clean_env("NEXTDNS_READABLE_PROFILES", "")
 
-        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.raw_request("GET", "/profiles")
+        async with RawProbeTransport(base_url="https://api.nextdns.io") as raw:
+            response = await raw.request("GET", "/profiles")
 
         mock_super_request.assert_called_once()
         assert response.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_raw_request_bypasses_write_denial(
+    async def test_probe_request_bypasses_write_denial(
         self, mock_super_request: Any, clean_env: Callable[[str, str], None]
     ) -> None:
         """Read-only mode must not block a raw probe either."""
         clean_env("NEXTDNS_READ_ONLY", "true")
 
-        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
-            response = await client.raw_request("GET", "/profiles/abc123/settings")
+        async with RawProbeTransport(base_url="https://api.nextdns.io") as raw:
+            response = await raw.request("GET", "/profiles/abc123/settings")
 
         mock_super_request.assert_called_once()
         assert response.status_code == 200
+
+
+class TestCompositionStructure:
+    """Structural invariants of the composition refactor (issue #639).
+
+    The ACL invariant lives in one narrowing subclass no longer: the class
+    that enforces the profile ACL must not be an httpx.AsyncClient subclass
+    (which leaks inherited transport methods past the door) and must expose
+    no general-purpose raw request method.
+    """
+
+    def test_is_not_an_httpx_async_client_subclass(self):
+        assert not issubclass(AccessControlledClient, httpx.AsyncClient)
+
+    def test_exposes_no_raw_request_doorway(self):
+        assert not hasattr(AccessControlledClient, "raw_request")
+
+    def test_raw_probe_transport_is_not_an_httpx_subclass_either(self):
+        """The probe's bypass lives on its own class, off the ACL class."""
+        assert not issubclass(RawProbeTransport, httpx.AsyncClient)
+        assert not issubclass(RawProbeTransport, AccessControlledClient)

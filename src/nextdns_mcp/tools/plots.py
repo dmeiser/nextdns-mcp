@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT
 """
 
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.app import PrefabApp
@@ -26,7 +26,7 @@ from ..errors import ErrorCode, error_payload
 from ..transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ..utils import (
     PARTIALS_VALUES,
-    _build_series_params,
+    build_series_params,
     limit_range_error,
     normalize_partials,
     normalize_time_value,
@@ -95,6 +95,24 @@ def _validate_interval_and_limit(interval: int, limit: int) -> dict[str, Any] | 
     return limit_range_error(limit)
 
 
+class _PlotParams(NamedTuple):
+    """Parameters that passed every plot validation, ready for the series fetch.
+
+    The explicit ``error`` field is always ``None`` here; it exists so the
+    caller inspects one named field instead of unpacking positions.
+    """
+
+    profile_id: str
+    error: None = None
+
+
+class _PlotParamsError(NamedTuple):
+    """The typed payload that stopped plot parameter validation."""
+
+    error: dict[str, Any]
+    profile_id: None = None
+
+
 def _validate_plot_params(
     metric: str,
     interval: int,
@@ -102,24 +120,29 @@ def _validate_plot_params(
     from_time: str | int = "-1d",
     to_time: str | int = "now",
     limit: int = 10,
-) -> tuple[str, None] | tuple[None, dict[str, Any]]:
+) -> _PlotParams | _PlotParamsError:
     """Validate metric, interval, limit, range, and profile ID parameters for plotting."""
     if metric not in PLOT_METRICS:
-        return None, error_payload(
-            ErrorCode.UNSUPPORTED_METRIC,
-            f"Unsupported metric: {metric}",
-            supported_metrics=sorted(PLOT_METRICS),
+        return _PlotParamsError(
+            error_payload(
+                ErrorCode.UNSUPPORTED_METRIC,
+                f"Unsupported metric: {metric}",
+                supported_metrics=sorted(PLOT_METRICS),
+            )
         )
 
     bounds_error = _validate_interval_and_limit(interval, limit)
     if bounds_error:
-        return None, bounds_error
+        return _PlotParamsError(bounds_error)
 
     budget_error = series_budget_error(from_time, to_time, interval)
     if budget_error:
-        return None, budget_error
+        return _PlotParamsError(budget_error)
 
-    return resolve_default_profile(profile_id)
+    resolved = resolve_default_profile(profile_id)
+    if resolved[1] is not None:
+        return _PlotParamsError(resolved[1])
+    return _PlotParams(profile_id=resolved[0])
 
 
 async def _fetch_series_payload(
@@ -164,11 +187,11 @@ async def _plot_analytics_series_impl(
     if partials_error:
         return partials_error
 
-    resolved = _validate_plot_params(metric, interval, profile_id, from_time, to_time, limit)
-    if resolved[1] is not None:
-        return resolved[1]
+    validated = _validate_plot_params(metric, interval, profile_id, from_time, to_time, limit)
+    if isinstance(validated, _PlotParamsError):
+        return validated.error
 
-    params: dict[str, Any] = _build_series_params(
+    params: dict[str, Any] = build_series_params(
         from_time=from_time,
         to_time=to_time,
         interval=interval,
@@ -177,7 +200,7 @@ async def _plot_analytics_series_impl(
         partials=partials,
     )
 
-    return await _fetch_plot_series(metric, resolved[0], params)
+    return await _fetch_plot_series(metric, validated.profile_id, params)
 
 
 def _validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:

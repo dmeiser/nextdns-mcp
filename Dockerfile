@@ -1,16 +1,18 @@
 # Multi-stage build for a lean final image
 
 # 1. Builder stage: Install dependencies
-FROM python:3.15-slim AS builder
+# The base image is pinned by digest, not only by tag, so a build can't resolve
+# different bytes than the ones CI verified; the tag stays to name the pin.
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS builder
 
-# Update system packages for security
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+# The image carries exactly the pinned base's package set: no build-time
+# `apt-get upgrade`, which would make the result depend on the mirrors that day.
 
 # Set working directory
 WORKDIR /app
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Install uv, pinned to the same release and digest as the Alpine variant
+COPY --from=ghcr.io/astral-sh/uv:0.11.24@sha256:99ea34acedc870ba4ad11a1f540a1c04267c9f30aadc465a94406f52dfda2c36 /uv /usr/local/bin/uv
 
 # Copy only the dependency files: the export and install below read nothing else,
 # so src/ stays out of the builder and its dependency layer cache
@@ -47,10 +49,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -f /tmp/deno.zip && rm -rf /var/lib/apt/lists/*
 
 # 2. Final stage: Create the runtime image
-FROM python:3.15-slim
+# Pinned to the same base image digest as the builder stage.
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
-# Update system packages for security
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+# The image carries exactly the pinned base's package set: no build-time
+# `apt-get upgrade`, which would make the result depend on the mirrors that day.
 
 # OCI labels for container metadata
 LABEL org.opencontainers.image.title="NextDNS MCP Server"

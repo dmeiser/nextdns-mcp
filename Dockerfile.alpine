@@ -1,11 +1,13 @@
 # Multi-stage build for a lean Alpine final image
 
 # Builder stage
-FROM python:3.15-alpine AS builder
+# Base pinned by digest (tracked by Dependabot) so a rebuild from an unchanged
+# revision always starts from the same image, per the slim variant.
+FROM python:3.15-alpine@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd AS builder
 
-# Upgrade base packages and install build tooling for any wheels that need compilation
-RUN apk upgrade --no-cache && \
-    apk add --no-cache build-base linux-headers
+# Build tooling for any wheels that need compilation; no build-time `apk
+# upgrade`, which would make the result depend on the mirrors that day.
+RUN apk add --no-cache build-base linux-headers
 
 WORKDIR /app
 
@@ -27,10 +29,9 @@ RUN uv export --frozen --no-dev --no-emit-project --output-file /tmp/requirement
     uv pip install --target /install --requirement /tmp/requirements.txt
 
 # Runtime stage
-FROM python:3.15-alpine
-
-# Upgrade base packages for security parity with the slim variant
-RUN apk upgrade --no-cache
+# Same digest-pinned base as the builder stage; the image carries exactly the
+# pinned base's package set, so no `apk upgrade` here either.
+FROM python:3.15-alpine@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd
 
 WORKDIR /app
 

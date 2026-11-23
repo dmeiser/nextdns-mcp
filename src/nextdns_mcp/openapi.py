@@ -38,6 +38,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import logging
 import time
+import weakref
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, NamedTuple
@@ -52,7 +53,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .call_log import CallLogMiddleware, call_log_path
-from .client import close_api_client, get_api_client
+from .client import close_api_client, close_raw_probe_client, get_raw_probe_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
 from .constants import SYNTHETIC_TOOL_NAMES
 from .spec_tools import endpoints_for_routes
@@ -60,7 +61,7 @@ from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import close_doh_client
 from .tools.logs import _download_registry, cleanup_successful_downloads
 from .usage import server_instructions
-from .utils import _BARE_NEGATIVE_RE, _NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
+from .utils import BARE_NEGATIVE_RE, NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,7 @@ HEALTH_FAILURE_UNREACHABLE = "unreachable"
 """Failure class: NextDNS could not be probed, or answered unusably."""
 
 
-class HealthFailure(NamedTuple):
+class _HealthFailure(NamedTuple):
     """A failed readiness probe.
 
     Attributes:
@@ -102,7 +103,7 @@ class HealthFailure(NamedTuple):
 
 
 # Cached probe result as (monotonic timestamp, failure or None when healthy).
-_health_probe_cache: tuple[float, HealthFailure | None] | None = None
+_health_probe_cache: tuple[float, _HealthFailure | None] | None = None
 
 # Guards probe *construction*, not cache reads: concurrent ``/health`` pollers
 # that all miss an empty (or just-expired) cache used to each fire their own
@@ -369,7 +370,7 @@ def _coerce_string_by_type(s: str, schema_types: set[str]) -> Any:
 
 def _preserves_time_string(value: str, schema_types: set[str]) -> bool:
     """Whether a string time value must survive coercion untouched."""
-    return "string" in schema_types and bool(_BARE_NEGATIVE_RE.match(value) or _NOW_OFFSET_RE.match(value))
+    return "string" in schema_types and bool(BARE_NEGATIVE_RE.match(value) or NOW_OFFSET_RE.match(value))
 
 
 class StripExtraFieldsMiddleware(Middleware):
@@ -393,15 +394,20 @@ class StripExtraFieldsMiddleware(Middleware):
     served (everything is registered at startup), so re-fetching each tool's
     schema through FastMCP re-decodes the same large JSON Schema on every
     single call, and rebuilding the owner index re-walks the whole catalog.
-    The caches key on the server identity, so a second server instance in the
-    same process cannot read the first one's catalog.
+    The caches key on the server object itself — never ``id(server)``, whose
+    value Python recycles after garbage collection — so a second server
+    instance in the same process cannot read a dead server's catalog.
     """
 
     def __init__(self, tool_names: Sequence[str] = ()) -> None:
-        # (server identity, tool name) -> that tool's parameter schema.
-        self._schema_cache: dict[tuple[int, str], dict[str, Any]] = {}
-        # (server identity) -> argument-name owner index, built on first use.
-        self._owner_cache: tuple[int, dict[str, tuple[str, ...]]] | None = None
+        # server -> tool name -> that tool's parameter schema. The weak key is
+        # the server object, not id(server): id() values are reused once an
+        # object is collected, which let a new server read a dead server's
+        # cached schema. Entries vanish with the server they belong to.
+        self._schema_cache: weakref.WeakKeyDictionary[FastMCP, dict[str, dict[str, Any]]] = weakref.WeakKeyDictionary()
+        # server -> argument-name owner index, built on first use. Same weak
+        # keying as _schema_cache, for the same id()-reuse reason.
+        self._owner_cache: weakref.WeakKeyDictionary[FastMCP, dict[str, tuple[str, ...]]] = weakref.WeakKeyDictionary()
         # The server's registration list: the only source that enumerates the
         # real tools under disclosure (see _catalog_argument_index).
         self._tool_names: tuple[str, ...] = tuple(tool_names)
@@ -413,22 +419,27 @@ class StripExtraFieldsMiddleware(Middleware):
         be shadowed by it, and misses are off the served path anyway (FastMCP
         rejects unknown names right after this middleware returns).
         """
-        key = (id(fastmcp_server), tool_name)
-        cached = self._schema_cache.get(key)
+        server_cache = self._schema_cache.get(fastmcp_server)
+        if server_cache is None:
+            server_cache = {}
+            self._schema_cache[fastmcp_server] = server_cache
+        cached = server_cache.get(tool_name)
         if cached is not None:
             return cached
         tool = await fastmcp_server.get_tool(tool_name)
         if tool is None:
             return None
         parameters: dict[str, Any] = tool.parameters or {}
-        self._schema_cache[key] = parameters
+        server_cache[tool_name] = parameters
         return parameters
 
     async def _owner_index(self, fastmcp_server: FastMCP) -> dict[str, tuple[str, ...]]:
         """The registered catalog's argument-owner index, built once per server."""
-        if self._owner_cache is None or self._owner_cache[0] != id(fastmcp_server):
-            self._owner_cache = (id(fastmcp_server), await _catalog_argument_index(fastmcp_server, self._tool_names))
-        return self._owner_cache[1]
+        cached = self._owner_cache.get(fastmcp_server)
+        if cached is None:
+            cached = await _catalog_argument_index(fastmcp_server, self._tool_names)
+            self._owner_cache[fastmcp_server] = cached
+        return cached
 
     def _get_schema_property_types(self, prop_schema: Any) -> set[str]:
         """Extract JSON Schema type(s) from a property schema.
@@ -598,6 +609,7 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         try:
             await close_api_client()
         finally:
+            await close_raw_probe_client()
             await close_doh_client()
             # The lazily-started Pyodide/Deno sandbox subprocess (issue #408) is
             # stopped by NextDNSGenerativeUI.lifespan(), which FastMCP unwinds
@@ -767,7 +779,7 @@ def _register_compat_endpoints(mcp: FastMCP) -> None:
     mcp.custom_route("/v1/models", methods=["GET"])(v1_models)
 
 
-def _cached_readiness() -> tuple[bool, HealthFailure | None]:
+def _cached_readiness() -> tuple[bool, _HealthFailure | None]:
     """Whether the cached probe result is still valid, and what it said.
 
     ``(fresh, failure)``; ``failure`` is the cached result (``None`` meaning
@@ -779,7 +791,7 @@ def _cached_readiness() -> tuple[bool, HealthFailure | None]:
     return True, cached[1]
 
 
-async def check_nextdns_readiness() -> HealthFailure | None:
+async def check_nextdns_readiness() -> _HealthFailure | None:
     """Return the readiness result, probing NextDNS at most once per cache window.
 
     Single-flight: concurrent pollers that all miss an empty or expired cache
@@ -789,7 +801,7 @@ async def check_nextdns_readiness() -> HealthFailure | None:
 
     Returns:
         None when the configured credentials work against NextDNS, otherwise a
-        HealthFailure describing why the service is not ready.
+        _HealthFailure describing why the service is not ready.
     """
     global _health_probe_cache
 
@@ -808,30 +820,30 @@ async def check_nextdns_readiness() -> HealthFailure | None:
         return failure
 
 
-async def _run_health_probe() -> HealthFailure | None:
+async def _run_health_probe() -> _HealthFailure | None:
     """Probe the NextDNS API once with the configured credentials.
 
-    The request goes through the client's RAW transport (``raw_request``), which
-    bypasses profile access control: a local ACL denial must not mask the true
-    upstream authentication state. Only the status code and the exception type
-    name are reported, never the API key, the auth headers, or the response
-    body.
+    The request goes through the raw probe transport
+    (``client.get_raw_probe_client()``), which bypasses profile access control:
+    a local ACL denial must not mask the true upstream authentication state.
+    Only the status code and the exception type name are reported, never the
+    API key, the auth headers, or the response body.
 
     Returns:
-        None when NextDNS accepted the credentials, otherwise a HealthFailure.
+        None when NextDNS accepted the credentials, otherwise a _HealthFailure.
     """
     try:
-        client = get_api_client()
-        response = await client.raw_request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
+        probe_client = get_raw_probe_client()
+        response = await probe_client.request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
     except ConfigurationError:
         return _configuration_failure()
     except httpx.TimeoutException:
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_UNREACHABLE,
             f"NextDNS API did not respond within {HEALTH_PROBE_TIMEOUT:g}s",
         )
     except httpx.HTTPError as exc:
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_UNREACHABLE,
             f"Could not reach the NextDNS API ({type(exc).__name__})",
         )
@@ -841,24 +853,24 @@ async def _run_health_probe() -> HealthFailure | None:
     return _probe_status_failure(response)
 
 
-def _configuration_failure() -> HealthFailure:
+def _configuration_failure() -> _HealthFailure:
     """Classify a ConfigurationError from building the client: no key at all is auth."""
     if not get_api_key():
-        return HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
-    return HealthFailure(
+        return _HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
+    return _HealthFailure(
         HEALTH_FAILURE_UNREACHABLE,
         "NextDNS client configuration is invalid (check NEXTDNS_HTTP_TIMEOUT)",
     )
 
 
-def _probe_status_failure(response: httpx.Response) -> HealthFailure:
+def _probe_status_failure(response: httpx.Response) -> _HealthFailure:
     """Classify a non-success probe answer: 401/403 is auth, anything else unreachable."""
     if response.status_code in (401, 403):
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_AUTH,
             f"NextDNS API rejected the configured credentials (HTTP {response.status_code})",
         )
-    return HealthFailure(
+    return _HealthFailure(
         HEALTH_FAILURE_UNREACHABLE,
         f"NextDNS API answered with an unusable status (HTTP {response.status_code})",
     )
