@@ -53,13 +53,13 @@ This file contains repository-specific agent rules. Agents should follow these w
 
 1. `CallToolShapeMiddleware` (`src/nextdns_mcp/tool_search_shape.py`, added only under disclosure) — repairs the `call_tool` call shape: resolves a name out of a whole search answer, normalizes a mistyped name, and lifts tool parameters that were sent beside `name` back into `arguments`.
 2. `StripExtraFieldsMiddleware` (`src/nextdns_mcp/openapi.py`) — drops top-level arguments the target tool's published schema does not declare (reporting them as `ignored_arguments`) and coerces obvious string spellings of typed fields.
-3. `CallLogMiddleware` (`src/nextdns_mcp/call_log/middleware.py`, added only when `NEXTDNS_CALL_LOG` is set) — records the call that actually executed. The row it writes is built in `src/nextdns_mcp/call_log/record.py`, bounded by `src/nextdns_mcp/call_log/projection.py` and lifted of identity facts by `src/nextdns_mcp/call_log/evidence.py`, and appended by `src/nextdns_mcp/call_log/store.py`.
+3. `CallLogMiddleware` (`src/nextdns_mcp/call_log.py`, added only when `NEXTDNS_CALL_LOG` is set) — records the call that actually executed.
 
 Why exactly that order:
 
 - Shape repair must be added **before** the extra-field filter. The misplaced parameters it exists to rescue are exactly the keys the filter would drop as unknown, so a filter running first would destroy the evidence the repair needs.
 - Shape repair must be added **before** the call log, so the log records the resolved tool name and the repaired arguments rather than the malformed call the caller sent.
-- The synthetic `call_tool` **re-enters the whole chain**: it dispatches through the server's own `call_tool`, which re-applies every middleware to the resolved target tool. That is why `constants.SYNTHETIC_TOOL_NAMES` skips `search_tools`/`call_tool` — without the skip, one disclosed call would be recorded twice — and why the outer relaxation pass must be keyed on the resolved target rather than on the wrapper.
+- The synthetic `call_tool` **re-enters the whole chain**: it dispatches through the server's own `call_tool`, which re-applies every middleware to the resolved target tool. That is why `call_log._SYNTHETIC_TOOLS` skips `search_tools`/`call_tool` — without the skip, one disclosed call would be recorded twice — and why the outer relaxation pass must be keyed on the resolved target rather than on the wrapper.
 - The invariant a FastMCP bump must preserve: **exactly one call-log row per executed call**, under the real tool name, carrying the arguments the tool actually received. The disclosure-proxy row test in `tests/unit/test_call_log.py` is what fails first if FastMCP changes how `call_tool` dispatches. Treat that failure as a chain-order question, not a logging bug.
 
 ## FastMCP integration surface
