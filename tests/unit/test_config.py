@@ -138,22 +138,17 @@ class TestEnvironmentConfiguration:
             assert nextdns_mcp.config.get_http_timeout() == 60.0
 
     def test_base_url_is_correct(self, monkeypatch, mock_api_key):
-        """Test that the base URL defaults to the production API."""
+        """Test that base URL is set correctly."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.delenv("NEXTDNS_API_BASE", raising=False)
+
+        import sys
+
+        if "nextdns_mcp.config" in sys.modules:
+            del sys.modules["nextdns_mcp.config"]
 
         from nextdns_mcp import config
 
-        assert config.get_api_base() == "https://api.nextdns.io"
-
-    def test_base_url_override_normalizes_trailing_slash(self, monkeypatch, mock_api_key):
-        """NEXTDNS_API_BASE overrides the default and is normalized."""
-        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setenv("NEXTDNS_API_BASE", "https://api.example.test/v1/")
-
-        from nextdns_mcp import config
-
-        assert config.get_api_base() == "https://api.example.test/v1"
+        assert config.NEXTDNS_BASE_URL == "https://api.nextdns.io"
 
 
 class TestGenerativeUIConfig:

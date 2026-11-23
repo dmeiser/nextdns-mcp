@@ -17,29 +17,10 @@ def patch_env(monkeypatch):
 
 
 def test_api_url():
-    """Test API base URL default."""
+    """Test API base URL constant."""
     from nextdns_mcp import config
 
-    assert config.get_api_base() == "https://api.nextdns.io"
-
-
-def test_api_url_reads_env_at_call_time(patch_env):
-    """A long-lived process picks up a NEXTDNS_API_BASE change without a reimport."""
-    from nextdns_mcp import config
-
-    patch_env("NEXTDNS_API_BASE", "https://first.example.invalid/")
-    assert config.get_api_base() == "https://first.example.invalid"
-    patch_env("NEXTDNS_API_BASE", "https://second.example.invalid")
-    assert config.get_api_base() == "https://second.example.invalid"
-
-
-def test_api_url_rejects_non_https(patch_env):
-    """The https requirement holds on every read, not only at startup."""
-    from nextdns_mcp import config
-
-    patch_env("NEXTDNS_API_BASE", "http://api.nextdns.io")
-    with pytest.raises(config.ConfigurationError, match="NEXTDNS_API_BASE must use https://"):
-        config.get_api_base()
+    assert config.NEXTDNS_BASE_URL == "https://api.nextdns.io"
 
 
 def test_default_api_key_empty(patch_env):
