@@ -1013,8 +1013,13 @@ def test_create_profile_guard_all_protected(monkeypatch):
 
     from nextdns_mcp import config, spec_tools
 
-    monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1"})
-    monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
+    monkeypatch.setattr(
+        config,
+        "load_profile_access_control",
+        lambda: config.ProfileAccessControl(
+            read_only=False, readable=frozenset({"p1"}), writable=frozenset({"p1"}), protected=frozenset({"p1"})
+        ),
+    )
     from types import SimpleNamespace
 
     route = SimpleNamespace(
@@ -1029,8 +1034,16 @@ def test_create_profile_guard_not_all_protected(monkeypatch):
 
     from nextdns_mcp import config, spec_tools
 
-    monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1", "p2"})
-    monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
+    monkeypatch.setattr(
+        config,
+        "load_profile_access_control",
+        lambda: config.ProfileAccessControl(
+            read_only=False,
+            readable=frozenset({"p1", "p2"}),
+            writable=frozenset({"p1", "p2"}),
+            protected=frozenset({"p1"}),
+        ),
+    )
     from types import SimpleNamespace
 
     route = SimpleNamespace(
@@ -1038,6 +1051,36 @@ def test_create_profile_guard_not_all_protected(monkeypatch):
     )
     tool = spec_tools.SpecApiTool(route=route)
     assert tool._create_profile_guard() is None
+
+
+def test_create_profile_guard_reads_protected_profiles_once(monkeypatch):
+    """One guard invocation takes a single snapshot: the denylist is read once."""
+
+    from nextdns_mcp import config, spec_tools
+
+    monkeypatch.setenv("NEXTDNS_READ_ONLY", "")
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abcdef,fedcba")
+    monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "abcdef")
+
+    calls = 0
+    real_get_protected_profiles = config.get_protected_profiles
+
+    def counting_get_protected_profiles() -> frozenset[str]:
+        nonlocal calls
+        calls += 1
+        return real_get_protected_profiles()
+
+    monkeypatch.setattr(config, "get_protected_profiles", counting_get_protected_profiles)
+
+    from types import SimpleNamespace
+
+    route = SimpleNamespace(
+        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    assert tool._create_profile_guard() is None
+    assert calls == 1
 
 
 import asyncio
