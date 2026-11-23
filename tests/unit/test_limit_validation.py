@@ -74,7 +74,17 @@ class TestValidateDashboardLimit:
         assert err["max_limit"] == 500
         assert err["limit"] == limit
 
-    @pytest.mark.parametrize("limit", [1, 10, 500])
+    @pytest.mark.parametrize("limit", ["10", "", "abc", None, [10], {"limit": 10}, 10.5j])
+    def test_non_numeric_limits_rejected_with_typed_payload(self, limit):
+        """A non-numeric limit returns the typed payload, not a ``TypeError`` (issue #596)."""
+        err = utils_module.limit_range_error(limit)
+        assert err is not None
+        assert err["code"] == "invalid_argument"
+        assert err["min_limit"] == 1
+        assert err["max_limit"] == 500
+        assert err["limit"] == limit
+
+    @pytest.mark.parametrize("limit", [1, 10, 500, 1.0, 500.0, 42.5])
     def test_boundary_limits_accepted(self, limit):
         assert utils_module.limit_range_error(limit) is None
 

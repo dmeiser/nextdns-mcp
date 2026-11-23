@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from nextdns_mcp.config import ConfigurationError
-from nextdns_mcp.server import _is_loopback_host, _parse_port, _resolve_transport, get_mcp_run_options
+from nextdns_mcp.run_options import _is_loopback_host, _parse_port, _resolve_transport, get_mcp_run_options
 
 
 class TestGetMcpRunOptions:
@@ -84,7 +84,7 @@ class TestGetMcpRunOptions:
         """Test that an explicit non-loopback bind logs a security warning."""
         with (
             patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_HOST": "0.0.0.0"}, clear=True),
-            patch("nextdns_mcp.server.logger.warning") as mock_warning,
+            patch("nextdns_mcp.run_options.logger.warning") as mock_warning,
         ):
             options = get_mcp_run_options()
             assert options["host"] == "0.0.0.0"
@@ -95,7 +95,7 @@ class TestGetMcpRunOptions:
         """Test that the default loopback bind emits no security warning."""
         with (
             patch.dict(os.environ, {"MCP_TRANSPORT": "http"}, clear=True),
-            patch("nextdns_mcp.server.logger.warning") as mock_warning,
+            patch("nextdns_mcp.run_options.logger.warning") as mock_warning,
         ):
             get_mcp_run_options()
             mock_warning.assert_not_called()
@@ -219,3 +219,29 @@ class TestIsLoopbackHost:
     def test_non_loopback_hosts(self, host):
         """Test that non-loopback addresses are not recognized as loopback."""
         assert _is_loopback_host(host) is False
+
+
+class TestServerModuleReExports:
+    """The catalog and run-option helpers used to live in ``nextdns_mcp.server``.
+
+    External scripts and tests import them from there, so ``server.py``
+    re-exports the moved names; these aliases must keep pointing at the
+    implementations in ``nextdns_mcp.catalog`` and ``nextdns_mcp.run_options``.
+    """
+
+    def test_run_option_helpers_remain_importable_from_server(self):
+        import nextdns_mcp.server as server_module
+        from nextdns_mcp import run_options
+
+        assert server_module.get_mcp_run_options is run_options.get_mcp_run_options
+        assert server_module._resolve_transport is run_options._resolve_transport
+        assert server_module._parse_port is run_options._parse_port
+        assert server_module._is_loopback_host is run_options._is_loopback_host
+
+    def test_catalog_helpers_remain_importable_from_server(self):
+        import nextdns_mcp.server as server_module
+        from nextdns_mcp import catalog
+
+        assert server_module.generative_ui_tool_names is catalog.generative_ui_tool_names
+        assert server_module.generative_ui_content_tool_names is catalog.generative_ui_content_tool_names
+        assert server_module.generative_ui_data_tool_names is catalog.generative_ui_data_tool_names
