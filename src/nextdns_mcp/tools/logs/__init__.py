@@ -16,7 +16,8 @@ responsibility, one concern per module:
 - ``stream`` - streaming the response body to disk under the total-size cap,
   with typed mid-stream failures.
 - ``redirects`` - the unauthenticated redirect-chain fetch, so the API key
-  never crosses to a redirect target.
+  never crosses to a redirect target; one persistent bounded client serves
+  every chain for keep-alive reuse.
 - ``tool`` - the ``downloadLogs`` entrypoint: temp-file lifecycle, typed error
   mapping, and the payload the tool returns.
 
@@ -26,7 +27,9 @@ module's names - the same objects, not copies - because callers inside and
 outside the repo resolve them on this package (``spec_tools`` resolves the
 downloader here at call time on purpose, and ``openapi`` shares the registry
 context var). Monkeypatching a rebinding here would not reach the owning
-module's global; patch the owning submodule instead.
+module's global; patch the owning submodule instead. The redirect client's
+singleton global lives on ``redirects`` for the same reason: only the
+functions are re-exported here, never the mutable ``_redirect_client``.
 """
 
 import contextvars
@@ -46,7 +49,12 @@ from .guard import (
     _pinned_dns,
 )
 from .preview import DOWNLOAD_PREVIEW_MAX_BYTES, DOWNLOAD_PREVIEW_MAX_LINES
-from .redirects import _MAX_DOWNLOAD_REDIRECTS, _follow_redirects_to_tempfile
+from .redirects import (
+    _MAX_DOWNLOAD_REDIRECTS,
+    _follow_redirects_to_tempfile,
+    _get_redirect_client,
+    close_redirect_client,
+)
 from .retention import (
     MAX_RETAINED_DOWNLOADS,
     MissingDownloadRegistryError,
@@ -77,6 +85,7 @@ __all__ = [
     "_download_logs_to_tempfile",
     "_download_registry",
     "_follow_redirects_to_tempfile",
+    "_get_redirect_client",
     "_host_resolves_to_public_address",
     "_is_public_address",
     "_note_successful_download",
@@ -86,6 +95,7 @@ __all__ = [
     "_unlink_temp_file",
     "_write_stream_to_tempfile",
     "cleanup_successful_downloads",
+    "close_redirect_client",
     "contextvars",
     "httpx",
     "os",
