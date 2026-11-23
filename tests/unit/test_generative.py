@@ -11,20 +11,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastmcp import FastMCP
 
-from nextdns_mcp import generative as gen_mod
+from nextdns_mcp import chart_placement as chart_placement_module
 from nextdns_mcp import generative as generative_module
 from nextdns_mcp import openapi as openapi_module
+from nextdns_mcp.chart_placement import _validate_chart_placement
 from nextdns_mcp.generative import (
     MAX_CODE_BYTES,
     MAX_DATA_BYTES,
-    MAX_RESULT_BYTES,
     SANDBOX_PRELUDE,
     NextDNSGenerativeUI,
     _build_renderer_resource,
     _parse_ui_data,
     _result_size_bytes,
-    _validate_chart_placement,
 )
+from nextdns_mcp.generative_sandbox import MAX_RESULT_BYTES
 
 
 def test_parse_ui_data():
@@ -125,13 +125,13 @@ def test_repeated_tab_blocks_scale_subquadratically(monkeypatch):
 
     def count_examinations(blocks: int) -> int:
         examinations = {"n": 0}
-        original = gen_mod._node_visits
+        original = chart_placement_module._node_visits
 
         def counting(node, in_tab):
             examinations["n"] += 1
             return original(node, in_tab)
 
-        monkeypatch.setattr(gen_mod, "_node_visits", counting)
+        monkeypatch.setattr(chart_placement_module, "_node_visits", counting)
         code = "".join(f"with Tab('T{i}'):\n    pass\n" for i in range(blocks))
         _validate_chart_placement(code)  # should not raise
         return examinations["n"]
@@ -624,7 +624,7 @@ class _ChunkedRaw:
 
 
 def test_bounded_stdout_readline_reassembles_chunked_line():
-    from nextdns_mcp.generative import _BoundedStdout
+    from nextdns_mcp.generative_sandbox import _BoundedStdout
 
     line = b'{"id": "abc", "result": {"view": {}}}\n'
     raw = _ChunkedRaw(line + b'{"id": "def"}\n', chunk_size=7)
@@ -636,7 +636,7 @@ def test_bounded_stdout_readline_reassembles_chunked_line():
 
 
 def test_bounded_stdout_readline_raises_past_limit_and_stops_sandbox():
-    from nextdns_mcp.generative import _BoundedStdout
+    from nextdns_mcp.generative_sandbox import _BoundedStdout
 
     overflow = MagicMock()
     raw = _ChunkedRaw(b"x" * 100 + b"\n", chunk_size=16)
@@ -648,7 +648,7 @@ def test_bounded_stdout_readline_raises_past_limit_and_stops_sandbox():
 
 def test_bounded_stdout_readline_rejects_newline_chunk_past_limit():
     """A line whose newline arrives in the chunk that crosses the limit is still rejected."""
-    from nextdns_mcp.generative import _BoundedStdout
+    from nextdns_mcp.generative_sandbox import _BoundedStdout
 
     overflow = MagicMock()
     raw = _ChunkedRaw(b"x" * 100 + b"\n", chunk_size=128)
@@ -660,7 +660,7 @@ def test_bounded_stdout_readline_rejects_newline_chunk_past_limit():
 
 def test_get_sandbox_returns_bounded_result_sandbox():
     """The wiring that installs the fix: generate_ui must use the bounded sandbox."""
-    from nextdns_mcp.generative import _BoundedResultSandbox
+    from nextdns_mcp.generative_sandbox import _BoundedResultSandbox
 
     gen_ui = NextDNSGenerativeUI()
     sandbox = gen_ui._get_sandbox()
@@ -669,7 +669,7 @@ def test_get_sandbox_returns_bounded_result_sandbox():
 
 
 def test_bounded_stdout_readline_returns_partial_line_at_eof():
-    from nextdns_mcp.generative import _BoundedStdout
+    from nextdns_mcp.generative_sandbox import _BoundedStdout
 
     raw = _ChunkedRaw(b'{"id": "abc"}', chunk_size=4)
     bounded = _BoundedStdout(raw, limit=1024, on_overflow=MagicMock())
@@ -678,21 +678,21 @@ def test_bounded_stdout_readline_returns_partial_line_at_eof():
 
 
 def test_bounded_result_sandbox_wraps_stdout_after_start():
-    from nextdns_mcp import generative
-    from nextdns_mcp.generative import _BoundedResultSandbox, _BoundedStdout
+    from nextdns_mcp import generative_sandbox
+    from nextdns_mcp.generative_sandbox import _BoundedResultSandbox, _BoundedStdout
 
     sandbox = _BoundedResultSandbox()
     proc = MagicMock()
     proc.stdout = MagicMock()
     sandbox._process = proc
     # Drive the real _BoundedResultSandbox._start with a stubbed base start.
-    original_start = generative._Sandbox._start
+    original_start = generative_sandbox._Sandbox._start
 
     async def fake_start(self):
         self._process = proc
 
     try:
-        generative._Sandbox._start = fake_start  # type: ignore[assignment]
+        generative_sandbox._Sandbox._start = fake_start  # type: ignore[assignment]
         asyncio.run(sandbox._start())
         assert isinstance(proc.stdout, _BoundedStdout)
         wrapper = proc.stdout
@@ -700,24 +700,24 @@ def test_bounded_result_sandbox_wraps_stdout_after_start():
         asyncio.run(sandbox._start())
         assert proc.stdout is wrapper
     finally:
-        generative._Sandbox._start = original_start  # type: ignore[assignment]
+        generative_sandbox._Sandbox._start = original_start  # type: ignore[assignment]
 
 
 def test_bounded_result_sandbox_start_without_process_is_safe():
-    from nextdns_mcp import generative
-    from nextdns_mcp.generative import _BoundedResultSandbox
+    from nextdns_mcp import generative_sandbox
+    from nextdns_mcp.generative_sandbox import _BoundedResultSandbox
 
     sandbox = _BoundedResultSandbox()
-    original_start = generative._Sandbox._start
+    original_start = generative_sandbox._Sandbox._start
 
     async def fake_start(self):
         self._process = None
 
     try:
-        generative._Sandbox._start = fake_start  # type: ignore[assignment]
+        generative_sandbox._Sandbox._start = fake_start  # type: ignore[assignment]
         asyncio.run(sandbox._start())  # must not raise
     finally:
-        generative._Sandbox._start = original_start  # type: ignore[assignment]
+        generative_sandbox._Sandbox._start = original_start  # type: ignore[assignment]
     assert sandbox._process is None
 
 
@@ -780,7 +780,7 @@ async def test_generate_ui_execution_timeout():
 
 def test_sandbox_env_strips_host_secrets(monkeypatch):
     """Sensitive host variables (especially NEXTDNS_API_KEY) never reach the Deno subprocess."""
-    from nextdns_mcp.generative import _sandbox_env
+    from nextdns_mcp.generative_sandbox import _sandbox_env
 
     monkeypatch.setenv("NEXTDNS_API_KEY", "super-secret-key")
     monkeypatch.setenv("NEXTDNS_API_KEY_FILE", "/run/secrets/key")
@@ -804,7 +804,7 @@ def test_sandbox_env_strips_host_secrets(monkeypatch):
 
 def test_sandbox_env_is_a_copy(monkeypatch):
     """Mutating the returned dict must not touch the host environment."""
-    from nextdns_mcp.generative import _sandbox_env
+    from nextdns_mcp.generative_sandbox import _sandbox_env
 
     env = _sandbox_env()
     before = dict(os.environ)
@@ -815,7 +815,7 @@ def test_sandbox_env_is_a_copy(monkeypatch):
 
 def test_sandbox_startup_env_bounds_v8_heap(monkeypatch):
     """The worker heap is bounded well below the upstream 4 GiB ceiling."""
-    from nextdns_mcp.generative import SANDBOX_V8_HEAP_MB, _sandbox_startup_env
+    from nextdns_mcp.generative_sandbox import SANDBOX_V8_HEAP_MB, _sandbox_startup_env
 
     monkeypatch.setenv("NEXTDNS_API_KEY", "super-secret-key")
     monkeypatch.setenv("DENO_V8_FLAGS", "--max-old-space-size=8192")
@@ -828,7 +828,7 @@ def test_sandbox_startup_env_bounds_v8_heap(monkeypatch):
 @pytest.mark.asyncio
 async def test_hardened_sandbox_start_spawns_with_sanitized_env(monkeypatch):
     """_start forwards a sanitized environment with a bounded heap to the Deno worker."""
-    from nextdns_mcp import generative
+    from nextdns_mcp import generative_sandbox
 
     monkeypatch.setenv("NEXTDNS_API_KEY", "super-secret-key")
     captured_envs = []
@@ -843,16 +843,16 @@ async def test_hardened_sandbox_start_spawns_with_sanitized_env(monkeypatch):
         future.set_result(_FakeProc())
         return future
 
-    monkeypatch.setattr(generative, "_spawn_deno", fake_spawn)
-    monkeypatch.setattr(generative, "_await_ready", AsyncMock())
+    monkeypatch.setattr(generative_sandbox, "_spawn_deno", fake_spawn)
+    monkeypatch.setattr(generative_sandbox, "_await_ready", AsyncMock())
 
-    sandbox = generative.HardenedPyodideSandbox()
+    sandbox = generative_sandbox.HardenedPyodideSandbox()
     await sandbox._start()
 
     assert len(captured_envs) == 1
     env = captured_envs[0]
     assert "NEXTDNS_API_KEY" not in env
-    assert env["DENO_V8_FLAGS"] == f"--max-old-space-size={generative.SANDBOX_V8_HEAP_MB}"
+    assert env["DENO_V8_FLAGS"] == f"--max-old-space-size={generative_sandbox.SANDBOX_V8_HEAP_MB}"
     # The interpreter is not marked alive until readiness is confirmed.
     assert sandbox._process is not None
 
@@ -860,7 +860,7 @@ async def test_hardened_sandbox_start_spawns_with_sanitized_env(monkeypatch):
 @pytest.mark.asyncio
 async def test_hardened_sandbox_discards_worker_after_run():
     """Each execution runs on a fresh interpreter: the worker is stopped afterwards."""
-    from nextdns_mcp.generative import HardenedPyodideSandbox
+    from nextdns_mcp.generative_sandbox import HardenedPyodideSandbox
 
     sandbox = HardenedPyodideSandbox()
     stop_calls = []
@@ -878,7 +878,7 @@ async def test_hardened_sandbox_discards_worker_after_run():
 @pytest.mark.asyncio
 async def test_hardened_sandbox_run_stops_worker_even_on_error():
     """A failing execution still discards the interpreter."""
-    from nextdns_mcp.generative import HardenedPyodideSandbox
+    from nextdns_mcp.generative_sandbox import HardenedPyodideSandbox
 
     sandbox = HardenedPyodideSandbox()
     sandbox._stop = MagicMock()  # type: ignore[method-assign]
@@ -895,7 +895,7 @@ async def test_hardened_sandbox_run_stops_worker_even_on_error():
 @pytest.mark.asyncio
 async def test_hardened_sandbox_start_is_lazy_and_idempotent():
     """start() cold-starts only when no live worker exists."""
-    from nextdns_mcp.generative import HardenedPyodideSandbox
+    from nextdns_mcp.generative_sandbox import HardenedPyodideSandbox
 
     sandbox = HardenedPyodideSandbox()
     sandbox._start = AsyncMock()  # type: ignore[method-assign]
@@ -911,7 +911,7 @@ async def test_hardened_sandbox_start_is_lazy_and_idempotent():
 async def test_get_sandbox_returns_hardened_instance():
     gen_ui = NextDNSGenerativeUI()
     sandbox = gen_ui._get_sandbox()
-    from nextdns_mcp.generative import HardenedPyodideSandbox
+    from nextdns_mcp.generative_sandbox import HardenedPyodideSandbox
 
     assert isinstance(sandbox, HardenedPyodideSandbox)
     assert gen_ui._get_sandbox() is sandbox
@@ -938,10 +938,20 @@ async def test_generate_ui_cold_start_timeout_is_distinct():
 
 
 class _FakeStderr:
-    def __init__(self, lines: list[bytes]) -> None:
+    """A stderr pipe that answers from a canned list, then reports EOF.
+
+    ``reads`` counts submissions, and ``max_reads`` makes a reader that keeps
+    submitting after EOF fail loudly instead of spinning for the whole test run.
+    """
+
+    def __init__(self, lines: list[bytes], max_reads: int = 4) -> None:
         self._lines = list(lines)
+        self._max_reads = max_reads
+        self.reads = 0
 
     def readline(self) -> bytes:
+        self.reads += 1
+        assert self.reads <= self._max_reads, f"stderr read {self.reads} times; expected at most {self._max_reads}"
         return self._lines.pop(0) if self._lines else b""
 
 
@@ -957,11 +967,11 @@ class _FakeProc:
 
 
 def test_deno_command_raises_when_deno_missing(monkeypatch):
-    from nextdns_mcp import generative
+    from nextdns_mcp import generative_sandbox
 
-    monkeypatch.setattr(generative.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(generative_sandbox.shutil, "which", lambda _name: None)
     with pytest.raises(RuntimeError, match="Deno is required"):
-        generative._deno_command()
+        generative_sandbox._deno_command()
 
 
 def test_discard_startup_reclaims_only_completed_workers():
@@ -969,7 +979,7 @@ def test_discard_startup_reclaims_only_completed_workers():
 
     from prefab_ui.sandbox import PyodideSandbox
 
-    from nextdns_mcp.generative import _discard_startup
+    from nextdns_mcp.generative_sandbox import _discard_startup
 
     stopped: list[object] = []
     fake_proc = MagicMock(name="proc")
@@ -991,7 +1001,7 @@ def test_discard_startup_reclaims_only_completed_workers():
 
 
 def test_startup_error_truncates_long_output():
-    from nextdns_mcp.generative import _startup_error
+    from nextdns_mcp.generative_sandbox import _startup_error
 
     short = str(_startup_error(["boom"]))
     assert short == "Pyodide sandbox failed to start:\nboom"
@@ -1004,7 +1014,7 @@ def test_startup_error_truncates_long_output():
 
 @pytest.mark.asyncio
 async def test_await_ready_consumes_lines_until_ready():
-    from nextdns_mcp.generative import _await_ready
+    from nextdns_mcp.generative_sandbox import _await_ready
 
     proc = _FakeProc([b"boot log\n", b"pyodide:ready\n"])
     await _await_ready(proc)  # returns once readiness is signalled
@@ -1012,30 +1022,48 @@ async def test_await_ready_consumes_lines_until_ready():
 
 @pytest.mark.asyncio
 async def test_await_ready_raises_when_worker_dies():
-    from nextdns_mcp.generative import _await_ready
+    from nextdns_mcp.generative_sandbox import _await_ready
 
     proc = _FakeProc([b"import error\n", b""], returncode=1)
     with pytest.raises(RuntimeError, match="Pyodide sandbox failed to start"):
         await _await_ready(proc)
+    assert proc.stderr.reads == 2  # the log line, then the EOF that ends the wait
 
 
 @pytest.mark.asyncio
-async def test_read_startup_line_passes_through_empty_lines_while_alive():
-    """An empty readline with the worker still alive must not raise."""
-    from nextdns_mcp.generative import _read_startup_line
+async def test_await_ready_raises_on_stderr_eof_while_worker_alive():
+    """A worker that closes stderr without signalling must fail startup, not spin.
 
-    proc = _FakeProc([b""], returncode=None)
+    An empty `readline()` is EOF, so readiness can never arrive; before the fix the
+    `while True` loop re-submitted reads to the executor until the caller's cold-start
+    timeout cancelled it (issue #595).
+    """
+    from nextdns_mcp.generative_sandbox import _await_ready
+
+    proc = _FakeProc([b"boot log\n"], returncode=None)  # poll() stays None: the worker is alive
+    with pytest.raises(RuntimeError, match="Pyodide sandbox failed to start"):
+        await _await_ready(proc)
+    assert proc.stderr.reads == 2  # the log line, then the EOF that ends the wait
+
+
+@pytest.mark.asyncio
+async def test_read_startup_line_raises_on_eof_while_worker_alive():
+    """EOF on a live worker's stderr is a failed startup, the same as a dead one."""
+    from nextdns_mcp.generative_sandbox import _read_startup_line
+
+    stderr = _FakeStderr([b""])
     lines: list[str] = []
-    decoded = await _read_startup_line(proc, proc.stderr, lines)  # type: ignore[arg-type]
-    assert decoded == ""
-    assert lines == [""]
+    with pytest.raises(RuntimeError, match="Pyodide sandbox failed to start"):
+        await _read_startup_line(stderr, lines)
+    assert stderr.reads == 1
+    assert lines == []
 
 
 @pytest.mark.asyncio
 async def test_hardened_start_stops_worker_when_readiness_fails(monkeypatch):
     from prefab_ui.sandbox import PyodideSandbox
 
-    from nextdns_mcp import generative
+    from nextdns_mcp import generative_sandbox
 
     stopped: list[object] = []
     fake_proc = MagicMock(name="proc")
@@ -1045,11 +1073,11 @@ async def test_hardened_start_stops_worker_when_readiness_fails(monkeypatch):
         future.set_result(fake_proc)
         return future
 
-    monkeypatch.setattr(generative, "_spawn_deno", fake_spawn)
-    monkeypatch.setattr(generative, "_await_ready", AsyncMock(side_effect=RuntimeError("boot failed")))
+    monkeypatch.setattr(generative_sandbox, "_spawn_deno", fake_spawn)
+    monkeypatch.setattr(generative_sandbox, "_await_ready", AsyncMock(side_effect=RuntimeError("boot failed")))
     monkeypatch.setattr(PyodideSandbox, "_stop_process", lambda p: stopped.append(p))
 
-    sandbox = generative.HardenedPyodideSandbox()
+    sandbox = generative_sandbox.HardenedPyodideSandbox()
     with pytest.raises(RuntimeError, match="boot failed"):
         await sandbox._start()
     assert stopped == [fake_proc]
@@ -1070,11 +1098,11 @@ class _SpyFuture(asyncio.Future):
 
 @pytest.mark.asyncio
 async def test_hardened_start_cancellation_registers_reclaim(monkeypatch):
-    from nextdns_mcp import generative
+    from nextdns_mcp import generative_sandbox
 
     pending = _SpyFuture()
-    monkeypatch.setattr(generative, "_spawn_deno", lambda env: pending)
-    sandbox = generative.HardenedPyodideSandbox()
+    monkeypatch.setattr(generative_sandbox, "_spawn_deno", lambda env: pending)
+    sandbox = generative_sandbox.HardenedPyodideSandbox()
 
     task = asyncio.ensure_future(sandbox._start())
     await asyncio.sleep(0)  # let the task reach the shield

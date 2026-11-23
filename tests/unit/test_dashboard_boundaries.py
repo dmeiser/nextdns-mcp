@@ -162,3 +162,37 @@ def test_package_public_surface():
     """Callers import the tool from the package, so the package must export it."""
     assert dashboard.overviewDashboard.__module__.startswith("nextdns_mcp.tools.dashboard")
     assert "overviewDashboard" in dashboard.__all__
+
+
+def test_overview_dashboard_delegates_once():
+    """The published wrapper ends in one delegation, with nothing after it (WORK-279).
+
+    ``overviewDashboard`` used to close with two identical
+    ``return await _overview_dashboard_impl(...)`` blocks in a row; the second
+    could never run and read as a second implementation path. This test pins
+    the removal so a copy-paste re-introduction fails on the broken tree - the
+    same shape ``8f6249c`` pinned for the dead ``OpenApiSpecNotFound`` class.
+    """
+    module_file = PACKAGE_DIR / "tool.py"
+    tree = ast.parse(module_file.read_text(encoding="utf-8"), filename=str(module_file))
+    (func,) = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "overviewDashboard"
+    ]
+    returns = [node for node in ast.walk(func) if isinstance(node, ast.Return)]
+    assert len(returns) == 1, f"expected exactly one delegation to _overview_dashboard_impl, found {len(returns)}"
+    assert func.body[-1] is returns[0], "a statement sits after the delegation; the return must be the tail"
+    call = returns[0].value
+    assert isinstance(call, ast.Await) and isinstance(call.value, ast.Call), "the delegation must be a single await"
+    assert isinstance(call.value.func, ast.Name) and call.value.func.id == "_overview_dashboard_impl"
+    assert not call.value.args, "the delegation must pass every argument by keyword"
+    assert [kw.arg for kw in call.value.keywords] == [
+        "profile_id",
+        "from_time",
+        "to_time",
+        "limit",
+        "section",
+        "view_type",
+        "domain_view",
+    ], "the delegation's keyword arguments drifted from the published signature"

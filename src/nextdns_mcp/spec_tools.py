@@ -435,9 +435,12 @@ class SpecApiTool(Tool):
             return None
         from . import config as _config
 
-        writable = _config.get_writable_profiles_set()
-        protected = _config.get_protected_profiles()
-        if writable is not None and writable and writable.issubset(protected):
+        # One snapshot per invocation: the writable set and the protected
+        # denylist must come from the same read of the environment, and the
+        # snapshot loader already calls get_protected_profiles().
+        access = _config.load_profile_access_control()
+        writable = access.writable
+        if writable is not None and writable and writable.issubset(access.protected):
             return ToolResult(
                 structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no writable profile available"),
                 is_error=True,
@@ -782,6 +785,13 @@ def _capped_transport_kwargs(route: HTTPRoute, request: Callable[..., Any]) -> d
     return {}
 
 
+# A capability answer belongs to one transport object, so the memo is keyed on
+# identity rather than equality: a transport whose class defines __eq__ would
+# otherwise let one transport answer for another. The callable is kept beside
+# its answer so the key's id cannot be recycled while the entry lives.
+_CAP_SUPPORT_BY_REQUEST: dict[int, tuple[Callable[..., Any], bool]] = {}
+
+
 def _transport_accepts_cap(request: Callable[..., Any]) -> bool:
     """Whether the resolved transport accepts a ``max_response_bytes`` keyword.
 
@@ -795,7 +805,21 @@ def _transport_accepts_cap(request: Callable[..., Any]) -> bool:
     whose signature cannot be introspected is treated as legacy for the same
     reason - the unpriced path still enforces the ceiling, the priced one
     must not guess.
+
+    The transport is fixed per route and a callable's signature cannot change
+    while the callable lives, so the answer is memoized per callable: reading
+    the signature again on every dispatch can only return what was just read.
     """
+    cached = _CAP_SUPPORT_BY_REQUEST.get(id(request))
+    if cached is not None and cached[0] is request:
+        return cached[1]
+    accepted = _probe_transport_cap(request)
+    _CAP_SUPPORT_BY_REQUEST[id(request)] = (request, accepted)
+    return accepted
+
+
+def _probe_transport_cap(request: Callable[..., Any]) -> bool:
+    """Read the capability out of the callable's signature."""
     try:
         parameters = inspect.signature(request).parameters
     except (TypeError, ValueError):
