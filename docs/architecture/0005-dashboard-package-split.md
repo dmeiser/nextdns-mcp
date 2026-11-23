@@ -16,7 +16,7 @@ Its time-series primitives lived in the plotting sibling, `tools/plots.py`, impo
 across the module boundary by `_`-prefixed name. That made a rename inside the plotting
 tool a silent break in the dashboard, and it left a thousand-line module reaching into a
 peer for private helpers — the defect this split was filed for, recorded in the boundary
-test's own docstring (`tests/unit/test_dashboard_boundaries.py:1-8`, and the history of
+test's own docstring (`tests/unit/test_dashboard_boundaries.py:1-10`, and the history of
 the primitives in `src/nextdns_mcp/charts.py:1-14`).
 
 A move alone would not hold. The second problem was coupling, not size:
@@ -83,11 +83,11 @@ needs a card in a hurry.**
 
 ## History
 
-- `a09d8fa` (#477, WORK-117, 4.2.0): `tools/dashboard.py` (~1,504 lines) is split into
+- `a09d8fa` (#477, 4.2.0): `tools/dashboard.py` (~1,504 lines) is split into
   the package over a new neutral `charts.py`; the boundary test arrives with it, and the
   suites are repointed at their new owners. The branch carried the main-line fixes that
   landed while it was open into the modules that now own them, per the merge record.
-- `d503847` (#579, WORK-223): the Prefab chart builders split out of `charts.py` into
+- `d503847` (#579): the Prefab chart builders split out of `charts.py` into
   `chart_ui.py` (issue #550), keeping the pure half free of the component library.
 - `tests/unit/test_dashboard_boundaries.py` records the coupling this replaced —
   private-name imports across the plotting boundary — and is the line the package may

@@ -59,7 +59,7 @@ obligations down instead of assuming them.**
   that registers them and exported so validation imports the split instead of restating
   it: `generate_prefab_ui` answers with UI content (so no payload exists for a schema to
   pin), `search_prefab_components` answers with plain JSON whose shape validation pins
-  (`src/nextdns_mcp/server.py:82-120`).
+  (`src/nextdns_mcp/server.py:82-119`).
 - Code execution is annotated as code execution: `generate_prefab_ui` carries
   `read_only_hint=False, destructive_hint=False, open_world_hint=False`, while
   `search_prefab_components` is read-only (`src/nextdns_mcp/generative.py:596-609`). A
@@ -68,9 +68,9 @@ obligations down instead of assuming them.**
   worker's start so the subprocess environment is scrubbed of secret-bearing variable
   names, the V8 heap is bounded to 1 GiB, and the worker is discarded after every
   execution so no interpreter state survives a call
-  (`src/nextdns_mcp/generative.py:72-99`, `:178-199`). The Deno invocation is pinned:
+  (`src/nextdns_mcp/generative.py:72-103`, `:178-199`). The Deno invocation is pinned:
   `--no-config`, `--frozen` against the vendored lock, and network to
-  `cdn.jsdelivr.net:443` only (`src/nextdns_mcp/generative.py:106-128`). Size and time are
+  `cdn.jsdelivr.net:443` only (`src/nextdns_mcp/generative.py:106-123`). Size and time are
   budgeted — 32 KiB of code, 128 KiB of data, 256 KiB of result, 10 s of execution, and a
   separate 60 s cold-start budget so a Pyodide boot never eats the user-code timeout — and
   the worker's stdout is read under a byte cap (`src/nextdns_mcp/generative.py:61-70`,
@@ -78,9 +78,9 @@ obligations down instead of assuming them.**
 - A failure mode that was observed is refused before execution: an AST walk rejects a
   chart nested inside a `Tab`, because tab panels initialize at 0 px width and the chart
   renders blank with nothing for the caller to act on
-  (`src/nextdns_mcp/generative.py:390-483`).
+  (`src/nextdns_mcp/generative.py:390-470`).
 - The renderer resource ships with a CSP built by upstream's `_build_csp()` and FastMCP's
-  UI MIME type (`src/nextdns_mcp/generative.py:473-483`, `:596-609`). What the host must
+  UI MIME type (`src/nextdns_mcp/generative.py:473-482`, `:596-609`). What the host must
   add around it is documented, not implied ([docs/generative-ui.md](../generative-ui.md)).
 - The subprocess belongs to the provider that started it. It is created lazily, owned by
   the provider's own FastMCP lifespan, stopped off the event loop so a slow teardown
@@ -103,7 +103,7 @@ obligations down instead of assuming them.**
 
 - Two published tools are conditional, so any new consumer that pins the catalog must read
   the flag or import the server's accessors
-  (`generative_ui_tool_names()` and friends, `src/nextdns_mcp/server.py:93-120`); a
+  (`generative_ui_tool_names()` and friends, `src/nextdns_mcp/server.py:93-119`); a
   hardcoded list goes stale silently.
 - The provider borrows nine private FastMCP members (`_gen`, `_build_csp`,
   `_local._add_component`, `_setup_done`, `_get_sandbox`, `_sandbox`, `_tool_name`,

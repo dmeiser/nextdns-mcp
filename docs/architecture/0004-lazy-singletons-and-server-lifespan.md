@@ -1,7 +1,6 @@
 # ADR 0004 — Lazy process singletons and one shutdown point
 
-Status: accepted (3.x; the pattern predates the 4.0.0 tool-surface rewrite — it already
-exists at the shallow-history boundary commit `10a3729`). Applies to
+Status: accepted (3.x; the pattern predates the 4.0.0 tool-surface rewrite). Applies to
 `src/nextdns_mcp/server.py`, `src/nextdns_mcp/client.py`,
 `src/nextdns_mcp/tools/doh.py`, and the server lifespan in `src/nextdns_mcp/openapi.py`.
 
@@ -45,18 +44,18 @@ the server lifespan.**
   Importing the module does neither (issues #177 and #190), and that is pinned by
   `tests/unit/test_server_dotenv.py` and `tests/unit/test_lazy_factories.py`.
 - **The clients** follow the same shape: `get_api_client()`
-  (`src/nextdns_mcp/client.py:446-455`) and `_get_doh_client()`
+  (`src/nextdns_mcp/client.py:446-458`) and `_get_doh_client()`
   (`src/nextdns_mcp/tools/doh.py:64-72`). `close_api_client()` and `close_doh_client()`
   clear the module global *before* awaiting the close, so a call arriving during teardown
   builds a fresh client rather than joining one that is shutting down
-  (`src/nextdns_mcp/client.py:461-468`, `src/nextdns_mcp/tools/doh.py:75-83`).
+  (`src/nextdns_mcp/client.py:461-471`, `src/nextdns_mcp/tools/doh.py:75-85`).
 - **Legacy spellings keep working without an import-time object.** `client.api_client` and
   `server.mcp_server`/`server.mcp` are served through module `__getattr__` and resolve
   through the same accessors (`src/nextdns_mcp/client.py:474-477`,
   `src/nextdns_mcp/server.py:219-225`).
 - **One shutdown point.** `_server_lifespan` closes the API client, then the DoH client,
   each in a `finally` so a failure in one cannot strand the other
-  (`src/nextdns_mcp/openapi.py:577-604`). The rule in `AGENT.md` follows from the
+  (`src/nextdns_mcp/openapi.py:577-603`). The rule in `AGENT.md` follows from the
   decision: any new long-lived client must be closed there too.
 - **State that belongs to one server runtime is registered per lifespan, not per
   process.** The download registry is a `ContextVar` set at the start of the lifespan and

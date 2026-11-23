@@ -15,7 +15,7 @@ them, each with its own spec description, in every session, for every client.
 
 What that costs was measured, not guessed. Four fully-described search results still
 measured about 10 KB, and the live run that carried 10-18 KB per discovery stalled 27
-times in 29 steps (`src/nextdns_mcp/tool_search.py:66-75`).
+times in 29 steps (`src/nextdns_mcp/tool_search.py:72-74`).
 
 The failure mode of naive disclosure was measured too. FastMCP's `BM25SearchTransform`
 ranks prose similarity, and small models query with tool-shaped guesses —
@@ -53,9 +53,9 @@ nets make discovery survive a bad query, and disclosure never touches authorizat
   (`src/nextdns_mcp/tool_search.py:26-28`). Their descriptions are replaced with this
   server's discovery contract, because under disclosure they are the only always-visible
   place to say that the catalog is hidden and that guessing a name fails
-  (`src/nextdns_mcp/tool_search.py:255-283`).
+  (`src/nextdns_mcp/tool_search.py:256-283`).
 - Two safety nets, both task-independent and client-agnostic — no prompt hints, no
-  per-task routing (`src/nextdns_mcp/tool_search.py:16-25`):
+  per-task routing (`src/nextdns_mcp/tool_search.py:14-20`):
   1. **Full-catalog fallback.** A query that matches nothing answers with every tool,
      reads first, rather than an empty list
      (`src/nextdns_mcp/tool_search.py:228-247`).
@@ -70,10 +70,10 @@ nets make discovery survive a bad query, and disclosure never touches authorizat
   carry — the three composites and the generative-UI pair — is classified from its own
   `readOnlyHint`. The name heuristic this replaced read every `list*` tool as a write, and
   defaulting off-map names to `GET` let a loose match reach `generate_prefab_ui`, a tool
-  that executes code (`src/nextdns_mcp/tool_search.py:94-131`).
+  that executes code (`src/nextdns_mcp/tool_search.py:93-118`).
 - Byte budgets are part of the contract: 1,400 characters of description per result, 8 KB
   for a ranked answer, 128 KB for the fallback, top 6 ranked entries
-  (`src/nextdns_mcp/tool_search.py:64-86`). The fallback gets its own larger ceiling
+  (`src/nextdns_mcp/tool_search.py:64-84`). The fallback gets its own larger ceiling
   because it *is* the catalog: an answer that silently drops entries teaches the caller
   the catalog is smaller than it is (`src/nextdns_mcp/tool_search.py:238-247`).
 - `CallToolShapeMiddleware` repairs the three ways live callers wrap `call_tool` wrong —
