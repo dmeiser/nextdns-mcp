@@ -107,6 +107,35 @@ def parse_profile_list(profile_str: str) -> set[str] | None:
     return ids
 
 
+def _profile_list_env(name: str) -> set[str] | None:
+    """Read one profile-list environment variable and parse it as an allowlist.
+
+    The one place an allowlist is read from the environment, so the empty
+    default and the parser cannot drift between the direct readers
+    (``get_readable_profiles`` / ``get_writable_profiles``) and the snapshot
+    loader that feeds the per-request access checks.
+
+    Returns:
+        The same shape as :func:`parse_profile_list`: ``None`` for deny all,
+        the empty set for allow all, else the normalized ids.
+    """
+    return parse_profile_list(os.getenv(name, ""))
+
+
+def _profile_ids_env(name: str) -> set[str]:
+    """Read one profile-list environment variable as bare normalized ids.
+
+    For lists that are not allowlists and therefore have no deny-all/allow-all
+    sentinel - the protected-profile denylist reads its members through here so
+    its parsing cannot diverge from the allowlists' (see
+    :func:`_normalized_profile_ids`).
+
+    Returns:
+        set[str]: Lowercased ids, empty when the variable is unset or blank.
+    """
+    return _normalized_profile_ids(os.getenv(name, ""))
+
+
 @dataclass(frozen=True)
 class ProfileAccessControl:
     """Immutable snapshot of the profile access control environment.
@@ -177,8 +206,7 @@ def get_protected_profiles() -> frozenset[str]:
     Raises:
         ConfigurationError: If any entry is not a valid profile-id shape.
     """
-    raw = os.getenv("NEXTDNS_PROTECTED_PROFILES", "")
-    ids = _normalized_profile_ids(raw)
+    ids = _profile_ids_env("NEXTDNS_PROTECTED_PROFILES")
     invalid = sorted(pid for pid in ids if not SAFE_PROFILE_ID_PATTERN.match(pid))
     if invalid:
         raise ConfigurationError(
@@ -201,9 +229,9 @@ def load_profile_access_control() -> ProfileAccessControl:
     effect on the next request, never retroactively on one already in flight.
     """
     read_only = _read_only_from_env()
-    readable = parse_profile_list(os.getenv("NEXTDNS_READABLE_PROFILES", ""))
+    readable = _profile_list_env("NEXTDNS_READABLE_PROFILES")
     # Read-only mode denies all writes, so the writable set stays None.
-    writable = None if read_only else parse_profile_list(os.getenv("NEXTDNS_WRITABLE_PROFILES", ""))
+    writable = None if read_only else _profile_list_env("NEXTDNS_WRITABLE_PROFILES")
     return ProfileAccessControl(
         read_only=read_only,
         readable=_combine_readable(readable, writable),
@@ -249,8 +277,7 @@ def get_readable_profiles() -> set[str] | None:
         None if empty/unset (deny all), empty set if "ALL" (allow all),
         or set of specific profile IDs
     """
-    profiles = os.getenv("NEXTDNS_READABLE_PROFILES", "")
-    return parse_profile_list(profiles)
+    return _profile_list_env("NEXTDNS_READABLE_PROFILES")
 
 
 def get_writable_profiles() -> set[str] | None:
@@ -262,8 +289,18 @@ def get_writable_profiles() -> set[str] | None:
     """
     if is_read_only():
         return None  # Read-only mode = deny all writes
-    profiles = os.getenv("NEXTDNS_WRITABLE_PROFILES", "")
-    return parse_profile_list(profiles)
+    return _profile_list_env("NEXTDNS_WRITABLE_PROFILES")
+
+
+def _mutable_profile_set(profiles: frozenset[str] | None) -> set[str] | None:
+    """Copy a snapshot frozenset into a fresh set, keeping the ``None`` sentinel.
+
+    The snapshot holds frozensets so no caller can mutate the decision another
+    check already made; the convenience accessors hand back a mutable copy.
+    ``None`` means deny all and must survive the copy as ``None`` - rewriting
+    it to an empty set would read as allow all.
+    """
+    return None if profiles is None else set(profiles)
 
 
 def get_readable_profiles_set() -> set[str] | None:
@@ -278,8 +315,7 @@ def get_readable_profiles_set() -> set[str] | None:
         empty set if all profiles are readable (allow all),
         or set of specific profile IDs
     """
-    readable = load_profile_access_control().readable
-    return None if readable is None else set(readable)
+    return _mutable_profile_set(load_profile_access_control().readable)
 
 
 def get_writable_profiles_set() -> set[str] | None:
@@ -294,8 +330,7 @@ def get_writable_profiles_set() -> set[str] | None:
         empty set if all profiles are writable (allow all),
         or set of specific profile IDs
     """
-    writable = load_profile_access_control().writable
-    return None if writable is None else set(writable)
+    return _mutable_profile_set(load_profile_access_control().writable)
 
 
 def can_read_profile(profile_id: str) -> bool:

@@ -8,6 +8,7 @@ control layer and the typed error payloads in the path.
 SPDX-License-Identifier: MIT
 """
 
+import inspect
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -58,6 +59,23 @@ class TestGeneratedCatalog:
     def test_the_catalog_order_is_by_name_not_by_spec_order(self):
         names = spec_tools.spec_tool_names()
         assert names == sorted(names)
+
+    def test_mutating_a_returned_list_cannot_corrupt_the_cache(self):
+        """The process-wide cache is never handed out: a caller mutating the list
+        ``spec_routes()`` returned must not change what any later call sees."""
+        original = [route.operation_id for route in spec_tools.spec_routes()]
+        routes = spec_tools.spec_routes()
+        routes.pop()
+        routes.clear()
+        after = [route.operation_id for route in spec_tools.spec_routes()]
+        assert after == original
+
+    def test_an_explicit_spec_still_gets_a_fresh_parse(self):
+        """The cache is for the shipped document only; handing in a spec parses it."""
+        parsed = spec_tools.spec_routes(spec_tools.load_spec())
+        assert [route.operation_id for route in parsed] == [route.operation_id for route in spec_tools.spec_routes()]
+        parsed.pop()
+        assert len(spec_tools.spec_routes(spec_tools.load_spec())) == len(spec_tools.spec_routes())
 
     def test_parameters_keep_their_descriptions_and_types(self, routes):
         properties = routes["getAnalyticsDomains"].flat_param_schema["properties"]
@@ -943,6 +961,78 @@ class TestLegacyInjectedTransportCompatibility:
         assert not spec_tools._transport_accepts_cap(iter)  # builtin whose signature() raises ValueError
 
 
+class TestTransportCapabilityProbeIsMemoized:
+    """One signature inspection per transport callable, whatever the dispatch count.
+
+    The capability probe inspected the transport's signature on every
+    ``;series`` dispatch, for an answer that cannot change while the callable
+    lives. These tests count the inspections themselves and check that each
+    transport still receives the arguments it received before the memo.
+    """
+
+    @staticmethod
+    def _inspect_calls(monkeypatch) -> list[Any]:
+        """Route this module's ``inspect`` use through a counter, leaving the rest of the process alone."""
+        seen: list[Any] = []
+        real_signature = inspect.signature
+
+        def counting_signature(obj: Any, *args: Any, **kwargs: Any) -> Any:
+            seen.append(obj)
+            return real_signature(obj, *args, **kwargs)
+
+        monkeypatch.setattr(
+            spec_tools, "inspect", SimpleNamespace(signature=counting_signature, Parameter=inspect.Parameter)
+        )
+        return seen
+
+    def _series_route(self):
+        return next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
+
+    async def test_two_series_dispatches_inspect_a_capped_transport_once(self, monkeypatch):
+        inspections = self._inspect_calls(monkeypatch)
+        calls: list[dict[str, Any]] = []
+
+        async def capped_transport(method, url, params=None, json_body=None, max_response_bytes=None):
+            calls.append({"method": method, "url": url, "cap": max_response_bytes})
+            return {"data": []}
+
+        tool = spec_tools.SpecApiTool(self._series_route(), transport=capped_transport)
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+
+        assert inspections == [capped_transport], "the second dispatch reads the memo, not the signature"
+        assert [(call["method"], call["cap"]) for call in calls] == [("GET", spec_tools.MAX_SERIES_RESPONSE_BYTES)] * 2
+
+    async def test_two_series_dispatches_inspect_a_legacy_transport_once(self, monkeypatch):
+        inspections = self._inspect_calls(monkeypatch)
+        calls: list[tuple[str, str]] = []
+
+        async def legacy_transport(method, url, params=None, json_body=None):
+            calls.append((method, url))
+            return {"data": []}
+
+        tool = spec_tools.SpecApiTool(self._series_route(), transport=legacy_transport)
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+
+        assert inspections == [legacy_transport]
+        assert len(calls) == 2, "the legacy transport keeps its old four-argument call shape every time"
+
+    def test_each_callable_keeps_its_own_answer(self, monkeypatch):
+        """No transport inherits another's capability, so the memo may not key on equality."""
+        inspections = self._inspect_calls(monkeypatch)
+
+        async def legacy_transport(method, url, params=None, json_body=None): ...
+
+        async def capped_transport(method, url, params=None, json_body=None, max_response_bytes=None): ...
+
+        assert not spec_tools._transport_accepts_cap(legacy_transport)
+        assert spec_tools._transport_accepts_cap(capped_transport)
+        assert not spec_tools._transport_accepts_cap(legacy_transport)
+        assert spec_tools._transport_accepts_cap(capped_transport)
+        assert inspections == [legacy_transport, capped_transport]
+
+
 def test_a_big_non_series_payload_is_not_refused_by_the_series_backstop():
     """The ceiling is a ;series policy: a wide aggregate answer is data, not an overrun."""
     route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getDenylist")
@@ -996,8 +1086,13 @@ def test_create_profile_guard_all_protected(monkeypatch):
 
     from nextdns_mcp import config, spec_tools
 
-    monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1"})
-    monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
+    monkeypatch.setattr(
+        config,
+        "load_profile_access_control",
+        lambda: config.ProfileAccessControl(
+            read_only=False, readable=frozenset({"p1"}), writable=frozenset({"p1"}), protected=frozenset({"p1"})
+        ),
+    )
     from types import SimpleNamespace
 
     route = SimpleNamespace(
@@ -1012,8 +1107,16 @@ def test_create_profile_guard_not_all_protected(monkeypatch):
 
     from nextdns_mcp import config, spec_tools
 
-    monkeypatch.setattr(config, "get_writable_profiles_set", lambda: {"p1", "p2"})
-    monkeypatch.setattr(config, "get_protected_profiles", lambda: {"p1"})
+    monkeypatch.setattr(
+        config,
+        "load_profile_access_control",
+        lambda: config.ProfileAccessControl(
+            read_only=False,
+            readable=frozenset({"p1", "p2"}),
+            writable=frozenset({"p1", "p2"}),
+            protected=frozenset({"p1"}),
+        ),
+    )
     from types import SimpleNamespace
 
     route = SimpleNamespace(
@@ -1021,6 +1124,36 @@ def test_create_profile_guard_not_all_protected(monkeypatch):
     )
     tool = spec_tools.SpecApiTool(route=route)
     assert tool._create_profile_guard() is None
+
+
+def test_create_profile_guard_reads_protected_profiles_once(monkeypatch):
+    """One guard invocation takes a single snapshot: the denylist is read once."""
+
+    from nextdns_mcp import profile_access, spec_tools
+
+    monkeypatch.setenv("NEXTDNS_READ_ONLY", "")
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abcdef,fedcba")
+    monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "abcdef")
+
+    calls = 0
+    real_get_protected_profiles = profile_access.get_protected_profiles
+
+    def counting_get_protected_profiles() -> frozenset[str]:
+        nonlocal calls
+        calls += 1
+        return real_get_protected_profiles()
+
+    monkeypatch.setattr(profile_access, "get_protected_profiles", counting_get_protected_profiles)
+
+    from types import SimpleNamespace
+
+    route = SimpleNamespace(
+        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    assert tool._create_profile_guard() is None
+    assert calls == 1
 
 
 import asyncio

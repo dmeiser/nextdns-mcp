@@ -19,10 +19,16 @@ SPDX-License-Identifier: MIT
 import logging
 import math
 import os
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
-from .constants import SAFE_PROFILE_ID_PATTERN
+# DNS_STATUS_CODES and VALID_DNS_RECORD_TYPES are re-exported here: callers
+# already read them off this module, and the definitions live in
+# ``constants`` so the tool layer owns nothing that the base layer republishes.
+# The import is eager rather than lazy because ``constants`` imports nothing
+# from this package, so this edge cannot close a cycle.
+from .constants import DNS_STATUS_CODES, SAFE_PROFILE_ID_PATTERN, VALID_DNS_RECORD_TYPES  # noqa: F401
 from .errors import ConfigurationError, MissingApiKeyError
 from .logging_config import configure_logging
 from .profile_access import _BOOL_FALSE_TOKENS as _BOOL_FALSE_TOKENS  # noqa: PLC0414
@@ -47,7 +53,10 @@ from .profile_access import _combine_readable as _combine_readable  # noqa: PLC0
 from .profile_access import _combine_set_readable as _combine_set_readable  # noqa: PLC0414
 from .profile_access import _is_allow_all as _is_allow_all  # noqa: PLC0414
 from .profile_access import _is_empty_profile_list as _is_empty_profile_list  # noqa: PLC0414
+from .profile_access import _mutable_profile_set as _mutable_profile_set  # noqa: PLC0414
 from .profile_access import _normalized_profile_ids as _normalized_profile_ids  # noqa: PLC0414
+from .profile_access import _profile_ids_env as _profile_ids_env  # noqa: PLC0414
+from .profile_access import _profile_list_env as _profile_list_env  # noqa: PLC0414
 from .profile_access import _read_only_from_env as _read_only_from_env  # noqa: PLC0414
 
 # The pre-split module had no __all__, so star imports bound every public
@@ -254,8 +263,12 @@ def _log_api_key_error() -> None:
     logger.critical("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret")
 
 
-def _log_profile_access(profile_set: set[str] | None, access_type: str) -> None:
-    """Log profile access configuration."""
+def _log_profile_access(profile_set: Collection[str] | None, access_type: str) -> None:
+    """Log profile access configuration.
+
+    Takes the snapshot's frozensets as-is: this function only reads the value
+    to decide which of the three sentences to log, so it needs no mutable copy.
+    """
     if profile_set is None:
         logger.info(f"No profiles are {access_type} (deny all by default)")
     elif not profile_set:
@@ -280,16 +293,14 @@ def _log_protected_profiles(access: ProfileAccessControl) -> None:
 def _log_access_control_settings() -> None:
     """Log current access control configuration."""
     access = load_profile_access_control()
-    readable = None if access.readable is None else set(access.readable)
-    writable = None if access.writable is None else set(access.writable)
     read_only = access.read_only
 
     if read_only:
         logger.info("Read-only mode is ENABLED - all write operations are disabled")
 
-    _log_profile_access(readable, "readable")
+    _log_profile_access(access.readable, "readable")
     if not read_only:
-        _log_profile_access(writable, "writable")
+        _log_profile_access(access.writable, "writable")
     _log_protected_profiles(access)
 
 
@@ -324,11 +335,3 @@ def validate_configuration() -> None:
             raise ConfigurationError(f"Invalid {env_name}: {raw!r}. Expected one of {sorted(_BOOL_TOKENS - {''})}.")
 
     _log_access_control_settings()
-
-
-def __getattr__(name: str) -> Any:
-    if name in {"DNS_STATUS_CODES", "VALID_DNS_RECORD_TYPES"}:
-        from .tools.doh import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES
-
-        return {"DNS_STATUS_CODES": DNS_STATUS_CODES, "VALID_DNS_RECORD_TYPES": VALID_DNS_RECORD_TYPES}[name]
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -1,5 +1,6 @@
 """Tests for StripExtraFieldsMiddleware."""
 
+import gc
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +13,18 @@ from fastmcp.tools import ToolResult
 from nextdns_mcp import openapi, spec_tools
 from nextdns_mcp.openapi import StripExtraFieldsMiddleware
 from nextdns_mcp.server import build_mcp_server
+
+
+class _FakeServer(SimpleNamespace):
+    """Server stand-in weakref-able, unlike plain ``types.SimpleNamespace``.
+
+    The middleware keys its caches on the server object via a WeakKeyDictionary;
+    fixture servers must support weak references the way real FastMCP servers do.
+    """
+
+    __slots__ = ("__weakref__",)
+    __hash__ = object.__hash__  # identity, like the real FastMCP server key
+    __eq__ = object.__eq__
 
 
 class TestStripExtraFieldsMiddleware:
@@ -437,7 +450,7 @@ class TestOwnerIndexIsTheRegisteredCatalog:
     @staticmethod
     def _server_with(tools: list) -> SimpleNamespace:
         by_name = {t.name: t for t in tools}
-        server = SimpleNamespace()
+        server = _FakeServer()
         server.get_tool = AsyncMock(side_effect=lambda name: by_name.get(name))
         return server
 
@@ -492,7 +505,7 @@ class TestOwnerIndexIsTheRegisteredCatalog:
     async def test_tool_schemas_are_memoized_after_the_first_fetch(self):
         mw = StripExtraFieldsMiddleware()
         tool = self._tool("getProfile", ["profile_id"])
-        server = SimpleNamespace()
+        server = _FakeServer()
         server.get_tool = AsyncMock(return_value=tool)
         first = await mw._tool_parameters(server, "getProfile")
         second = await mw._tool_parameters(server, "getProfile")
@@ -505,10 +518,56 @@ class TestOwnerIndexIsTheRegisteredCatalog:
         mw = StripExtraFieldsMiddleware()
         tool = self._tool("lateTool", ["x"])
         responses = iter([None, tool])
-        server = SimpleNamespace()
+        server = _FakeServer()
         server.get_tool = AsyncMock(side_effect=lambda name: next(responses))
         assert await mw._tool_parameters(server, "lateTool") is None
         assert await mw._tool_parameters(server, "lateTool") == tool.parameters
+
+    @pytest.mark.asyncio
+    async def test_a_recycled_object_address_does_not_leak_a_dead_servers_cache(self):
+        """id() is reused after GC; a new server must not read the dead server's caches.
+
+        Warm both caches through one middleware with a server whose ``probe``
+        tool declares ``first_field``, release that server, then re-run the same
+        middleware against a second server (whose ``probe`` declares
+        ``second_field``) whose ``id()`` reports the freed address — the
+        reuse-after-GC condition from the issue, pinned deterministically.
+        Both lookups must answer from the second server's catalog; at the old
+        ``id(server)`` keying both lookups returned ``first_field``.
+        """
+        mw = StripExtraFieldsMiddleware(tool_names=["probe"])
+
+        server_a = self._server_with([self._tool("probe", ["first_field"])])
+        assert (await mw._tool_parameters(server_a, "probe"))["properties"] == {"first_field": {}}
+        assert "first_field" in await mw._owner_index(server_a)
+        address = id(server_a)
+        del server_a
+
+        gc.collect()
+        server_b = self._server_with([self._tool("probe", ["second_field"])])
+        with patch("builtins.id", return_value=address):
+            schema_b = await mw._tool_parameters(server_b, "probe")
+            index_b = await mw._owner_index(server_b)
+
+        assert schema_b["properties"] == {"second_field": {}}
+        assert "second_field" in index_b
+        assert "first_field" not in index_b
+
+    @pytest.mark.asyncio
+    async def test_dead_server_entries_are_collected_from_the_caches(self):
+        """A cached catalog must not outlive the server it belongs to."""
+        mw = StripExtraFieldsMiddleware(tool_names=["probe"])
+        server = self._server_with([self._tool("probe", ["profile_id"])])
+        await mw._tool_parameters(server, "probe")
+        await mw._owner_index(server)
+        assert len(mw._schema_cache) == 1
+        assert len(mw._owner_cache) == 1
+
+        del server
+
+        gc.collect()
+        assert len(mw._schema_cache) == 0
+        assert len(mw._owner_cache) == 0
 
 
 class TestIgnoredArgumentsNeverClobberTheToolHint:
