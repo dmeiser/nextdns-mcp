@@ -15,7 +15,6 @@ from typing import ClassVar
 import httpx
 import pytest
 
-from nextdns_mcp import client as client_module
 from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
 
 API_KEY = "test-key-12345"
@@ -124,13 +123,14 @@ class TestApprovedDestinationsProceed:
     async def test_configured_base_url_host_is_approved(
         self, monkeypatch: pytest.MonkeyPatch, recorder: Callable[..., object]
     ) -> None:
-        """NEXTDNS_BASE_URL stays consistent: pointing it at a proxy widens the allow-list.
+        """The configured API base stays consistent: pointing it at a proxy widens the allow-list.
 
-        This is the existing base-URL knob, so a self-hosted/proxy deployment
-        needs no second configuration mechanism; no new escape hatch is added.
+        NEXTDNS_API_BASE is the existing base-URL knob, so a self-hosted/proxy
+        deployment needs no second configuration mechanism; no new escape
+        hatch is added.
         """
         proxy_base = "https://nextdns.internal.example.com"
-        monkeypatch.setattr(client_module, "NEXTDNS_BASE_URL", proxy_base)
+        monkeypatch.setenv("NEXTDNS_API_BASE", proxy_base)
         client, seen = recorder(base_url=proxy_base)
         async with client:
             response = await client.request("GET", "/profiles/abc123/settings")

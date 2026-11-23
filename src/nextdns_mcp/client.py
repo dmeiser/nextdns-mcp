@@ -13,9 +13,9 @@ from typing import Any
 import httpx
 
 from .config import (
-    NEXTDNS_BASE_URL,
     ConfigurationError,
     ProfileAccessControl,
+    get_api_base,
     get_api_key,
     get_http_timeout,
     load_profile_access_control,
@@ -29,9 +29,10 @@ logger = logging.getLogger(__name__)
 # X-Api-Key client header, so without a destination allow-list the account's API
 # key follows the request to whatever host the URL names (issue #262). These are
 # the two NextDNS hosts the code actually calls: the REST API base and the DoH
-# endpoint built by tools/doh.py. The host of NEXTDNS_BASE_URL is added as well
-# so pointing that existing constant at a self-hosted/proxy base keeps working
-# without inventing a second configuration mechanism.
+# endpoint built by tools/doh.py. The host of the configured API base
+# (config.get_api_base(), read at call time) is added as well so pointing
+# NEXTDNS_API_BASE at a self-hosted/proxy base keeps working without inventing
+# a second configuration mechanism.
 ALLOWED_DESTINATION_HOSTS = frozenset({"api.nextdns.io", "dns.nextdns.io"})
 
 # Loopback destinations are allowed so local test doubles and loopback mock
@@ -51,7 +52,7 @@ def allowed_destination_hosts() -> frozenset[str]:
     :data:`LOOPBACK_HOSTS` for the local test-double allowance.
     """
     hosts = set(ALLOWED_DESTINATION_HOSTS) | set(LOOPBACK_HOSTS)
-    hosts.add(_normalized_host(httpx.URL(NEXTDNS_BASE_URL).host))
+    hosts.add(_normalized_host(httpx.URL(get_api_base()).host))
     return frozenset(hosts)
 
 
@@ -436,7 +437,7 @@ def create_nextdns_client() -> AccessControlledClient:
     }
 
     return AccessControlledClient(
-        base_url=NEXTDNS_BASE_URL,
+        base_url=get_api_base(),
         headers=headers,
         timeout=get_http_timeout(),
         follow_redirects=False,
@@ -462,7 +463,8 @@ async def close_api_client() -> None:
     """Close the shared authenticated API client if one exists and reset the singleton.
 
     Subsequent calls to :func:`get_api_client` will construct a fresh client,
-    picking up any updated configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+    picking up any updated configuration (such as ``NEXTDNS_HTTP_TIMEOUT``
+    or ``NEXTDNS_API_BASE``).
     """
     global _client
     if _client is not None:

@@ -53,11 +53,12 @@ def configure_logging() -> None:
 # harness and container-E2E scripts already pass into the server's
 # environment; before this the override reached the child process and was
 # simply ignored, so a custom base configured the harness's REST checks but
-# not the MCP server under test. Read once at import: the ACL client's
-# base_url, the DoH allowlist host and the startup banner all resolve from
-# this constant, so the override configures every one of them.
+# not the MCP server under test. Read at use time through get_api_base(),
+# matching the harness's api_base() convention: the ACL client's base_url,
+# the destination allow-list host and the startup banner all resolve through
+# the getter, so a long-lived process that changes NEXTDNS_API_BASE picks the
+# new endpoint up on the next client creation without a reimport or restart.
 DEFAULT_API_BASE = "https://api.nextdns.io"
-NEXTDNS_BASE_URL = os.getenv("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
 
 # Default HTTP request timeout in seconds
 DEFAULT_HTTP_TIMEOUT: float = 30.0
@@ -69,6 +70,25 @@ DEFAULT_DOWNLOAD_MAX_BYTES: int = 1024 * 1024 * 1024  # 1 GiB
 
 # Constants for profile access control
 ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
+
+
+def get_api_base() -> str:
+    """Get the API base URL from the environment, read at call time.
+
+    Returns:
+        str: The configured base URL with any trailing slash removed
+            (default ``https://api.nextdns.io``).
+
+    Raises:
+        ConfigurationError: If NEXTDNS_API_BASE does not use https://. The
+            scheme check runs on every read, not only at startup validation,
+            so a runtime change cannot silently redirect the API key to a
+            plaintext endpoint.
+    """
+    base_url = os.getenv("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
+    if not base_url.lower().startswith("https://"):
+        raise ConfigurationError("NEXTDNS_API_BASE must use https://")
+    return base_url
 
 
 def get_api_key() -> str | None:
@@ -563,9 +583,7 @@ def validate_configuration() -> None:
 
     get_http_timeout()
     get_download_max_bytes()
-    base_url = os.getenv("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
-    if not base_url.lower().startswith("https://"):
-        raise ConfigurationError("NEXTDNS_API_BASE must use https://")
+    get_api_base()  # Validates NEXTDNS_API_BASE (https scheme) at startup.
     for env_name, default in (
         ("NEXTDNS_READ_ONLY", ""),
         ("NEXTDNS_GENERATIVE_UI", "off"),

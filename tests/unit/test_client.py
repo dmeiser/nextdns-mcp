@@ -34,6 +34,30 @@ class TestCreateNextdnsClient:
 
         assert str(client.base_url) == "https://api.nextdns.io"
 
+    def test_create_client_reads_api_base_at_call_time(self, monkeypatch, mock_api_key):
+        """A long-lived process picks up a NEXTDNS_API_BASE change when it creates a client."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://first.example.invalid/")
+        first = create_nextdns_client()
+        assert str(first.base_url) == "https://first.example.invalid"
+
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://second.example.invalid")
+        second = create_nextdns_client()
+        assert str(second.base_url) == "https://second.example.invalid"
+
+    def test_create_client_rejects_non_https_api_base(self, monkeypatch, mock_api_key):
+        """A runtime change to a non-https base fails closed instead of sending the key in plaintext."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_API_BASE", "http://api.nextdns.io")
+
+        from nextdns_mcp.client import create_nextdns_client
+
+        with pytest.raises(ConfigurationError, match="NEXTDNS_API_BASE must use https://"):
+            create_nextdns_client()
+
     def test_create_client_has_api_key_header(self, monkeypatch, mock_api_key):
         """Test that X-Api-Key header is set as a static header during client creation."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)

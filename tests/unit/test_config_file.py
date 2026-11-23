@@ -130,7 +130,7 @@ def test_nextdns_api_base_env_configures_the_server_base_url():
         "import os;"
         "os.environ['NEXTDNS_API_BASE'] = 'https://api.example.test/v1/';"
         "import nextdns_mcp.config as c;"
-        "print(c.NEXTDNS_BASE_URL)"
+        "print(c.get_api_base())"
     )
     result = subprocess.run([sys.executable, "-c", code], check=False, capture_output=True, text=True)
     assert result.stdout.strip() == "https://api.example.test/v1", result.stderr
