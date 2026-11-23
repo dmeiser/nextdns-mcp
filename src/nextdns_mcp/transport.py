@@ -181,9 +181,11 @@ async def read_body_capped(response: httpx.Response, max_bytes: int) -> bytes:
     """Read a (possibly streaming) response's decoded body up to ``max_bytes``.
 
     ``aiter_bytes`` yields decoded bytes, so the result is what would be
-    parsed - at most ``max_bytes`` of it, read no further once the cap is
-    reached. Shared by the capped-request path and the download guard's
-    bounded error-body read, which used to carry its own copy of this loop.
+    parsed. The read stops after the whole chunk that reaches ``max_bytes``,
+    so the result exceeds ``max_bytes`` by up to one chunk, and is shorter
+    only at end-of-stream. The caller is the download guard's bounded
+    error-body read; the bytes past its slice limit are what let it set its
+    ``response_body_truncated`` flag truthfully.
     """
     parts: list[bytes] = []
     total = 0
