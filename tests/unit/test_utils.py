@@ -14,17 +14,25 @@ def test_truncate_at_boundary_leaves_text_at_or_below_limit_untouched():
     assert utils_module._truncate_at_boundary("a" * 100, 100) == "a" * 100
 
 
-def test_truncate_at_boundary_prefers_an_early_newline():
+def test_truncate_at_boundary_prefers_a_boundary_after_halfway():
     text = "x" * 30 + "\n" + "y" * 30
     out = utils_module._truncate_at_boundary(text, 40)
     assert out == "x" * 30
     assert len(out) <= 40
 
 
-def test_truncate_at_boundary_newline_before_halfway_falls_back_to_hard_cut():
-    text = "\n" + "y" * 50
+def test_truncate_at_boundary_one_before_halfway_falls_back_to_hard_cut():
+    """A boundary at ``limit // 2 - 1`` is too early: it would discard over half the budget."""
+    text = "a" * 19 + "\n" + "c" * 40
     out = utils_module._truncate_at_boundary(text, 40)
     assert out == text[:40].rstrip()
+
+
+def test_truncate_at_boundary_at_halfway_qualifies():
+    """A boundary exactly at ``limit // 2`` is the first qualifying position (the guard is ``<``)."""
+    text = "a" * 20 + "\n" + "c" * 40
+    out = utils_module._truncate_at_boundary(text, 40)
+    assert out == "a" * 20
 
 
 def test_truncate_at_boundary_sentence_boundary_keeps_the_period():

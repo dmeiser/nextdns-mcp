@@ -376,8 +376,8 @@ failed call returns a JSON payload with an error `code` and, when available, a
 def _truncate_description(dumped: dict[str, Any]) -> None:
     """Cut one dumped tool definition's description to the per-result budget.
 
-    The cut lands on a line boundary when one falls inside the first half of
-    the budget; a description with no usable early line boundary (a hard-
+    The cut lands on a line boundary at or after the halfway point of the
+    budget; a description with no qualifying line boundary that late (a hard-
     wrapped docstring can wrap mid-sentence) is cut at the budget itself, so
     the cut CAN be mid-sentence. The input schema, which decides whether a
     call is valid, is never touched.

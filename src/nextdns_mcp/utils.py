@@ -131,15 +131,17 @@ def resolve_default_profile(profile_id: str | int | None = None) -> tuple[str, N
 
 
 def _truncate_at_boundary(text: str, limit: int, *, sentence: bool = False) -> str:
-    """Cut ``text`` to ``limit`` chars, preferring an early boundary over a mid-word cut.
+    """Cut ``text`` to ``limit`` chars, preferring a boundary near the budget over a mid-word cut.
 
     Text at or below ``limit`` is returned unchanged. Otherwise the cut lands on
-    the last newline within the first half of the budget — and, when ``sentence``
-    is true, the last ``". "`` sentence break as well, keeping the sentence's
-    period. A text with no qualifying early boundary is hard-cut at the budget
-    itself, so the cut CAN land mid-sentence. Both truncate-to-budget callers
-    (published spec descriptions and search-result descriptions) share this one
-    boundary selection so the two paths cannot drift apart.
+    the last newline at or after the halfway point of the budget (``limit // 2``)
+    — and, when ``sentence`` is true, the last ``". "`` sentence break as well,
+    keeping the sentence's period. A boundary earlier than halfway would discard
+    more than half the budget, so it does not qualify: a text with no qualifying
+    boundary is hard-cut at the budget itself, and the cut CAN land mid-sentence.
+    Both truncate-to-budget callers (published spec descriptions and
+    search-result descriptions) share this one boundary selection so the two
+    paths cannot drift apart.
     """
     if len(text) <= limit:
         return text
