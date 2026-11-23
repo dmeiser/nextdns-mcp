@@ -380,7 +380,7 @@ class TestBoundedProjection:
         assert node == [None]
 
     def test_a_large_dict_consumes_only_the_key_cap(self):
-        """``_project_dict`` slices lazily: it reads ``PROJECT_MAX_KEYS`` items,
+        """The key cap slices lazily: it reads ``PROJECT_MAX_KEYS`` items,
         never a materialized list of the whole mapping's items."""
         from nextdns_mcp.call_log import PROJECT_MAX_KEYS, _project_value
 
