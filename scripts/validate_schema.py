@@ -306,9 +306,11 @@ def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str
 # document-local, so the document is registered as a resource and each local
 # pointer is restated to address it (``#/components/schemas/X`` ->
 # ``nextdns-openapi#/components/schemas/X``). Restating a pointer is addressing
-# plumbing, not validation logic — resolution itself, including recursive
-# schemas, is the library's job, and no cycle guard is needed because the
-# resolver follows references lazily.
+# plumbing, not validation logic — resolution itself is the library's job, and
+# recursive schemas that descend into the instance validate without any guard.
+# A reference that loops back to itself *without* descending (a pure
+# ``{"$ref": ...}`` cycle) would recurse forever; that case is named up front
+# by _non_consuming_ref_cycle() and reported as a violation.
 _DOC_URI = "nextdns-openapi"
 
 
@@ -357,25 +359,26 @@ def _validation_errors(spec: dict[str, Any], schema: dict[str, Any], data: Any) 
     whole document (``required``, ``enum``, ``pattern``, ``additionalProperties``,
     array bounds, composed schemas) instead of the subset a local
     re-implementation happened to cover. Returns one ``path: message`` string
-    per violation; a reference the document cannot resolve is reported as a
+    per violation; a reference the document cannot resolve, and a reference that
+    recurses without ever descending into the instance, are each reported as a
     violation rather than crashing the run or passing silently.
     """
     if not isinstance(schema, dict):
         return []
+    cycle = _non_consuming_ref_cycle(spec, schema)
+    if cycle is not None:
+        return [f"$: schema reference {cycle!r} recurses back to itself without descending into the instance"]
     validator = jsonschema.Draft202012Validator(_with_absolute_refs(schema), registry=_registry_for_spec(spec))
     try:
         return sorted(f"{error.json_path}: {error.message}" for error in validator.iter_errors(data))
     except Unresolvable as error:
         return [f"$: unresolvable schema reference: {error}"]
     except RecursionError:
-        # A ``$ref`` cycle that re-enters the same (instance, schema) pair with no
-        # intervening keyword — a pure ``{"$ref": ...}`` loop — has no constraints
-        # to check and recurses forever; the hand-rolled resolver this replaced
-        # fell back to a permissive subtree in exactly this case. Finite API
-        # payloads cannot reach the recursion limit through keyword-descended
-        # cycles (each step consumes instance depth), so this stays a
-        # same-pair-cycle fallback rather than a depth limit.
-        return []
+        # Backstop for a non-consuming reference cycle the walk above did not
+        # name: reported as a violation, never as a permissive pass. A cycle
+        # that descends through ``properties``/``items`` cannot reach this,
+        # because every step consumes instance depth and payloads are finite.
+        return ["$: schema reference recurses back to itself without descending into the instance"]
 
 
 def _resolve_schema_ref(spec: dict[str, Any], ref: str) -> Any:
@@ -385,6 +388,49 @@ def _resolve_schema_ref(spec: dict[str, Any], ref: str) -> Any:
         return resolver.lookup(ref).contents
     except Unresolvable:
         return None
+
+
+# Keywords whose subschemas apply to the *same* instance location. A reference
+# cycle through only these re-enters the same (instance, schema) pair forever;
+# a cycle that passes through ``properties``/``items`` descends into the
+# instance and terminates on any finite payload.
+_SAME_INSTANCE_KEYWORDS = ("allOf", "anyOf", "oneOf", "not", "if", "then", "else", "dependentSchemas")
+
+
+def _non_consuming_ref_cycle(spec: dict[str, Any], schema: Any, chain: tuple[Any, ...] = ()) -> str | None:
+    """Return the ``$ref`` that re-enters an already-visited schema without descending.
+
+    ``jsonschema`` follows references lazily and recurses on the same instance
+    when a schema refers back to itself through same-instance keywords only — the
+    plain ``{"$ref": ...}`` loop, or a component whose content is just an
+    ``allOf`` of itself. Such a schema has no decidable outcome; the reference is
+    named as a violation rather than validated permissively (the removed
+    resolver's fallback) or recursed into. Every step extends ``chain`` with a
+    schema identity, so the walk itself terminates: a repeated identity is the
+    stop condition, not a recursion risk.
+    """
+    if not isinstance(schema, dict) or any(node is schema for node in chain):
+        return None
+    chain = chain + (schema,)
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        target = _resolve_schema_ref(spec, ref)
+        if isinstance(target, dict) and any(node is target for node in chain):
+            return ref
+        return _non_consuming_ref_cycle(spec, target, chain)
+    for keyword in _SAME_INSTANCE_KEYWORDS:
+        subschemas = schema.get(keyword)
+        if isinstance(subschemas, dict):
+            members = list(subschemas.values()) if keyword == "dependentSchemas" else [subschemas]
+        elif isinstance(subschemas, list):
+            members = subschemas
+        else:
+            continue
+        for member in members:
+            found = _non_consuming_ref_cycle(spec, member, chain)
+            if found is not None:
+                return found
+    return None
 
 
 def _resolve_body_schema(spec: dict[str, Any], schema: Any) -> Any:

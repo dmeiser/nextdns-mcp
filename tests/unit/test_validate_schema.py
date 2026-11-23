@@ -178,8 +178,14 @@ def test_cyclic_ref_nested_cycle_invalid_response_fails():
     assert errors == []
 
 
-def test_pure_ref_cycle_validates_without_crashing():
-    """A direct $ref cycle with no constraints must not crash or hang validation."""
+def test_pure_ref_cycle_is_reported_as_a_violation():
+    """A direct $ref cycle with no constraints is a validation failure, not a pass.
+
+    The cycle has no decidable outcome: jsonschema would recurse on the same
+    (instance, schema) pair forever. The check must name it as a violation
+    rather than hang, crash, or — as the removed hand-rolled resolver did —
+    wave the subtree through permissively.
+    """
     spec = {
         **_spec_with_get_operation(
             "getLoop",
@@ -188,8 +194,22 @@ def test_pure_ref_cycle_validates_without_crashing():
         "components": {"schemas": {"Loop": {"$ref": "#/components/schemas/Loop"}}},
     }
     status, errors = validate_tool_response("getLoop", {"anything": 1}, spec)
-    assert status == "VALID"
-    assert errors == []
+    assert status == "INVALID"
+    assert any("recurses back to itself" in error for error in errors)
+
+
+def test_allof_self_cycle_is_reported_as_a_violation():
+    """A component that is only an allOf of itself is the same non-consuming cycle."""
+    spec = {
+        **_spec_with_get_operation(
+            "getSelf",
+            {"$ref": "#/components/schemas/Self"},
+        ),
+        "components": {"schemas": {"Self": {"allOf": [{"$ref": "#/components/schemas/Self"}]}}},
+    }
+    status, errors = validate_tool_response("getSelf", {"anything": 1}, spec)
+    assert status == "INVALID"
+    assert any("recurses back to itself" in error for error in errors)
 
 
 def test_body_schema_ref_resolution_edges():
