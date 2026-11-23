@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import Mapping
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -920,6 +921,33 @@ class TestExtraSectionBinding:
 
     EXTRA_SECTIONS = ("reasons", "devices", "ips", "root_domains", "gafam", "countries", "encryption", "dnssec")
 
+    class _DesyncedTasks(Mapping):
+        """A task mapping whose name-list order differs from its fetch order.
+
+        Models the hazard the ticket names - a caller that builds the name list
+        differently from the order the fetches were gathered in. Before the
+        name-keyed binding, ``list(extra_fetchers)`` supplied the names while
+        ``extra_fetchers.values()`` supplied the gather arguments, so this
+        desync silently rotated every section; now each fetch carries its own
+        name and the order pair cannot disagree.
+        """
+
+        def __init__(self, tasks):
+            self._tasks = tasks
+            self._names = list(reversed(list(tasks)))
+
+        def __iter__(self):
+            return iter(self._names)
+
+        def __len__(self):
+            return len(self._tasks)
+
+        def __getitem__(self, key):
+            return self._tasks[key]
+
+        def values(self):
+            return (self._tasks[name] for name in self._tasks)
+
     @staticmethod
     def _distinct_fetch(started):
         """A transport stub where every endpoint answers with a row only it could produce."""
@@ -941,17 +969,16 @@ class TestExtraSectionBinding:
         return fake_fetch
 
     @pytest.mark.asyncio
-    async def test_permuted_task_order_keeps_every_section_on_its_own_payload(self, monkeypatch):
-        """With the 8 extra tasks built in reverse, each field still carries its own endpoint's rows."""
+    async def test_name_list_built_differently_from_fetch_order_keeps_sections_on_their_own_payloads(self, monkeypatch):
+        """With the name list reversed against the fetch order, each field still carries its own endpoint's rows."""
         started = []
         monkeypatch.setattr(data_mod, "_fetch_analytics_payload", self._distinct_fetch(started))
         real_build = data_mod._build_extra_tasks
 
-        def reversed_build(*args, **kwargs):
-            tasks = real_build(*args, **kwargs)
-            return {name: tasks[name] for name in reversed(list(tasks))}
+        def desynced_build(*args, **kwargs):
+            return self._DesyncedTasks(real_build(*args, **kwargs))
 
-        monkeypatch.setattr(data_mod, "_build_extra_tasks", reversed_build)
+        monkeypatch.setattr(data_mod, "_build_extra_tasks", desynced_build)
 
         _, _, _, _, extra, err = await data_mod._fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
 
