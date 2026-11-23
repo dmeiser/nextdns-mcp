@@ -21,7 +21,7 @@ from .config import (
     get_http_timeout,
     load_profile_access_control,
 )
-from .constants import SAFE_PROFILE_ID_PATTERN, is_write_operation
+from .constants import LOOPBACK_HOSTS, SAFE_PROFILE_ID_PATTERN, is_write_operation
 from .errors import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 # without inventing a second configuration mechanism.
 ALLOWED_DESTINATION_HOSTS = frozenset({"api.nextdns.io", "dns.nextdns.io"})
 
-# Loopback destinations are allowed so local test doubles and loopback mock
-# servers stay usable; no shipped tool ever targets them.
-LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+# The loopback allowance this client also sends requests to lives in
+# ``constants.LOOPBACK_HOSTS`` — the same set the run-options check reads to
+# decide whether an ``MCP_HOST`` bind is loopback-only.
 
 
 def _normalized_host(host: str | None) -> str:
