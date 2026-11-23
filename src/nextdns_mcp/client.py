@@ -8,7 +8,8 @@ import posixpath
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 import httpx
 
@@ -252,23 +253,55 @@ class AccessControlledClient:
         transport: Any = None,
         follow_redirects: bool = False,
     ) -> None:
-        kwargs: dict[str, Any] = {"base_url": base_url, "headers": headers, "follow_redirects": follow_redirects}
+        kwargs: dict[str, Any] = {"headers": headers, "follow_redirects": follow_redirects}
+        if base_url is not None:
+            kwargs["base_url"] = base_url
         if timeout is not None:
             kwargs["timeout"] = timeout
         if transport is not None:
             kwargs["transport"] = transport
         self._client = httpx.AsyncClient(**kwargs)
 
-    async def __aenter__(self) -> "AccessControlledClient":
+    async def __aenter__(self) -> Self:
         await self._client.__aenter__()
         return self
 
-    async def __aexit__(self, *exc_info: Any) -> None:
-        await self._client.__aexit__(*exc_info)
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self._client.__aexit__(exc_type, exc_value, traceback)
 
     async def aclose(self) -> None:
         """Close the wrapped httpx client."""
         await self._client.aclose()
+
+    @property
+    def base_url(self) -> httpx.URL:
+        """The base URL the wrapped client resolves relative requests against."""
+        return self._client.base_url
+
+    @property
+    def headers(self) -> httpx.Headers:
+        """The client-level default headers, including the X-Api-Key credential."""
+        return self._client.headers
+
+    @property
+    def timeout(self) -> httpx.Timeout:
+        """The configured request timeout."""
+        return self._client.timeout
+
+    @property
+    def follow_redirects(self) -> bool:
+        """Whether the wrapped client follows redirects (always False here)."""
+        return self._client.follow_redirects
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the wrapped client has been closed."""
+        return self._client.is_closed
 
     def _check_write_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
         """Check write access against the request snapshot; raise AccessDeniedError if denied."""
@@ -507,16 +540,36 @@ class RawProbeTransport:
     def __init__(self, **kwargs: Any) -> None:
         self._client = httpx.AsyncClient(**kwargs)
 
-    async def __aenter__(self) -> "RawProbeTransport":
+    async def __aenter__(self) -> Self:
         await self._client.__aenter__()
         return self
 
-    async def __aexit__(self, *exc_info: Any) -> None:
-        await self._client.__aexit__(*exc_info)
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self._client.__aexit__(exc_type, exc_value, traceback)
 
     async def aclose(self) -> None:
         """Close the wrapped httpx client."""
         await self._client.aclose()
+
+    @property
+    def base_url(self) -> httpx.URL:
+        """The base URL the wrapped client resolves relative requests against."""
+        return self._client.base_url
+
+    @property
+    def headers(self) -> httpx.Headers:
+        """The client-level default headers, including the X-Api-Key credential."""
+        return self._client.headers
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the wrapped client has been closed."""
+        return self._client.is_closed
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Send a request with NO profile ACL check; the destination allow-list still applies.

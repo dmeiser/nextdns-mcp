@@ -204,22 +204,28 @@ class TestServerLifespan:
 
         server = create_mcp_server()
         api_client = client_module.get_api_client()
+        probe_client = client_module.get_raw_probe_client()
         doh_client = doh_module._get_doh_client()
 
         try:
             assert not api_client.is_closed
+            assert not probe_client.is_closed
             assert not doh_client.is_closed
 
             async with server._lifespan_manager():
                 pass
 
             assert api_client.is_closed
+            assert probe_client.is_closed
             assert doh_client.is_closed
             assert client_module._client is None
+            assert client_module._raw_probe_client is None
             assert doh_module._doh_client is None
         finally:
             if not api_client.is_closed:
                 await api_client.aclose()
+            if not probe_client.is_closed:
+                await probe_client.aclose()
             if not doh_client.is_closed:
                 await doh_client.aclose()
 
@@ -336,6 +342,7 @@ class TestDownloadOwnershipIsPerServer:
         from nextdns_mcp.tools import logs as logs_module
 
         monkeypatch.setattr(openapi_module, "close_api_client", self._noop)
+        monkeypatch.setattr(openapi_module, "close_raw_probe_client", self._noop)
         monkeypatch.setattr(openapi_module, "close_doh_client", self._noop)
 
         server_a_csv = tmp_path / "a" / "download.csv"
