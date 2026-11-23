@@ -10,8 +10,8 @@ from fastmcp import Client
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.tools import ToolResult
 
-from nextdns_mcp import openapi, spec_tools
-from nextdns_mcp.openapi import StripExtraFieldsMiddleware
+from nextdns_mcp import relaxation, spec_tools
+from nextdns_mcp.relaxation import StripExtraFieldsMiddleware
 from nextdns_mcp.server import build_mcp_server
 
 
@@ -216,7 +216,7 @@ class TestStripExtraFieldsMiddleware:
         mock_context.message.arguments = {"domain": "test.com", "extra": "field"}
         call_next = AsyncMock(return_value=MagicMock())
 
-        with patch("nextdns_mcp.openapi.logger") as mock_logger, pytest.raises(ToolError):
+        with patch("nextdns_mcp.relaxation.logger") as mock_logger, pytest.raises(ToolError):
             await middleware.on_call_tool(mock_context, call_next)
 
         mock_logger.exception.assert_called_once()
@@ -229,7 +229,7 @@ class TestStripExtraFieldsMiddleware:
         """Test that stripped fields are logged at debug level."""
         call_next = AsyncMock(return_value=MagicMock())
 
-        with patch("nextdns_mcp.openapi.logger"):
+        with patch("nextdns_mcp.relaxation.logger"):
             await middleware.on_call_tool(mock_context, call_next)
 
             # Verify call_next was called (middleware completed successfully)
@@ -387,7 +387,7 @@ class TestStripExtraFieldsMiddleware:
         a value that passes the shape but fails ``float()`` must come back
         unchanged rather than raise out of the coercion layer.
         """
-        monkeypatch.setattr("nextdns_mcp.openapi.is_float_shaped", lambda _s: True)
+        monkeypatch.setattr("nextdns_mcp.relaxation.is_float_shaped", lambda _s: True)
         assert middleware._coerce_string_value("not a float", {"number"}) == "not a float"
 
 
@@ -401,7 +401,7 @@ class TestIgnoredArgumentOwnerHint:
     """
 
     def test_single_owner_is_named(self):
-        from nextdns_mcp.openapi import _owner_hint
+        from nextdns_mcp.relaxation import _owner_hint
 
         index = {
             "googleSafeBrowsing": ("updateSecuritySettings",),
@@ -413,7 +413,7 @@ class TestIgnoredArgumentOwnerHint:
         assert "call it with them" in hint
 
     def test_multiple_owners_are_split(self):
-        from nextdns_mcp.openapi import _owner_hint
+        from nextdns_mcp.relaxation import _owner_hint
 
         index = {"googleSafeBrowsing": ("updateSecuritySettings",), "allowAffiliate": ("updatePrivacySettings",)}
         hint = _owner_hint(["googleSafeBrowsing", "allowAffiliate"], "updateSettings", index)
@@ -422,7 +422,7 @@ class TestIgnoredArgumentOwnerHint:
         assert "each named tool" in hint
 
     def test_unowned_arguments_note_alongside_an_owner(self):
-        from nextdns_mcp.openapi import _owner_hint
+        from nextdns_mcp.relaxation import _owner_hint
 
         index = {"googleSafeBrowsing": ("updateSecuritySettings",)}
         hint = _owner_hint(["googleSafeBrowsing", "extra_field"], "updateSettings", index)
@@ -431,7 +431,7 @@ class TestIgnoredArgumentOwnerHint:
         assert "dropped too" in hint
 
     def test_generic_hint_when_nothing_has_an_owner(self):
-        from nextdns_mcp.openapi import _owner_hint
+        from nextdns_mcp.relaxation import _owner_hint
 
         hint = _owner_hint(["extra_field", "unknown"], "updateSettings", {})
         assert "check the tool's parameter list" in hint
@@ -460,7 +460,7 @@ class TestOwnerIndexIsTheRegisteredCatalog:
 
     @pytest.mark.asyncio
     async def test_composite_tools_own_their_arguments(self):
-        from nextdns_mcp.openapi import _catalog_argument_index
+        from nextdns_mcp.relaxation import _catalog_argument_index
 
         tools = [self._tool("plotAnalytics", ["metric", "profile_id"]), self._tool("getProfile", ["profile_id"])]
         server = self._server_with(tools)
@@ -471,7 +471,7 @@ class TestOwnerIndexIsTheRegisteredCatalog:
     @pytest.mark.asyncio
     async def test_synthetic_entries_are_excluded(self):
         from nextdns_mcp.constants import SYNTHETIC_TOOL_NAMES
-        from nextdns_mcp.openapi import _catalog_argument_index
+        from nextdns_mcp.relaxation import _catalog_argument_index
 
         tools = [self._tool(name, ["name", "arguments"]) for name in sorted(SYNTHETIC_TOOL_NAMES)]
         tools.append(self._tool("getProfile", ["profile_id"]))
@@ -581,7 +581,7 @@ class TestIgnoredArgumentsNeverClobberTheToolHint:
     """
 
     def test_an_existing_hint_survives_the_merge(self):
-        from nextdns_mcp.openapi import _report_ignored_arguments
+        from nextdns_mcp.relaxation import _report_ignored_arguments
 
         result = ToolResult(structured_content={"data": [], "hint": "the profile id is 6 or 10 characters"})
         _report_ignored_arguments(result, ["privacy"], "privacy are parameters of updatePrivacySettings")
@@ -594,7 +594,7 @@ class TestIgnoredArgumentsNeverClobberTheToolHint:
         )
 
     def test_no_prior_hint_uses_the_annotation_alone(self):
-        from nextdns_mcp.openapi import _report_ignored_arguments
+        from nextdns_mcp.relaxation import _report_ignored_arguments
 
         result = ToolResult(structured_content={"data": []})
         _report_ignored_arguments(result, ["x"], "the note")
@@ -608,20 +608,20 @@ class TestIgnoredArgumentsMerge:
         result = ToolResult(
             structured_content={"data": [], "ignored_arguments": ["from"], "ignored_arguments_hint": "inner hint"}
         )
-        openapi._report_ignored_arguments(result, ["query"], "outer hint")
+        relaxation._report_ignored_arguments(result, ["query"], "outer hint")
         assert result.structured_content["ignored_arguments"] == ["from", "query"]
         assert "inner hint" in result.structured_content["ignored_arguments_hint"]
         assert "outer hint" in result.structured_content["ignored_arguments_hint"]
 
     def test_a_duplicate_report_adds_nothing(self):
         result = ToolResult(structured_content={"data": [], "ignored_arguments": ["x"], "ignored_arguments_hint": "h"})
-        openapi._report_ignored_arguments(result, ["x"], "h")
+        relaxation._report_ignored_arguments(result, ["x"], "h")
         assert result.structured_content["ignored_arguments"] == ["x"]
 
     def test_a_content_only_result_gets_a_visible_note(self):
         """An image result has no structured dict: the drop is said in the content."""
         result = ToolResult(content=[mcp.types.ImageContent(type="image", data="AA", mimeType="image/png")])
-        openapi._report_ignored_arguments(result, ["from"], "from_time is this tool's name for it")
+        relaxation._report_ignored_arguments(result, ["from"], "from_time is this tool's name for it")
         note = result.content[-1]
         assert note.type == "text" and "from" in note.text
 
@@ -631,7 +631,7 @@ class TestIgnoredArgumentsMerge:
             content=[mcp.types.TextContent(type="text", text="Summary")],
             structured_content={"$prefab": {"version": "0.3"}, "view": {}},
         )
-        openapi._report_ignored_arguments(result, ["from"], "from_time is this tool's name for it")
+        relaxation._report_ignored_arguments(result, ["from"], "from_time is this tool's name for it")
         assert len(result.content) == 2
         assert "from" in result.content[-1].text
         assert result.structured_content["ignored_arguments"] == ["from"]
@@ -665,14 +665,14 @@ class TestIgnoredArgumentsEdgePaths:
 
     def test_a_content_only_result_with_nothing_dropped_is_untouched(self):
         result = ToolResult(content=[mcp.types.ImageContent(type="image", data="AA", mimeType="image/png")])
-        openapi._report_ignored_arguments(result, [], "nothing")
+        relaxation._report_ignored_arguments(result, [], "nothing")
         assert len(result.content) == 1
 
     def test_a_hint_already_present_is_not_appended_twice(self):
         result = ToolResult(
             structured_content={"data": [], "hint": "keep it | owner hint"},
         )
-        openapi._report_ignored_arguments(result, ["x"], "owner hint")
+        relaxation._report_ignored_arguments(result, ["x"], "owner hint")
         assert result.structured_content["hint"] == "keep it | owner hint"
 
 
@@ -687,7 +687,7 @@ class TestIgnoredArgumentsHintDedup:
                 "ignored_arguments_hint": "privacy: updatePrivacy",
             }
         )
-        openapi._report_ignored_arguments(
+        relaxation._report_ignored_arguments(
             result,
             ["privacy", "name"],
             "privacy, name: updatePrivacy",
@@ -704,7 +704,7 @@ class TestIgnoredArgumentsHintDedup:
         result = ToolResult(
             structured_content={"data": [], "ignored_arguments": ["x"], "ignored_arguments_hint": "x: T"}
         )
-        openapi._report_ignored_arguments(
+        relaxation._report_ignored_arguments(
             result, ["x"], "x: T", hint_for=lambda names: "owners(" + ",".join(names) + ")"
         )
         assert result.structured_content["ignored_arguments_hint"] == "owners(x)"
@@ -722,7 +722,7 @@ class TestIgnoredArgumentsHintBaseSurvival:
                 "ignored_arguments_hint": "from: getAnalyticsStatusSeries",
             }
         )
-        openapi._report_ignored_arguments(
+        relaxation._report_ignored_arguments(
             result,
             ["from", "to"],
             "from, to: getAnalyticsStatusSeries",
@@ -739,7 +739,7 @@ class TestIgnoredArgumentsHintBaseSurvival:
                 "ignored_arguments_hint": "from: T",
             }
         )
-        openapi._report_ignored_arguments(
+        relaxation._report_ignored_arguments(
             result, ["to"], "to: T", hint_for=lambda names: "owners(" + ",".join(names) + ")"
         )
         assert result.structured_content["hint"] == "fix the range | someone else's note | owners(from,to)"
@@ -749,7 +749,7 @@ class TestIgnoredArgumentsHintBaseSurvival:
         result = ToolResult(
             structured_content={"data": [], "hint": 7, "ignored_arguments": ["x"], "ignored_arguments_hint": None}
         )
-        openapi._report_ignored_arguments(
+        relaxation._report_ignored_arguments(
             result, ["x"], "x: T", hint_for=lambda names: "owners(" + ",".join(names) + ")"
         )
         assert result.structured_content["hint"] == "owners(x)"

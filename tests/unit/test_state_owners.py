@@ -20,7 +20,7 @@ from nextdns_mcp import client as client_module
 from nextdns_mcp import server as server_module
 from nextdns_mcp import state as state_module
 from nextdns_mcp.errors import StateOwnershipError
-from nextdns_mcp.openapi import ServerResources, _server_resources
+from nextdns_mcp.lifespan import ServerResources, server_resources
 from nextdns_mcp.tools import doh as doh_module
 from nextdns_mcp.tools import logs as logs_module
 
@@ -78,7 +78,7 @@ class TestRequestResourcesResolution:
             pass
 
         with pytest.raises(RuntimeError):
-            _server_resources(_Bare())  # type: ignore[arg-type]
+            server_resources(_Bare())  # type: ignore[arg-type]
 
 
 class TestNoProcessGlobalFallback:

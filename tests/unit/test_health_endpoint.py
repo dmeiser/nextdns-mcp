@@ -16,14 +16,14 @@ import logging
 import httpx
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import openapi
-from nextdns_mcp.openapi import (
+from nextdns_mcp import health
+from nextdns_mcp.health import (
     HEALTH_CACHE_TTL,
     HEALTH_PROBE_PATH,
     HEALTH_PROBE_TIMEOUT,
     ReadinessProber,
-    create_mcp_server,
 )
+from nextdns_mcp.openapi import create_mcp_server
 
 
 class FakeProbeTransport:
@@ -57,7 +57,7 @@ def _response(status_code: int, body: str = '{"error":"Forbidden"}') -> httpx.Re
 def _install_client(monkeypatch, *outcomes: httpx.Response | Exception) -> FakeProbeTransport:
     """Point the health probe at a fake transport, bypassing the shared singleton."""
     client = FakeProbeTransport(*outcomes)
-    monkeypatch.setattr(openapi, "get_raw_probe_client", lambda: client)
+    monkeypatch.setattr(health, "get_raw_probe_client", lambda: client)
     monkeypatch.setattr(client_module, "_raw_probe_client", None)
     return client
 
@@ -133,7 +133,7 @@ async def test_health_failure_detail_reaches_the_server_log(monkeypatch, mock_ap
     """
     _install_client(monkeypatch, _response(401))
 
-    with caplog.at_level(logging.WARNING, logger="nextdns_mcp.openapi"):
+    with caplog.at_level(logging.WARNING, logger="nextdns_mcp.health"):
         status_code, body = await _call_health(create_mcp_server().http_app())
 
     assert status_code == 503
@@ -314,7 +314,7 @@ async def test_concurrent_pollers_share_one_probe(monkeypatch, mock_api_key):
         calls.append(1)
         await asyncio.sleep(0.05)  # let the other poller arrive and wait on the lock
 
-    monkeypatch.setattr(openapi, "get_raw_probe_client", lambda: FakeProbeTransport(_response(200, "[]")))
+    monkeypatch.setattr(health, "get_raw_probe_client", lambda: FakeProbeTransport(_response(200, "[]")))
     prober = ReadinessProber()
     monkeypatch.setattr(prober, "_probe", slow_probe)
 
