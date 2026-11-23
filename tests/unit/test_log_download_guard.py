@@ -476,7 +476,17 @@ class TestDownloadTool:
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
 
-    async def test_a_redirect_is_followed_to_a_file(self, monkeypatch, unauthenticated):
+    @pytest.fixture()
+    def owned_registry(self):
+        """Bind an owning-lifespan registry, as ``_server_lifespan`` would."""
+        owned: dict[str, None] = {}
+        token = logs_module._download_registry.set(owned)
+        try:
+            yield owned
+        finally:
+            logs_module._download_registry.reset(token)
+
+    async def test_a_redirect_is_followed_to_a_file(self, monkeypatch, unauthenticated, owned_registry):
         signed = "https://storage.example/file.csv?Signature=deadbeef"
         monkeypatch.setattr(
             client_module,
@@ -489,8 +499,10 @@ class TestDownloadTool:
         assert payload["row_count"] == 2
         assert os.path.exists(payload["file_path"])
         assert payload["preview"]["text"].startswith("host,reason")
+        logs_module.cleanup_successful_downloads()
+        assert not os.path.exists(payload["file_path"])
 
-    async def test_a_successful_download_is_reclaimed_at_shutdown(self, monkeypatch, unauthenticated):
+    async def test_a_successful_download_is_reclaimed_at_shutdown(self, monkeypatch, unauthenticated, owned_registry):
         """The kept CSV is bounded: the lifespan cleanup removes it and its dir.
 
         The file must outlive the call (the caller reads the returned path),
@@ -507,11 +519,41 @@ class TestDownloadTool:
 
         payload = await logs_module._download_logs_to_tempfile("abc123")
         assert os.path.exists(payload["file_path"])
-        assert payload["file_path"] in logs_module._SUCCESSFUL_DOWNLOADS
+        assert payload["file_path"] in owned_registry
         logs_module.cleanup_successful_downloads()
         assert not os.path.exists(payload["file_path"])
         assert not os.path.exists(os.path.dirname(payload["file_path"]))
         logs_module.cleanup_successful_downloads()  # idempotent: nothing registered, nothing to do
+
+    async def test_a_successful_download_without_a_lifespan_is_rejected_and_cleaned_up(
+        self, monkeypatch, unauthenticated
+    ):
+        """No owning lifespan means no reclaim point: the download is refused
+        with an explicit missing-registry error and the CSV is removed, rather
+        than silently registered where nothing would ever reclaim it."""
+        created: list[str] = []
+        real_mkdtemp = __import__("tempfile").mkdtemp
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            return made
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        monkeypatch.setattr(
+            client_module,
+            "api_client",
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)]),
+        )
+        unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+
+        payload = await logs_module._download_logs_to_tempfile("abc123")
+        assert payload["code"] == ErrorCode.INTERNAL_ERROR
+        assert "could not be handed out" in payload["error"]
+        assert "no server lifespan" in payload["error"].lower()
+        assert created and not os.path.exists(created[0]), "the rejected download's temp dir must be removed"
 
     async def test_an_acl_denial_is_typed_and_leaves_no_temp_file(self, monkeypatch):
         class Denied:
@@ -997,52 +1039,74 @@ class TestSuccessfulDownloadLifecycle:
         logs_module._note_successful_download(str(path), True)
         return str(path)
 
-    def test_retention_is_bounded_by_evicting_the_oldest_download(self, tmp_path, monkeypatch):
-        """A long-lived server must not keep every CSV it ever handed out."""
-        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        cap = logs_module.MAX_RETAINED_DOWNLOADS
-        paths = [self._register(tmp_path, f"dl{i}") for i in range(cap + 2)]
-        # The two oldest were evicted and unlinked; the newest `cap` stay.
-        assert not (tmp_path / "dl0" / "download.csv").exists()
-        assert not (tmp_path / "dl1" / "download.csv").exists()
-        for tag in range(2, cap + 2):
-            assert (tmp_path / f"dl{tag}" / "download.csv").exists()
-        registered = logs_module._current_registry()
-        assert set(registered) == set(paths[2:])
-        logs_module.cleanup_successful_downloads()
-        assert logs_module._current_registry() == {}
+    @staticmethod
+    def _own_lifespan_registry() -> tuple[dict[str, None], Any]:
+        """Bind an owning-lifespan registry and return it with its reset token."""
+        owned: dict[str, None] = {}
+        return owned, logs_module._download_registry.set(owned)
 
-    def test_a_failed_deletion_stays_registered_for_a_later_retry(self, tmp_path, monkeypatch, caplog):
+    def test_retention_is_bounded_by_evicting_the_oldest_download(self, tmp_path):
+        """A long-lived server must not keep every CSV it ever handed out."""
+        owned, token = self._own_lifespan_registry()
+        try:
+            cap = logs_module.MAX_RETAINED_DOWNLOADS
+            paths = [self._register(tmp_path, f"dl{i}") for i in range(cap + 2)]
+            # The two oldest were evicted and unlinked; the newest `cap` stay.
+            assert not (tmp_path / "dl0" / "download.csv").exists()
+            assert not (tmp_path / "dl1" / "download.csv").exists()
+            for tag in range(2, cap + 2):
+                assert (tmp_path / f"dl{tag}" / "download.csv").exists()
+            assert set(owned) == set(paths[2:])
+            logs_module.cleanup_successful_downloads()
+            assert owned == {}
+        finally:
+            logs_module._download_registry.reset(token)
+
+    def test_a_failed_deletion_stays_registered_for_a_later_retry(self, tmp_path, caplog):
         """The old cleanup popped each path BEFORE unlinking: one OSError and the
         CSV leaked forever with no record it had ever existed. A failed removal
         must keep the path registered so a later cleanup can retry it."""
-        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        blocker = tmp_path / "blocker"
-        blocker.mkdir()
-        blocked = str(blocker)  # a directory at the registered path: unlink fails with OSError
-        logs_module._note_successful_download(blocked, True)
-        gone = self._register(tmp_path, "gone")
+        owned, token = self._own_lifespan_registry()
+        try:
+            blocker = tmp_path / "blocker"
+            blocker.mkdir()
+            blocked = str(blocker)  # a directory at the registered path: unlink fails with OSError
+            logs_module._note_successful_download(blocked, True)
+            gone = self._register(tmp_path, "gone")
 
-        with caplog.at_level("WARNING"):
-            logs_module.cleanup_successful_downloads()
+            with caplog.at_level("WARNING"):
+                logs_module.cleanup_successful_downloads()
 
-        assert "Failed to remove temp log file" in caplog.text
-        # The removable file was unregistered; the failed one is still registered.
-        registered = logs_module._current_registry()
-        assert blocked in registered
-        assert gone not in registered
+            assert "Failed to remove temp log file" in caplog.text
+            # The removable file was unregistered; the failed one is still registered.
+            assert blocked in owned
+            assert gone not in owned
+        finally:
+            logs_module._download_registry.reset(token)
 
-    def test_registration_goes_to_the_owning_lifespan_registry(self, tmp_path, monkeypatch):
-        """Outside a lifespan the process-global registry is the fallback."""
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        owned: dict[str, None] = {}
-        token = logs_module._download_registry.set(owned)
+    def test_registration_without_a_lifespan_fails_fast_and_records_nothing(self, tmp_path):
+        """Outside a lifespan there is no owner that could ever reclaim the
+        CSV, so registration is refused with an explicit error before the path
+        is recorded - not silently kept in a process-global registry."""
+        path = tmp_path / "orphan" / "download.csv"
+        path.parent.mkdir(parents=True)
+        path.write_text("csv")
+        with pytest.raises(logs_module.MissingDownloadRegistryError):
+            logs_module._note_successful_download(str(path), True)
+        assert logs_module._download_registry.get() is None
+
+    def test_a_failed_download_is_never_registered(self, tmp_path):
+        """``downloaded=False`` records nothing and needs no owning lifespan."""
+        path = tmp_path / "nope" / "download.csv"
+        logs_module._note_successful_download(str(path), False)  # no lifespan bound: still a no-op
+        assert logs_module._download_registry.get() is None
+
+    def test_registration_goes_to_the_owning_lifespan_registry(self, tmp_path):
+        """A bound lifespan's registry receives the registration."""
+        owned, token = self._own_lifespan_registry()
         try:
             path = self._register(tmp_path, "owned")
             assert owned == {path: None}
-            assert logs_module._SUCCESSFUL_DOWNLOADS == {}
         finally:
             logs_module._download_registry.reset(token)
 
@@ -1063,15 +1127,16 @@ class TestSuccessfulDownloadLifecycle:
         assert not registered.exists()
         assert parent.exists(), "a parent another file lives in must survive"
 
-    def test_an_unevictable_oldest_download_stops_the_eviction_sweep(self, tmp_path, monkeypatch):
+    def test_an_unevictable_oldest_download_stops_the_eviction_sweep(self, tmp_path):
         """When the oldest registered path cannot be unlinked, the sweep stops
         instead of spinning; the overflow stays registered for shutdown reclaim."""
-        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        blocker = tmp_path / "blocker"
-        blocker.mkdir()  # a directory: unlink fails with OSError, cannot be evicted
-        logs_module._note_successful_download(str(blocker), True)
-        survivors = [self._register(tmp_path, f"dl{i}") for i in range(logs_module.MAX_RETAINED_DOWNLOADS + 1)]
-        registered = logs_module._current_registry()
-        assert str(blocker) in registered, "the failed eviction must stay registered"
-        assert set(survivors) <= set(registered), "an unevictable oldest must stop the sweep, not drop the rest"
+        owned, token = self._own_lifespan_registry()
+        try:
+            blocker = tmp_path / "blocker"
+            blocker.mkdir()  # a directory: unlink fails with OSError, cannot be evicted
+            logs_module._note_successful_download(str(blocker), True)
+            survivors = [self._register(tmp_path, f"dl{i}") for i in range(logs_module.MAX_RETAINED_DOWNLOADS + 1)]
+            assert str(blocker) in owned, "the failed eviction must stay registered"
+            assert set(survivors) <= set(owned), "an unevictable oldest must stop the sweep, not drop the rest"
+        finally:
+            logs_module._download_registry.reset(token)
