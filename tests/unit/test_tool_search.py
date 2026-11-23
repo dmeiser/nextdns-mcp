@@ -1255,7 +1255,10 @@ class TestShapeRepairAnnouncesItself:
         assert "/profiles/abc123/denylist" in content, content
         assert (getattr(result, "structured_content", None) or {}).get("resolved_from") == "get_denylist"
         assert (getattr(result, "structured_content", None) or {}).get("resolved_name") == "getDenylist"
-        assert any(r.levelno == logging.WARNING and "once normalised" in r.getMessage() for r in caplog.records)
+        assert any(
+            r.name == "nextdns_mcp.tool_search" and r.levelno == logging.WARNING and "once normalised" in r.getMessage()
+            for r in caplog.records
+        )
 
     async def test_a_plain_name_carries_no_annotation_and_no_warning(self, caplog):
         import logging
@@ -1268,7 +1271,9 @@ class TestShapeRepairAnnouncesItself:
                     "call_tool", {"name": "getDenylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
                 )
         assert "resolved_from" not in (getattr(result, "structured_content", None) or {})
-        assert not [r for r in caplog.records if r.name == "nextdns_mcp.tool_search" and r.levelno >= logging.WARNING]
+        assert not [
+            r for r in caplog.records if r.name.startswith("nextdns_mcp.tool_search") and r.levelno >= logging.WARNING
+        ]
 
     async def test_a_lifted_argument_repair_logs_at_warning(self, caplog):
         import logging
@@ -1280,7 +1285,10 @@ class TestShapeRepairAnnouncesItself:
                 await client.call_tool(
                     "call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False
                 )
-        assert any(r.levelno == logging.WARNING and "beside name" in r.getMessage() for r in caplog.records)
+        assert any(
+            r.name == "nextdns_mcp.tool_search" and r.levelno == logging.WARNING and "beside name" in r.getMessage()
+            for r in caplog.records
+        )
 
     async def test_a_search_answer_name_repair_logs_at_warning(self, caplog):
         import logging
@@ -1291,7 +1299,10 @@ class TestShapeRepairAnnouncesItself:
             async with Client(build_mcp_server()) as client:
                 found = await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
                 await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}}, raise_on_error=False)
-        assert any(r.levelno == logging.WARNING and "top-ranked" in r.getMessage() for r in caplog.records)
+        assert any(
+            r.name == "nextdns_mcp.tool_search" and r.levelno == logging.WARNING and "top-ranked" in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_a_non_dict_payload_passes_the_annotation_through_unchanged(self):
         from types import SimpleNamespace
