@@ -45,15 +45,30 @@ def _normalized_host(host: str | None) -> str:
     return (host or "").strip().rstrip(".").lower()
 
 
+# Memo of ``_allowed_destination_hosts()`` keyed on the current
+# NEXTDNS_BASE_URL value, so the per-request destination check does not
+# rebuild the set and re-parse the base URL on every call. Keyed on the
+# constant (rather than computed once at import) so pointing the constant at
+# a different base - as the tests do - still re-derives the set.
+_ALLOWED_HOSTS_BY_BASE_URL: dict[str, frozenset[str]] = {}
+
+
 def _allowed_destination_hosts() -> frozenset[str]:
     """Return every host this client may send a request to.
 
     See :data:`ALLOWED_DESTINATION_HOSTS` for the NextDNS endpoints and
-    :data:`LOOPBACK_HOSTS` for the local test-double allowance.
+    :data:`LOOPBACK_HOSTS` for the local test-double allowance. The answer
+    only changes when NEXTDNS_BASE_URL does, so it is memoized per base URL.
     """
+    base_url = NEXTDNS_BASE_URL
+    cached = _ALLOWED_HOSTS_BY_BASE_URL.get(base_url)
+    if cached is not None:
+        return cached
     hosts = set(ALLOWED_DESTINATION_HOSTS) | set(LOOPBACK_HOSTS)
-    hosts.add(_normalized_host(httpx.URL(NEXTDNS_BASE_URL).host))
-    return frozenset(hosts)
+    hosts.add(_normalized_host(httpx.URL(base_url).host))
+    result = frozenset(hosts)
+    _ALLOWED_HOSTS_BY_BASE_URL[base_url] = result
+    return result
 
 
 def _redacted(url: str) -> str:
