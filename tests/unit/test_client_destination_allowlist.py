@@ -4,9 +4,9 @@
 header, so it follows every request to whatever host the request URL names.
 These tests pin the contract that a request only ever leaves the process for a
 host on the client's allow-list (the REST API base, the NextDNS DoH host, the
-host of the client's own base URL, and loopback test doubles), on both the
-normal request path and the streaming path, and that a refusal reaches the
-transport neither at all nor with the key attached.
+host of the API base the client was created on, and loopback test doubles), on
+both the normal request path and the streaming path, and that a refusal reaches
+the transport neither at all nor with the key attached.
 """
 
 from collections.abc import Callable
@@ -15,6 +15,7 @@ from typing import ClassVar
 import httpx
 import pytest
 
+from nextdns_mcp import client as client_module
 from nextdns_mcp.client import AccessControlledClient, AccessDeniedError, RawProbeTransport
 
 API_KEY = "test-key-12345"
@@ -137,6 +138,87 @@ class TestApprovedDestinationsProceed:
 
         assert response.status_code == 200
         assert seen[0].url.host == "nextdns.internal.example.com"
+
+    async def test_retained_client_keeps_its_own_base_host_approved(
+        self, monkeypatch: pytest.MonkeyPatch, recorder: Callable[..., object]
+    ) -> None:
+        """A client kept alive across a NEXTDNS_API_BASE change still reaches its own base host.
+
+        The environment is resolved once per client, at creation, and the
+        destination allowance is that same base. Re-reading it per request
+        would move the allowance to the new host while the retained client was
+        still sending relative requests to the old one, and those requests
+        would fail closed in the window before the client is reset.
+        """
+        proxy_a = "https://proxy-a.internal.example.com"
+        monkeypatch.setenv("NEXTDNS_API_BASE", proxy_a)
+        client, seen = recorder(base_url=proxy_a)
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://proxy-b.internal.example.com")
+        async with client:
+            response = await client.request("GET", "/profiles/abc123/settings")
+
+        assert response.status_code == 200
+        assert seen[0].url.host == "proxy-a.internal.example.com"
+
+    async def test_new_host_approved_only_after_a_client_is_built_on_it(
+        self, monkeypatch: pytest.MonkeyPatch, recorder: Callable[..., object]
+    ) -> None:
+        """The mirror of the previous test: the new host is approved for a client created after the change.
+
+        Together the pair pins that base and allowance move one client at a
+        time, so the guard never permits a host no live client is aimed at.
+        """
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://proxy-a.internal.example.com")
+        stale, seen = recorder(base_url="https://proxy-a.internal.example.com")
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://proxy-b.internal.example.com")
+
+        async with stale:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await stale.request("GET", "https://proxy-b.internal.example.com/profiles/abc123/settings")
+
+        assert "proxy-b.internal.example.com" in str(exc_info.value)
+        assert seen == []
+
+        fresh, fresh_seen = recorder(base_url="https://proxy-b.internal.example.com")
+        async with fresh:
+            response = await fresh.request("GET", "/profiles/abc123/settings")
+
+        assert response.status_code == 200
+        assert fresh_seen[0].url.host == "proxy-b.internal.example.com"
+
+
+class TestAllowListFollowsTheCreationTimeBase:
+    """The configured entry is the base captured when the client was created, never a later env read."""
+
+    def test_configured_base_is_the_env_value_as_of_now(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://proxy-a.internal.example.com/")
+        assert client_module._configured_destination_base() == "https://proxy-a.internal.example.com"
+
+    def test_configured_base_of_a_rejected_value_adds_no_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A value the getter refuses must not widen the allow-list (fail closed)."""
+        monkeypatch.setenv("NEXTDNS_API_BASE", "http://plain.internal.example.com")
+        configured = client_module._configured_destination_base()
+
+        assert configured == ""
+        assert client_module._allowed_destination_hosts(configured) == (
+            client_module.ALLOWED_DESTINATION_HOSTS | client_module.LOOPBACK_HOSTS
+        )
+
+    def test_allow_list_ignores_an_env_change_after_the_base_was_taken(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://proxy-b.internal.example.com")
+        hosts = client_module._allowed_destination_hosts("https://proxy-a.internal.example.com")
+
+        assert "proxy-a.internal.example.com" in hosts
+        assert "proxy-b.internal.example.com" not in hosts
+
+    def test_allow_list_without_a_configured_base_holds_only_the_built_ins(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No configured base means no extra entry, and no empty-string entry."""
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://proxy-b.internal.example.com")
+        hosts = client_module._allowed_destination_hosts()
+
+        assert hosts == client_module.ALLOWED_DESTINATION_HOSTS | client_module.LOOPBACK_HOSTS
 
 
 class TestNonApprovedDestinationsRefused:

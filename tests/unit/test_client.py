@@ -49,6 +49,25 @@ class TestCreateNextdnsClient:
         second = create_nextdns_client()
         assert str(second.base_url) == "https://second.example.invalid"
 
+    async def test_shared_client_holds_its_base_until_closed_and_reset(self, monkeypatch, mock_api_key):
+        """The reset lifecycle is unchanged: the shared client keeps its base until close_api_client()."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_API_BASE", "https://first.example.invalid")
+
+        from nextdns_mcp.client import close_api_client, get_api_client
+
+        try:
+            assert str(get_api_client().base_url) == "https://first.example.invalid"
+
+            monkeypatch.setenv("NEXTDNS_API_BASE", "https://second.example.invalid")
+            # Retained on purpose: the env change reaches this client only when it is rebuilt.
+            assert str(get_api_client().base_url) == "https://first.example.invalid"
+
+            await close_api_client()
+            assert str(get_api_client().base_url) == "https://second.example.invalid"
+        finally:
+            await close_api_client()
+
     def test_create_client_rejects_non_https_api_base(self, monkeypatch, mock_api_key):
         """A runtime change to a non-https base fails closed instead of sending the key in plaintext."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)

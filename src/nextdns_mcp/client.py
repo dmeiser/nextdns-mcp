@@ -30,10 +30,11 @@ logger = logging.getLogger(__name__)
 # X-Api-Key client header, so without a destination allow-list the account's API
 # key follows the request to whatever host the URL names (issue #262). These are
 # the two NextDNS hosts the code actually calls: the REST API base and the DoH
-# endpoint built by tools/doh.py. The host of the configured API base
-# (config.get_api_base(), read at call time) is added as well so pointing
-# NEXTDNS_API_BASE at a self-hosted/proxy base keeps working without inventing
-# a second configuration mechanism.
+# endpoint built by tools/doh.py. The host of the API base the requesting client
+# resolved at construction is added as well (see _configured_destination_base and
+# _allowed_destination_hosts) so pointing NEXTDNS_API_BASE at a self-hosted/proxy
+# base keeps working without inventing a second configuration mechanism, and so
+# the allowance cannot move out from under a client that is still in use.
 ALLOWED_DESTINATION_HOSTS = frozenset({"api.nextdns.io", "dns.nextdns.io"})
 
 # Loopback destinations are allowed so local test doubles and loopback mock
@@ -46,14 +47,47 @@ def _normalized_host(host: str | None) -> str:
     return (host or "").strip().rstrip(".").lower()
 
 
-def _allowed_destination_hosts() -> frozenset[str]:
-    """Return every host this client may send a request to.
+def _configured_destination_base() -> str:
+    """Return the configured API base as it stands at this moment.
+
+    A client calls this once, at construction, and keeps the value, so its
+    destination allowance cannot move under it later: NEXTDNS_API_BASE is
+    resolved per client, at creation (config.get_api_base()), and the base a
+    client actually sends relative requests to is that same value.
+
+    An invalid (non-https) NEXTDNS_API_BASE yields ``""`` rather than raising:
+    the client factory refuses that configuration before building anything, and
+    a client constructed by hand then simply gains no configured host, so its
+    requests are judged against the built-in allow-list alone. A rejected value
+    never widens the list.
+    """
+    try:
+        return get_api_base()
+    except ConfigurationError:
+        return ""
+
+
+def _allowed_destination_hosts(configured_base: str = "") -> frozenset[str]:
+    """Return every host a request may be sent to, for one configured base.
 
     See :data:`ALLOWED_DESTINATION_HOSTS` for the NextDNS endpoints and
-    :data:`LOOPBACK_HOSTS` for the local test-double allowance.
+    :data:`LOOPBACK_HOSTS` for the local test-double allowance. The third entry
+    is the host of ``configured_base`` - the API base the requesting client
+    resolved when it was created - so a self-hosted/proxy deployment needs no
+    second configuration mechanism.
+
+    Passing the client's own value rather than re-reading the environment per
+    request is what keeps the guard and the base from drifting apart across the
+    reset boundary: a client kept alive while the environment names a new base
+    keeps sending relative requests to its old host, and it must keep being
+    allowed to reach that host; a client created after the change uses and is
+    allowed to reach the new one. A client aimed at a base that was never the
+    configured one gains no allowance (issue #262).
     """
     hosts = set(ALLOWED_DESTINATION_HOSTS) | set(LOOPBACK_HOSTS)
-    hosts.add(_normalized_host(httpx.URL(get_api_base()).host))
+    configured = _normalized_host(httpx.URL(str(configured_base)).host) if configured_base else ""
+    if configured:
+        hosts.add(configured)
     return frozenset(hosts)
 
 
@@ -210,13 +244,15 @@ def _destination_host(base_url: Any, url: Any) -> str:
     return _normalized_host(httpx.URL(str(base_url)).host)
 
 
-def _check_destination(base_url: Any, method: str, url: Any) -> None:
+def _check_destination(base_url: Any, method: str, url: Any, configured_base: str = "") -> None:
     """Refuse a request whose destination host is not an approved NextDNS host.
 
     Runs before the request is handed to httpx, so nothing is sent and the
     X-Api-Key header never leaves the process. The message carries the host
     only - never the URL (which may hold query-string PII) and never any
-    credential.
+    credential. ``configured_base`` is the API base this client resolved when
+    it was created; see :func:`_allowed_destination_hosts` for why it is passed
+    in rather than re-read here.
     """
     host = _destination_host(base_url, url)
     if not host:
@@ -224,7 +260,7 @@ def _check_destination(base_url: Any, method: str, url: Any) -> None:
         # base URL, so httpx itself rejects it before any I/O. There is no
         # destination to allow or to protect, and no key to leak.
         return
-    if host in _allowed_destination_hosts():
+    if host in _allowed_destination_hosts(configured_base):
         return
 
     error_msg = f"Blocked request to non-NextDNS host: {host}"
@@ -262,6 +298,10 @@ class AccessControlledClient:
         if transport is not None:
             kwargs["transport"] = transport
         self._client = httpx.AsyncClient(**kwargs)
+        # Resolved once, here: the destination allowance is the API base this
+        # client was created on, so changing NEXTDNS_API_BASE later cannot move
+        # the guard off the host this client is still sending to.
+        self._configured_base = _configured_destination_base()
 
     async def __aenter__(self) -> Self:
         await self._client.__aenter__()
@@ -378,7 +418,7 @@ class AccessControlledClient:
         no request leaves the process without both an approved destination host
         and an access-control decision.
         """
-        _check_destination(self._client.base_url, method, url)
+        _check_destination(self._client.base_url, method, url, self._configured_base)
 
         url_str = str(url)
         request_path = _normalized_request_path(url_str)
@@ -540,6 +580,10 @@ class RawProbeTransport:
 
     def __init__(self, **kwargs: Any) -> None:
         self._client = httpx.AsyncClient(**kwargs)
+        # Resolved once, here: the destination allowance is the API base this
+        # client was created on, so changing NEXTDNS_API_BASE later cannot move
+        # the guard off the host this client is still sending to.
+        self._configured_base = _configured_destination_base()
 
     async def __aenter__(self) -> Self:
         await self._client.__aenter__()
@@ -587,7 +631,7 @@ class RawProbeTransport:
             AccessDeniedError: If the destination host is not an approved
                 NextDNS host. No network request is made.
         """
-        _check_destination(self._client.base_url, method, url)
+        _check_destination(self._client.base_url, method, url, self._configured_base)
         return await self._client.request(method, url, **kwargs)
 
 
