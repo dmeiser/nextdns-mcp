@@ -1147,10 +1147,12 @@ class TestTieBreakOnUndiscountedNameOverlap:
 class TestMemoizedCatalogStructures:
     """Catalog constants are computed once per catalog identity, not per query (PERF-2/3/5, L).
 
-    The word memo keys on the sorted tool NAMES (the identity these structures
-    are keyed by); the compaction cache keys on the Tool instance and holds a
-    strong reference so an id cannot be recycled under it. A replaced catalog
-    is a new name-set / a new instance and rebuilds.
+    The word memo keys on the catalog's tool NAMES: the ordered-names tuple is
+    the hot-path key (no sort), and the sorted-names store it falls back to
+    keeps one memo shared across orderings of the same catalog. The
+    compaction cache keys on the Tool instance and holds a strong reference so
+    an id cannot be recycled under it. A replaced catalog is a new name-set /
+    a new instance and rebuilds.
     """
 
     def test_catalog_words_are_memoized_by_tool_names(self):
@@ -1166,6 +1168,31 @@ class TestMemoizedCatalogStructures:
         assert transform._catalog_words(list(reversed(tools))) is first
         # A different catalog (different name set) is a different memo.
         assert transform._catalog_words(tools[:1]) is not first
+
+    def test_warm_catalog_word_lookup_pays_no_sorts(self, monkeypatch):
+        """A repeated lookup against an unchanged catalog never re-sorts the memo key (PERF-5)."""
+        from fastmcp.tools.base import Tool
+
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        tools = [
+            Tool.from_function(lambda: None, name="aTool"),
+            Tool.from_function(lambda: None, name="bTool"),
+        ]
+        first = transform._catalog_words(tools)  # cold: builds the words and sorts once
+        sorts = 0
+        real_sorted = sorted
+
+        def counting_sorted(*args, **kwargs):
+            nonlocal sorts
+            sorts += 1
+            return real_sorted(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.sorted", counting_sorted)
+        # The hot path: the same effective catalog on every call (FastMCP hands
+        # the search a fresh sequence of the same instances each time).
+        for _ in range(3):
+            assert transform._catalog_words(list(tools)) is first
+        assert sorts == 0
 
     async def test_compacted_results_are_cached_but_handed_out_as_copies(self):
         """The cache is never handed out by reference; a caller cannot mutate it."""
@@ -1289,6 +1316,80 @@ class TestMultiEntryAnswerWriteGate:
         )
         assert resolved == "plotAnalytics"
         assert target is plot
+
+
+class TestCallPathCatalogLookup:
+    """The call path resolves names against the current request's catalog (PERF-5).
+
+    FastMCP rebuilds the catalog's ``Tool`` shells on every read, so the
+    name -> tool lookup is built per call: at the shipped catalog that build
+    (~4.8 us over 81 tools) is cheaper than any key sound enough to invalidate
+    a tool re-registered under the same name (~11.5 us), and an unmemoized
+    lookup cannot serve a replaced tool. What is memoized on this path is the
+    catalog's word data (~1.9 ms to build), shared with the search path
+    through ``_catalog_words_memo`` and keyed so a warm catalog pays no sort.
+    """
+
+    @staticmethod
+    def _tool(name: str):
+        from fastmcp.tools.base import Tool
+
+        return Tool.from_function(lambda: None, name=name)
+
+    async def test_a_same_name_replacement_resolves_to_the_current_tool(self):
+        """A tool re-registered under the same name with a new schema is the one resolution lands on."""
+        from fastmcp.tools.base import Tool
+
+        def old_profile() -> str:
+            return "old"
+
+        def new_profile(profile_id: str) -> str:
+            return profile_id
+
+        middleware = ts.CallToolShapeMiddleware(endpoints={"getProfile": ("GET", "/p")})
+        original = Tool.from_function(old_profile, name="getProfile")
+        await middleware._resolve_tool_name("getProfile", [original])
+        replacement = Tool.from_function(new_profile, name="getProfile")
+        resolved, target = await middleware._resolve_tool_name("getProfile", [replacement])
+        assert resolved == "getProfile"
+        assert target is replacement
+
+    async def test_repeated_resolution_hands_back_the_current_entry_each_time(self):
+        """Two reads of an unchanged catalog hand back that read's own entry, not a cached one."""
+        middleware = ts.CallToolShapeMiddleware(endpoints={"getProfile": ("GET", "/profiles/{profile_id}")})
+        first_read = [self._tool("getProfile"), self._tool("listProfiles")]
+        _, first_target = await middleware._resolve_tool_name("getProfile", first_read)
+        second_read = [self._tool("getProfile"), self._tool("listProfiles")]
+        resolved, second_target = await middleware._resolve_tool_name("getProfile", second_read)
+        assert resolved == "getProfile"
+        assert second_target is second_read[0]
+        assert second_target is not first_target
+
+    def test_the_middleware_word_memo_pays_no_sorts_when_warm(self, monkeypatch):
+        """The call path's word memo hits on an unchanged catalog without re-sorting the key."""
+        from fastmcp.tools.base import Tool
+
+        middleware = ts.CallToolShapeMiddleware(endpoints={})
+        tools = [
+            Tool.from_function(lambda: None, name="aTool"),
+            Tool.from_function(lambda: None, name="bTool"),
+        ]
+        first = middleware._catalog_words(tools)  # cold: builds the words and sorts once
+        sorts = 0
+        real_sorted = sorted
+
+        def counting_sorted(*args, **kwargs):
+            nonlocal sorts
+            sorts += 1
+            return real_sorted(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.sorted", counting_sorted)
+        for _ in range(3):
+            assert middleware._catalog_words(list(tools)) is first
+        assert sorts == 0
+        # A different name set is a different memo, and it sorts once.
+        assert middleware._catalog_words(tools[:1]) is not first
+        assert sorts == 1
 
 
 class TestAWriteOffTheRouteMapIsStillAWrite:

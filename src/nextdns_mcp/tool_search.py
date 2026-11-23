@@ -53,6 +53,7 @@ from .tool_search_answer import (
 )
 from .tool_search_rank import (
     _catalog_words_memo,
+    _CatalogWordMemos,
     _CatalogWords,
     _named_tools,
     _rank_by_name_overlap,
@@ -138,12 +139,12 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         # name it does not carry - the three composite operations and the
         # generative-UI pair - is classified from its own readOnlyHint.
         self._endpoints: dict[str, tuple[str, str]] = dict(endpoints)
-        self._word_memos: dict[tuple[str, ...], _CatalogWords] = {}
+        self._word_memos = _CatalogWordMemos()
         self._compacted_cache: dict[int, tuple[Tool, dict[str, Any], int]] = {}
         self._synthetic_tools: dict[str, Tool] = {}
 
     def _catalog_words(self, tools: Sequence[Tool]) -> _CatalogWords:
-        """The catalog's word structures, memoized by its sorted tool names."""
+        """The catalog's word structures, memoized by its tool names (see _catalog_words_memo)."""
         return _catalog_words_memo(self._word_memos, tools)
 
     def _augment_query(self, query: str, variants: set[str]) -> str:

@@ -30,6 +30,7 @@ from .constants import is_write_operation
 from .tool_search_rank import (
     _catalog_words_for,
     _catalog_words_memo,
+    _CatalogWordMemos,
     _CatalogWords,
     _flat_key,
     _tool_properties,
@@ -377,7 +378,7 @@ class CallToolShapeMiddleware(Middleware):
         self._call_tool_name = call_tool_name
         self._transform = transform
         self._endpoints = endpoints
-        self._catalog_memos: dict[tuple[str, ...], _CatalogWords] = {}
+        self._catalog_memos = _CatalogWordMemos()
 
     def _is_exact_ready_call(self, supplied: Any, arguments: Mapping[str, Any]) -> bool:
         """A well-formed exact call: the name is a real operation, parameters are inside.
@@ -442,6 +443,16 @@ class CallToolShapeMiddleware(Middleware):
         resolved = _name_from_search_answer(supplied)
         _note_search_answer_name(supplied, resolved)
 
+        # Built from this request's catalog, deliberately not memoized.
+        # FastMCP rebuilds the catalog's Tool shells on every read - the
+        # shells differ per call while names, parameters and annotations
+        # carry over - so no shell-identity key ever hits (it would retain a
+        # full catalog per call), and a key sound enough to catch a tool
+        # re-registered under the same name costs more than the build it
+        # skips: at the shipped 81-tool catalog the dict costs ~4.8 us, the
+        # cheapest sound key ~11.5 us. The structures here that ARE worth
+        # memoizing - the catalog's word data, ~1.9 ms to build - are
+        # memoized by name in _catalog_words_memo.
         by_name = {tool.name: tool for tool in tools}
         self._refuse_ambiguous_write(supplied, by_name)
         passthrough = _passthrough_resolution(resolved, by_name)

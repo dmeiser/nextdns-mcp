@@ -516,20 +516,43 @@ def _catalog_words_for(tools: Sequence[Tool]) -> _CatalogWords:
     )
 
 
-def _catalog_words_memo(memos: dict[tuple[str, ...], _CatalogWords], tools: Sequence[Tool]) -> _CatalogWords:
+class _CatalogWordMemos:
+    """The two-level word memo shared by the disclosure paths.
+
+    ``by_order`` is the hot-path key: the catalog's tool names in the order
+    they arrived, built without a sort on every call. ``by_names`` is the
+    canonical store, keyed on the sorted names, so orderings of one catalog
+    share one build. A holder (the transform instance, the middleware
+    instance) owns one of these; the tables are not module state.
+    """
+
+    def __init__(self) -> None:
+        self.by_order: dict[tuple[str, ...], _CatalogWords] = {}
+        self.by_names: dict[tuple[str, ...], _CatalogWords] = {}
+
+
+def _catalog_words_memo(memos: _CatalogWordMemos, tools: Sequence[Tool]) -> _CatalogWords:
     """One catalog's word structures, shared by the search and call-shape paths.
 
     The transform's query ranking and the middleware's unknown-name matching
-    and suggestions all read the same constants of a static catalog; both
-    memoize them keyed on the sorted tool names, and a catalog under a
-    different set of names rebuilds them. The memo table belongs to the holder
-    (the transform instance, the middleware instance), not to this module.
+    and suggestions all read the same constants of a static catalog, and
+    building them costs ~1.9 ms at the shipped 81-tool catalog - far more than
+    the key that finds them. The ordered-names tuple is the hot-path key:
+    built without a sort, it still changes exactly when the effective
+    catalog's names change. The sorted-names store it falls back to keeps one
+    memo shared across orderings of the same catalog, so only a name-set
+    never seen pays the sort and the build.
     """
-    key = tuple(sorted(tool.name for tool in tools))
-    memo = memos.get(key)
+    order_key = tuple(tool.name for tool in tools)
+    memo = memos.by_order.get(order_key)
+    if memo is not None:
+        return memo
+    key = tuple(sorted(order_key))
+    memo = memos.by_names.get(key)
     if memo is None:
         memo = _catalog_words_for(tools)
-        memos[key] = memo
+        memos.by_names[key] = memo
+    memos.by_order[order_key] = memo
     return memo
 
 
