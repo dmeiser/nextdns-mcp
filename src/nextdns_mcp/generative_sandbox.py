@@ -1,24 +1,34 @@
 """Sandbox process management for the Generative UI provider.
 
-Owns the Deno/Pyodide worker lifecycle: the sanitized environment, the
-bounded V8 heap, the cold-start handshake, and the bounded stdout reader
-that rejects oversized results during the wire read.
+Owns the Deno/Pyodide worker lifecycle end to end: the sanitized environment,
+the bounded V8 heap, the cold-start handshake, the request/response wire
+framing, the bounded stdout reader that rejects oversized results during the
+read, and the reap that terminates the worker. Nothing here subclasses
+prefab-ui's ``PyodideSandbox``: an upstream rename of its private process or
+teardown state cannot silently drop a guard, because this module does not
+read any of it. The only upstream values used are the runner path constants,
+which are data, not a class body.
 
 SPDX-License-Identifier: MIT
 """
 
 import asyncio
 import atexit
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from prefab_ui.sandbox import PyodideSandbox
-from prefab_ui.sandbox import Sandbox as _Sandbox
+# The three paths that make the worker runnable: the runner script, the Prefab
+# source tree it imports, and the lock that pins its dependencies. They are data
+# (module constants), not behaviour, so reading them does not couple this module
+# to any upstream class body.
 from prefab_ui.sandbox._pyodide import DENO_LOCK, PREFAB_SRC, RUNNER_JS
 
 MAX_RESULT_BYTES = 256 * 1024
@@ -30,7 +40,7 @@ SANDBOX_START_TIMEOUT = 60.0
 # and bounds a runaway worker. The upstream default grants 4 GiB.
 SANDBOX_V8_HEAP_MB = 1024
 
-# The sandbox worker answers each request with a single JSON line on stdout:
+# The worker answers each request with a single JSON line on stdout:
 # {"id": "<32-hex>", "result": <wire>} (or {"id": ..., "error": ...}). The
 # wire is serialized with JSON.stringify, so the raw line is the UTF-8 wire
 # plus a small ASCII envelope — no escaping expansion. Bound the line just
@@ -188,10 +198,35 @@ def _spawn_deno(env: dict[str, str]) -> "asyncio.Future[subprocess.Popen[bytes]]
     )
 
 
+def _reap_process(process: subprocess.Popen[bytes]) -> None:
+    """Terminate the worker, escalate to kill if it ignores that, and close its pipes.
+
+    Blocking: ``communicate`` waits up to 5s for the worker to exit. Event-loop
+    callers must offload it to a worker thread (``asyncio.to_thread`` /
+    ``run_in_executor``); the call sites below do.
+    """
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+    finally:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+
 def _discard_startup(future: "asyncio.Future[subprocess.Popen[bytes]]") -> None:
-    """Reclaim a worker whose start was cancelled before it completed."""
-    if not future.cancelled() and future.exception() is None:
-        PyodideSandbox._stop_process(future.result())
+    """Reclaim a worker whose start was cancelled before it completed.
+
+    Done callbacks run on the event loop, and reaping blocks for up to ~5s, so
+    the reap is handed to the default executor instead of stalling the loop.
+    """
+    if future.cancelled() or future.exception() is not None:
+        return
+    future.get_loop().run_in_executor(None, _reap_process, future.result())
 
 
 def _startup_error(stderr_lines: list[str]) -> RuntimeError:
@@ -233,85 +268,20 @@ async def _await_ready(proc: subprocess.Popen[bytes]) -> None:
             break
 
 
-class HardenedPyodideSandbox(PyodideSandbox):
-    """PyodideSandbox with host secrets stripped, a bounded V8 heap, and a fresh interpreter per execution.
-
-    ``prefab_ui.sandbox.PyodideSandbox`` copies ``os.environ`` verbatim into the Deno
-    subprocess (exposing ``NEXTDNS_API_KEY`` to generated code), grants the worker a 4 GiB
-    V8 heap, and keeps one warm interpreter whose imported modules are shared across
-    calls, so code from one ``generate_prefab_ui`` invocation can poison later ones.
-    This subclass keeps the upstream subprocess protocol but vendors ``_start`` with a
-    sanitized environment, a bounded heap, and the bounded launch arguments built by
-    :func:`_deno_command`, and discards the worker after every execution so no
-    interpreter state survives between calls. Its ``_start`` is also the method that
-    enforces the wire bound: it wraps the fresh pipe in :class:`_BoundedStdout` so an
-    oversized result is rejected during the read. The provider's ``_CombinedSandbox``
-    resolves startup here (this class is first in its MRO), so this override is the
-    single live wrap site on the provider path.
-    """
-
-    async def start(self) -> None:
-        """Cold-start the worker, outside the user-code execution timeout."""
-        async with self._lock:
-            if self._process is None or self._process.poll() is not None:
-                await self._start()
-
-    def stop(self) -> None:
-        """Discard the worker so the next execution gets a fresh interpreter."""
-        self._stop()
-
-    async def run(self, code: str, *, data: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Execute generated code, then discard the interpreter it ran on."""
-        try:
-            return await super().run(code, data=data)
-        finally:
-            self._stop()
-
-    async def _start(self) -> None:
-        # Vendored from PyodideSandbox._start (prefab-ui 0.21.1). The startup path
-        # deviates from upstream in these respects: the subprocess environment is an
-        # explicit allowlist (_sandbox_env) with DENO_DIR pointed at the sandbox's
-        # private cache dir, the V8 heap is bounded, the worker is launched with the
-        # bounded filesystem grants built by _deno_command instead of upstream's bare
-        # --allow-read/--allow-write, the worker's stdout is wrapped in
-        # _BoundedStdout to enforce the wire limit, and the readiness wait aborts at
-        # stderr EOF rather than only once the worker is dead (_read_startup_line;
-        # upstream keeps reading until the process dies).
-        # Keep in sync with prefab_ui.sandbox._pyodide on upgrades.
-        starting = _spawn_deno(_sandbox_startup_env())
-        try:
-            proc = await asyncio.shield(starting)
-        except asyncio.CancelledError:
-            # Popen may still be running in its executor thread; reclaim it.
-            starting.add_done_callback(_discard_startup)
-            raise
-        try:
-            await _await_ready(proc)
-        except (Exception, asyncio.CancelledError):
-            PyodideSandbox._stop_process(proc)
-            raise
-        self._process = proc
-        stdout = getattr(proc, "stdout", None)
-        if stdout is None or isinstance(stdout, _BoundedStdout):
-            return
-        # Note: _start returns None; wrapping stdout here is best-effort.
-        proc.stdout = _BoundedStdout(stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
-
-
 class _BoundedStdout:
     """File-like bounding each stdout line to ``limit`` bytes during the read.
 
-    ``PyodideSandbox.run`` calls ``stdout.readline()`` with no cap, so a
-    runaway generated view buffers unboundedly in the host before the result
-    size check can run. This wrapper reads in chunks, preserves any bytes
-    past the newline for the next response, and raises ``ValueError`` the
-    moment a line exceeds ``limit`` — before JSON decode and
-    ``PrefabApp.from_json`` allocation. ``on_overflow`` stops the sandbox so
-    the next call starts a fresh worker (a partially consumed line would
-    otherwise misalign the wire protocol).
+    The worker's answer line is read with no cap otherwise, so a runaway
+    generated view buffers unboundedly in the host before the result size
+    check can run. This wrapper reads in chunks, preserves any bytes past the
+    newline for the next response, and raises ``ValueError`` the moment a line
+    exceeds ``limit`` — before JSON decode and ``PrefabApp.from_json``
+    allocation. ``on_overflow`` stops the sandbox so the next call starts a
+    fresh worker (a partially consumed line would otherwise misalign the wire
+    protocol).
     """
 
-    def __init__(self, raw: Any, limit: int, on_overflow: Any) -> None:
+    def __init__(self, raw: Any, limit: int, on_overflow: Callable[[], None]) -> None:
         self._raw = raw
         self._limit = limit
         self._on_overflow = on_overflow
@@ -360,39 +330,138 @@ class _BoundedStdout:
         return self._raw.fileno()
 
 
-class _BoundedResultSandbox(_Sandbox):
-    """An intentional, redundant statement of the wire bound — not an active override.
+class _WorkerGone(RuntimeError):
+    """The worker is unusable — a pipe died, it answered with nothing, or its answer was malformed.
 
-    Under ``_CombinedSandbox``, the MRO resolves ``_start`` to
-    ``HardenedPyodideSandbox._start`` (that class precedes this one in the base
-    order), so this override never runs: the bound is enforced by the hardened
-    class's own :class:`_BoundedStdout` wrap. The class is kept as an explicit
-    declaration that every worker start must carry the bound, so a future reordering
-    of ``_CombinedSandbox``'s bases — or a refactor of the vendored ``_start`` — is
-    confronted with the contract it has to preserve. If this override is ever reached
-    (for example by constructing this class directly, as the unit tests do), it still
-    wraps correctly: it calls ``super()._start()`` and bounds any stdout the base
-    start left unwrapped.
+    ``DenoPyodideSandbox.run`` reports it to the caller as ``RuntimeError``, the
+    failure type ``prefab_ui.generative.execute`` turns into the tool's
+    ``ValueError``, and discards the worker.
     """
 
-    async def _start(self) -> None:
-        await super()._start()
-        proc = self._process
-        if proc is None:
-            return
-        stdout = getattr(proc, "stdout", None)
-        if stdout is None or isinstance(stdout, _BoundedStdout):
-            return
-        proc.stdout = _BoundedStdout(stdout, MAX_WIRE_LINE_BYTES, self._stop)  # type: ignore[assignment]
 
+def _round_trip(stdin: Any, stdout: Any, frame: bytes) -> bytes:
+    """Write one request frame and read the worker's answer line (blocking I/O, off the loop).
 
-class _CombinedSandbox(HardenedPyodideSandbox, _BoundedResultSandbox):
-    """The sandbox the provider constructs: a hardened worker plus the bounded stdout reader.
-
-    Startup resolves to ``HardenedPyodideSandbox._start`` — first in the base order —
-    which is the method that wraps the worker's stdout in :class:`_BoundedStdout` and
-    enforces the wire bound on every start, including the auto-restart inside
-    ``PyodideSandbox.run``. ``_BoundedResultSandbox`` sits below it as a deliberately
-    redundant declaration of the same bound rather than a second code path; see its
-    docstring for why it is retained.
+    Runs in the default executor: ``stdin.write``/``flush`` can block past the
+    64 KiB pipe buffer, and ``stdout.readline`` blocks until the worker answers.
     """
+    stdin.write(frame)
+    stdin.flush()
+    return stdout.readline()
+
+
+class DenoPyodideSandbox:
+    """A Deno/Pyodide worker this class owns outright: sanitized env, bounded heap, disposable interpreter.
+
+    prefab-ui's ``PyodideSandbox`` copies ``os.environ`` verbatim into the Deno
+    subprocess (exposing ``NEXTDNS_API_KEY`` to generated code), grants the
+    worker a 4 GiB V8 heap, keeps one warm interpreter whose imported modules
+    are shared across calls (so code from one ``generate_prefab_ui`` call can
+    poison later ones), and reads stdout with no cap. Rather than subclass it
+    and reach into its process, teardown and startup internals to fix each of
+    those, this class owns the whole lifecycle itself: spawn, readiness
+    handshake, request/response framing, bounded reads, and reaping. The only
+    upstream values it uses are the runner paths in :func:`_deno_command`.
+    """
+
+    def __init__(self) -> None:
+        self._process: subprocess.Popen[bytes] | None = None
+        self._lock = asyncio.Lock()
+
+    async def start(self) -> None:
+        """Cold-start the worker, outside the user-code execution timeout."""
+        async with self._lock:
+            await self._ensure_worker()
+
+    def stop(self) -> None:
+        """Discard the worker so the next execution gets a fresh interpreter."""
+        process, self._process = self._process, None
+        if process is not None:
+            _reap_process(process)
+
+    async def run(self, code: str, *, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Execute Prefab code and return the wire protocol dict.
+
+        The worker is discarded whichever way the execution ends — an answer, a
+        crashed worker, or a cancellation — which is what keeps one generated
+        view from poisoning the next (issue #541). Cancellation is re-raised
+        unchanged so ``asyncio.wait_for`` still reports it as a timeout.
+        """
+        async with self._lock:
+            try:
+                return await self._execute(code, data)
+            except _WorkerGone as exc:
+                raise RuntimeError(str(exc)) from None
+            finally:
+                await asyncio.to_thread(self.stop)
+
+    async def _execute(self, code: str, data: dict[str, Any] | None) -> dict[str, Any]:
+        request_id = uuid4().hex
+        worker = await self._ensure_worker()
+        return _decode_response(await self._exchange(worker, request_id, code, data), request_id)
+
+    async def _ensure_worker(self) -> subprocess.Popen[bytes]:
+        """Return a live worker, cold-starting one when none is running."""
+        process = self._process
+        if process is not None and process.poll() is None:
+            return process
+        return await self._start()
+
+    async def _exchange(
+        self,
+        process: subprocess.Popen[bytes],
+        request_id: str,
+        code: str,
+        data: dict[str, Any] | None,
+    ) -> bytes:
+        """Write one request frame and read the worker's answer line off bounded stdout."""
+        stdin, stdout = process.stdin, process.stdout
+        if stdin is None or stdout is None:
+            raise _WorkerGone("Sandbox failed to start")
+        frame = (json.dumps({"id": request_id, "code": code, "data": data or {}}) + "\n").encode()
+        try:
+            return await asyncio.get_running_loop().run_in_executor(None, _round_trip, stdin, stdout, frame)
+        except OSError:
+            raise _WorkerGone("Sandbox process died unexpectedly") from None
+
+    async def _start(self) -> subprocess.Popen[bytes]:
+        """Spawn the worker with a sanitized environment, a bounded heap, and a bounded stdout."""
+        starting = _spawn_deno(_sandbox_startup_env())
+        try:
+            process = await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            # Popen may still be running in its executor thread; reclaim it.
+            starting.add_done_callback(_discard_startup)
+            raise
+        try:
+            await _await_ready(process)
+        except (Exception, asyncio.CancelledError):
+            # Reaping blocks for up to ~5s: never do it on the loop.
+            await asyncio.to_thread(_reap_process, process)
+            raise
+        process.stdout = _BoundedStdout(process.stdout, MAX_WIRE_LINE_BYTES, self.stop)  # type: ignore[assignment]
+        self._process = process
+        return process
+
+
+def _frame_answers(response: Any, request_id: str) -> bool:
+    """True when the frame answers our request with a result object or an error string."""
+    if not isinstance(response, dict) or response.get("id") != request_id:
+        return False
+    return isinstance(response.get("result"), dict) or isinstance(response.get("error"), str)
+
+
+def _decode_response(line: bytes, request_id: str) -> dict[str, Any]:
+    """Parse one answer frame off the wire and return its result half."""
+    if not line:
+        raise _WorkerGone("Sandbox process died unexpectedly")
+    try:
+        response = json.loads(line)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise _WorkerGone("Invalid sandbox response") from exc
+    if not _frame_answers(response, request_id):
+        raise _WorkerGone("Invalid sandbox response")
+    error = response.get("error")
+    if isinstance(error, str):
+        raise RuntimeError(error)  # noqa: TRY004 - the worker's error text, surfaced for execute() to map
+    return response["result"]

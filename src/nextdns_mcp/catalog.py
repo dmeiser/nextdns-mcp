@@ -10,7 +10,7 @@ classification to make, and it is declared once here, so validation imports it i
 restating the names.
 
 This module also owns the two gating decisions ``server.py`` used to make: whether the
-generative-UI names join the published catalog, and whether the ``NextDNSGenerativeUI``
+generative-UI names join the published catalog, and whether the ``PrefabGenerativeUI``
 provider is registered on the server. The entry point composes both through
 :func:`enabled_generative_ui_tool_names` and :func:`register_generative_ui_provider` and
 no longer branches on ``is_generative_ui_enabled()`` itself.
@@ -71,12 +71,12 @@ def register_generative_ui_provider(server: FastMCP) -> None:
     """Register the generative-UI provider on ``server``, decided here.
 
     The provider-registration gate the entry point used to branch on itself:
-    ``NextDNSGenerativeUI`` is imported and added only when generative UI is
+    ``PrefabGenerativeUI`` is imported and added only when generative UI is
     enabled, so the heavy generative stack is never pulled in for a server
     that will not use it. The import stays inside the gate for the same
     reason.
     """
     if is_generative_ui_enabled():
-        from .generative import NextDNSGenerativeUI
+        from .generative import PrefabGenerativeUI
 
-        server.add_provider(NextDNSGenerativeUI())
+        server.add_provider(PrefabGenerativeUI())

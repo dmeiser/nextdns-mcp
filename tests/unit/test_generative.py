@@ -1,15 +1,19 @@
-"""Tests for NextDNSGenerativeUI provider and sizing rules."""
+"""Tests for PrefabGenerativeUI provider, the owned sandbox, and sizing rules."""
 
+import ast
 import asyncio
 import inspect
 import json
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,13 +21,14 @@ from fastmcp import FastMCP
 
 from nextdns_mcp import chart_placement as chart_placement_module
 from nextdns_mcp import generative as generative_module
+from nextdns_mcp import generative_sandbox as sandbox_module
 from nextdns_mcp import openapi as openapi_module
 from nextdns_mcp.chart_placement import _validate_chart_placement
 from nextdns_mcp.generative import (
     MAX_CODE_BYTES,
     MAX_DATA_BYTES,
     SANDBOX_PRELUDE,
-    NextDNSGenerativeUI,
+    PrefabGenerativeUI,
     _build_renderer_resource,
     _parse_ui_data,
     _result_size_bytes,
@@ -259,18 +264,101 @@ def test_build_renderer_resource():
     assert resource.mime_type == "text/html;profile=mcp-app"
 
 
+def test_renderer_csp_follows_the_renderer_declaration():
+    """The advertised CSP domains come from the renderer's own declaration, not a copied literal."""
+    csp = generative_module._renderer_csp()
+    assert csp.resource_domains == ["https://cdn.jsdelivr.net"]
+    assert csp.connect_domains == [
+        "https://cdn.jsdelivr.net",
+        "https://pypi.org",
+        "https://files.pythonhosted.org",
+    ]
+
+
+def _touched_names(module: Any) -> set[str]:
+    """Names a module's code (not prose) references: imports, aliases, attribute accesses."""
+    tree = ast.parse(inspect.getsource(module))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            names.add(node.module or "")
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+    return names
+
+
+def _class_bases(module: Any) -> dict[str, list[str]]:
+    """Every class a module defines, mapped to the names of its base classes."""
+    tree = ast.parse(inspect.getsource(module))
+    return {
+        node.name: [ast.unparse(base) for base in node.bases]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+    }
+
+
+def test_generative_code_touches_no_upstream_private():
+    """WORK-283: composition, not inheritance — the reported coupling is gone.
+
+    Neither module may subclass or reach into FastMCP's ``GenerativeUI`` or
+    prefab-ui's ``PyodideSandbox``: their process, teardown, setup,
+    registration and sandbox state are upstream privates whose rename would
+    drop a guard at request time. Traced over the syntax tree of BOTH modules
+    (the maintainer's rebase condition) so docstrings and comments describing
+    what used to happen cannot satisfy the assertion.
+    """
+    reached = _touched_names(generative_module) | _touched_names(sandbox_module)
+    forbidden = {
+        "PyodideSandbox",
+        "Sandbox",
+        "GenerativeUI",
+        "_build_csp",
+        "_gen",
+        "_ensure_setup",
+        "_setup_done",
+        "_get_sandbox",
+        "_sandbox",
+        "_local",
+        "_add_component",
+        "_stop",
+        "_stop_process",
+        "close_all_generative_ui",
+    }
+    assert not (reached & forbidden), f"upstream private surface still touched: {sorted(reached & forbidden)}"
+    classes = _class_bases(generative_module) | _class_bases(sandbox_module)
+    assert classes["PrefabGenerativeUI"] == ["Provider"]
+    assert classes["DenoPyodideSandbox"] == []
+
+
+def test_get_worker_returns_one_owned_worker():
+    gen_ui = PrefabGenerativeUI()
+    worker = gen_ui._get_worker()
+    assert isinstance(worker, sandbox_module.DenoPyodideSandbox)
+    assert gen_ui._get_worker() is worker
+
+
+async def _tool_map(gen_ui: PrefabGenerativeUI) -> dict[str, Any]:
+    """Every tool this provider publishes, keyed by name."""
+    return {tool.name: tool for tool in await gen_ui.list_tools()}
+
+
+def _stub_worker() -> MagicMock:
+    """A worker double exposing the lifecycle surface the provider calls."""
+    worker = MagicMock(name="worker")
+    worker.start = AsyncMock()
+    return worker
+
+
 @pytest.mark.asyncio
-async def test_nextdns_generative_ui_setup_and_execution():
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    assert gen_ui._setup_done is True
+async def test_prefab_generative_ui_publishes_its_tools():
+    gen_ui = PrefabGenerativeUI()
 
-    # Calling again is a no-op
-    gen_ui._ensure_setup()
-
-    # Verify registered tools
-    tool_list = await gen_ui._local.list_tools()
-    tools = {t.name: t for t in tool_list}
+    tools = await _tool_map(gen_ui)
     assert "generate_prefab_ui" in tools
     assert "search_prefab_components" in tools
 
@@ -282,12 +370,10 @@ async def test_nextdns_generative_ui_setup_and_execution():
     assert comp_tool.annotations.read_only_hint is True
     assert comp_tool.annotations.destructive_hint is False
 
-    # Test execution through generate_ui
-    sandbox = MagicMock()
-    sandbox.start = AsyncMock()
+    worker = _stub_worker()
     with (
-        patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_sandbox", return_value=sandbox),
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_worker", return_value=worker),
     ):
         mock_exec.return_value = "fake_app"
         res = await gen_tool.fn(code="print('hi')", data='{"a": 1}')
@@ -297,141 +383,119 @@ async def test_nextdns_generative_ui_setup_and_execution():
         assert SANDBOX_PRELUDE in call_code
         assert "print('hi')" in call_code
         assert mock_exec.call_args[1]["data"] == {"a": 1}
-        sandbox.start.assert_awaited_once()
-        sandbox.stop.assert_called_once()
+        worker.start.assert_awaited_once()
+        worker.stop.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_nextdns_generative_ui_tool_lookup():
-    """Compatibility: registered tools are retrievable via the local provider lookup."""
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
+async def test_prefab_generative_ui_tool_lookup():
+    """Compatibility: registered tools are retrievable via the provider lookup."""
+    gen_ui = PrefabGenerativeUI()
 
-    gen_tool = await gen_ui._local.get_tool("generate_prefab_ui")
+    gen_tool = await gen_ui.get_tool("generate_prefab_ui")
     assert gen_tool is not None
     assert gen_tool.name == "generate_prefab_ui"
     assert gen_tool.annotations.read_only_hint is False
     assert gen_tool.annotations.destructive_hint is False
 
-    comp_tool = await gen_ui._local.get_tool("search_prefab_components")
+    comp_tool = await gen_ui.get_tool("search_prefab_components")
     assert comp_tool is not None
     assert comp_tool.name == "search_prefab_components"
 
-    assert await gen_ui._local.get_tool("does-not-exist") is None
+    assert await gen_ui.get_tool("does-not-exist") is None
 
 
 @pytest.mark.asyncio
-async def test_nextdns_generative_ui_registers_renderer_resource():
-    """Compatibility: _ensure_setup registers the renderer resource on the local provider."""
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
+async def test_prefab_generative_ui_registers_renderer_resource():
+    """Compatibility: the renderer resource is listed on the provider."""
+    gen_ui = PrefabGenerativeUI()
 
-    resources = await gen_ui._local.list_resources()
+    resources = await gen_ui.list_resources()
     uris = [str(r.uri) for r in resources]
     assert "ui://prefab/generative.html" in uris
 
 
 @pytest.mark.asyncio
-async def test_nextdns_generative_ui_lifespan_and_sandbox_reuse():
-    """Compatibility: local-provider lifespan cycles cleanly and sandbox is reused."""
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-
-    async with gen_ui._local.lifespan():
-        pass
-
-    sentinel = MagicMock(name="sandbox")
-    gen_ui._sandbox = sentinel
-    assert gen_ui._get_sandbox() is sentinel
-    assert gen_ui._get_sandbox() is sentinel
-
-
-@pytest.mark.asyncio
-async def test_nextdns_generative_ui_without_components_tool():
-    gen_ui = NextDNSGenerativeUI(include_components_tool=False)
-    gen_ui._ensure_setup()
-    tool_list = await gen_ui._local.list_tools()
-    tools = {t.name: t for t in tool_list}
-    assert "generate_prefab_ui" in tools
-    assert "search_prefab_components" not in tools
-
-
-@pytest.mark.asyncio
-async def test_lifespan_runs_setup_before_yield():
-    """The override keeps the base provider's lazy setup and local-provider lifespan."""
-    gen_ui = NextDNSGenerativeUI()
-    assert gen_ui._setup_done is False
-
-    async with gen_ui.lifespan():
-        assert gen_ui._setup_done is True
-        tools = {tool.name for tool in await gen_ui._local.list_tools()}
-
-    assert "generate_prefab_ui" in tools
-
-
-@pytest.mark.asyncio
-async def test_lifespan_stops_its_own_sandbox_on_exit():
-    gen_ui = NextDNSGenerativeUI()
-    sandbox = MagicMock(name="sandbox")
-    gen_ui._sandbox = sandbox
-
-    async with gen_ui.lifespan():
-        pass
-
-    sandbox._stop.assert_called_once()
-    assert gen_ui._sandbox is None
-
-
-@pytest.mark.asyncio
-async def test_lifespan_is_a_noop_when_no_sandbox_was_started():
-    gen_ui = NextDNSGenerativeUI()
-
-    async with gen_ui.lifespan():
-        pass
-
-    assert gen_ui._sandbox is None
-
-
-@pytest.mark.asyncio
-async def test_a_sibling_servers_shutdown_leaves_this_servers_sandbox_running():
-    """One server's shutdown stops only its own subprocess (issue #542).
+async def test_lifespan_teardown_stops_only_the_provider_it_was_entered_on():
+    """One server's shutdown stops only its own worker (issue #542).
 
     The process-global registry this replaces emptied `_ACTIVE_GENERATIVE_UI`,
     so server B starting and finishing while server A was live killed A's
-    sandbox mid-read.
+    worker mid-read.
     """
-    host_a = NextDNSGenerativeUI()
-    host_b = NextDNSGenerativeUI()
-    sandbox_a = MagicMock(name="sandbox-a")
-    sandbox_b = MagicMock(name="sandbox-b")
-    host_a._sandbox = sandbox_a
-    host_b._sandbox = sandbox_b
+    host_a = PrefabGenerativeUI()
+    host_b = PrefabGenerativeUI()
+    worker_a = MagicMock(name="worker-a")
+    worker_b = MagicMock(name="worker-b")
+    host_a._worker = worker_a
+    host_b._worker = worker_b
 
     async with host_a.lifespan():
         # Server B starts and finishes WHILE server A is live:
         async with host_b.lifespan():
             pass
-        sandbox_b._stop.assert_called_once()
-        sandbox_a._stop.assert_not_called()
-        assert host_b._sandbox is None
-        assert host_a._sandbox is sandbox_a
+        worker_b.stop.assert_called_once()
+        worker_a.stop.assert_not_called()
+        assert host_b._worker is None
+        assert host_a._worker is worker_a
 
     # A's own shutdown reclaims its own subprocess:
-    sandbox_a._stop.assert_called_once()
+    worker_a.stop.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_lifespan_stops_the_sandbox_off_the_event_loop():
-    """`Sandbox._stop()` waits up to 5s on the subprocess, so it is not run on the loop."""
+async def test_prefab_generative_ui_without_components_tool():
+    gen_ui = PrefabGenerativeUI(include_components_tool=False)
+    tools = await _tool_map(gen_ui)
+    assert "generate_prefab_ui" in tools
+    assert "search_prefab_components" not in tools
+
+
+@pytest.mark.asyncio
+async def test_lifespan_publishes_tools_while_it_runs():
+    gen_ui = PrefabGenerativeUI()
+
+    async with gen_ui.lifespan():
+        tools = {tool.name for tool in await gen_ui.list_tools()}
+
+    assert "generate_prefab_ui" in tools
+
+
+@pytest.mark.asyncio
+async def test_lifespan_stops_its_own_worker_on_exit():
+    gen_ui = PrefabGenerativeUI()
+    worker = MagicMock(name="worker")
+    gen_ui._worker = worker
+
+    async with gen_ui.lifespan():
+        pass
+
+    worker.stop.assert_called_once()
+    assert gen_ui._worker is None
+
+
+@pytest.mark.asyncio
+async def test_lifespan_is_a_noop_when_no_worker_was_started():
+    gen_ui = PrefabGenerativeUI()
+
+    async with gen_ui.lifespan():
+        pass
+
+    assert gen_ui._worker is None
+
+
+@pytest.mark.asyncio
+async def test_lifespan_stops_the_worker_off_the_event_loop():
+    """`worker.stop()` waits up to 5s on the subprocess, so it is not run on the loop."""
     stopped_on: list[threading.Thread] = []
 
     def blocking_stop() -> None:
         stopped_on.append(threading.current_thread())
 
-    gen_ui = NextDNSGenerativeUI()
-    sandbox = MagicMock(name="sandbox")
-    sandbox._stop.side_effect = blocking_stop
-    gen_ui._sandbox = sandbox
+    gen_ui = PrefabGenerativeUI()
+    worker = MagicMock(name="worker")
+    worker.stop.side_effect = blocking_stop
+    gen_ui._worker = worker
 
     async with gen_ui.lifespan():
         pass
@@ -447,15 +511,15 @@ async def test_lifespan_teardown_survives_a_failing_stop(caplog):
     def exploding_stop() -> None:
         raise RuntimeError("terminate failed")
 
-    gen_ui = NextDNSGenerativeUI()
-    sandbox = MagicMock(name="sandbox")
-    sandbox._stop.side_effect = exploding_stop
-    gen_ui._sandbox = sandbox
+    gen_ui = PrefabGenerativeUI()
+    worker = MagicMock(name="worker")
+    worker.stop.side_effect = exploding_stop
+    gen_ui._worker = worker
 
     async with gen_ui.lifespan():
         pass
 
-    assert gen_ui._sandbox is None
+    assert gen_ui._worker is None
     assert "Failed to stop the Generative UI sandbox" in caplog.text
 
 
@@ -468,31 +532,29 @@ def test_openapi_lifespan_has_no_generative_dependency():
 
 
 @pytest.mark.asyncio
-async def test_a_real_server_shutdown_stops_the_providers_sandbox():
+async def test_a_real_server_shutdown_stops_the_providers_worker():
     """FastMCP enters provider lifespans, so server teardown reaches this teardown.
 
     Without the override nothing in the shipped server stops the subprocess
     (the ~4 GB leak of issue #408).
     """
     server = FastMCP("NextDNS MCP Test")
-    gen_ui = NextDNSGenerativeUI()
+    gen_ui = PrefabGenerativeUI()
     server.add_provider(gen_ui)
-    sandbox = MagicMock(name="sandbox")
-    gen_ui._sandbox = sandbox
+    worker = MagicMock(name="worker")
+    gen_ui._worker = worker
 
     async with server._lifespan_manager():
         pass
 
-    sandbox._stop.assert_called_once()
-    assert gen_ui._sandbox is None
+    worker.stop.assert_called_once()
+    assert gen_ui._worker is None
 
 
 @pytest.mark.asyncio
 async def test_generate_ui_code_size_limit():
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tool_list = await gen_ui._local.list_tools()
-    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     oversize = "a" * (MAX_CODE_BYTES + 1)
     with pytest.raises(ValueError, match="code exceeds maximum size"):
         await gen_tool.fn(code=oversize)
@@ -501,10 +563,8 @@ async def test_generate_ui_code_size_limit():
 @pytest.mark.asyncio
 async def test_generate_ui_oversized_code_skips_ast_parsing():
     """Oversized code is rejected by the byte guard before ast.parse runs."""
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tool_list = await gen_ui._local.list_tools()
-    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     oversize = "a" * (MAX_CODE_BYTES + 1)
     with (
         patch("nextdns_mcp.generative._validate_chart_placement") as mock_validate,
@@ -517,10 +577,8 @@ async def test_generate_ui_oversized_code_skips_ast_parsing():
 @pytest.mark.asyncio
 async def test_generate_ui_rejects_invalid_data_type_before_serialization():
     """Non-str/non-dict data raises ValueError from validation, not TypeError from json.dumps."""
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tool_list = await gen_ui._local.list_tools()
-    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     for bad in (123, ["a"], True):
         with (
             patch("nextdns_mcp.generative.json") as mock_json,
@@ -533,10 +591,8 @@ async def test_generate_ui_rejects_invalid_data_type_before_serialization():
 @pytest.mark.asyncio
 async def test_generate_ui_oversized_dict_data():
     """An oversized dict is rejected after type validation, with a single measurement serialization."""
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tool_list = await gen_ui._local.list_tools()
-    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     oversized_dict = {"payload": "b" * (MAX_DATA_BYTES + 1)}
     with (
         patch("nextdns_mcp.generative.json") as mock_json,
@@ -552,14 +608,12 @@ async def test_generate_ui_serializes_valid_dict_data_once():
     """Valid dict data is measured with a single json.dumps before sandbox execution."""
     import json as real_json
 
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tool_list = await gen_ui._local.list_tools()
-    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
 
     with (
-        patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_sandbox", return_value=MagicMock(start=AsyncMock())),
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
         patch("nextdns_mcp.generative.json") as mock_json,
     ):
         mock_json.dumps.side_effect = real_json.dumps
@@ -572,10 +626,8 @@ async def test_generate_ui_serializes_valid_dict_data_once():
 
 @pytest.mark.asyncio
 async def test_generate_ui_data_size_limit():
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tool_list = await gen_ui._local.list_tools()
-    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     oversize_data = "b" * (MAX_DATA_BYTES + 1)
     with pytest.raises(ValueError, match="data exceeds maximum size"):
         await gen_tool.fn(code="print(1)", data=oversize_data)
@@ -583,18 +635,16 @@ async def test_generate_ui_data_size_limit():
 
 @pytest.mark.asyncio
 async def test_generate_ui_result_size_limit():
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tool_list = await gen_ui._local.list_tools()
-    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
 
     class OversizedApp:
         def to_json(self):
             return {"payload": "x" * (MAX_RESULT_BYTES + 1)}
 
     with (
-        patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_sandbox", return_value=MagicMock(start=AsyncMock())),
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
     ):
         mock_exec.return_value = OversizedApp()
         with pytest.raises(ValueError, match="result exceeds maximum size"):
@@ -628,23 +678,24 @@ class _ChunkedRaw:
 
 
 def test_bounded_stdout_readline_reassembles_chunked_line():
-    from nextdns_mcp.generative_sandbox import _BoundedStdout
-
-    line = b'{"id": "abc", "result": {"view": {}}}\n'
-    raw = _ChunkedRaw(line + b'{"id": "def"}\n', chunk_size=7)
-    bounded = _BoundedStdout(raw, limit=1024, on_overflow=MagicMock())
-    assert bounded.readline() == line
+    bounded = sandbox_module._BoundedStdout(
+        _ChunkedRaw(b'{"id": "abc", "result": {"view": {}}}\n{"id": "def"}\n', chunk_size=7),
+        limit=1024,
+        on_overflow=MagicMock(),
+    )
+    assert bounded.readline() == b'{"id": "abc", "result": {"view": {}}}\n'
     # Bytes past the newline belong to the next response.
     assert bounded.readline() == b'{"id": "def"}\n'
     assert bounded.readline() == b""
 
 
 def test_bounded_stdout_readline_raises_past_limit_and_stops_sandbox():
-    from nextdns_mcp.generative_sandbox import _BoundedStdout
-
     overflow = MagicMock()
-    raw = _ChunkedRaw(b"x" * 100 + b"\n", chunk_size=16)
-    bounded = _BoundedStdout(raw, limit=32, on_overflow=overflow)
+    bounded = sandbox_module._BoundedStdout(
+        _ChunkedRaw(b"x" * 100 + b"\n", chunk_size=16),
+        limit=32,
+        on_overflow=overflow,
+    )
     with pytest.raises(ValueError, match="result exceeds maximum size"):
         bounded.readline()
     overflow.assert_called_once_with()
@@ -652,80 +703,307 @@ def test_bounded_stdout_readline_raises_past_limit_and_stops_sandbox():
 
 def test_bounded_stdout_readline_rejects_newline_chunk_past_limit():
     """A line whose newline arrives in the chunk that crosses the limit is still rejected."""
-    from nextdns_mcp.generative_sandbox import _BoundedStdout
-
     overflow = MagicMock()
-    raw = _ChunkedRaw(b"x" * 100 + b"\n", chunk_size=128)
-    bounded = _BoundedStdout(raw, limit=32, on_overflow=overflow)
+    bounded = sandbox_module._BoundedStdout(
+        _ChunkedRaw(b"x" * 100 + b"\n", chunk_size=128),
+        limit=32,
+        on_overflow=overflow,
+    )
     with pytest.raises(ValueError, match="result exceeds maximum size"):
         bounded.readline()
     overflow.assert_called_once_with()
 
 
-def test_get_sandbox_returns_bounded_result_sandbox():
-    """The wiring that installs the fix: generate_ui must use the bounded sandbox."""
-    from nextdns_mcp.generative_sandbox import _BoundedResultSandbox
-
-    gen_ui = NextDNSGenerativeUI()
-    sandbox = gen_ui._get_sandbox()
-    assert isinstance(sandbox, _BoundedResultSandbox)
-    assert gen_ui._get_sandbox() is sandbox
-
-
 def test_bounded_stdout_readline_returns_partial_line_at_eof():
-    from nextdns_mcp.generative_sandbox import _BoundedStdout
-
-    raw = _ChunkedRaw(b'{"id": "abc"}', chunk_size=4)
-    bounded = _BoundedStdout(raw, limit=1024, on_overflow=MagicMock())
+    bounded = sandbox_module._BoundedStdout(
+        _ChunkedRaw(b'{"id": "abc"}', chunk_size=4),
+        limit=1024,
+        on_overflow=MagicMock(),
+    )
     assert bounded.readline() == b'{"id": "abc"}'
     assert bounded.readline() == b""
 
 
-def test_bounded_result_sandbox_wraps_stdout_after_start():
-    from nextdns_mcp import generative_sandbox
-    from nextdns_mcp.generative_sandbox import _BoundedResultSandbox, _BoundedStdout
+class _StubStream:
+    """A pipe stand-in the sandbox can write to, read from, and close."""
 
-    sandbox = _BoundedResultSandbox()
-    proc = MagicMock()
-    proc.stdout = MagicMock()
+    def __init__(self, owner: "_StubProcess", readline: Callable[[], bytes] | None = None) -> None:
+        self._owner = owner
+        self._readline = readline
+        self.closed = False
+
+    def readline(self) -> bytes:
+        if self._readline is not None:
+            return self._readline()
+        return self._owner.next_answer()
+
+    def read(self, _n: int) -> bytes:
+        return self.readline()
+
+    def write(self, data: bytes) -> None:
+        self._owner.add_request(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StubProcess:
+    """A worker stand-in that speaks the sandbox wire protocol.
+
+    Answers are built from the request being answered, so a test can pin the
+    request framing (id/code/data) while the answer's id still matches. The
+    lifecycle methods record what the sandbox did to the worker.
+    """
+
+    def __init__(self, responder: Callable[[dict[str, Any]], bytes] | None = None) -> None:
+        self._responder = responder or _result_answer
+        self.requests: list[dict[str, Any]] = []
+        self._answered = 0
+        self._pending = b""
+        self.stdin = _StubStream(self)
+        self.stdout = _StubStream(self)
+        self.stderr = _StubStream(self)
+        self.terminated = False
+        self.killed = False
+
+    def add_request(self, frame: bytes) -> None:
+        self._pending += frame
+        while b"\n" in self._pending:
+            line, self._pending = self._pending.split(b"\n", 1)
+            self.requests.append(json.loads(line))
+
+    def next_answer(self) -> bytes:
+        request = self.requests[self._answered]
+        self._answered += 1
+        return self._responder(request)
+
+    def poll(self) -> int | None:
+        return None
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+        return b"", b""
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def _result_answer(request: dict[str, Any]) -> bytes:
+    return json.dumps({"id": request["id"], "result": {"view": "ok"}}).encode() + b"\n"
+
+
+def _error_answer(request: dict[str, Any]) -> bytes:
+    return json.dumps({"id": request["id"], "error": "boom"}).encode() + b"\n"
+
+
+class _BrokenStdIn(_StubStream):
+    def write(self, data: bytes) -> None:
+        raise OSError("broken pipe")
+
+
+@pytest.mark.asyncio
+async def test_run_frames_one_request_per_execution_and_discards_the_worker():
+    """run() owns the wire round trip: one frame in, one frame out, then the worker is reaped."""
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    proc = _StubProcess()
     sandbox._process = proc
-    # Drive the real _BoundedResultSandbox._start with a stubbed base start.
-    original_start = generative_sandbox._Sandbox._start
 
-    async def fake_start(self):
-        self._process = proc
+    result = await sandbox.run("print(1)", data={"k": "v"})
 
-    try:
-        generative_sandbox._Sandbox._start = fake_start  # type: ignore[assignment]
-        asyncio.run(sandbox._start())
-        assert isinstance(proc.stdout, _BoundedStdout)
-        wrapper = proc.stdout
-        # Re-entering the start path over a live worker must not double-wrap.
-        asyncio.run(sandbox._start())
-        assert proc.stdout is wrapper
-    finally:
-        generative_sandbox._Sandbox._start = original_start  # type: ignore[assignment]
+    assert result == {"view": "ok"}
+    (request,) = proc.requests
+    assert set(request) == {"id", "code", "data"}
+    assert request["code"] == "print(1)"
+    assert request["data"] == {"k": "v"}
+    assert len(request["id"]) == 32
+    int(request["id"], 16)
+    # The worker is discarded after the execution: a fresh one starts next time.
+    assert sandbox._process is None
+    assert proc.terminated
 
 
-def test_bounded_result_sandbox_start_without_process_is_safe():
-    from nextdns_mcp import generative_sandbox
-    from nextdns_mcp.generative_sandbox import _BoundedResultSandbox
+@pytest.mark.asyncio
+async def test_run_defaults_data_to_an_empty_object():
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    proc = _StubProcess()
+    sandbox._process = proc
 
-    sandbox = _BoundedResultSandbox()
-    original_start = generative_sandbox._Sandbox._start
+    await sandbox.run("print(1)")
 
-    async def fake_start(self):
-        self._process = None
+    assert proc.requests[0]["data"] == {}
 
-    try:
-        generative_sandbox._Sandbox._start = fake_start  # type: ignore[assignment]
-        asyncio.run(sandbox._start())  # must not raise
-    finally:
-        generative_sandbox._Sandbox._start = original_start  # type: ignore[assignment]
+
+@pytest.mark.asyncio
+async def test_run_reports_a_code_error_frame():
+    """A worker-reported failure reaches the caller as RuntimeError (execute() maps it to the tool error)."""
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    sandbox._process = _StubProcess(responder=_error_answer)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await sandbox.run("print(1)")
+
+
+@pytest.mark.asyncio
+async def test_run_ignores_a_null_error_field_on_a_result_frame():
+    """A frame with a result and a null error is a success; only a string error is a failure."""
+
+    def null_error_answer(request: dict[str, Any]) -> bytes:
+        return json.dumps({"id": request["id"], "result": {"view": "ok"}, "error": None}).encode() + b"\n"
+
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    sandbox._process = _StubProcess(responder=null_error_answer)
+
+    assert await sandbox.run("print(1)") == {"view": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_a_frame_for_another_request():
+    def wrong_id_answer(request: dict[str, Any]) -> bytes:
+        return json.dumps({"id": "not-the-request", "result": {"view": "ok"}}).encode() + b"\n"
+
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    sandbox._process = _StubProcess(responder=wrong_id_answer)
+
+    with pytest.raises(RuntimeError, match="Invalid sandbox response"):
+        await sandbox.run("print(1)")
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_a_frame_without_a_payload():
+    def payloadless_answer(request: dict[str, Any]) -> bytes:
+        return json.dumps({"id": request["id"]}).encode() + b"\n"
+
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    sandbox._process = _StubProcess(responder=payloadless_answer)
+
+    with pytest.raises(RuntimeError, match="Invalid sandbox response"):
+        await sandbox.run("print(1)")
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_a_malformed_frame():
+    def garbage_answer(request: dict[str, Any]) -> bytes:
+        return b"{not json\n"
+
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    sandbox._process = _StubProcess(responder=garbage_answer)
+
+    with pytest.raises(RuntimeError, match="Invalid sandbox response"):
+        await sandbox.run("print(1)")
+
+
+@pytest.mark.asyncio
+async def test_run_reports_a_worker_that_answers_nothing():
+    def empty_answer(request: dict[str, Any]) -> bytes:
+        return b""
+
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    sandbox._process = _StubProcess(responder=empty_answer)
+
+    with pytest.raises(RuntimeError, match="Sandbox process died unexpectedly"):
+        await sandbox.run("print(1)")
+
+
+@pytest.mark.asyncio
+async def test_run_reports_a_worker_whose_pipes_are_gone():
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    proc = _StubProcess()
+    proc.stdin = None  # type: ignore[assignment]
+    sandbox._process = proc
+
+    with pytest.raises(RuntimeError, match="Sandbox failed to start"):
+        await sandbox.run("print(1)")
+
+
+@pytest.mark.asyncio
+async def test_run_reports_a_broken_pipe_and_discards_the_worker():
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    proc = _StubProcess()
+    proc.stdin = _BrokenStdIn(proc)
+    sandbox._process = proc
+
+    with pytest.raises(RuntimeError, match="Sandbox process died unexpectedly"):
+        await sandbox.run("print(1)")
+
+    assert proc.terminated
     assert sandbox._process is None
 
 
-def test_result_size_bytes_model_dump_json():
+@pytest.mark.asyncio
+async def test_run_stops_the_worker_when_the_call_is_cancelled():
+    """A cancelled execution re-raises CancelledError and reaps the worker (lock released)."""
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    proc = _StubProcess()
+
+    def blocked_until_stopped() -> bytes:
+        for _ in range(200):
+            if proc.terminated:
+                return b""
+            time.sleep(0.02)
+        return b""
+
+    proc.stdout = _StubStream(proc, readline=blocked_until_stopped)
+    sandbox._process = proc
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(sandbox.run("print(1)"), timeout=0.05)
+
+    assert proc.terminated
+    assert sandbox._process is None
+
+
+@pytest.mark.asyncio
+async def test_run_cold_starts_a_worker_when_none_is_running(monkeypatch):
+    """run() lazily starts a worker, wraps its stdout, and reports framing through it."""
+    proc = _StubProcess()
+
+    def fake_spawn(env: dict[str, str]) -> asyncio.Future:
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(proc)
+        return future
+
+    monkeypatch.setattr(sandbox_module, "_spawn_deno", fake_spawn)
+    monkeypatch.setattr(sandbox_module, "_await_ready", AsyncMock())
+    sandbox = sandbox_module.DenoPyodideSandbox()
+
+    result = await sandbox.run("print(1)")
+
+    assert result == {"view": "ok"}
+    assert isinstance(proc.stdout, sandbox_module._BoundedStdout)
+    assert sandbox._process is None
+
+
+@pytest.mark.asyncio
+async def test_start_cold_starts_only_when_no_live_worker_runs(monkeypatch):
+    """start() cold-starts once, then no-ops while a live worker exists and restarts a dead one."""
+    spawned: list[object] = []
+
+    def fake_spawn(env: dict[str, str]) -> asyncio.Future:
+        spawned.append(env)
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(_StubProcess())
+        return future
+
+    monkeypatch.setattr(sandbox_module, "_spawn_deno", fake_spawn)
+    monkeypatch.setattr(sandbox_module, "_await_ready", AsyncMock())
+    sandbox = sandbox_module.DenoPyodideSandbox()
+
+    await sandbox.start()
+    assert len(spawned) == 1
+    await sandbox.start()  # live worker: no second spawn
+    assert len(spawned) == 1
+    sandbox._process = None
+    await sandbox.start()  # dead worker: respawn
+    assert len(spawned) == 2
+
+
+@pytest.mark.asyncio
+async def test_result_size_bytes_model_dump_json():
     class DumpApp:
         def model_dump_json(self):
             return '{"payload": "' + "x" * (MAX_RESULT_BYTES + 1) + '"}'
@@ -755,11 +1033,9 @@ def test_result_size_bytes_serialization_fallback():
 
 @pytest.mark.asyncio
 async def test_generate_ui_execution_timeout():
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    tool_list = await gen_ui._local.list_tools()
-    gen_tool = {t.name: t for t in tool_list}["generate_prefab_ui"]
-    sandbox_mock = MagicMock(start=AsyncMock())
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    worker = _stub_worker()
     cancelled = {"seen": False}
 
     async def never_resolves(*args, **kwargs):
@@ -770,16 +1046,17 @@ async def test_generate_ui_execution_timeout():
             raise
 
     with (
-        patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_sandbox", return_value=sandbox_mock),
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_worker", return_value=worker),
     ):
         mock_exec.side_effect = never_resolves
         with pytest.raises(TimeoutError, match="execution exceeded"):
             await gen_tool.fn(code="print(1)")
         assert cancelled["seen"]
+    worker.stop.assert_called_once()
 
 
-# --- Sandbox hardening (issue #541) ---
+# --- Worker hardening (issue #541) ---
 
 
 def test_sandbox_env_strips_host_secrets(monkeypatch):
@@ -788,8 +1065,6 @@ def test_sandbox_env_strips_host_secrets(monkeypatch):
     The sanitizer is an allowlist, not a name-substring blocklist, so
     credential-bearing variables with unmarked names are dropped too.
     """
-    from nextdns_mcp.generative_sandbox import _sandbox_env
-
     monkeypatch.setenv("NEXTDNS_API_KEY", "super-secret-key")
     monkeypatch.setenv("NEXTDNS_API_KEY_FILE", "/run/secrets/key")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
@@ -803,7 +1078,7 @@ def test_sandbox_env_strips_host_secrets(monkeypatch):
     # Credential-bearing names inside the DENO_ namespace must not pass on a prefix.
     monkeypatch.setenv("DENO_AUTH_TOKENS", "deadbeef@deno.land")
     monkeypatch.setenv("DENO_KV_ACCESS_TOKEN", "kv_pat_x")
-    env = _sandbox_env()
+    env = sandbox_module._sandbox_env()
     for stripped in (
         "NEXTDNS_API_KEY",
         "NEXTDNS_API_KEY_FILE",
@@ -825,16 +1100,14 @@ def test_sandbox_env_strips_host_secrets(monkeypatch):
     # Only the explicitly approved Deno runtime variables pass through.
     monkeypatch.setenv("DENO_DIR", "/tmp/deno-cache")
     monkeypatch.setenv("DENO_NO_UPDATE_CHECK", "1")
-    env = _sandbox_env()
+    env = sandbox_module._sandbox_env()
     assert env["DENO_DIR"] == "/tmp/deno-cache"
     assert env["DENO_NO_UPDATE_CHECK"] == "1"
 
 
 def test_sandbox_env_is_a_copy(monkeypatch):
     """Mutating the returned dict must not touch the host environment."""
-    from nextdns_mcp.generative_sandbox import _sandbox_env
-
-    env = _sandbox_env()
+    env = sandbox_module._sandbox_env()
     before = dict(os.environ)
     env["INJECTED"] = "x"
     assert os.environ.get("INJECTED") is None
@@ -843,126 +1116,181 @@ def test_sandbox_env_is_a_copy(monkeypatch):
 
 def test_sandbox_startup_env_bounds_v8_heap(monkeypatch):
     """The worker heap is bounded well below the upstream 4 GiB ceiling."""
-    from nextdns_mcp.generative_sandbox import SANDBOX_V8_HEAP_MB, _sandbox_startup_env
-
     monkeypatch.setenv("NEXTDNS_API_KEY", "super-secret-key")
     monkeypatch.setenv("DENO_V8_FLAGS", "--max-old-space-size=8192")
-    env = _sandbox_startup_env()
-    assert env["DENO_V8_FLAGS"] == f"--max-old-space-size={SANDBOX_V8_HEAP_MB}"
-    assert SANDBOX_V8_HEAP_MB < 4096
+    env = sandbox_module._sandbox_startup_env()
+    assert env["DENO_V8_FLAGS"] == f"--max-old-space-size={sandbox_module.SANDBOX_V8_HEAP_MB}"
+    assert sandbox_module.SANDBOX_V8_HEAP_MB < 4096
     assert "NEXTDNS_API_KEY" not in env
 
 
 @pytest.mark.asyncio
-async def test_hardened_sandbox_start_spawns_with_sanitized_env(monkeypatch):
+async def test_start_spawns_with_sanitized_env_and_a_bounded_heap(monkeypatch):
     """_start forwards a sanitized environment with a bounded heap to the Deno worker."""
-    from nextdns_mcp import generative_sandbox
-
     monkeypatch.setenv("NEXTDNS_API_KEY", "super-secret-key")
-    captured_envs = []
+    captured_envs: list[dict[str, str]] = []
+    proc = _StubProcess()
 
-    class _FakeProc:
-        pass
-
-    def fake_spawn(env):
+    def fake_spawn(env: dict[str, str]) -> asyncio.Future:
         captured_envs.append(env)
-        loop = asyncio.get_event_loop()
-        future: asyncio.Future = loop.create_future()
-        future.set_result(_FakeProc())
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(proc)
         return future
 
-    monkeypatch.setattr(generative_sandbox, "_spawn_deno", fake_spawn)
-    monkeypatch.setattr(generative_sandbox, "_await_ready", AsyncMock())
+    monkeypatch.setattr(sandbox_module, "_spawn_deno", fake_spawn)
+    monkeypatch.setattr(sandbox_module, "_await_ready", AsyncMock())
 
-    sandbox = generative_sandbox.HardenedPyodideSandbox()
-    await sandbox._start()
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    started = await sandbox._start()
 
-    assert len(captured_envs) == 1
-    env = captured_envs[0]
+    assert started is proc
+    (env,) = captured_envs
     assert "NEXTDNS_API_KEY" not in env
-    assert env["DENO_V8_FLAGS"] == f"--max-old-space-size={generative_sandbox.SANDBOX_V8_HEAP_MB}"
-    # The interpreter is not marked alive until readiness is confirmed.
-    assert sandbox._process is not None
+    assert env["DENO_V8_FLAGS"] == f"--max-old-space-size={sandbox_module.SANDBOX_V8_HEAP_MB}"
+    assert sandbox._process is proc
+    # Every answer the worker gives passes through the bounded reader.
+    assert isinstance(proc.stdout, sandbox_module._BoundedStdout)
 
 
 @pytest.mark.asyncio
-async def test_hardened_sandbox_discards_worker_after_run():
-    """Each execution runs on a fresh interpreter: the worker is stopped afterwards."""
-    from nextdns_mcp.generative_sandbox import HardenedPyodideSandbox
+async def test_start_reaps_the_worker_when_readiness_fails(monkeypatch):
+    proc = _StubProcess()
 
-    sandbox = HardenedPyodideSandbox()
-    stop_calls = []
-    monkeypatch_stop = MagicMock(side_effect=lambda: stop_calls.append(1))
-    sandbox._stop = monkeypatch_stop  # type: ignore[method-assign]
-    with patch.object(
-        HardenedPyodideSandbox.__bases__[0], "run", new_callable=AsyncMock, return_value={"ok": True}
-    ) as base_run:
-        result = await sandbox.run(code="print(1)")
-    assert result == {"ok": True}
-    base_run.assert_awaited_once()
-    assert stop_calls == [1]
+    def fake_spawn(env: dict[str, str]) -> asyncio.Future:
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(proc)
+        return future
+
+    monkeypatch.setattr(sandbox_module, "_spawn_deno", fake_spawn)
+    monkeypatch.setattr(sandbox_module, "_await_ready", AsyncMock(side_effect=RuntimeError("boot failed")))
+
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    with pytest.raises(RuntimeError, match="boot failed"):
+        await sandbox._start()
+    assert proc.terminated
+    assert sandbox._process is None
 
 
-@pytest.mark.asyncio
-async def test_hardened_sandbox_run_stops_worker_even_on_error():
-    """A failing execution still discards the interpreter."""
-    from nextdns_mcp.generative_sandbox import HardenedPyodideSandbox
+class _SpyFuture(asyncio.Future):
+    """Future that records done-callbacks so cancellation behaviour is observable."""
 
-    sandbox = HardenedPyodideSandbox()
-    sandbox._stop = MagicMock()  # type: ignore[method-assign]
-    with (
-        patch.object(
-            HardenedPyodideSandbox.__bases__[0], "run", new_callable=AsyncMock, side_effect=RuntimeError("boom")
-        ),
-        pytest.raises(RuntimeError, match="boom"),
-    ):
-        await sandbox.run(code="print(1)")
-    sandbox._stop.assert_called_once()
+    def __init__(self) -> None:
+        super().__init__()
+        self.recorded_callbacks = []
+
+    def add_done_callback(self, fn, *, context=None):
+        self.recorded_callbacks.append(fn)
+        return super().add_done_callback(fn, context=context)
 
 
 @pytest.mark.asyncio
-async def test_hardened_sandbox_start_is_lazy_and_idempotent():
-    """start() cold-starts only when no live worker exists."""
-    from nextdns_mcp.generative_sandbox import HardenedPyodideSandbox
+async def test_start_cancellation_registers_reclaim(monkeypatch):
+    pending = _SpyFuture()
+    monkeypatch.setattr(sandbox_module, "_spawn_deno", lambda env: pending)
+    sandbox = sandbox_module.DenoPyodideSandbox()
 
-    sandbox = HardenedPyodideSandbox()
-    sandbox._start = AsyncMock()  # type: ignore[method-assign]
-    await sandbox.start()
-    sandbox._start.assert_awaited_once()
-    # A live (freshly started) worker is not restarted.
-    sandbox._process = MagicMock(poll=MagicMock(return_value=None))
-    await sandbox.start()
-    sandbox._start.assert_awaited_once()
+    task = asyncio.ensure_future(sandbox._start())
+    await asyncio.sleep(0)  # let the task reach the shield
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pending.recorded_callbacks  # worker will be reclaimed if it appears
+
+
+def _reap_mock(**poll_return: Any) -> MagicMock:
+    proc = MagicMock(name="proc")
+    proc.poll.return_value = poll_return.get("value")
+    return proc
+
+
+def test_reap_process_terminates_and_closes_every_pipe():
+    proc = _reap_mock(value=None)
+
+    sandbox_module._reap_process(proc)
+
+    proc.terminate.assert_called_once()
+    proc.communicate.assert_called_once_with(timeout=5)
+    proc.kill.assert_not_called()
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        stream.close.assert_called_once()
+
+
+def test_reap_process_leaves_an_exited_worker_unterminated():
+    proc = _reap_mock(value=0)
+
+    sandbox_module._reap_process(proc)
+
+    proc.terminate.assert_not_called()
+    proc.communicate.assert_called_once_with(timeout=5)
+
+
+def test_reap_process_kills_a_worker_that_ignores_terminate():
+    proc = _reap_mock(value=None)
+    proc.communicate.side_effect = [
+        subprocess.TimeoutExpired(cmd="deno", timeout=5),
+        ("", ""),
+    ]
+
+    sandbox_module._reap_process(proc)
+
+    proc.kill.assert_called_once()
+    assert proc.communicate.call_count == 2
+
+
+def test_reap_process_tolerates_unopened_pipes():
+    proc = _reap_mock(value=0)
+    proc.stdin = None
+
+    sandbox_module._reap_process(proc)  # must not raise
+
+    proc.terminate.assert_not_called()
+
+
+def test_deno_command_raises_when_deno_missing(monkeypatch):
+    monkeypatch.setattr(sandbox_module.shutil, "which", lambda _name: None)
+    with pytest.raises(RuntimeError, match="Deno is required"):
+        sandbox_module._deno_command()
+
+
+async def _wait_for_reap(stopped: list[object], expected: list[object]) -> None:
+    """The default executor runs the scheduled reap asynchronously; give it a bounded window."""
+    for _ in range(200):
+        if stopped == expected:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"executor never ran the reap: {stopped!r}")
 
 
 @pytest.mark.asyncio
-async def test_get_sandbox_returns_hardened_instance():
-    gen_ui = NextDNSGenerativeUI()
-    sandbox = gen_ui._get_sandbox()
-    from nextdns_mcp.generative_sandbox import HardenedPyodideSandbox
+async def test_discard_startup_reclaims_only_completed_workers():
+    """A cancelled or failed start is left alone; a completed one is reaped off the loop."""
+    stopped: list[object] = []
+    fake_proc = MagicMock(name="proc")
+    with patch.object(sandbox_module, "_reap_process", lambda p: stopped.append(p)):
+        done: asyncio.Future = asyncio.get_running_loop().create_future()
+        done.set_result(fake_proc)
+        sandbox_module._discard_startup(done)
+        await _wait_for_reap(stopped, [fake_proc])
 
-    assert isinstance(sandbox, HardenedPyodideSandbox)
-    assert gen_ui._get_sandbox() is sandbox
+        cancelled: asyncio.Future = asyncio.get_running_loop().create_future()
+        cancelled.cancel()
+        sandbox_module._discard_startup(cancelled)  # no-op
+        assert stopped == [fake_proc]
+
+        failed: asyncio.Future = asyncio.get_running_loop().create_future()
+        failed.set_exception(RuntimeError("spawn error"))
+        sandbox_module._discard_startup(failed)  # no-op
+        assert stopped == [fake_proc]
 
 
-@pytest.mark.asyncio
-async def test_generate_ui_cold_start_timeout_is_distinct():
-    """A slow sandbox boot raises a cold-start error and never runs user code."""
-    gen_ui = NextDNSGenerativeUI()
-    gen_ui._ensure_setup()
-    gen_tool = {t.name: t for t in await gen_ui._local.list_tools()}["generate_prefab_ui"]
+def test_startup_error_truncates_long_output():
+    short = str(sandbox_module._startup_error(["boom"]))
+    assert short == "Pyodide sandbox failed to start:\nboom"
 
-    async def never_started():
-        await asyncio.sleep(9999)
-
-    sandbox = MagicMock(start=AsyncMock(side_effect=never_started))
-    with (
-        patch("fastmcp.apps.generative._gen.execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_sandbox", return_value=sandbox),
-    ):
-        with pytest.raises(TimeoutError, match="cold start exceeded"):
-            await gen_tool.fn(code="print(1)")
-        mock_exec.assert_not_called()
+    long = str(sandbox_module._startup_error(["x" * 1500, "y" * 1500]))
+    assert long.startswith("Pyodide sandbox failed to start:")
+    assert "\n...\n" in long
+    assert len(long) < 2200
 
 
 class _FakeStderr:
@@ -992,14 +1320,6 @@ class _FakeProc:
 
     def poll(self) -> int | None:
         return self._returncode
-
-
-def test_deno_command_raises_when_deno_missing(monkeypatch):
-    from nextdns_mcp import generative_sandbox
-
-    monkeypatch.setattr(generative_sandbox.shutil, "which", lambda _name: None)
-    with pytest.raises(RuntimeError, match="Deno is required"):
-        generative_sandbox._deno_command()
 
 
 def _flag_paths(flag: str, cmd: list[str]) -> list[str]:
@@ -1178,59 +1498,17 @@ def test_sandbox_startup_env_relocates_deno_cache(isolated_sandbox_deno_dir, mon
     assert "NEXTDNS_API_KEY" not in env
 
 
-def test_discard_startup_reclaims_only_completed_workers():
-    import concurrent.futures
-
-    from prefab_ui.sandbox import PyodideSandbox
-
-    from nextdns_mcp.generative_sandbox import _discard_startup
-
-    stopped: list[object] = []
-    fake_proc = MagicMock(name="proc")
-    with patch.object(PyodideSandbox, "_stop_process", lambda p: stopped.append(p)):
-        done = concurrent.futures.Future()
-        done.set_result(fake_proc)
-        _discard_startup(done)
-        assert stopped == [fake_proc]
-
-        cancelled = concurrent.futures.Future()
-        cancelled.cancel()
-        _discard_startup(cancelled)  # no-op
-        assert stopped == [fake_proc]
-
-        failed = concurrent.futures.Future()
-        failed.set_exception(RuntimeError("spawn error"))
-        _discard_startup(failed)  # no-op
-        assert stopped == [fake_proc]
-
-
-def test_startup_error_truncates_long_output():
-    from nextdns_mcp.generative_sandbox import _startup_error
-
-    short = str(_startup_error(["boom"]))
-    assert short == "Pyodide sandbox failed to start:\nboom"
-
-    long = str(_startup_error(["x" * 1500, "y" * 1500]))
-    assert long.startswith("Pyodide sandbox failed to start:")
-    assert "\n...\n" in long
-    assert len(long) < 2200
-
-
 @pytest.mark.asyncio
 async def test_await_ready_consumes_lines_until_ready():
-    from nextdns_mcp.generative_sandbox import _await_ready
-
     proc = _FakeProc([b"boot log\n", b"pyodide:ready\n"])
-    await _await_ready(proc)  # returns once readiness is signalled
+    await sandbox_module._await_ready(proc)  # returns once readiness is signalled
 
 
 @pytest.mark.asyncio
 async def test_await_ready_raises_when_worker_dies():
-    from nextdns_mcp.generative_sandbox import _await_ready
-
     proc = _FakeProc([b"import error\n", b""], returncode=1)
     with pytest.raises(RuntimeError, match="Pyodide sandbox failed to start"):
-        await _await_ready(proc)
+        await sandbox_module._await_ready(proc)
     assert proc.stderr.reads == 2  # the log line, then the EOF that ends the wait
 
 
@@ -1242,75 +1520,39 @@ async def test_await_ready_raises_on_stderr_eof_while_worker_alive():
     `while True` loop re-submitted reads to the executor until the caller's cold-start
     timeout cancelled it (issue #595).
     """
-    from nextdns_mcp.generative_sandbox import _await_ready
-
     proc = _FakeProc([b"boot log\n"], returncode=None)  # poll() stays None: the worker is alive
     with pytest.raises(RuntimeError, match="Pyodide sandbox failed to start"):
-        await _await_ready(proc)
+        await sandbox_module._await_ready(proc)
     assert proc.stderr.reads == 2  # the log line, then the EOF that ends the wait
 
 
 @pytest.mark.asyncio
 async def test_read_startup_line_raises_on_eof_while_worker_alive():
     """EOF on a live worker's stderr is a failed startup, the same as a dead one."""
-    from nextdns_mcp.generative_sandbox import _read_startup_line
-
     stderr = _FakeStderr([b""])
     lines: list[str] = []
     with pytest.raises(RuntimeError, match="Pyodide sandbox failed to start"):
-        await _read_startup_line(stderr, lines)
+        await sandbox_module._read_startup_line(stderr, lines)
     assert stderr.reads == 1
     assert lines == []
 
 
 @pytest.mark.asyncio
-async def test_hardened_start_stops_worker_when_readiness_fails(monkeypatch):
-    from prefab_ui.sandbox import PyodideSandbox
+async def test_generate_ui_cold_start_timeout_is_distinct():
+    """A slow sandbox boot raises a cold-start error and never runs user code."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
 
-    from nextdns_mcp import generative_sandbox
+    async def never_started():
+        await asyncio.sleep(9999)
 
-    stopped: list[object] = []
-    fake_proc = MagicMock(name="proc")
-
-    def fake_spawn(env):
-        future = asyncio.get_event_loop().create_future()
-        future.set_result(fake_proc)
-        return future
-
-    monkeypatch.setattr(generative_sandbox, "_spawn_deno", fake_spawn)
-    monkeypatch.setattr(generative_sandbox, "_await_ready", AsyncMock(side_effect=RuntimeError("boot failed")))
-    monkeypatch.setattr(PyodideSandbox, "_stop_process", lambda p: stopped.append(p))
-
-    sandbox = generative_sandbox.HardenedPyodideSandbox()
-    with pytest.raises(RuntimeError, match="boot failed"):
-        await sandbox._start()
-    assert stopped == [fake_proc]
-    assert sandbox._process is None
-
-
-class _SpyFuture(asyncio.Future):
-    """Future that records done-callbacks so cancellation behaviour is observable."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.recorded_callbacks = []
-
-    def add_done_callback(self, fn, *, context=None):
-        self.recorded_callbacks.append(fn)
-        return super().add_done_callback(fn, context=context)
-
-
-@pytest.mark.asyncio
-async def test_hardened_start_cancellation_registers_reclaim(monkeypatch):
-    from nextdns_mcp import generative_sandbox
-
-    pending = _SpyFuture()
-    monkeypatch.setattr(generative_sandbox, "_spawn_deno", lambda env: pending)
-    sandbox = generative_sandbox.HardenedPyodideSandbox()
-
-    task = asyncio.ensure_future(sandbox._start())
-    await asyncio.sleep(0)  # let the task reach the shield
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert pending.recorded_callbacks  # worker will be reclaimed if it appears
+    worker = MagicMock(start=AsyncMock(side_effect=never_started))
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_worker", return_value=worker),
+        patch.object(generative_module, "SANDBOX_START_TIMEOUT", 0.05),
+    ):
+        with pytest.raises(TimeoutError, match="cold start exceeded"):
+            await gen_tool.fn(code="print(1)")
+        mock_exec.assert_not_called()
+    worker.stop.assert_called_once()
