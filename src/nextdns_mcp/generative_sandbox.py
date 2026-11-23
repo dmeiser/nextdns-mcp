@@ -8,9 +8,13 @@ SPDX-License-Identifier: MIT
 """
 
 import asyncio
+import atexit
 import os
 import shutil
 import subprocess
+import tempfile
+import threading
+from pathlib import Path
 from typing import Any
 
 from prefab_ui.sandbox import PyodideSandbox
@@ -98,13 +102,62 @@ def _sandbox_startup_env() -> dict[str, str]:
     env = _sandbox_env()
     env["DENO_V8_FLAGS"] = f"--max-old-space-size={SANDBOX_V8_HEAP_MB}"
     env["DENO_UNSTABLE_DETECT_CJS"] = "1"
+    # Point the Deno cache at the sandbox's dedicated temp directory so the
+    # module/wheel cache (Pyodide's downloaded wheels included) is the only
+    # writable surface the worker can reach.
+    env["DENO_DIR"] = str(_sandbox_deno_dir())
     return env
+
+
+_SANDBOX_DENO_DIR_PREFIX = "nextdns-mcp-sandbox-"
+_sandbox_deno_dir_lock = threading.Lock()
+_sandbox_deno_dir_path: Path | None = None
+_sandbox_deno_dir_cleanup_registered = False
+
+
+def _sandbox_deno_dir() -> Path:
+    """Unpredictable private temp directory that is the sandbox's only writable path.
+
+    Created by ``tempfile.mkdtemp`` — ``O_CREAT | O_EXCL``, mode 0700 — so a
+    symlink or another user's directory planted at a guessable name can never be
+    adopted into the ``--allow-write`` grant, which would turn the sandbox's own
+    cache directory into a host path (dmeiser/nextdns-mcp#593). The path is
+    canonical and cached for the process lifetime, so Deno's module cache and
+    Pyodide's wheel cache are reused across worker starts and both launch sites
+    (:func:`_deno_command` and :func:`_sandbox_startup_env`) name the same
+    directory; it is removed at interpreter exit so restarts do not accumulate
+    directories, and a directory removed mid-run is recreated on the next start.
+    """
+    global _sandbox_deno_dir_path, _sandbox_deno_dir_cleanup_registered
+    with _sandbox_deno_dir_lock:
+        cached = _sandbox_deno_dir_path
+        if cached is not None and cached.is_dir():
+            return cached
+        if not _sandbox_deno_dir_cleanup_registered:
+            atexit.register(_drop_sandbox_deno_dir)
+            _sandbox_deno_dir_cleanup_registered = True
+        _sandbox_deno_dir_path = Path(tempfile.mkdtemp(prefix=_SANDBOX_DENO_DIR_PREFIX)).resolve()
+        return _sandbox_deno_dir_path
+
+
+def _drop_sandbox_deno_dir() -> None:
+    """Remove this process's sandbox cache directory; registered with ``atexit``."""
+    path = _sandbox_deno_dir_path
+    if path is not None:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _deno_command() -> list[str]:
     deno = shutil.which("deno")
     if deno is None:
         raise RuntimeError("Deno is required for the Prefab sandbox. Install it from https://deno.land")
+    sandbox_dir = _sandbox_deno_dir()
+    # Generated code executes in this subprocess with Pyodide's full ``os``
+    # module, so the launch flags are the sandbox's filesystem boundary
+    # (dmeiser/nextdns-mcp#593): reads are confined to the Prefab sandbox
+    # assets plus the sandbox's own cache dir, and the cache dir is the only
+    # writable path — a mounted NEXTDNS_API_KEY_FILE secret or the
+    # application source tree is unreachable.
     return [
         deno,
         "run",
@@ -113,8 +166,8 @@ def _deno_command() -> list[str]:
         "--frozen",
         "--unstable-detect-cjs",
         "--no-prompt",
-        "--allow-read",
-        "--allow-write",
+        f"--allow-read={RUNNER_JS},{PREFAB_SRC},{DENO_LOCK},{sandbox_dir}",
+        f"--allow-write={sandbox_dir}",
         "--allow-net=cdn.jsdelivr.net:443",
         str(RUNNER_JS),
         str(PREFAB_SRC),
@@ -188,8 +241,9 @@ class HardenedPyodideSandbox(PyodideSandbox):
     V8 heap, and keeps one warm interpreter whose imported modules are shared across
     calls, so code from one ``generate_prefab_ui`` invocation can poison later ones.
     This subclass keeps the upstream subprocess protocol but vendors ``_start`` with a
-    sanitized environment and a bounded heap, and discards the worker after every
-    execution so no interpreter state survives between calls.
+    sanitized environment, a bounded heap, and the bounded launch arguments built by
+    :func:`_deno_command`, and discards the worker after every execution so no
+    interpreter state survives between calls.
     """
 
     async def start(self) -> None:
@@ -210,8 +264,12 @@ class HardenedPyodideSandbox(PyodideSandbox):
             self._stop()
 
     async def _start(self) -> None:
-        # Vendored from PyodideSandbox._start (prefab-ui 0.21.1) with two changes:
-        # the subprocess environment is sanitized and the V8 heap is bounded.
+        # Vendored from PyodideSandbox._start (prefab-ui 0.21.1) with three
+        # changes: the subprocess environment is sanitized (secrets stripped,
+        # DENO_DIR pointed at the sandbox's private cache dir), the V8 heap is
+        # bounded, and the worker is launched with the bounded filesystem
+        # grants built by _deno_command instead of upstream's bare
+        # --allow-read/--allow-write.
         # Keep in sync with prefab_ui.sandbox._pyodide on upgrades.
         starting = _spawn_deno(_sandbox_startup_env())
         try:
