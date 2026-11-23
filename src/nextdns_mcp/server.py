@@ -24,8 +24,8 @@ from .catalog import (  # noqa: F401
 )
 from .client import get_api_client
 from .config import (
-    NEXTDNS_BASE_URL,
     configure_logging,
+    get_api_base,
     get_http_timeout,
     validate_configuration,
 )
@@ -133,7 +133,7 @@ def build_mcp_server() -> FastMCP:
     Returns:
         FastMCP: Configured MCP server instance with all tools registered
     """
-    logger.info(f"Creating HTTP client for {NEXTDNS_BASE_URL}")
+    logger.info(f"Creating HTTP client for {get_api_base()}")
     # One parse of the shipped document feeds all three views of it: the tool
     # surface, the call-log endpoint map, and the published-name list in the
     # initialize instructions (spec_tool_names hits the process-wide route
@@ -215,7 +215,7 @@ def _run_server() -> None:
     """Validate configuration and start the MCP server (blocking)."""
     configure_logging()
     logger.info("Starting NextDNS MCP Server...")
-    logger.info(f"  Base URL: {NEXTDNS_BASE_URL}")
+    logger.info(f"  Base URL: {get_api_base()}")
     logger.info(f"  Timeout: {get_http_timeout()}s")
     validate_configuration()
     configure().run(**get_mcp_run_options())

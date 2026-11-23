@@ -12,7 +12,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 
 | Variable | Type | Default | Required | Description |
 |----------|------|---------|----------|-------------|
-| NEXTDNS_API_BASE | string (URL) | https://api.nextdns.io | No | Sets the REST base URL and the DoH allowlist host; must use `https://` (a non-https value fails startup with `ConfigurationError`). Read once at import — changing it requires a process restart |
+| NEXTDNS_API_BASE | string (URL) | https://api.nextdns.io | No | Sets the REST base URL and the DoH allowlist host; must use `https://` (a non-https value fails startup with `ConfigurationError`, and every runtime read re-checks it). Read at use time — a long-lived process picks up a changed value on the next client creation (recreate the shared client with `close_api_client()`), no process restart or reimport needed. A client that is still open keeps the base it was created with, and its destination allow-list moves with that base, until it is recreated |
 | NEXTDNS_API_KEY | string | - | Yes | API key used for authenticated NextDNS API calls |
 | NEXTDNS_API_KEY_FILE | string (path) | - | No | Path to a file containing only the API key (e.g., Docker secret) |
 | NEXTDNS_DEFAULT_PROFILE | string | - | No | Default profile ID used only by `overviewDashboard`, `dohLookup`, and `plotAnalytics` when they omit `profile_id`; every generated operation tool requires an explicit `profile_id` |
