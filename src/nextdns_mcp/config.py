@@ -19,23 +19,18 @@ SPDX-License-Identifier: MIT
 import logging
 import math
 import os
+from dataclasses import dataclass
 from typing import Any
 
+from .constants import SAFE_PROFILE_ID_PATTERN
 from .errors import ConfigurationError, MissingApiKeyError
 from .logging_config import configure_logging
+from .profile_access import _BOOL_FALSE_TOKENS as _BOOL_FALSE_TOKENS  # noqa: PLC0414
 from .profile_access import (
-    _BOOL_FALSE_TOKENS,
     _BOOL_TOKENS,
-    _BOOL_TRUE_TOKENS,
     ALLOW_ALL_PROFILES,
     ProfileAccessControl,
-    _combine_readable,
-    _combine_set_readable,
-    _is_allow_all,
-    _is_empty_profile_list,
-    _normalized_profile_ids,
     _parse_bool_env,
-    _read_only_from_env,
     can_read_profile,
     can_write_profile,
     get_protected_profiles,
@@ -47,7 +42,21 @@ from .profile_access import (
     load_profile_access_control,
     parse_profile_list,
 )
+from .profile_access import _BOOL_TRUE_TOKENS as _BOOL_TRUE_TOKENS  # noqa: PLC0414
+from .profile_access import _combine_readable as _combine_readable  # noqa: PLC0414
+from .profile_access import _combine_set_readable as _combine_set_readable  # noqa: PLC0414
+from .profile_access import _is_allow_all as _is_allow_all  # noqa: PLC0414
+from .profile_access import _is_empty_profile_list as _is_empty_profile_list  # noqa: PLC0414
+from .profile_access import _normalized_profile_ids as _normalized_profile_ids  # noqa: PLC0414
+from .profile_access import _read_only_from_env as _read_only_from_env  # noqa: PLC0414
 
+# The pre-split module had no __all__, so star imports bound every public
+# attribute - including the stdlib names, ``dataclass`` and
+# ``SAFE_PROFILE_ID_PATTERN`` it imported - and no underscore-prefixed
+# helper. ``__all__`` pins exactly that surface: the private helpers above
+# stay importable by name but stay out of star imports, and the incidental
+# re-exports (``dataclass``, ``SAFE_PROFILE_ID_PATTERN``) remain importable
+# from here as they were before the split.
 __all__ = [
     "ALLOW_ALL_PROFILES",
     "DEFAULT_API_BASE",
@@ -55,23 +64,16 @@ __all__ = [
     "DEFAULT_HTTP_TIMEOUT",
     "DEFAULT_TOOL_SEARCH_MODE",
     "NEXTDNS_BASE_URL",
+    "SAFE_PROFILE_ID_PATTERN",
     "TOOL_SEARCH_MODES",
-    "_BOOL_FALSE_TOKENS",
-    "_BOOL_TOKENS",
-    "_BOOL_TRUE_TOKENS",
+    "Any",
     "ConfigurationError",
     "MissingApiKeyError",
     "ProfileAccessControl",
-    "_combine_readable",
-    "_combine_set_readable",
-    "_is_allow_all",
-    "_is_empty_profile_list",
-    "_normalized_profile_ids",
-    "_parse_bool_env",
-    "_read_only_from_env",
     "can_read_profile",
     "can_write_profile",
     "configure_logging",
+    "dataclass",
     "get_api_key",
     "get_default_profile",
     "get_download_max_bytes",
@@ -85,6 +87,10 @@ __all__ = [
     "is_generative_ui_enabled",
     "is_read_only",
     "load_profile_access_control",
+    "logger",
+    "logging",
+    "math",
+    "os",
     "parse_profile_list",
     "validate_configuration",
 ]
