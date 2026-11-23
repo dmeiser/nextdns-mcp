@@ -362,10 +362,13 @@ class _StubResponse:
         return self._payload
 
 
-def test_doh_query_is_authorized_by_the_request_snapshot(monkeypatch):
+def test_doh_query_is_authorized_by_the_request_snapshot(monkeypatch, request):
     """A DoH query is sent only under the ACL values of the request that gated it."""
     doh_client = _RecordingDohClient()
-    monkeypatch.setattr(doh_module, "_doh_client", doh_client)
+    monkeypatch.setattr(doh_module.DohClientOwner, "get", lambda self: doh_client)
+    owner_cm = doh_module.doh_client_owned(doh_module.DohClientOwner())
+    owner_cm.__enter__()
+    request.addfinalizer(lambda: owner_cm.__exit__(None, None, None))
     doh_url = "https://dns.nextdns.io/abc123/dns-query"
 
     monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "abc123")

@@ -36,13 +36,18 @@ def allow_doh_read_access(monkeypatch, clean_env):
 
 @pytest.fixture(autouse=True)
 async def mock_doh_client(monkeypatch):
-    """Install a mock persistent DoH client so no test hits the network."""
+    """Install a mock persistent DoH client so no test hits the network.
+
+    The persistent client lives behind an explicit owner (issues #149, #642):
+    the fixture adopts the mock into one owner and publishes it for the
+    test's context.
+    """
     mock_client = AsyncMock(spec=httpx.AsyncClient)
     mock_response = MagicMock()
     mock_response.json.return_value = {"Status": 0, "Answer": [{"data": "1.2.3.4"}]}
     mock_client.get.return_value = mock_response
-    monkeypatch.setattr(doh_module, "_doh_client", mock_client)
-    return mock_client
+    with doh_module.doh_client_owned(doh_module.DohClientOwner(client=mock_client)):
+        yield mock_client
 
 
 class TestCreateNextDNSClient:

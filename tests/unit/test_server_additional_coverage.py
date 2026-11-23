@@ -211,33 +211,37 @@ async def test_execute_doh_and_doh_impl(monkeypatch, mock_doh_response, mock_pro
         async def get(self, doh_url, params=None, headers=None):
             return DummyResponse({**mock_doh_response})
 
-    # Install the dummy client as the doh tool module's cached persistent
-    # client (issue #149) so doh_lookup never hits the network.
-    monkeypatch.setattr(doh_module, "_doh_client", DummyClient())
+    # Install the dummy as the DoH owner's client (issues #149, #642) so
+    # doh_lookup never hits the network.
+    monkeypatch.setattr(doh_module.DohClientOwner, "get", lambda self: DummyClient())
+    with doh_module.doh_client_owned(doh_module.DohClientOwner()):
+        # doh_lookup success
+        res = await doh_module.doh_lookup(
+            "https://dns.nextdns.io/abc123/dns-query",
+            "google.com",
+            "A",
+            "abc123",
+            config.load_profile_access_control(),
+        )
+        assert "_metadata" in res
 
-    # doh_lookup success
-    res = await doh_module.doh_lookup(
-        "https://dns.nextdns.io/abc123/dns-query", "google.com", "A", "abc123", config.load_profile_access_control()
-    )
-    assert "_metadata" in res
+        # _dohLookup_impl: no default profile
+        monkeypatch.setattr(utils_module, "get_default_profile", lambda: None)
+        r = await doh_module._dohLookup_impl("example.com")
+        assert "error" in r and "No profile_id" in r["error"]
 
-    # _dohLookup_impl: no default profile
-    monkeypatch.setattr(utils_module, "get_default_profile", lambda: None)
-    r = await doh_module._dohLookup_impl("example.com")
-    assert "error" in r and "No profile_id" in r["error"]
+        # invalid record type
+        monkeypatch.setattr(utils_module, "get_default_profile", lambda: "abc123")
+        r2 = await doh_module._dohLookup_impl("example.com", record_type="INVALID")
+        assert "error" in r2 and "Invalid record type" in r2["error"]
 
-    # invalid record type
-    monkeypatch.setattr(utils_module, "get_default_profile", lambda: "abc123")
-    r2 = await doh_module._dohLookup_impl("example.com", record_type="INVALID")
-    assert "error" in r2 and "Invalid record type" in r2["error"]
+        # success path uses doh_lookup
+        async def fake_exec(doh_url, domain, record_type, profile, access):
+            return {"ok": True}
 
-    # success path uses doh_lookup
-    async def fake_exec(doh_url, domain, record_type, profile, access):
-        return {"ok": True}
-
-    monkeypatch.setattr(doh_module, "doh_lookup", fake_exec)
-    r3 = await doh_module._dohLookup_impl("example.com")
-    assert r3 == {"ok": True}
+        monkeypatch.setattr(doh_module, "doh_lookup", fake_exec)
+        r3 = await doh_module._dohLookup_impl("example.com")
+        assert r3 == {"ok": True}
 
 
 def test_get_mcp_run_options_http(monkeypatch):

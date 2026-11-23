@@ -1,9 +1,11 @@
-"""Regression tests for lazy factories replacing module-level singletons.
+"""Regression tests for the lazy factories and their explicit owners.
 
 Issue #150: api_client and mcp_server were built at import time and
 logging.basicConfig ran at import. These tests pin the lazy behavior:
-importing the modules must not build the client or server, and the
-factories must cache and lazily expose the singletons.
+importing the modules must not build the client or server, the owners must
+create and cache their instances lazily, and no owner may be served a
+process-global fallback (issue #642: the old module-global singletons were
+hidden side channels between independent servers).
 """
 
 import importlib
@@ -17,38 +19,36 @@ import pytest
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import config, server
+from nextdns_mcp.errors import StateOwnershipError
 
 
 class TestLazyApiClient:
     """The API client must be created lazily, not at import time."""
 
-    def test_get_api_client_caches_instance(self, monkeypatch, mock_api_key):
+    def test_owner_caches_instance(self, monkeypatch, mock_api_key):
         """First call creates the client; subsequent calls return the same object."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(client_module, "_client", None)
+        owner = client_module.ApiClientOwner()
 
-        first = client_module.get_api_client()
-        second = client_module.get_api_client()
+        first = owner.get()
+        second = owner.get()
 
         assert first is second
 
-    def test_module_getattr_exposes_api_client(self, monkeypatch, mock_api_key):
-        """The backward-compatible client.api_client attribute is served lazily."""
+    def test_get_api_client_uses_the_published_owner(self, monkeypatch, mock_api_key):
+        """The module factory serves the current owner's client."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        # Clear any real api_client entry left in the module namespace by other
-        # tests' monkeypatch.setattr(..., "api_client", ...) teardowns. Pop the
-        # module dict directly: monkeypatch.delattr would raise AttributeError
-        # here because its hasattr probe is answered by the module __getattr__
-        # (which lazily builds a client) while there is no real dict entry to
-        # delete, making this test order-dependent.
-        client_module.__dict__.pop("api_client", None)
-        monkeypatch.setattr(client_module, "_client", None)
         sentinel = object()
         monkeypatch.setattr(client_module, "create_nextdns_client", lambda: sentinel)
 
-        # The module attribute resolves to the same instance the factory serves.
-        assert client_module.api_client is sentinel
-        assert client_module.get_api_client() is sentinel
+        with client_module.api_client_owned(client_module.ApiClientOwner()):
+            assert client_module.get_api_client() is sentinel
+            assert client_module.api_client is sentinel
+
+    def test_get_api_client_without_an_owner_raises(self):
+        """No active owner is a loud error, never a silent process-global fallback."""
+        with pytest.raises(StateOwnershipError):
+            client_module.get_api_client()
 
     def test_module_getattr_unknown_name_raises(self):
         """Unknown attribute names still raise AttributeError."""
@@ -58,17 +58,49 @@ class TestLazyApiClient:
     def test_api_key_read_at_creation_not_import(self, monkeypatch):
         """The API key is captured when the client is created, not at import."""
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
-        monkeypatch.setattr(client_module, "_client", None)
+        owner = client_module.ApiClientOwner()
 
         # Calling without a key must fail fast with ConfigurationError
         with pytest.raises(config.ConfigurationError):
-            client_module.get_api_client()
+            owner.get()
 
         # Recreate with a key set later: header must be present
-        monkeypatch.setattr(client_module, "_client", None)
         monkeypatch.setenv("NEXTDNS_API_KEY", "late_key")
-        keyed_client = client_module.get_api_client()
+        keyed_client = client_module.ApiClientOwner().get()
         assert keyed_client.headers["X-Api-Key"] == "late_key"
+
+    def test_aclose_resets_the_owner_for_a_fresh_client(self, monkeypatch, mock_api_key):
+        """Closing an owner releases its client; the next get builds a new one."""
+        import asyncio
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        owner = client_module.ApiClientOwner()
+        first = owner.get()
+
+        asyncio.run(owner.aclose())
+
+        assert first.is_closed
+        second = owner.get()
+        assert second is not first
+        assert not second.is_closed
+        asyncio.run(owner.aclose())
+
+    def test_two_owners_never_share_a_client(self, monkeypatch, mock_api_key):
+        """Independent owners in one process hold independent clients (issue #642)."""
+        import asyncio
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        first_owner = client_module.ApiClientOwner()
+        second_owner = client_module.ApiClientOwner()
+
+        assert first_owner.get() is not second_owner.get()
+
+        asyncio.run(first_owner.aclose())
+
+        assert first_owner.get() is not second_owner.get()
+        assert not second_owner.get().is_closed, "one owner's shutdown closed another owner's client"
+        asyncio.run(first_owner.aclose())
+        asyncio.run(second_owner.aclose())
 
 
 class TestLazyMcpServer:
@@ -77,10 +109,10 @@ class TestLazyMcpServer:
     def test_get_mcp_server_caches_instance(self, monkeypatch, mock_api_key):
         """First call builds the server; subsequent calls return the same object."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(server, "_mcp_server", None)
 
-        first = server.get_mcp_server()
-        second = server.get_mcp_server()
+        with server.mcp_server_owned(server.McpServerOwner()):
+            first = server.get_mcp_server()
+            second = server.get_mcp_server()
 
         assert first is second
         assert first is not None
@@ -89,20 +121,48 @@ class TestLazyMcpServer:
     def test_module_getattr_exposes_mcp_server(self, monkeypatch, mock_api_key):
         """The backward-compatible mcp_server and mcp attributes are served lazily."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(server, "_mcp_server", None)
 
-        assert server.mcp_server is server.get_mcp_server()
-        assert server.mcp is server.get_mcp_server()
+        with server.mcp_server_owned(server.McpServerOwner()):
+            assert server.mcp_server is server.get_mcp_server()
+            assert server.mcp is server.get_mcp_server()
 
     def test_module_getattr_exposes_api_client(self, monkeypatch, mock_api_key):
-        """server.api_client resolves to the same shared instance as the client factory."""
+        """server.api_client resolves to the same instance as the client factory."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(client_module, "_client", None)
         sentinel = object()
         monkeypatch.setattr(client_module, "create_nextdns_client", lambda: sentinel)
 
-        assert server.api_client is sentinel
-        assert client_module.get_api_client() is sentinel
+        with (
+            client_module.api_client_owned(client_module.ApiClientOwner()),
+            server.mcp_server_owned(server.McpServerOwner()),
+        ):
+            assert server.api_client is sentinel
+            assert client_module.get_api_client() is sentinel
+
+    def test_get_mcp_server_without_an_owner_raises(self, monkeypatch):
+        """No active owner is a loud error; configure() is what publishes one."""
+        token = server.mcp_server_owner.set(None)
+        try:
+            with pytest.raises(StateOwnershipError):
+                server.get_mcp_server()
+        finally:
+            server.mcp_server_owner.reset(token)
+
+    def test_configure_publishes_the_owner(self, monkeypatch, mock_api_key):
+        """configure() publishes an owner, so get_mcp_server() serves its server."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        token = server.mcp_server_owner.set(None)
+        try:
+            built = server.configure()
+            assert built is server.get_mcp_server()
+            assert server.configure() is built, "repeated configure() calls serve the same server"
+        finally:
+            server.mcp_server_owner.reset(token)
+
+    def test_two_owners_build_independent_servers(self, monkeypatch, mock_api_key):
+        """Independent owners in one process hold independent servers (issue #642)."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        assert server.McpServerOwner().get() is not server.McpServerOwner().get()
 
     def test_module_getattr_unknown_name_raises(self):
         """Unknown attribute names still raise AttributeError."""
@@ -140,8 +200,8 @@ class TestImportHasNoSideEffects:
         fresh_client = importlib.import_module("nextdns_mcp.client")
 
         assert constructions == []
-        assert fresh_client._client is None
-        assert fresh_server._mcp_server is None
+        assert fresh_client.api_client_owner.get() is None
+        assert fresh_server.mcp_server_owner.get() is None
 
 
 class TestConfigureLogging:

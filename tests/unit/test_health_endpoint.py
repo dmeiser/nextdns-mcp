@@ -3,7 +3,10 @@
 ``GET /health`` is a real readiness check: it probes the NextDNS API with the
 configured API key and returns ``200 OK`` with ``{"status": "ok"}`` only when
 that probe succeeds. Failures return ``503`` with the failure class and a short
-reason, and the result is cached so health polling cannot hammer the API.
+reason, and the result is cached so health polling cannot hammer the API. The
+cache and its single-flight lock are owned by one ``ReadinessProber`` per
+server (issue #642), and the probe sends through the API client owner the
+server instance owns.
 """
 
 from collections.abc import Iterator
@@ -12,14 +15,13 @@ import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import openapi
 from nextdns_mcp.openapi import (
     HEALTH_CACHE_TTL,
     HEALTH_PROBE_PATH,
     HEALTH_PROBE_TIMEOUT,
+    ReadinessProber,
     create_mcp_server,
 )
-from nextdns_mcp.server import get_mcp_server
 
 
 class FakeApiClient:
@@ -42,6 +44,16 @@ class FakeApiClient:
         return outcome
 
 
+class _FakeOwner:
+    """Duck-typed ApiClientOwner stand-in returning the fake client."""
+
+    def __init__(self, client: FakeApiClient) -> None:
+        self._client = client
+
+    def get(self) -> FakeApiClient:
+        return self._client
+
+
 def _response(status_code: int, body: str = '{"error":"Forbidden"}') -> httpx.Response:
     return httpx.Response(
         status_code,
@@ -51,16 +63,19 @@ def _response(status_code: int, body: str = '{"error":"Forbidden"}') -> httpx.Re
 
 
 def _install_client(monkeypatch, *outcomes: httpx.Response | Exception) -> FakeApiClient:
-    """Point the health probe at a fake client and reset the result cache."""
+    """Point every owner build at a fake client (no real client is created)."""
     client = FakeApiClient(*outcomes)
-    monkeypatch.setattr(openapi, "get_api_client", lambda: client)
-    openapi._health_probe_cache = None
+    monkeypatch.setattr(client_module, "create_nextdns_client", lambda: client)
     return client
 
 
-async def _call_health() -> tuple[int, dict]:
-    """GET /health over the real HTTP app and return (status code, parsed body)."""
-    app = create_mcp_server().http_app()
+def _prober_with(monkeypatch, *outcomes: httpx.Response | Exception) -> tuple[ReadinessProber, FakeApiClient]:
+    """A prober whose probe sends through a fake client."""
+    return ReadinessProber(), _install_client(monkeypatch, *outcomes)
+
+
+async def _call_health(app) -> tuple[int, dict]:
+    """GET /health on the given server app and return (status code, parsed body)."""
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://testserver",
@@ -69,19 +84,17 @@ async def _call_health() -> tuple[int, dict]:
     return response.status_code, response.json()
 
 
-@pytest.fixture(autouse=True)
-def _clear_probe_cache() -> Iterator[None]:
-    """Keep the module-level readiness cache from leaking between tests."""
-    openapi._health_probe_cache = None
-    yield
-    openapi._health_probe_cache = None
+@pytest.fixture
+def real_api_client_owner() -> Iterator[client_module.ApiClientOwner]:
+    """An owner that builds the real client from the current environment."""
+    yield client_module.ApiClientOwner()
 
 
 async def test_health_returns_200_when_the_credential_probe_succeeds(monkeypatch, mock_api_key):
     """A successful NextDNS probe yields 200 with {"status": "ok"}."""
     client = _install_client(monkeypatch, _response(200, "[]"))
 
-    status_code, body = await _call_health()
+    status_code, body = await _call_health(create_mcp_server().http_app())
 
     assert status_code == 200
     assert body == {"status": "ok"}
@@ -92,7 +105,7 @@ async def test_health_returns_503_auth_class_when_nextdns_rejects_the_key(monkey
     """An upstream 401 is reported as 503 with the auth failure class."""
     _install_client(monkeypatch, _response(401, '{"error":"API key not found","token":"super-secret"}'))
 
-    status_code, body = await _call_health()
+    status_code, body = await _call_health(create_mcp_server().http_app())
 
     assert status_code == 503
     assert body["class"] == "auth"
@@ -106,7 +119,7 @@ async def test_health_never_leaks_key_material_or_the_probe_body(monkeypatch, mo
     upstream_body = f'{{"error":"invalid key","api_key":"{secret}"}}'
     _install_client(monkeypatch, _response(401, upstream_body))
 
-    _, body = await _call_health()
+    _, body = await _call_health(create_mcp_server().http_app())
 
     serialized = str(body)
     assert secret not in serialized
@@ -115,14 +128,9 @@ async def test_health_never_leaks_key_material_or_the_probe_body(monkeypatch, mo
     assert body["reason"] == "NextDNS API rejected the configured credentials (HTTP 401)"
 
 
-async def test_health_returns_503_auth_class_when_no_api_key_is_usable(monkeypatch):
+async def test_health_returns_503_auth_class_when_no_api_key_is_usable(real_api_client_owner):
     """A missing or empty API key is reported as 503 with the auth class, not a 500."""
-    monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
-    monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
-    monkeypatch.setattr(client_module, "_client", None)
-    openapi._health_probe_cache = None
-
-    status_code, body = await _call_health()
+    status_code, body = await _call_health(create_mcp_server().http_app())
 
     assert status_code == 503
     assert body["status"] == "error"
@@ -134,10 +142,8 @@ async def test_health_reports_an_invalid_http_timeout_as_unreachable(monkeypatch
     """An invalid NEXTDNS_HTTP_TIMEOUT is never mislabeled as an auth failure."""
     monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
     monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "not-a-number")
-    monkeypatch.setattr(client_module, "_client", None)
-    openapi._health_probe_cache = None
 
-    status_code, body = await _call_health()
+    status_code, body = await _call_health(create_mcp_server().http_app())
 
     assert status_code == 503
     assert body["class"] == "unreachable"
@@ -148,21 +154,21 @@ async def test_configuration_failure_is_cached_like_any_other_probe_result(monke
     """Repeated polling inside the TTL reuses the configuration-failure result."""
     monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
     monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
-    monkeypatch.setattr(client_module, "_client", None)
-    openapi._health_probe_cache = None
+    prober = ReadinessProber()
+    owner = client_module.ApiClientOwner()
 
-    assert (await _call_health())[0] == 503
-    first_result = openapi._health_probe_cache
+    assert (await prober.check(owner)) is not None
+    first_result = prober._cache
 
-    assert (await _call_health())[0] == 503
-    assert openapi._health_probe_cache is first_result
+    assert (await prober.check(owner)) is not None
+    assert prober._cache is first_result
 
 
 async def test_health_returns_503_unreachable_class_on_timeout(monkeypatch, mock_api_key):
     """A probe that times out is reported as 503 with the unreachable class."""
     _install_client(monkeypatch, httpx.ReadTimeout("timed out"))
 
-    status_code, body = await _call_health()
+    status_code, body = await _call_health(create_mcp_server().http_app())
 
     assert status_code == 503
     assert body["class"] == "unreachable"
@@ -173,7 +179,7 @@ async def test_health_returns_503_unreachable_class_when_nextdns_is_down(monkeyp
     """A connection error is reported as 503 with the unreachable class."""
     _install_client(monkeypatch, httpx.ConnectError("no route to host"))
 
-    status_code, body = await _call_health()
+    status_code, body = await _call_health(create_mcp_server().http_app())
 
     assert status_code == 503
     assert body["class"] == "unreachable"
@@ -184,7 +190,7 @@ async def test_health_returns_503_unreachable_class_on_upstream_server_error(mon
     """A non-auth error status from NextDNS is reported as unreachable."""
     _install_client(monkeypatch, _response(503, "upstream boom"))
 
-    status_code, body = await _call_health()
+    status_code, body = await _call_health(create_mcp_server().http_app())
 
     assert status_code == 503
     assert body["class"] == "unreachable"
@@ -194,28 +200,30 @@ async def test_health_returns_503_unreachable_class_on_upstream_server_error(mon
 async def test_second_health_call_within_the_window_does_not_re_probe(monkeypatch, mock_api_key):
     """Health polling inside the cache window reuses the first probe result."""
     client = _install_client(monkeypatch, _response(200, "[]"))
+    app = create_mcp_server().http_app()
 
-    assert (await _call_health())[0] == 200
-    assert (await _call_health())[0] == 200
-    assert (await _call_health())[0] == 200
+    assert (await _call_health(app))[0] == 200
+    assert (await _call_health(app))[0] == 200
+    assert (await _call_health(app))[0] == 200
 
     assert len(client.calls) == 1
 
 
 async def test_cached_failure_is_reused_and_expires_after_the_ttl(monkeypatch, mock_api_key):
     """A cached failure is reused, and a re-probe happens once the TTL elapses."""
-    client = _install_client(monkeypatch, _response(401), _response(200, "[]"))
+    prober, client = _prober_with(monkeypatch, _response(401), _response(200, "[]"))
+    owner = _FakeOwner(client)
 
-    assert (await _call_health())[0] == 503
-    assert (await _call_health())[0] == 503
+    assert (await prober.check(owner)) is not None
+    assert (await prober.check(owner)) is not None
     assert len(client.calls) == 1
 
     # Age the cached entry past the TTL by backdating its timestamp.
-    cached_at, failure = openapi._health_probe_cache
-    openapi._health_probe_cache = (cached_at - (HEALTH_CACHE_TTL + 1), failure)
+    cached_at, failure = prober._cache
+    prober._cache = (cached_at - (HEALTH_CACHE_TTL + 1), failure)
     assert failure is not None
 
-    assert (await _call_health())[0] == 200
+    assert (await prober.check(owner)) is None
     assert len(client.calls) == 2
 
 
@@ -223,7 +231,7 @@ async def test_probe_issues_a_raw_request_with_the_short_timeout(monkeypatch, mo
     """The probe calls the client's raw transport with the 5 second timeout."""
     client = _install_client(monkeypatch, _response(200, "[]"))
 
-    assert (await _call_health())[0] == 200
+    assert (await _call_health(create_mcp_server().http_app()))[0] == 200
 
     method, url, kwargs = client.calls[0]
     assert (method, url) == ("GET", "/profiles")
@@ -233,8 +241,9 @@ async def test_probe_issues_a_raw_request_with_the_short_timeout(monkeypatch, mo
 async def test_health_served_by_http_app(monkeypatch, mock_api_key):
     """GET /health on the streamable-HTTP app reports 200 once the probe succeeds."""
     _install_client(monkeypatch, _response(200, "[]"))
-    server = get_mcp_server()
-    app = server.http_app()
+    from nextdns_mcp.server import build_mcp_server
+
+    app = build_mcp_server().http_app()
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -250,8 +259,9 @@ async def test_health_served_by_http_app(monkeypatch, mock_api_key):
 async def test_health_served_by_http_app_reports_failures(monkeypatch, mock_api_key):
     """A failing probe surfaces as a 503 JSON body over the real HTTP app."""
     _install_client(monkeypatch, _response(401))
-    server = get_mcp_server()
-    app = server.http_app()
+    from nextdns_mcp.server import build_mcp_server
+
+    app = build_mcp_server().http_app()
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -276,22 +286,36 @@ async def test_concurrent_pollers_share_one_probe(monkeypatch, mock_api_key):
 
     calls: list[int] = []
 
-    async def slow_probe() -> None:
+    async def slow_probe(api_client) -> None:
         calls.append(1)
         await asyncio.sleep(0.05)  # let the other poller arrive and wait on the lock
 
-    monkeypatch.setattr(openapi, "_run_health_probe", slow_probe)
-    openapi._health_probe_cache = None
+    monkeypatch.setattr(client_module, "create_nextdns_client", lambda: FakeApiClient(_response(200, "[]")))
+    prober = ReadinessProber()
+    owner = client_module.ApiClientOwner()
+    monkeypatch.setattr(prober, "_probe", slow_probe)
 
-    first, second = await asyncio.gather(openapi.check_nextdns_readiness(), openapi.check_nextdns_readiness())
+    first, second = await asyncio.gather(prober.check(owner), prober.check(owner))
     assert len(calls) == 1, "the simultaneous first miss must issue exactly one probe"
     assert first is None and second is None
 
 
+async def test_two_probers_do_not_share_their_cache(monkeypatch, mock_api_key):
+    """Readiness state is per server: a second server's prober probes on its own."""
+    prober_a, client = _prober_with(monkeypatch, _response(200, "[]"), _response(200, "[]"))
+    prober_b = ReadinessProber()
+
+    await prober_a.check(_FakeOwner(client))
+    await prober_b.check(_FakeOwner(client))
+
+    assert len(client.calls) == 2, "each server owns its own readiness cache"
+
+
 async def test_v1_models_endpoint_answers_empty_list():
     """GET /v1/models answers OpenWebUI's model discovery probe with an empty list."""
-    server = get_mcp_server()
-    app = server.http_app()
+    from nextdns_mcp.server import build_mcp_server
+
+    app = build_mcp_server().http_app()
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),

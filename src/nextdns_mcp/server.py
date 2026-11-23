@@ -7,6 +7,9 @@ import inspect
 import logging
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import wraps
 from typing import Any
 
@@ -23,6 +26,7 @@ from .config import (
     is_generative_ui_enabled,
     validate_configuration,
 )
+from .errors import StateOwnershipError
 from .openapi import create_mcp_server
 from .spec_tools import (
     endpoints_for_routes,
@@ -76,7 +80,58 @@ def _with_error_flag(tool_fn: Any) -> Any:
     return _wrapped
 
 
-_mcp_server: FastMCP | None = None
+class McpServerOwner:
+    """Owns one lazily built FastMCP server for one explicit lifetime.
+
+    Explicit owner for the server instance that used to live in the
+    module-global ``_mcp_server`` singleton. ``configure()`` publishes one
+    owner into the calling context, so repeated ``configure()`` calls and the
+    ``mcp_server``/``mcp`` compatibility attributes return that same
+    instance; embedded servers go through :func:`build_mcp_server` and never
+    touch it. Two owners in one process hold two independent servers.
+    """
+
+    def __init__(self) -> None:
+        self._server: FastMCP | None = None
+
+    def get(self) -> FastMCP:
+        """Return this owner's server, building it on first use."""
+        if self._server is None:
+            self._server = build_mcp_server()
+        return self._server
+
+
+# The owner whose server the current context uses, published by configure()
+# (the entrypoint path). No module-level default: an absent owner fails
+# loudly instead of silently handing every caller one process-global server.
+mcp_server_owner: ContextVar[McpServerOwner | None] = ContextVar("nextdns_mcp_server_owner", default=None)
+
+
+def current_mcp_server_owner() -> McpServerOwner:
+    """Return the owner of the MCP server instance for the current context.
+
+    Raises:
+        StateOwnershipError: When no owner is active. The entrypoint path
+            publishes one via :func:`configure`; embedded servers build their
+            own with :func:`build_mcp_server`.
+    """
+    owner = mcp_server_owner.get()
+    if owner is None:
+        raise StateOwnershipError(
+            "No MCP server owner is active in this context. The entrypoint publishes one via "
+            "server.configure(); embedded servers build their own with build_mcp_server()."
+        )
+    return owner
+
+
+@contextmanager
+def mcp_server_owned(owner: McpServerOwner) -> Iterator[McpServerOwner]:
+    """Publish ``owner`` as the current context's MCP server owner for the block."""
+    token = mcp_server_owner.set(owner)
+    try:
+        yield owner
+    finally:
+        mcp_server_owner.reset(token)
 
 
 # Generative-UI tools partitioned by what they answer with. A content tool answers with an
@@ -170,11 +225,8 @@ def build_mcp_server() -> FastMCP:
 
 
 def get_mcp_server() -> FastMCP:
-    """Return the shared MCP server instance, creating it on first use."""
-    global _mcp_server
-    if _mcp_server is None:
-        _mcp_server = build_mcp_server()
-    return _mcp_server
+    """Return the current owner's shared MCP server instance, creating it on first use."""
+    return current_mcp_server_owner().get()
 
 
 def _sync_fastmcp_update_check() -> None:
@@ -203,16 +255,24 @@ def configure() -> FastMCP:
 
     1. disable FastMCP's automatic update check, which delays startup and can
        hang in offline/CI environments, and
-    2. build the shared server instance on purpose instead of at import time.
+    2. publish this context's owner of the shared server instance, building
+       the server on purpose instead of at import time.
 
-    The server is created on first use and cached, so calling this repeatedly
-    is cheap and returns the same instance.
+    The first ``configure()`` call in a context publishes an owner and later
+    calls return that owner's server, so calling this repeatedly is cheap and
+    returns the same instance. Embedded servers that need their own instance
+    build one explicitly with :func:`build_mcp_server` instead.
 
     Returns:
         FastMCP: The shared, configured MCP server instance.
     """
     os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
     _sync_fastmcp_update_check()
+    try:
+        owner = current_mcp_server_owner()
+    except StateOwnershipError:
+        owner = McpServerOwner()
+        mcp_server_owner.set(owner)
     return get_mcp_server()
 
 

@@ -6,8 +6,9 @@ SPDX-License-Identifier: MIT
 import logging
 import posixpath
 import re
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -21,7 +22,8 @@ from .config import (
     load_profile_access_control,
 )
 from .constants import SAFE_PROFILE_ID_PATTERN, is_write_operation
-from .errors import ErrorCode
+from .errors import ErrorCode, StateOwnershipError
+from .state import request_resources
 
 logger = logging.getLogger(__name__)
 
@@ -443,36 +445,110 @@ def create_nextdns_client() -> AccessControlledClient:
     )
 
 
-_client: AccessControlledClient | None = None
+class ApiClientOwner:
+    """Owns one authenticated NextDNS API client for one explicit lifetime.
+
+    Explicit owner for the client state that used to live in the module-global
+    ``_client`` singleton: a server lifespan builds one owner per server and
+    publishes it with :func:`api_client_owned`; standalone callers (tests,
+    scripts) build their own. The client is created lazily on first use and
+    reused until :meth:`aclose`, so lazy creation, configuration pickup, and
+    keep-alive connection reuse are preserved per owner - and two owners in
+    one process never share a client, so one owner's shutdown cannot close
+    another owner's connections.
+    """
+
+    def __init__(self) -> None:
+        self._client: AccessControlledClient | None = None
+
+    def get(self) -> AccessControlledClient:
+        """Return this owner's client, creating it on first use.
+
+        The client is built lazily so that importing this module has no side
+        effects and configuration changes (e.g. in tests) are picked up.
+        """
+        if self._client is None:
+            self._client = create_nextdns_client()
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close this owner's client if one exists and reset it.
+
+        The next :meth:`get` constructs a fresh client, picking up any updated
+        configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+        """
+        if self._client is not None:
+            client = self._client
+            self._client = None
+            await client.aclose()
+
+
+# The owner whose client the current context uses. A server lifespan sets this
+# to the owner its ServerResources holds (see nextdns_mcp.openapi), as may
+# standalone callers (tests, scripts) with ``api_client_owned`` for work that
+# runs in the same task. Requests served by FastMCP resolve the owner from the
+# request's lifespan context instead (see nextdns_mcp.state): the lifespan
+# task does not propagate context variables into request tasks, so this var
+# alone cannot serve per-request traffic. There is deliberately NO
+# module-level default: an absent owner fails loudly instead of silently
+# serving one process-global client to independent servers.
+api_client_owner: ContextVar[ApiClientOwner | None] = ContextVar("nextdns_api_client_owner", default=None)
+
+
+def current_api_client_owner() -> ApiClientOwner:
+    """Return the owner of the API client state for the current context.
+
+    Resolution order: an owner published with :func:`api_client_owned`, then
+    the resources of the FastMCP server serving this request.
+
+    Raises:
+        StateOwnershipError: When no owner is active. Code reached outside a
+            server lifespan must publish one with :func:`api_client_owned`.
+    """
+    owner = api_client_owner.get()
+    if owner is None:
+        resources = request_resources()
+        if resources is not None:
+            owner = resources.api_client
+    if owner is None:
+        raise StateOwnershipError(
+            "No API client owner is active in this context. Server code runs inside a server "
+            "lifespan, which publishes one; standalone callers must wrap the work in "
+            "`with client_module.api_client_owned(client_module.ApiClientOwner()):`."
+        )
+    return owner
+
+
+@contextmanager
+def api_client_owned(owner: ApiClientOwner) -> Iterator[ApiClientOwner]:
+    """Publish ``owner`` as the current context's API client owner for the block."""
+    token = api_client_owner.set(owner)
+    try:
+        yield owner
+    finally:
+        api_client_owner.reset(token)
 
 
 def get_api_client() -> AccessControlledClient:
-    """Return the shared authenticated API client, creating it on first use.
+    """Return the current owner's shared authenticated API client, creating it on first use.
 
     The client is built lazily so that importing this module has no side
     effects and configuration changes (e.g. in tests) are picked up.
     """
-    global _client
-    if _client is None:
-        _client = create_nextdns_client()
-    return _client
+    return current_api_client_owner().get()
 
 
 async def close_api_client() -> None:
-    """Close the shared authenticated API client if one exists and reset the singleton.
+    """Close the current owner's API client if one exists and reset it.
 
     Subsequent calls to :func:`get_api_client` will construct a fresh client,
     picking up any updated configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
     """
-    global _client
-    if _client is not None:
-        client = _client
-        _client = None
-        await client.aclose()
+    await current_api_client_owner().aclose()
 
 
 def __getattr__(name: str) -> Any:
-    """Lazily expose the ``api_client`` singleton for backward compatibility."""
+    """Lazily expose the ``api_client`` client for backward compatibility."""
     if name == "api_client":
         return get_api_client()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

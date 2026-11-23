@@ -67,12 +67,18 @@ class _RecordingClient:
 
 
 @pytest.fixture
-def recorder(monkeypatch: pytest.MonkeyPatch) -> _RecordingClient:
+def recorder(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> _RecordingClient:
     monkeypatch.setenv("NEXTDNS_API_KEY", API_KEY)
     monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
     monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
     rec = _RecordingClient()
-    monkeypatch.setattr(client_module, "api_client", rec.client)
+    # The API client lives behind an explicit owner now (issue #642): the
+    # recording client becomes the owner's lazy build instead of patching a
+    # module attribute.
+    monkeypatch.setattr(client_module, "create_nextdns_client", lambda: rec.client)
+    owner_cm = client_module.api_client_owned(client_module.ApiClientOwner())
+    owner_cm.__enter__()
+    request.addfinalizer(lambda: owner_cm.__exit__(None, None, None))
     return rec
 
 

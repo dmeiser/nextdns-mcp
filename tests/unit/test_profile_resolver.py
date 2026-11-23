@@ -34,11 +34,16 @@ def clean_env(monkeypatch):
 
 
 @pytest.fixture
-def mock_api_client(monkeypatch):
+def mock_api_client(monkeypatch, request):
     """Replace the module-level api_client with a mock."""
     monkeypatch.setenv("NEXTDNS_API_KEY", "test-api-key")
     client = AsyncMock()
-    monkeypatch.setattr(client_module, "api_client", client)
+    # The client lives behind an explicit owner now (issue #642): the mock
+    # becomes the owner's lazy build instead of patching a module attribute.
+    monkeypatch.setattr(client_module, "create_nextdns_client", lambda: client)
+    owner_cm = client_module.api_client_owned(client_module.ApiClientOwner())
+    owner_cm.__enter__()
+    request.addfinalizer(lambda: owner_cm.__exit__(None, None, None))
     return client
 
 

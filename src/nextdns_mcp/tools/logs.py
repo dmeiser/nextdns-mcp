@@ -33,9 +33,11 @@ from ..config import get_download_max_bytes
 from ..errors import (
     BODY_SLICE_BYTES,
     ErrorCode,
+    StateOwnershipError,
     error_payload,
     http_error_payload,
 )
+from ..state import request_resources
 from ..transport import access_denied_payload_for, buffered_response, read_body_capped
 
 logger = logging.getLogger(__name__)
@@ -66,14 +68,62 @@ def _unlink_temp_file(path: str) -> None:
 #
 # Ownership is PER SERVER, not per process. The registry a download registers
 # with is the one the current server lifespan owns (the ``_download_registry``
-# context var, set by ``nextdns_mcp.openapi._server_lifespan``); a download
-# handled outside any lifespan falls back to the process-global registry
-# below. The registries used to be one process-global set that EVERY server's
-# lifespan emptied, so one embedded server deleted another live server's
-# tracked CSVs mid-read. Insertion-ordered, so the oldest entry is always
-# first: that order is the eviction order (see ``_note_successful_download``).
-_SUCCESSFUL_DOWNLOADS: dict[str, None] = {}
-_download_registry: contextvars.ContextVar[dict[str, None] | None] = contextvars.ContextVar(
+# context var, set by ``nextdns_mcp.openapi._server_lifespan``). There is no
+# process-global fallback registry: a download made outside any lifespan has
+# no owner to reclaim it, so it is reported untracked and left for the caller
+# instead of being silently bound to some other server's lifetime. The
+# registries used to be one process-global set that EVERY server's lifespan
+# emptied, so one embedded server deleted another live server's tracked CSVs
+# mid-read.
+class DownloadRegistry:
+    """Owns the successful downloadLogs CSVs for one explicit lifetime.
+
+    One server lifespan owns one registry; a standalone session owns one via
+    :func:`downloads_owned`. Insertion-ordered, so the oldest entry is always
+    first: that order is the eviction order.
+    """
+
+    def __init__(self) -> None:
+        self._paths: dict[str, None] = {}
+
+    def note(self, path: str, downloaded: bool) -> None:
+        """Register a fully-written CSV for reclaim; failures stay unregistered.
+
+        Registration is insertion-ordered, and past ``MAX_RETAINED_DOWNLOADS``
+        the oldest CSV is evicted and unlinked, so disk use stays bounded
+        across a long server lifetime even when shutdown (the other reclaim
+        point) is far away or never comes (SIGKILL).
+        """
+        if not downloaded:
+            return
+        self._paths[path] = None
+        while len(self._paths) > MAX_RETAINED_DOWNLOADS:
+            oldest = next(iter(self._paths))
+            if not _remove_downloaded_file(oldest):
+                break  # cannot evict: leave the overflow for shutdown reclaim rather than spin
+            self._paths.pop(oldest, None)
+
+    def cleanup(self) -> None:
+        """Remove every registered temp file and its directory.
+
+        Called once at the owning lifetime's end (server shutdown, or the end
+        of a ``downloads_owned`` block). A downloadLogs CSV can be hundreds of
+        MB; without this the file outlived the process that created it. Best
+        effort and idempotent: a second call has nothing registered and does
+        nothing.
+        """
+        for path in list(self._paths):
+            if _remove_downloaded_file(path):
+                self._paths.pop(path, None)
+
+    def __contains__(self, path: object) -> bool:
+        return path in self._paths
+
+    def __len__(self) -> int:
+        return len(self._paths)
+
+
+_download_registry: contextvars.ContextVar[DownloadRegistry | None] = contextvars.ContextVar(
     "nextdns_download_registry", default=None
 )
 
@@ -84,10 +134,44 @@ _download_registry: contextvars.ContextVar[dict[str, None] | None] = contextvars
 MAX_RETAINED_DOWNLOADS = 8
 
 
-def _current_registry() -> dict[str, None]:
-    """The registry downloads register with now: the owning lifespan's, else the process-global."""
+def current_download_registry() -> DownloadRegistry:
+    """The registry downloads register with now.
+
+    Resolution order: a registry published with :func:`downloads_owned`, then
+    the resources of the FastMCP server serving this request.
+
+    Raises:
+        StateOwnershipError: When no registry owner is active. Server code
+            runs inside a server lifespan, which publishes one; standalone
+            callers must wrap the work in ``downloads_owned()``.
+    """
     owned = _download_registry.get()
-    return owned if owned is not None else _SUCCESSFUL_DOWNLOADS
+    if owned is None:
+        resources = request_resources()
+        if resources is not None:
+            owned = resources.downloads
+    if owned is None:
+        raise StateOwnershipError(
+            "No download registry owner is active in this context. Server code runs inside a "
+            "server lifespan, which publishes one; standalone callers must wrap the work in "
+            "`with logs_module.downloads_owned():`."
+        )
+    return owned
+
+
+@contextlib.contextmanager
+def downloads_owned(registry: DownloadRegistry | None = None) -> Iterator[DownloadRegistry]:
+    """Publish a download registry owner for the block (a standalone session).
+
+    Yields the registry so the caller can inspect it; cleanup stays the
+    caller's explicit decision via ``registry.cleanup()``.
+    """
+    owner = registry if registry is not None else DownloadRegistry()
+    token = _download_registry.set(owner)
+    try:
+        yield owner
+    finally:
+        _download_registry.reset(token)
 
 
 def _remove_downloaded_file(path: str) -> bool:
@@ -124,29 +208,29 @@ def cleanup_successful_downloads() -> None:
     does nothing. Because registration is per-lifespan, this reclaims only
     the calling server's own downloads.
     """
-    registry = _current_registry()
-    for path in list(registry):
-        if _remove_downloaded_file(path):
-            registry.pop(path, None)
+    current_download_registry().cleanup()
 
 
 def _note_successful_download(path: str, downloaded: bool) -> None:
-    """Register a fully-written CSV for lifespan reclaim; failures stay unregistered.
+    """Register a fully-written CSV with the owning registry; failures stay unregistered.
 
-    Registration is insertion-ordered, and past ``MAX_RETAINED_DOWNLOADS`` the
-    oldest CSV is evicted and unlinked, so disk use stays bounded across a
-    long server lifetime even when shutdown (the other reclaim point) is far
-    away or never comes (SIGKILL).
+    Outside any owner the file is reported untracked and left for the caller:
+    with no lifespan there is no reclaim point, and binding it to a
+    process-global registry would hand its lifetime to whatever server happens
+    to shut down next.
     """
     if not downloaded:
         return
-    registry = _current_registry()
-    registry[path] = None
-    while len(registry) > MAX_RETAINED_DOWNLOADS:
-        oldest = next(iter(registry))
-        if not _remove_downloaded_file(oldest):
-            break  # cannot evict: leave the overflow for shutdown reclaim rather than spin
-        registry.pop(oldest, None)
+    try:
+        registry = current_download_registry()
+    except StateOwnershipError:
+        logger.warning(
+            "A downloadLogs CSV has no owning download registry (no server lifespan is "
+            "active); the file is left for the caller: %s",
+            path,
+        )
+        return
+    registry.note(path, downloaded)
 
 
 # Caps for log downloads: the CSV is streamed to a temp file (never buffered
@@ -554,7 +638,7 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
 
 async def _stream_download_to_path(profile_id: str, path: str) -> dict[str, Any]:
     """Stream the log download for ``profile_id`` into ``path`` and return the payload."""
-    async with client.api_client.stream(
+    async with client.get_api_client().stream(
         "GET", f"/profiles/{profile_id}/logs/download", headers={"Accept-Encoding": "identity"}
     ) as initial:
         # A non-redirect response is written straight to disk;

@@ -4,7 +4,8 @@ SPDX-License-Identifier: MIT
 
 Every generated tool and every hand-written one that talks to the NextDNS API
 reaches it through this module. It owns exactly one thing: sending a request
-through ``client.api_client`` - the access-controlled client that enforces the
+through ``client.get_api_client()`` - the current owner's access-controlled
+client, which enforces the
 profile read/write allowlists, read-only mode and the protected-profile
 denylist - and turning every way a request can fail into the standardized
 payload shape the server documents (``errors.py``):
@@ -165,7 +166,7 @@ async def _api_request_json(
     handling below is the same on both paths.
     """
     response = (
-        await client.api_client.request(method, url, params=params, json=json_body)
+        await client.get_api_client().request(method, url, params=params, json=json_body)
         if max_response_bytes is None
         else await _request_capped(method, url, params, json_body, max_response_bytes)
     )
@@ -222,7 +223,7 @@ async def _request_capped(
     ``max_response_bytes`` passes, and a longer one is refused before the
     chunk that crosses the cap is ever appended.
     """
-    async with client.api_client.stream(method, url, params=params, json=json_body) as streamed:
+    async with client.get_api_client().stream(method, url, params=params, json=json_body) as streamed:
         body = bytearray()
         async for chunk in streamed.aiter_bytes():
             if len(body) + len(chunk) > max_response_bytes:

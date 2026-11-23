@@ -30,6 +30,17 @@ TRUNCATION_MARKER = "... [truncated]"
 _UNBOUNDED_STRUCTURED_FIELDS = frozenset({"code", "error", "status_code"})
 
 
+class StateOwnershipError(RuntimeError):
+    """State with an explicit owner was read or written with no owner active.
+
+    The process-global singletons this project replaced (the shared API
+    client, MCP server, DoH client, readiness cache, and download registry)
+    silently served any caller from any context. Their explicit owners keep
+    that convenience from creeping back as a hidden fallback: a read or write
+    outside an owner's scope fails loudly, naming how to publish one.
+    """
+
+
 # Typed error codes. These form a stable external contract: consumers branch on
 # the code, never on the free-form message. Add new codes here; do not reuse an
 # existing code for a different failure class.

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from nextdns_mcp import client as client_module
 from nextdns_mcp import transport
 from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
 from nextdns_mcp.config import configure_logging
@@ -28,6 +29,18 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> Callable[[str, str], None]:
     # Set minimal required env for the module to load
     monkeypatch.setenv("NEXTDNS_API_KEY", "test-key-12345")
     return monkeypatch.setenv
+
+
+@pytest.fixture(autouse=True)
+def owned_api_client() -> Iterator[None]:
+    """Publish an API-client owner: the client state is owner-scoped now (issue #642).
+
+    Tests here drive ``transport._api_request`` directly, outside any server
+    lifespan, so the owner is published explicitly; the lazy client builds
+    from this module's test environment.
+    """
+    with client_module.api_client_owned(client_module.ApiClientOwner()):
+        yield
 
 
 @pytest.fixture

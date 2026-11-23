@@ -28,7 +28,7 @@ import pytest
 from nextdns_mcp import client as client_module
 from nextdns_mcp import config
 from nextdns_mcp.client import AccessDeniedError
-from nextdns_mcp.errors import ErrorCode
+from nextdns_mcp.errors import ErrorCode, StateOwnershipError
 from nextdns_mcp.tools import logs as logs_module
 
 # example.com: an address Python's ipaddress module reports as globally routable.
@@ -155,6 +155,23 @@ def unauthenticated(monkeypatch):
         return client
 
     return _install
+
+
+@pytest.fixture
+def owned_api_client(monkeypatch):
+    """Build a context manager publishing an API-client owner around a fake.
+
+    The download path resolves the client through the current owner (issue
+    #642), so tests install the fake as the owner's lazy build instead of
+    patching the old module-level ``api_client`` attribute. Enter the context
+    around the download call: the owner is scoped to the calling context.
+    """
+
+    def _owner_publishing(fake):
+        monkeypatch.setattr(client_module, "create_nextdns_client", lambda: fake)
+        return client_module.api_client_owned(client_module.ApiClientOwner())
+
+    return _owner_publishing
 
 
 @pytest.fixture(autouse=True)
@@ -288,7 +305,6 @@ class TestUnauthenticatedFollowUp:
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         signed = "https://storage.example/file.csv?X-Amz-Signature=deadbeef"
         api = _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
-        monkeypatch.setattr(client_module, "api_client", api)
         follower = unauthenticated(
             [
                 _FakeResponse(signed, location="https://storage.example/second.csv"),
@@ -476,44 +492,61 @@ class TestDownloadTool:
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
 
-    async def test_a_redirect_is_followed_to_a_file(self, monkeypatch, unauthenticated):
+    async def test_a_redirect_is_followed_to_a_file(self, monkeypatch, unauthenticated, owned_api_client):
         signed = "https://storage.example/file.csv?Signature=deadbeef"
-        monkeypatch.setattr(
-            client_module,
-            "api_client",
-            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)]),
-        )
-        unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+        with owned_api_client(
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+        ):
+            unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
 
-        payload = await logs_module._download_logs_to_tempfile("abc123")
+            payload = await logs_module._download_logs_to_tempfile("abc123")
         assert payload["row_count"] == 2
         assert os.path.exists(payload["file_path"])
         assert payload["preview"]["text"].startswith("host,reason")
 
-    async def test_a_successful_download_is_reclaimed_at_shutdown(self, monkeypatch, unauthenticated):
-        """The kept CSV is bounded: the lifespan cleanup removes it and its dir.
+    async def test_a_successful_download_is_reclaimed_at_shutdown(self, monkeypatch, unauthenticated, owned_api_client):
+        """The kept CSV is bounded: the owning registry's cleanup removes it and its dir.
 
         The file must outlive the call (the caller reads the returned path),
-        so the reclaim point is server shutdown - without it, every successful
-        download accumulated for the life of the container.
+        so the reclaim point is the owning lifetime's end - without it, every
+        successful download accumulated for the life of the container. The
+        registry is explicit (issue #642): a standalone session owns one via
+        ``downloads_owned``, a server lifespan owns one per server.
         """
         signed = "https://storage.example/file.csv?Signature=deadbeef"
-        monkeypatch.setattr(
-            client_module,
-            "api_client",
-            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)]),
-        )
-        unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+        with owned_api_client(
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+        ):
+            unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
 
-        payload = await logs_module._download_logs_to_tempfile("abc123")
-        assert os.path.exists(payload["file_path"])
-        assert payload["file_path"] in logs_module._SUCCESSFUL_DOWNLOADS
-        logs_module.cleanup_successful_downloads()
+            with logs_module.downloads_owned() as registry:
+                payload = await logs_module._download_logs_to_tempfile("abc123")
+            assert os.path.exists(payload["file_path"])
+            assert payload["file_path"] in registry
+        registry.cleanup()
         assert not os.path.exists(payload["file_path"])
         assert not os.path.exists(os.path.dirname(payload["file_path"]))
-        logs_module.cleanup_successful_downloads()  # idempotent: nothing registered, nothing to do
+        registry.cleanup()  # idempotent: nothing registered, nothing to do
 
-    async def test_an_acl_denial_is_typed_and_leaves_no_temp_file(self, monkeypatch):
+    async def test_a_successful_download_without_an_owner_is_untracked(
+        self, monkeypatch, unauthenticated, owned_api_client
+    ):
+        """Outside any lifespan there is no reclaim point: the file is left for the caller."""
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        with owned_api_client(
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+        ):
+            unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert os.path.exists(payload["file_path"]), "the download itself must still succeed"
+        with pytest.raises(StateOwnershipError):
+            logs_module.cleanup_successful_downloads()
+        # The untracked file is the caller's to remove:
+        logs_module._remove_downloaded_file(payload["file_path"])
+
+    async def test_an_acl_denial_is_typed_and_leaves_no_temp_file(self, monkeypatch, owned_api_client):
         class Denied:
             def stream(self, method, url, **kwargs):
                 raise AccessDeniedError(
@@ -522,12 +555,12 @@ class TestDownloadTool:
                     profile_id="abc123",
                 )
 
-        monkeypatch.setattr(client_module, "api_client", Denied())
-        payload = await logs_module._download_logs_to_tempfile("abc123")
+        with owned_api_client(Denied()):
+            payload = await logs_module._download_logs_to_tempfile("abc123")
         assert payload["code"] == ErrorCode.READ_ACCESS_DENIED
         assert "Read access denied for profile: abc123" in payload["error"]
 
-    async def test_a_refused_redirect_leaves_no_temp_directory(self, monkeypatch, unauthenticated):
+    async def test_a_refused_redirect_leaves_no_temp_directory(self, monkeypatch, unauthenticated, owned_api_client):
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
 
         class Redirect:
@@ -536,13 +569,13 @@ class TestDownloadTool:
                     "https://api.nextdns.io/profiles/abc123/logs/download", location="https://169.254.169.254/x"
                 )
 
-        monkeypatch.setattr(client_module, "api_client", Redirect())
-        unauthenticated([])
-        payload = await logs_module._download_logs_to_tempfile("abc123")
+        with owned_api_client(Redirect()):
+            unauthenticated([])
+            payload = await logs_module._download_logs_to_tempfile("abc123")
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert "non-https" in payload["error"] or "non-public" in payload["error"]
 
-    async def test_a_size_cap_abort_reports_download_too_large(self, monkeypatch):
+    async def test_a_size_cap_abort_reports_download_too_large(self, monkeypatch, owned_api_client):
         monkeypatch.setenv("NEXTDNS_DOWNLOAD_MAX_BYTES", "10")
 
         class Stream:
@@ -551,24 +584,24 @@ class TestDownloadTool:
                     "https://api.nextdns.io/profiles/abc123/logs/download", chunks=["x" * 20, "y" * 20]
                 )
 
-        monkeypatch.setattr(client_module, "api_client", Stream())
-        payload = await logs_module._download_logs_to_tempfile("abc123")
+        with owned_api_client(Stream()):
+            payload = await logs_module._download_logs_to_tempfile("abc123")
         assert payload["code"] == ErrorCode.DOWNLOAD_TOO_LARGE
         assert "NEXTDNS_DOWNLOAD_MAX_BYTES" in payload["error"]
 
-    async def test_a_network_failure_at_the_api_reports_http_error(self, monkeypatch):
+    async def test_a_network_failure_at_the_api_reports_http_error(self, monkeypatch, owned_api_client):
         """An httpx failure on the NextDNS request keeps the documented http_error shape."""
 
         class Down:
             def stream(self, method, url, **kwargs):
                 raise httpx.ConnectError("connection refused")
 
-        monkeypatch.setattr(client_module, "api_client", Down())
-        payload = await logs_module._download_logs_to_tempfile("abc123")
+        with owned_api_client(Down()):
+            payload = await logs_module._download_logs_to_tempfile("abc123")
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert payload["status_code"] is None
 
-    async def test_the_temp_file_and_its_directory_are_removed_on_failure(self, monkeypatch):
+    async def test_the_temp_file_and_its_directory_are_removed_on_failure(self, monkeypatch, owned_api_client):
         """A failed download leaves neither a partial CSV nor an empty directory."""
         created: list[str] = []
         real_mkdtemp = __import__("tempfile").mkdtemp
@@ -584,8 +617,8 @@ class TestDownloadTool:
             def stream(self, method, url, **kwargs):
                 raise RuntimeError("upstream is down")
 
-        monkeypatch.setattr(client_module, "api_client", Boom())
-        payload = await logs_module._download_logs_to_tempfile("abc123")
+        with owned_api_client(Boom()):
+            payload = await logs_module._download_logs_to_tempfile("abc123")
         assert payload["code"] == ErrorCode.INTERNAL_ERROR
         assert created and not os.path.exists(created[0])
 
@@ -605,26 +638,26 @@ class TestStreamedFailureIsTyped:
     what upstream said without buffering an unbounded failure page.
     """
 
-    async def test_a_streaming_503_reports_the_typed_error_with_its_body(self, monkeypatch, unauthenticated):
+    async def test_a_streaming_503_reports_the_typed_error_with_its_body(
+        self, monkeypatch, unauthenticated, owned_api_client
+    ):
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
         signed = "https://storage.example/file.csv?Signature=deadbeef"
-        monkeypatch.setattr(
-            client_module,
-            "api_client",
-            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)]),
-        )
-        unauthenticated(
-            [
-                _FakeResponse(
-                    signed,
-                    status_code=503,
-                    chunks=['{"errors":[{"code":"serverError","detail":"upstream down"}]}'],
-                )
-            ]
-        )
+        with owned_api_client(
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+        ):
+            unauthenticated(
+                [
+                    _FakeResponse(
+                        signed,
+                        status_code=503,
+                        chunks=['{"errors":[{"code":"serverError","detail":"upstream down"}]}'],
+                    )
+                ]
+            )
 
-        payload = await logs_module._download_logs_to_tempfile("abc123")
+            payload = await logs_module._download_logs_to_tempfile("abc123")
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert payload["status_code"] == 503
         assert "upstream down" in payload.get("response_body", ""), "the error document must ride along"
@@ -652,20 +685,18 @@ class TestStreamedFailureIsTyped:
             await logs_module._raise_for_streamed_status(response)
         assert reads == [], "a consumed body must not be re-read"
 
-    async def test_the_error_body_read_is_bounded(self, monkeypatch, unauthenticated):
+    async def test_the_error_body_read_is_bounded(self, monkeypatch, unauthenticated, owned_api_client):
         """A hostile multi-megabyte failure page is read only up to the cap."""
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
         signed = "https://storage.example/file.csv?Signature=deadbeef"
-        monkeypatch.setattr(
-            client_module,
-            "api_client",
-            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)]),
-        )
-        huge = ["<html>" + ("x" * 5000), "x" * 5000 + "</html>"]
-        unauthenticated([_FakeResponse(signed, status_code=503, chunks=huge)])
+        with owned_api_client(
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+        ):
+            huge = ["<html>" + ("x" * 5000), "x" * 5000 + "</html>"]
+            unauthenticated([_FakeResponse(signed, status_code=503, chunks=huge)])
 
-        payload = await logs_module._download_logs_to_tempfile("abc123")
+            payload = await logs_module._download_logs_to_tempfile("abc123")
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert payload.get("response_body_truncated") is True
         assert len(payload.get("response_body", "")) <= logs_module.BODY_SLICE_BYTES + len(
@@ -997,54 +1028,47 @@ class TestSuccessfulDownloadLifecycle:
         logs_module._note_successful_download(str(path), True)
         return str(path)
 
-    def test_retention_is_bounded_by_evicting_the_oldest_download(self, tmp_path, monkeypatch):
+    def test_retention_is_bounded_by_evicting_the_oldest_download(self, tmp_path):
         """A long-lived server must not keep every CSV it ever handed out."""
-        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        cap = logs_module.MAX_RETAINED_DOWNLOADS
-        paths = [self._register(tmp_path, f"dl{i}") for i in range(cap + 2)]
-        # The two oldest were evicted and unlinked; the newest `cap` stay.
-        assert not (tmp_path / "dl0" / "download.csv").exists()
-        assert not (tmp_path / "dl1" / "download.csv").exists()
-        for tag in range(2, cap + 2):
-            assert (tmp_path / f"dl{tag}" / "download.csv").exists()
-        registered = logs_module._current_registry()
-        assert set(registered) == set(paths[2:])
-        logs_module.cleanup_successful_downloads()
-        assert logs_module._current_registry() == {}
+        with logs_module.downloads_owned() as registry:
+            cap = logs_module.MAX_RETAINED_DOWNLOADS
+            paths = [self._register(tmp_path, f"dl{i}") for i in range(cap + 2)]
+            # The two oldest were evicted and unlinked; the newest `cap` stay.
+            assert not (tmp_path / "dl0" / "download.csv").exists()
+            assert not (tmp_path / "dl1" / "download.csv").exists()
+            for tag in range(2, cap + 2):
+                assert (tmp_path / f"dl{tag}" / "download.csv").exists()
+            assert len(registry) == cap
+            assert all(path in registry for path in paths[2:])
+            logs_module.cleanup_successful_downloads()
+            assert len(registry) == 0
 
-    def test_a_failed_deletion_stays_registered_for_a_later_retry(self, tmp_path, monkeypatch, caplog):
+    def test_a_failed_deletion_stays_registered_for_a_later_retry(self, tmp_path, caplog):
         """The old cleanup popped each path BEFORE unlinking: one OSError and the
         CSV leaked forever with no record it had ever existed. A failed removal
         must keep the path registered so a later cleanup can retry it."""
-        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        blocker = tmp_path / "blocker"
-        blocker.mkdir()
-        blocked = str(blocker)  # a directory at the registered path: unlink fails with OSError
-        logs_module._note_successful_download(blocked, True)
-        gone = self._register(tmp_path, "gone")
+        with logs_module.downloads_owned() as registry:
+            blocker = tmp_path / "blocker"
+            blocker.mkdir()
+            blocked = str(blocker)  # a directory at the registered path: unlink fails with OSError
+            logs_module._note_successful_download(blocked, True)
+            gone = self._register(tmp_path, "gone")
 
-        with caplog.at_level("WARNING"):
-            logs_module.cleanup_successful_downloads()
+            with caplog.at_level("WARNING"):
+                logs_module.cleanup_successful_downloads()
 
-        assert "Failed to remove temp log file" in caplog.text
-        # The removable file was unregistered; the failed one is still registered.
-        registered = logs_module._current_registry()
-        assert blocked in registered
-        assert gone not in registered
+            assert "Failed to remove temp log file" in caplog.text
+            # The removable file was unregistered; the failed one is still registered.
+            assert blocked in registry
+            assert gone not in registry
 
-    def test_registration_goes_to_the_owning_lifespan_registry(self, tmp_path, monkeypatch):
-        """Outside a lifespan the process-global registry is the fallback."""
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        owned: dict[str, None] = {}
-        token = logs_module._download_registry.set(owned)
-        try:
+    def test_registration_goes_to_the_owning_registry(self, tmp_path):
+        """The owning registry is explicit: a standalone session owns one via downloads_owned."""
+        registry = logs_module.DownloadRegistry()
+        with logs_module.downloads_owned(registry):
             path = self._register(tmp_path, "owned")
-            assert owned == {path: None}
-            assert logs_module._SUCCESSFUL_DOWNLOADS == {}
-        finally:
-            logs_module._download_registry.reset(token)
+            assert path in registry
+            assert logs_module.current_download_registry() is registry
 
     def test_a_never_written_path_is_removed_without_a_trace(self, tmp_path):
         """FileNotFoundError means there is nothing to remove and nothing to report."""
@@ -1063,15 +1087,15 @@ class TestSuccessfulDownloadLifecycle:
         assert not registered.exists()
         assert parent.exists(), "a parent another file lives in must survive"
 
-    def test_an_unevictable_oldest_download_stops_the_eviction_sweep(self, tmp_path, monkeypatch):
+    def test_an_unevictable_oldest_download_stops_the_eviction_sweep(self, tmp_path):
         """When the oldest registered path cannot be unlinked, the sweep stops
         instead of spinning; the overflow stays registered for shutdown reclaim."""
-        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        blocker = tmp_path / "blocker"
-        blocker.mkdir()  # a directory: unlink fails with OSError, cannot be evicted
-        logs_module._note_successful_download(str(blocker), True)
-        survivors = [self._register(tmp_path, f"dl{i}") for i in range(logs_module.MAX_RETAINED_DOWNLOADS + 1)]
-        registered = logs_module._current_registry()
-        assert str(blocker) in registered, "the failed eviction must stay registered"
-        assert set(survivors) <= set(registered), "an unevictable oldest must stop the sweep, not drop the rest"
+        with logs_module.downloads_owned() as registry:
+            blocker = tmp_path / "blocker"
+            blocker.mkdir()  # a directory: unlink fails with OSError, cannot be evicted
+            logs_module._note_successful_download(str(blocker), True)
+            survivors = [self._register(tmp_path, f"dl{i}") for i in range(logs_module.MAX_RETAINED_DOWNLOADS + 1)]
+            assert str(blocker) in registry, "the failed eviction must stay registered"
+            assert all(survivor in registry for survivor in survivors), (
+                "an unevictable oldest must stop the sweep, not drop the rest"
+            )

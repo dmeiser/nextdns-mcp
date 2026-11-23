@@ -52,13 +52,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .call_log import CallLogMiddleware, call_log_path
-from .client import close_api_client, get_api_client
+from .client import ApiClientOwner, api_client_owner
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
 from .constants import SYNTHETIC_TOOL_NAMES
 from .spec_tools import endpoints_for_routes
+from .state import RESOURCES_LIFESPAN_KEY
 from .tool_search import CallToolShapeMiddleware, build_search_transform
-from .tools.doh import close_doh_client
-from .tools.logs import _download_registry, cleanup_successful_downloads
+from .tools.doh import DohClientOwner, doh_client_owner
+from .tools.logs import DownloadRegistry, _download_registry
 from .usage import server_instructions
 from .utils import _BARE_NEGATIVE_RE, _NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
@@ -101,17 +102,109 @@ class HealthFailure(NamedTuple):
     reason: str
 
 
-# Cached probe result as (monotonic timestamp, failure or None when healthy).
-_health_probe_cache: tuple[float, HealthFailure | None] | None = None
+# Cached probe result as (monotonic timestamp, failure or None when healthy),
+# held by the ReadinessProber that owns it: one prober per FastMCP server, so
+# the cache and the single-flight lock are per-server state, never process
+# globals two embedded servers would share.
 
-# Guards probe *construction*, not cache reads: concurrent ``/health`` pollers
-# that all miss an empty (or just-expired) cache used to each fire their own
-# upstream request - a thundering herd against the cheapest authenticated
-# endpoint, which is exactly what the TTL cache exists to prevent (the cache
-# bounds steady-state polling, not the simultaneous first miss). The lock
-# makes the probe single-flight: one request goes upstream, everyone else
-# waits on it and reads the filled cache.
-_health_probe_lock = asyncio.Lock()
+
+class ReadinessProber:
+    """Owns the ``/health`` readiness cache and single-flight lock for one server.
+
+    Explicit owner for the probe state that used to live in the module-global
+    ``_health_probe_cache`` singleton and its module-global lock. Each
+    ``FastMCP`` server gets its own prober when its ``/health`` route is
+    registered, so two servers embedded in one process keep independent
+    readiness state and never serialize each other's probes.
+    """
+
+    def __init__(self) -> None:
+        self._cache: tuple[float, HealthFailure | None] | None = None
+        # Guards probe *construction*, not cache reads: concurrent ``/health``
+        # pollers that all miss an empty (or just-expired) cache used to each
+        # fire their own upstream request - a thundering herd against the
+        # cheapest authenticated endpoint, which is exactly what the TTL cache
+        # exists to prevent (the cache bounds steady-state polling, not the
+        # simultaneous first miss). The lock makes the probe single-flight:
+        # one request goes upstream, everyone else waits on it and reads the
+        # filled cache.
+        self._lock = asyncio.Lock()
+
+    async def check(self, api_client: ApiClientOwner) -> HealthFailure | None:
+        """Return the readiness result, probing NextDNS at most once per cache window.
+
+        Single-flight: concurrent pollers that all miss an empty or expired
+        cache wait on the one in-flight probe instead of each issuing their
+        own (see ``self._lock``). A poller that arrives while a probe is
+        running returns that probe's result, not a stale or duplicate one.
+
+        Args:
+            api_client: The owner of the API client the probe sends through.
+
+        Returns:
+            None when the configured credentials work against NextDNS,
+            otherwise a HealthFailure describing why the service is not ready.
+        """
+        fresh, failure = self._cached()
+        if fresh:
+            logger.debug("Reusing cached /health readiness result")
+            return failure
+
+        async with self._lock:
+            fresh, failure = self._cached()
+            if fresh:
+                logger.debug("Reusing /health readiness result filled by a concurrent probe")
+                return failure
+            failure = await self._probe(api_client)
+            self._cache = (time.monotonic(), failure)
+            return failure
+
+    def _cached(self) -> tuple[bool, HealthFailure | None]:
+        """Whether the cached probe result is still valid, and what it said.
+
+        ``(fresh, failure)``; ``failure`` is the cached result (``None``
+        meaning *proven healthy*) only when ``fresh`` is True.
+        """
+        cached = self._cache
+        if cached is None or time.monotonic() - cached[0] >= HEALTH_CACHE_TTL:
+            return False, None
+        return True, cached[1]
+
+    async def _probe(self, api_client: ApiClientOwner) -> HealthFailure | None:
+        """Probe the NextDNS API once with the configured credentials.
+
+        The request goes through the client's RAW transport (``raw_request``),
+        which bypasses profile access control: a local ACL denial must not
+        mask the true upstream authentication state. Only the status code and
+        the exception type name are reported, never the API key, the auth
+        headers, or the response body.
+
+        Args:
+            api_client: The owner of the API client the probe sends through.
+
+        Returns:
+            None when NextDNS accepted the credentials, otherwise a
+            HealthFailure.
+        """
+        try:
+            client = api_client.get()
+            response = await client.raw_request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
+        except ConfigurationError:
+            return _configuration_failure()
+        except httpx.TimeoutException:
+            return HealthFailure(
+                HEALTH_FAILURE_UNREACHABLE,
+                f"NextDNS API did not respond within {HEALTH_PROBE_TIMEOUT:g}s",
+            )
+        except httpx.HTTPError as exc:
+            return HealthFailure(
+                HEALTH_FAILURE_UNREACHABLE,
+                f"Could not reach the NextDNS API ({type(exc).__name__})",
+            )
+
+        if response.is_success:
+            return None
+        return _probe_status_failure(response)
 
 
 def _tool_property_names(tool: Any) -> list[str]:
@@ -573,34 +666,85 @@ class StripExtraFieldsMiddleware(Middleware):
         )
 
 
+class ServerResources:
+    """One server instance's explicitly owned state.
+
+    Owns the API client owner, DoH client owner, and download registry a
+    server serves: the state that used to live in process-global module
+    singletons any caller could reach. ``create_mcp_server()`` builds one per
+    ``FastMCP`` instance and attaches it to the instance, so two embedded
+    servers never read or reset each other's state. :meth:`aclose` closes the
+    clients and reclaims the downloads - one server's shutdown cannot reach
+    into a sibling server's connections or tracked CSVs.
+    """
+
+    def __init__(self) -> None:
+        self.api_client = ApiClientOwner()
+        self.doh_client = DohClientOwner()
+        self.downloads = DownloadRegistry()
+
+    async def aclose(self) -> None:
+        """Release everything this server owns: clients first, then the downloads.
+
+        Matches the shutdown order the lifespan has always used: close the
+        API client even when the DoH close or the download cleanup fails, and
+        never leave this server's tracked CSVs behind.
+        """
+        try:
+            await self.api_client.aclose()
+        finally:
+            await self.doh_client.aclose()
+            self.downloads.cleanup()
+
+
+def _server_resources(mcp: FastMCP) -> ServerResources:
+    """The resources attached to this FastMCP instance at creation.
+
+    Raises:
+        RuntimeError: When the instance carries no resources - every server
+            this package creates attaches them in ``create_mcp_server``.
+    """
+    resources = getattr(mcp, "_nextdns_resources", None)
+    if resources is None:
+        raise RuntimeError("FastMCP instance carries no nextdns_mcp ServerResources")
+    return resources
+
+
 @asynccontextmanager
 async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """Manage server lifespan: clients on shutdown, and the downloads they left (issue #277)."""
-    # Own the downloads THIS server hands out: registration goes through the
-    # context var (see nextdns_mcp.tools.logs), so shutdown below reclaims only
-    # this lifespan's registry. The registries used to be one process-global
-    # set that every embedded server's lifespan emptied, deleting a live
-    # sibling server's tracked CSVs mid-read.
-    owned_downloads: dict[str, None] = {}
-    registry_token = _download_registry.set(owned_downloads)
+    """Manage server lifespan: own the server's state explicitly, release it on shutdown.
+
+    Own the state THIS server hands out: the API client, DoH client, and
+    download registry attached to the instance by ``create_mcp_server``. The
+    lifespan publishes them two ways, both explicit: into each module's owner
+    context var for same-task callers, and into the lifespan context FastMCP
+    hands every request this server serves (issue #642: the lifespan task
+    does not propagate context variables into request tasks, so the lifespan
+    context is the only channel served traffic can resolve owners through).
+    A second embedded server owns its own resources, so one server's shutdown
+    closes only its own clients and reclaims only its own downloads
+    (issues #277, #642). The state used to be process-global singletons that
+    every embedded server's lifespan emptied or closed, killing a live
+    sibling's connections and deleting its tracked CSVs mid-read.
+    """
+    resources = _server_resources(server)
+    api_token = api_client_owner.set(resources.api_client)
+    doh_token = doh_client_owner.set(resources.doh_client)
+    registry_token = _download_registry.set(resources.downloads)
     try:
-        yield {}
+        yield {RESOURCES_LIFESPAN_KEY: resources}
     finally:
         try:
-            await close_api_client()
+            await resources.aclose()
         finally:
-            await close_doh_client()
             # The lazily-started Pyodide/Deno sandbox subprocess (issue #408) is
             # stopped by NextDNSGenerativeUI.lifespan(), which FastMCP unwinds
             # before this lifespan: this module has no dependency on the optional
             # generative module, and one server's shutdown no longer reaches into
             # its siblings' sandboxes (issue #542).
-            # Successful downloadLogs CSVs are kept after their call (the caller
-            # reads the path post-call); shutdown is the first safe reclaim point.
-            # The context var still names this lifespan's registry, so only this
-            # server's downloads are reclaimed - then the var is released.
-            cleanup_successful_downloads()
             _download_registry.reset(registry_token)
+            doh_client_owner.reset(doh_token)
+            api_client_owner.reset(api_token)
 
 
 def create_mcp_server(
@@ -611,8 +755,11 @@ def create_mcp_server(
 
     The tools themselves are registered by ``src/nextdns_mcp/server.py`` — the
     generated ones and the three composite operations. What happens here is the machinery
-    around them: disclosure, argument relaxation, the call log, and the health
-    endpoint.
+    around them: disclosure, argument relaxation, the call log, the health
+    endpoint, and ownership of the server's long-lived state — one
+    ``ServerResources`` (the API client, DoH client, and download registry)
+    is built here and attached to the instance, so every server owns its state
+    explicitly and embedded servers never share it.
 
         Args:
         tool_names: The names of the tools registered after this call, so the
@@ -636,6 +783,7 @@ def create_mcp_server(
     _add_call_log_middleware(mcp, endpoints)
 
     logger.info("MCP server created successfully")
+    mcp._nextdns_resources = ServerResources()  # type: ignore[attr-defined]
     default_profile = get_default_profile()
     if default_profile:
         logger.info(f"Default profile: {default_profile}")
@@ -720,15 +868,19 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
     ``HEALTH_CACHE_TTL`` seconds so a polling load balancer cannot hammer the
     API. The route is registered with FastMCP's ``custom_route`` so it is served
     alongside the ``/mcp`` streamable-HTTP endpoint; in stdio mode there is no
-    HTTP surface, so the route is simply not reachable.
+    HTTP surface, so the route is simply not reachable. The prober - the
+    route's TTL cache and single-flight lock - is owned here, per server, so
+    two embedded servers never share readiness state. The probe sends through
+    the API client owner this server instance owns.
 
     Args:
         mcp: The FastMCP server to attach the route to.
     """
+    prober = ReadinessProber()
 
     async def health_check(_request: Request) -> JSONResponse:
         """Report NextDNS API readiness as measured by a live credential probe."""
-        failure = await check_nextdns_readiness()
+        failure = await prober.check(_server_resources(mcp).api_client)
         if failure is None:
             return JSONResponse({"status": "ok"})
         return JSONResponse(
@@ -756,80 +908,6 @@ def _register_compat_endpoints(mcp: FastMCP) -> None:
         return JSONResponse({"object": "list", "data": []})
 
     mcp.custom_route("/v1/models", methods=["GET"])(v1_models)
-
-
-def _cached_readiness() -> tuple[bool, HealthFailure | None]:
-    """Whether the cached probe result is still valid, and what it said.
-
-    ``(fresh, failure)``; ``failure`` is the cached result (``None`` meaning
-    *proven healthy*) only when ``fresh`` is True.
-    """
-    cached = _health_probe_cache
-    if cached is None or time.monotonic() - cached[0] >= HEALTH_CACHE_TTL:
-        return False, None
-    return True, cached[1]
-
-
-async def check_nextdns_readiness() -> HealthFailure | None:
-    """Return the readiness result, probing NextDNS at most once per cache window.
-
-    Single-flight: concurrent pollers that all miss an empty or expired cache
-    wait on the one in-flight probe instead of each issuing their own (see
-    ``_health_probe_lock``). A poller that arrives while a probe is running
-    returns that probe's result, not a stale or duplicate one.
-
-    Returns:
-        None when the configured credentials work against NextDNS, otherwise a
-        HealthFailure describing why the service is not ready.
-    """
-    global _health_probe_cache
-
-    fresh, failure = _cached_readiness()
-    if fresh:
-        logger.debug("Reusing cached /health readiness result")
-        return failure
-
-    async with _health_probe_lock:
-        fresh, failure = _cached_readiness()
-        if fresh:
-            logger.debug("Reusing /health readiness result filled by a concurrent probe")
-            return failure
-        failure = await _run_health_probe()
-        _health_probe_cache = (time.monotonic(), failure)
-        return failure
-
-
-async def _run_health_probe() -> HealthFailure | None:
-    """Probe the NextDNS API once with the configured credentials.
-
-    The request goes through the client's RAW transport (``raw_request``), which
-    bypasses profile access control: a local ACL denial must not mask the true
-    upstream authentication state. Only the status code and the exception type
-    name are reported, never the API key, the auth headers, or the response
-    body.
-
-    Returns:
-        None when NextDNS accepted the credentials, otherwise a HealthFailure.
-    """
-    try:
-        client = get_api_client()
-        response = await client.raw_request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
-    except ConfigurationError:
-        return _configuration_failure()
-    except httpx.TimeoutException:
-        return HealthFailure(
-            HEALTH_FAILURE_UNREACHABLE,
-            f"NextDNS API did not respond within {HEALTH_PROBE_TIMEOUT:g}s",
-        )
-    except httpx.HTTPError as exc:
-        return HealthFailure(
-            HEALTH_FAILURE_UNREACHABLE,
-            f"Could not reach the NextDNS API ({type(exc).__name__})",
-        )
-
-    if response.is_success:
-        return None
-    return _probe_status_failure(response)
 
 
 def _configuration_failure() -> HealthFailure:

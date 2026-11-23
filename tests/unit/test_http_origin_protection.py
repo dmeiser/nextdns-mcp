@@ -37,14 +37,16 @@ print(f"rebinding={status}")
 
 @pytest.fixture
 def build_app(monkeypatch):
-    """Return a builder for the ASGI app ``configure()`` produces."""
+    """Return a builder for the ASGI app ``configure()`` produces.
+
+    Each build publishes its own ``McpServerOwner``, so every caller gets an
+    independent server even though ``configure()`` caches per owner.
+    """
     from nextdns_mcp import server
 
-    monkeypatch.setattr(server, "_mcp_server", None)
-
     def build(**kwargs):
-        server.configure()
-        return server.get_mcp_server().http_app(transport="http", path=MCP_ENDPOINT, **kwargs)
+        with server.mcp_server_owned(server.McpServerOwner()):
+            return server.configure().http_app(transport="http", path=MCP_ENDPOINT, **kwargs)
 
     return build
 
