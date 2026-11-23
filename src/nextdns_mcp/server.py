@@ -7,8 +7,9 @@ import inspect
 import logging
 import os
 import sys
+from collections.abc import Callable
 from functools import wraps
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastmcp import FastMCP
 from fastmcp.tools.base import ToolResult
@@ -48,13 +49,28 @@ from .transport import is_error_payload
 
 logger = logging.getLogger(__name__)
 
+
 # Operations the server performs itself instead of calling one API endpoint for:
 # `dohLookup` resolves a name through a DNS-over-HTTPS resolver, and `plotAnalytics`
 # alongside `overviewDashboard` render interactive Prefab UI views from analytics queries.
+class _CompositeTool(NamedTuple):
+    """One composite operation, and the FastMCP `app` flag it is registered with.
+
+    `app` is handed straight to ``FastMCP.tool(app=...)``: ``True`` publishes the tool
+    as an interactive app, so its Prefab UI view reaches the caller beside the payload;
+    ``None`` keeps it a plain request/response tool. It is named per entry rather than
+    left to a positional slot so the difference between the chart and the lookup is
+    readable where the catalog is declared.
+    """
+
+    tool: Callable[..., Any]
+    app: bool | None
+
+
 _COMPOSITE_TOOLS = (
-    (plotAnalytics, True),
-    (dohLookup, None),
-    (overviewDashboard, True),
+    _CompositeTool(plotAnalytics, app=True),
+    _CompositeTool(dohLookup, app=None),
+    _CompositeTool(overviewDashboard, app=True),
 )
 
 # None of the composite tools mutate anything: dohLookup answers a DNS question and
@@ -97,7 +113,11 @@ def published_tool_names() -> list[str]:
     the server is constructed — before the tools exist — so the names have to be
     derivable without registering anything.
     """
-    names = [*spec_tool_names(), *(tool.__name__ for tool, _ in _COMPOSITE_TOOLS), *enabled_generative_ui_tool_names()]
+    names = [
+        *spec_tool_names(),
+        *(composite.tool.__name__ for composite in _COMPOSITE_TOOLS),
+        *enabled_generative_ui_tool_names(),
+    ]
     return names
 
 
@@ -121,16 +141,16 @@ def build_mcp_server() -> FastMCP:
     routes = spec_routes()
     server = create_mcp_server(tool_names=published_tool_names(), endpoints=endpoints_for_routes(routes))
     register_spec_tools(server, routes)
-    for tool, app_enabled in _COMPOSITE_TOOLS:
+    for composite in _COMPOSITE_TOOLS:
         # FastMCP publishes only the first text section of a docstring as the tool
         # description, so the accepted values and the worked example further down
         # would never reach a caller — and for these three tools that is exactly the
         # part a caller needs (a chart's interval range, a lookup's record types).
         server.tool(
-            description=inspect.getdoc(tool) or "",
+            description=inspect.getdoc(composite.tool) or "",
             annotations=_COMPOSITE_ANNOTATIONS,
-            app=app_enabled,
-        )(_with_error_flag(tool))
+            app=composite.app,
+        )(_with_error_flag(composite.tool))
     register_generative_ui_provider(server)
     return server
 
