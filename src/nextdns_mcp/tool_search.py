@@ -259,14 +259,22 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         fallback (every tool, reads first) is held to SEARCH_FALLBACK_MAX_BYTES
         and must contain every catalog entry - a fallback that dropped entries
         silently taught the caller the catalog was smaller than it is.
-        Each kept entry is a shallow copy: the cached dict is never handed to a
-        caller, so nothing downstream can mutate the cache through an answer.
+        The answer is a fresh LIST per render, so a caller that reorders,
+        replaces, or clears the answer it holds cannot change the next one. Its
+        entries are the cached payloads themselves. The cache is read-only by
+        convention, not by enforcement: nothing on the mounted path writes to
+        an answer - FastMCP serializes the returned list straight to the wire,
+        so every client receives its own decoded copy - but an in-process
+        caller that edits a returned entry writes into the cache, and the write
+        is visible to later answers for that tool. That is the same boundary
+        the compacted payload already had one level down, where `inputSchema`
+        is the cache's own object either way; the per-entry shallow copy this
+        replaced paid a dict per kept entry per answer to fence only the top
+        level of it.
         """
         budget = SEARCH_FALLBACK_MAX_BYTES if _fallback_answer.get() else SEARCH_ANSWER_MAX_BYTES
         try:
-            return [
-                dict(dumped) for dumped in _budget_results([self._cached_compaction(tool) for tool in tools], budget)
-            ]
+            return _budget_results([self._cached_compaction(tool) for tool in tools], budget)
         finally:
             _fallback_answer.set(False)
 
@@ -278,6 +286,12 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         registered once at startup; a re-registered tool is a fresh instance
         with a fresh entry, and the old entry - never hit again - lives until
         the process does. Same static-catalog assumption as the word memo.
+
+        What an answer receives is the cached payload dict itself, handed out
+        as-is. The cache is read-only by convention, not enforcement: nothing
+        in this module writes to a payload after it is built, and isolation
+        for callers is guaranteed at the wire, not inside the process (see
+        _serialize_results for the boundary an in-process write crosses).
         """
         cached = self._compacted_cache.get(id(tool))
         if cached is None:

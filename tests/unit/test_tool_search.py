@@ -475,6 +475,32 @@ class TestToolSearchServerWiring:
             tool = await server.get_tool("addToDenylist")
             assert tool is not None
 
+    @pytest.mark.asyncio
+    async def test_the_answer_on_the_wire_is_never_the_cached_payload(self, monkeypatch):
+        """A warm render hands out its cached payloads, so the wire must not.
+
+        FastMCP copies the answer on its way to the client, which is what keeps a
+        caller that edits the answer it holds from poisoning every later answer
+        for that tool. A FastMCP bump that passed our own objects through to the
+        caller fails here instead of corrupting the cache silently.
+        """
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        server = build_mcp_server()
+        transform = next(t for t in server._transforms if isinstance(t, ts.FallbackBM25SearchTransform))
+        async with Client(server) as client:
+            first = await client.call_tool("search_tools", {"query": "addToDenylist"}, raise_on_error=False)
+            names = [t["name"] for t in first.data]
+            cached = {id(payload) for payload, _ in (v[1:] for v in transform._compacted_cache.values())}
+            assert names and not any(id(t) in cached for t in first.data)
+            for entry in first.data:
+                entry["name"] = "mutated-through-the-answer"
+                entry["inputSchema"] = {}
+            second = await client.call_tool("search_tools", {"query": "addToDenylist"}, raise_on_error=False)
+        assert [t["name"] for t in second.data] == names
+
 
 class TestSearchFallback:
     """Empty-result fallback: guessed-name queries still surface the catalog."""
@@ -1194,17 +1220,43 @@ class TestMemoizedCatalogStructures:
             assert transform._catalog_words(list(tools)) is first
         assert sorts == 0
 
-    async def test_compacted_results_are_cached_but_handed_out_as_copies(self):
-        """The cache is never handed out by reference; a caller cannot mutate it."""
+    async def test_repeated_renders_copy_no_entry_out_of_the_cache(self):
+        """A warm render rebuilds the answer list, never its entries.
+
+        The identity check is what fails if a render starts copying each kept
+        entry again; the encoded answer has to stay what it was, so the entry is
+        compared as the caller reads it.
+        """
         from fastmcp.tools.base import Tool
 
         transform = ts.FallbackBM25SearchTransform(endpoints={})
         tool = Tool.from_function(lambda: None, name="aTool", description="does a thing")
         first = await transform._render_results([tool])
-        first[0]["name"] = "mutated-through-the-answer"
         second = await transform._render_results([tool])
-        assert [t["name"] for t in second] == ["aTool"]
-        assert second[0] is not first[0]
+        assert second[0] is first[0]
+        assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+    async def test_the_answer_list_belongs_to_the_caller_that_received_it(self):
+        """Editing or clearing one answer cannot change the next one.
+
+        The caller owns the list; the entries are the cache's. A render that
+        handed back a memoized list would let one caller's edit outlive its own
+        answer, which is what the fresh list in _serialize_results prevents.
+        """
+        from fastmcp.tools.base import Tool
+
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        tools = [
+            Tool.from_function(lambda: None, name="aTool", description="does a thing"),
+            Tool.from_function(lambda: None, name="bTool", description="does another thing"),
+        ]
+        answer = await transform._render_results(tools)
+        answer[0] = {"name": "not-a-tool"}
+        answer.append({"name": "injected"})
+        del answer[1]
+        answer.clear()
+        assert [t["name"] for t in await transform._render_results(tools)] == ["aTool", "bTool"]
+        assert answer == []
 
     def test_synthetic_tools_are_built_once(self):
         """FastMCP rebuilds them per listing; they are constants of the transform."""
@@ -1257,6 +1309,28 @@ class TestAnswerByteBudget:
         huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
         small = Tool.from_function(lambda: None, name="smallOne", description="b")
         assert [result["name"] for result in ts._compact_search_results([huge, small])] == ["hugeOne"]
+
+    async def test_the_cached_render_encodes_what_the_uncached_reference_encodes(self):
+        """The memoized serializer must not drift from the uncached one, in either mode.
+
+        Both budgets are exercised: the ranked answer under the 8 KB ceiling and
+        the full-catalog fallback under its own. Entry sets are compared as
+        encoded JSON, since the ranked path re-orders what it keeps.
+        """
+        from fastmcp.tools.base import Tool
+
+        def encoded(answer: list[dict[str, object]]) -> list[str]:
+            return sorted(json.dumps(entry, sort_keys=True) for entry in answer)
+
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        tools = [
+            Tool.from_function(lambda: None, name="listProfiles", description="List the profiles on the account."),
+            Tool.from_function(lambda: None, name="getDenylist", description="Read the denylist entries of a profile."),
+        ]
+        expected = encoded(ts._compact_search_results(tools))
+        assert encoded(await transform._render_results(tools)) == expected
+        assert encoded(await transform._render_results(await transform._search(tools, "profile"))) == expected
+        assert encoded(await transform._render_results(await transform._search(tools, "zzz unmatchable"))) == expected
 
 
 class TestMultiEntryAnswerWriteGate:
