@@ -1127,6 +1127,13 @@ def test_sandbox_deno_dir_does_not_accumulate_across_restarts(isolated_sandbox_d
     assert not sandbox_dir.exists()
 
 
+def test_drop_sandbox_deno_dir_without_a_created_cache_is_a_noop(isolated_sandbox_deno_dir):
+    """The exit hook must tolerate a cache that was never created (e.g. no sandbox ran)."""
+    from nextdns_mcp import generative
+
+    generative._drop_sandbox_deno_dir()  # must not raise when the cache is absent
+
+
 def test_sandbox_startup_env_relocates_deno_cache(isolated_sandbox_deno_dir, monkeypatch):
     """DENO_DIR points at the sandbox cache dir so the wheel cache lands inside the only writable path."""
     from nextdns_mcp import generative
