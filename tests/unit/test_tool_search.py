@@ -1017,6 +1017,28 @@ class TestUnknownNameReusesTheCatalogsWordData:
         by_name = {tool.name: tool for tool in tools}
         assert ts._resolved_entry("plotAnalytics", by_name) == ("plotAnalytics", by_name["plotAnalytics"])
 
+    def test_the_unmemoized_fallback_normalizes_each_candidate_once(self, tools, work_counts):
+        """Direct callers without a catalog keep the linear O(catalog) contract.
+
+        The hoisted lookup must not rebuild per comprehension iteration: on
+        the fallback path each candidate is flat-normalized once and
+        tokenized once, whatever the catalog size.
+        """
+        from collections import Counter
+
+        counts, normalized = work_counts
+        names = [tool.name for tool in tools]
+
+        assert ts._match_tool_name("generate analytics plot", names) == ""
+
+        per_candidate = Counter(text for text in normalized if text in set(names))
+        assert per_candidate == Counter({"getDenylist": 2, "plotAnalytics": 2})
+        # The fallback builds just the two comparison dicts — no ranking-data
+        # rebuild at all.
+        assert counts["_catalog_words_for"] == 0
+        assert counts["_name_words"] == 0
+        assert counts["_vocabulary_words"] == 0
+
     async def test_the_real_server_builds_the_data_once_across_unknown_calls(self, monkeypatch):
         """End to end on the built server: two unknown calls, one catalog build."""
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")

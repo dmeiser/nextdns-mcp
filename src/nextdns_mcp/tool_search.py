@@ -541,7 +541,8 @@ def _flat_equal_matches(name: str, names: Sequence[str], catalog: _CatalogWords 
     memo each candidate is normalized here.
     """
     flat = _flat_key(name)
-    return [candidate for candidate in names if _flat_name_keys(names, catalog).get(candidate) == flat]
+    flat_keys = _flat_name_keys(names, catalog)
+    return [candidate for candidate in names if flat_keys.get(candidate) == flat]
 
 
 def _word_equal_matches(name: str, names: Sequence[str], catalog: _CatalogWords | None = None) -> list[str]:
@@ -552,7 +553,8 @@ def _word_equal_matches(name: str, names: Sequence[str], catalog: _CatalogWords 
     tokenized here.
     """
     words = _words(name)
-    return [candidate for candidate in names if _name_word_sets(names, catalog).get(candidate) == words]
+    word_sets = _name_word_sets(names, catalog)
+    return [candidate for candidate in names if word_sets.get(candidate) == words]
 
 
 def _match_tool_name(name: str, names: Sequence[str], catalog: _CatalogWords | None = None) -> str:
