@@ -15,9 +15,11 @@ SPDX-License-Identifier: MIT
 """
 
 import asyncio
+import io
 import ipaddress
 import os
 import socket
+import tempfile
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -506,12 +508,10 @@ class _HoldingSink:
     def release(self) -> None:
         self._released.set()
 
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        if self._file is not None:
-            self._file.close()
+    def close(self) -> None:
+        # Production closes the handle on the worker pool, so the sink is closed
+        # through here rather than by leaving a ``with`` block.
+        self._file.close()
 
 
 class _LoopStallWatcher:
@@ -578,6 +578,192 @@ class TestDiskWritesDoNotStallTheLoop:
         # Offloading the write changes when bytes land, not which bytes land.
         assert payload["row_count"] == 3
         assert Path(path).read_text(encoding="utf-8") == "".join(chunks)
+
+
+# The buffer is smaller than the first chunk on purpose: a chunk larger than the
+# buffer is written straight at the raw layer, and that is the only state in
+# which the buffered writer still owns its lock across a blocking write - the
+# state a cancellation catches it in, and the reason close() has to wait.
+_SINK_BUFFER_BYTES = 8192
+_SINK_CHUNK_BYTES = 4 * _SINK_BUFFER_BYTES
+
+
+class _BlockingRawSink(io.RawIOBase):
+    """A raw file over the real fd whose first write waits to be released.
+
+    It sits under a real ``io.BufferedWriter``, so a write in progress holds the
+    buffered writer's lock exactly as a real one does; nothing here fakes the
+    lock, it only delays the syscall underneath it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._fd: int | None = None
+        self.chunks = [b"x" * _SINK_CHUNK_BYTES, b"y" * _SINK_CHUNK_BYTES]
+        self.raw_write_started = threading.Event()
+        self._released = threading.Event()
+
+    def open_over(self, fd: int, *args: Any, **kwargs: Any) -> io.BufferedWriter:
+        self._fd = fd
+        return io.BufferedWriter(self, buffer_size=_SINK_BUFFER_BYTES)
+
+    def writable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return False
+
+    def write(self, view: memoryview) -> int:
+        if not self.raw_write_started.is_set():
+            self.raw_write_started.set()
+            self._released.wait(_RELEASE_SECONDS)
+        assert self._fd is not None
+        return os.write(self._fd, view)
+
+    def release(self) -> None:
+        self._released.set()
+
+    def close(self) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        super().close()
+
+
+class _CancellationWatcher:
+    """Asks for the cancellation off the loop, then records whether the loop survived it.
+
+    Both halves happen in a thread because a blocked loop runs nothing
+    scheduled on it: a watcher written as a coroutine would be frozen along with
+    the loop it measures, and the check would hang rather than fail.
+    """
+
+    def __init__(
+        self,
+        sink: _BlockingRawSink,
+        cancel_requested: threading.Event,
+        loop_progress: threading.Event,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._sink = sink
+        self._cancel_requested = cancel_requested
+        self._loop_progress = loop_progress
+        self._loop = loop
+        self._task: asyncio.Task[Any] | None = None
+        self.loop_stayed_free = False
+        self.note = ""
+
+    def attach(self, task: asyncio.Task[Any]) -> None:
+        self._task = task
+
+    def run(self) -> None:
+        if not self._sink.raw_write_started.wait(_WRITE_START_SECONDS):
+            self.note = "the download never reached a write below the buffer"
+            self._sink.release()
+            return
+        if self._task is not None:
+            self._loop.call_soon_threadsafe(self._task.cancel)
+        self._cancel_requested.set()
+        self.loop_stayed_free = self._loop_progress.wait(_PROGRESS_SECONDS)
+        if not self.loop_stayed_free:
+            self.note = "the loop stayed frozen from the cancel until the in-flight write was released"
+        self._sink.release()
+
+
+async def _progress_after(cancel_requested: threading.Event, done: threading.Event) -> None:
+    """The next request this server would serve, held back until the cancel is queued.
+
+    Waiting for the queueing rather than starting at the top of the download is
+    the point: a coroutine that finished before the cancellation was requested
+    says nothing about the unwinding path, and that is where the stall is.
+    """
+    while not cancel_requested.is_set():
+        await asyncio.sleep(0.01)
+    done.set()
+
+
+class TestCancellationDuringAWrite:
+    """Cancelling a download while a write is in flight must not stall the loop either.
+
+    Cancellation unwinds the file's close, and close needs the buffered writer's
+    lock that the in-flight write is holding. A close taken on the loop waits
+    for that lock there, which stops every other request for the rest of the
+    write - the same failure mode the write offload removed, arriving by a
+    different route. So the check has two halves: the loop keeps running, and
+    the cancellation still reaches the caller and removes the partial CSV and
+    its directory.
+    """
+
+    async def test_cancelling_during_a_raw_write_keeps_the_loop_running(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "download.csv")
+        sink = _BlockingRawSink()
+        monkeypatch.setattr(logs_module.os, "fdopen", sink.open_over)
+
+        loop = asyncio.get_running_loop()
+        cancel_requested = threading.Event()
+        loop_progress = threading.Event()
+        watcher = _CancellationWatcher(sink, cancel_requested, loop_progress, loop)
+        download = asyncio.create_task(
+            logs_module._write_stream_to_tempfile(_FakeResponse("https://x/f.csv", chunks=sink.chunks), path)
+        )
+        other = asyncio.create_task(_progress_after(cancel_requested, loop_progress))
+        watcher.attach(download)
+        thread = threading.Thread(target=watcher.run, name="cancellation-watcher", daemon=True)
+        thread.start()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await download
+            await other
+        finally:
+            thread.join(_WRITE_START_SECONDS + _RELEASE_SECONDS)
+
+        assert watcher.loop_stayed_free, watcher.note
+
+    async def test_a_cancelled_download_leaves_no_partial_file_and_no_directory(self, monkeypatch):
+        """The caller's cleanup guard still runs when the download is cancelled mid-write."""
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            return made
+
+        sink = _BlockingRawSink()
+        monkeypatch.setattr(logs_module.os, "fdopen", sink.open_over)
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        # ``api_client`` is a lazy attribute that refuses to resolve without a
+        # key, and replacing it reads the current value, so the key comes first.
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.setattr(
+            client_module,
+            "api_client",
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", chunks=sink.chunks)]),
+        )
+
+        loop = asyncio.get_running_loop()
+        cancel_requested = threading.Event()
+        loop_progress = threading.Event()
+        watcher = _CancellationWatcher(sink, cancel_requested, loop_progress, loop)
+        download = asyncio.create_task(logs_module._download_logs_to_tempfile("abc123"))
+        other = asyncio.create_task(_progress_after(cancel_requested, loop_progress))
+        watcher.attach(download)
+        thread = threading.Thread(target=watcher.run, name="cancellation-watcher", daemon=True)
+        thread.start()
+        try:
+            # The caller's handlers never see a cancelled task, so nothing is
+            # returned here: the task raises and its guard runs in ``finally``.
+            await download
+        except asyncio.CancelledError:
+            pass
+        finally:
+            thread.join(_WRITE_START_SECONDS + _RELEASE_SECONDS)
+            await other
+
+        assert watcher.loop_stayed_free, watcher.note
+        assert created, "no temp directory was created, so the cleanup claim is unproven"
+        assert not os.path.exists(created[0]), f"the cancelled download left {created[0]} behind"
 
 
 class TestDownloadTool:
