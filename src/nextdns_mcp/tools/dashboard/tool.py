@@ -14,7 +14,7 @@ SPDX-License-Identifier: MIT
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Literal, Protocol, get_args
+from typing import Any, Literal, NamedTuple, Protocol, get_args
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.components import Card
@@ -389,28 +389,52 @@ def _validate_overview_dashboard_args(section: Any, view_type: Any, domain_view:
     return None
 
 
+class _OverviewWindow(NamedTuple):
+    """The resolved profile and normalized window every section handler consumes.
+
+    The explicit ``error`` field is always ``None`` here; it exists so the
+    caller inspects one named field on the error variant instead of
+    discriminating positional tuple members.
+    """
+
+    profile_id: str
+    from_time: str | int
+    to_time: str | int
+    error: None = None
+
+
+class _OverviewWindowError(NamedTuple):
+    """The typed payload that stopped overview preflight."""
+
+    error: dict[str, Any]
+    profile_id: None = None
+    from_time: None = None
+    to_time: None = None
+
+
 def _overview_preflight(
     profile_id: OptionalProfileId,
     from_time: str | int,
     to_time: str | int,
-) -> tuple[str, str | int, str | int] | dict[str, Any]:
+) -> _OverviewWindow | _OverviewWindowError:
     """Resolve the profile and read the window once, in one order, for every section.
 
-    Returns ``(pid, from_time, to_time)`` with the window already normalized, or
-    the typed payload that stopped the call. Sections used to disagree here: the
-    single widgets bounded the range before they touched the profile, and
-    ``overview``/``all`` the other way round, so the same bad call answered a
-    different error depending on the section named.
+    Returns a named ``_OverviewWindow`` with the window already normalized, or
+    an ``_OverviewWindowError`` carrying the typed payload that stopped the
+    call. Sections used to disagree here: the single widgets bounded the range
+    before they touched the profile, and ``overview``/``all`` the other way
+    round, so the same bad call answered a different error depending on the
+    section named.
     """
     resolved = resolve_default_profile(profile_id)
     if resolved[1] is not None:
-        return resolved[1]
+        return _OverviewWindowError(error=resolved[1])
     norm_from = normalize_time_value(from_time)
     norm_to = normalize_time_value(to_time)
     range_err = analytics_range_error(norm_from, norm_to)
     if range_err is not None:
-        return range_err
-    return resolved[0], norm_from, norm_to
+        return _OverviewWindowError(error=range_err)
+    return _OverviewWindow(profile_id=resolved[0], from_time=norm_from, to_time=norm_to)
 
 
 async def _overview_dashboard_impl(
@@ -431,9 +455,8 @@ async def _overview_dashboard_impl(
         return limit_err
 
     window = _overview_preflight(profile_id, from_time, to_time)
-    if isinstance(window, dict):
-        return window
-    pid, norm_from, norm_to = window
+    if isinstance(window, _OverviewWindowError):
+        return window.error
 
     # A single widget asks for top-N rows, so its response is bounded by ``limit``;
     # only the pages that request ``status;series`` can breach the point budget,
@@ -442,11 +465,13 @@ async def _overview_dashboard_impl(
     # "auto" reaches each card's own default (#547).
     handler = _WIDGET_DISPATCH.get(section)
     if handler is not None:
-        return await handler(pid, norm_from, norm_to, limit, view_type)
+        return await handler(window.profile_id, window.from_time, window.to_time, limit, view_type)
 
     # Only the page sections reach here: ``section`` is validated against
     # ``DashboardSection`` and the import-time guard gives every other name a handler.
-    return await _render_overview_page(pid, norm_from, norm_to, limit, section, domain_view, view_type)
+    return await _render_overview_page(
+        window.profile_id, window.from_time, window.to_time, limit, section, domain_view, view_type
+    )
 
 
 async def overviewDashboard(
