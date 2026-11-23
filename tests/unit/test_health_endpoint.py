@@ -12,12 +12,11 @@ raw probe transport owner the server instance owns.
 """
 
 import logging
-from collections.abc import Iterator
 
 import httpx
-import pytest
 
 from nextdns_mcp import client as client_module
+from nextdns_mcp import openapi
 from nextdns_mcp.openapi import (
     HEALTH_CACHE_TTL,
     HEALTH_PROBE_PATH,
@@ -56,9 +55,10 @@ def _response(status_code: int, body: str = '{"error":"Forbidden"}') -> httpx.Re
 
 
 def _install_client(monkeypatch, *outcomes: httpx.Response | Exception) -> FakeProbeTransport:
-    """Point every raw probe owner's lazy build at a fake transport."""
+    """Point the health probe at a fake transport, bypassing the shared singleton."""
     client = FakeProbeTransport(*outcomes)
-    monkeypatch.setattr(client_module, "create_raw_probe_client", lambda: client)
+    monkeypatch.setattr(openapi, "get_raw_probe_client", lambda: client)
+    monkeypatch.setattr(client_module, "_raw_probe_client", None)
     return client
 
 
@@ -75,12 +75,6 @@ async def _call_health(app) -> tuple[int, dict]:
     ) as client:
         response = await client.get("/health")
     return response.status_code, response.json()
-
-
-@pytest.fixture
-def real_probe_owner() -> Iterator[client_module.RawProbeOwner]:
-    """An owner that builds the real probe transport from the current environment."""
-    yield client_module.RawProbeOwner()
 
 
 async def test_health_returns_200_when_the_credential_probe_succeeds(monkeypatch, mock_api_key):
@@ -162,8 +156,9 @@ async def test_health_never_leaks_key_material_or_the_probe_body(monkeypatch, mo
     assert body == {"status": "error"}
 
 
-async def test_health_returns_503_when_no_api_key_is_usable(real_probe_owner):
+async def test_health_returns_503_when_no_api_key_is_usable(monkeypatch):
     """A missing or empty API key is reported as 503, not a 500 — and says no more."""
+    monkeypatch.setattr(client_module, "_raw_probe_client", None)
     status_code, body = await _call_health(create_mcp_server().http_app())
 
     assert status_code == 503
@@ -174,6 +169,7 @@ async def test_an_invalid_http_timeout_is_reported_as_unready_without_naming_it(
     """An invalid NEXTDNS_HTTP_TIMEOUT still yields 503, without leaking the cause."""
     monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
     monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "not-a-number")
+    monkeypatch.setattr(client_module, "_raw_probe_client", None)
 
     status_code, body = await _call_health(create_mcp_server().http_app())
 
@@ -187,12 +183,11 @@ async def test_configuration_failure_is_cached_like_any_other_probe_result(monke
     monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
     monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
     prober = ReadinessProber()
-    owner = client_module.RawProbeOwner()
 
-    assert (await prober.check(owner)) is not None
+    assert (await prober.check()) is not None
     first_result = prober._cache
 
-    assert (await prober.check(owner)) is not None
+    assert (await prober.check()) is not None
     assert prober._cache is first_result
 
 
@@ -242,10 +237,9 @@ async def test_second_health_call_within_the_window_does_not_re_probe(monkeypatc
 async def test_cached_failure_is_reused_and_expires_after_the_ttl(monkeypatch, mock_api_key):
     """A cached failure is reused, and a re-probe happens once the TTL elapses."""
     prober, client = _prober_with(monkeypatch, _response(401), _response(200, "[]"))
-    owner = client_module.RawProbeOwner()
 
-    assert (await prober.check(owner)) is not None
-    assert (await prober.check(owner)) is not None
+    assert (await prober.check()) is not None
+    assert (await prober.check()) is not None
     assert len(client.calls) == 1
 
     # Age the cached entry past the TTL by backdating its timestamp.
@@ -253,7 +247,7 @@ async def test_cached_failure_is_reused_and_expires_after_the_ttl(monkeypatch, m
     prober._cache = (cached_at - (HEALTH_CACHE_TTL + 1), failure)
     assert failure is not None
 
-    assert (await prober.check(owner)) is None
+    assert (await prober.check()) is None
     assert len(client.calls) == 2
 
 
@@ -316,16 +310,15 @@ async def test_concurrent_pollers_share_one_probe(monkeypatch, mock_api_key):
 
     calls: list[int] = []
 
-    async def slow_probe(raw_probe) -> None:
+    async def slow_probe() -> None:
         calls.append(1)
         await asyncio.sleep(0.05)  # let the other poller arrive and wait on the lock
 
-    monkeypatch.setattr(client_module, "create_raw_probe_client", lambda: FakeProbeTransport(_response(200, "[]")))
+    monkeypatch.setattr(openapi, "get_raw_probe_client", lambda: FakeProbeTransport(_response(200, "[]")))
     prober = ReadinessProber()
-    owner = client_module.RawProbeOwner()
     monkeypatch.setattr(prober, "_probe", slow_probe)
 
-    first, second = await asyncio.gather(prober.check(owner), prober.check(owner))
+    first, second = await asyncio.gather(prober.check(), prober.check())
     assert len(calls) == 1, "the simultaneous first miss must issue exactly one probe"
     assert first is None and second is None
 
@@ -335,8 +328,8 @@ async def test_two_probers_do_not_share_their_cache(monkeypatch, mock_api_key):
     prober_a, client = _prober_with(monkeypatch, _response(200, "[]"), _response(200, "[]"))
     prober_b = ReadinessProber()
 
-    await prober_a.check(client_module.RawProbeOwner())
-    await prober_b.check(client_module.RawProbeOwner())
+    await prober_a.check()
+    await prober_b.check()
 
     assert len(client.calls) == 2, "each server owns its own readiness cache"
 

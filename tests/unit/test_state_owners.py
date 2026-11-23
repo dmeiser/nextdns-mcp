@@ -73,22 +73,6 @@ class TestRequestResourcesResolution:
         finally:
             fastmcp_request_ctx.reset(bound)
 
-    def test_the_raw_probe_resolver_uses_the_request_channel(self, mock_api_key, monkeypatch):
-        """A served request's health probe sends through its own server's probe owner."""
-        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        resources = ServerResources()
-        from fastmcp.server.dependencies import fastmcp_request_ctx
-
-        class _BoundRequest:
-            def __init__(self, lifespan_context):
-                self.lifespan_context = lifespan_context
-
-        bound = fastmcp_request_ctx.set(_BoundRequest({state_module.RESOURCES_LIFESPAN_KEY: resources}))  # type: ignore[arg-type]
-        try:
-            assert client_module.get_raw_probe_client() is resources.raw_probe.get()
-        finally:
-            fastmcp_request_ctx.reset(bound)
-
     def test_server_resources_rejects_an_instance_without_them(self):
         class _Bare:
             pass

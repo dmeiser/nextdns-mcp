@@ -53,7 +53,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .call_log import CallLogMiddleware, call_log_path
-from .client import ApiClientOwner, RawProbeOwner, api_client_owner, raw_probe_owner
+from .client import (
+    ApiClientOwner,
+    api_client_owner,
+    close_raw_probe_client,
+    get_raw_probe_client,
+)
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
 from .constants import SYNTHETIC_TOOL_NAMES
 from .spec_tools import endpoints_for_routes
@@ -136,7 +141,7 @@ class ReadinessProber:
         # filled cache.
         self._lock = asyncio.Lock()
 
-    async def check(self, raw_probe: RawProbeOwner) -> _HealthFailure | None:
+    async def check(self) -> _HealthFailure | None:
         """Return the readiness result, probing NextDNS at most once per cache window.
 
         Single-flight: concurrent pollers that all miss an empty or expired
@@ -144,9 +149,8 @@ class ReadinessProber:
         own (see ``self._lock``). A poller that arrives while a probe is
         running returns that probe's result, not a stale or duplicate one.
 
-        Args:
-            raw_probe: The owner of the ACL-free probe transport the probe
-                sends through.
+        The probe transport is the shared raw probe client (issue #603's
+        ACL-free transport, owned upstream of this card's scope).
 
         Returns:
             None when the configured credentials work against NextDNS,
@@ -162,7 +166,7 @@ class ReadinessProber:
             if fresh:
                 logger.debug("Reusing /health readiness result filled by a concurrent probe")
                 return failure
-            failure = await self._probe(raw_probe)
+            failure = await self._probe()
             self._cache = (time.monotonic(), failure)
             if failure is not None:
                 # One record per real probe, not per poll: the detail lives here
@@ -181,25 +185,22 @@ class ReadinessProber:
             return False, None
         return True, cached[1]
 
-    async def _probe(self, raw_probe: RawProbeOwner) -> _HealthFailure | None:
+    async def _probe(self) -> _HealthFailure | None:
         """Probe the NextDNS API once with the configured credentials.
 
-        The request goes through the raw probe transport (the ACL's enforcing
-        class exposes no bypass on it): a local ACL denial must not mask the
-        true upstream authentication state. Only the status code and the
-        exception type name are reported, never the API key, the auth headers,
-        or the response body.
-
-        Args:
-            raw_probe: The owner of the ACL-free probe transport the probe
-                sends through.
+        The request goes through the raw probe transport
+        (``client.get_raw_probe_client()``), which bypasses profile access
+        control: a local ACL denial must not mask the true upstream
+        authentication state. Only the status code and the exception type
+        name are reported, never the API key, the auth headers, or the
+        response body.
 
         Returns:
             None when NextDNS accepted the credentials, otherwise a
             _HealthFailure.
         """
         try:
-            probe_client = raw_probe.get()
+            probe_client = get_raw_probe_client()
             response = await probe_client.request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
         except ConfigurationError:
             return _configuration_failure()
@@ -711,7 +712,6 @@ class ServerResources:
 
     def __init__(self) -> None:
         self.api_client = ApiClientOwner()
-        self.raw_probe = RawProbeOwner()
         self.doh_client = DohClientOwner()
         self.downloads = DownloadRegistry()
 
@@ -719,12 +719,11 @@ class ServerResources:
         """Release everything this server owns: clients first, then the downloads.
 
         Matches the shutdown order the lifespan has always used: close the
-        API and probe clients even when the DoH close or the download cleanup
-        fails, and never leave this server's tracked CSVs behind.
+        API client even when the DoH close or the download cleanup fails,
+        and never leave this server's tracked CSVs behind.
         """
         try:
             await self.api_client.aclose()
-            await self.raw_probe.aclose()
         finally:
             await self.doh_client.aclose()
             self.downloads.cleanup()
@@ -762,15 +761,17 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
     resources = _server_resources(server)
     api_token = api_client_owner.set(resources.api_client)
-    probe_token = raw_probe_owner.set(resources.raw_probe)
     doh_token = doh_client_owner.set(resources.doh_client)
     registry_token = _download_registry.set(resources.downloads)
     try:
         yield {RESOURCES_LIFESPAN_KEY: resources}
     finally:
         try:
-            await resources.aclose()
+            await resources.api_client.aclose()
         finally:
+            await close_raw_probe_client()
+            await resources.doh_client.aclose()
+            resources.downloads.cleanup()
             # The lazily-started Pyodide/Deno sandbox subprocess (issue #408) is
             # stopped by NextDNSGenerativeUI.lifespan(), which FastMCP unwinds
             # before this lifespan: this module has no dependency on the optional
@@ -778,7 +779,6 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             # its siblings' sandboxes (issue #542).
             _download_registry.reset(registry_token)
             doh_client_owner.reset(doh_token)
-            raw_probe_owner.reset(probe_token)
             api_client_owner.reset(api_token)
 
 
@@ -912,9 +912,7 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
     ``/mcp`` streamable-HTTP endpoint; in stdio mode there is no HTTP surface,
     so the route is simply not reachable. The prober - the route's TTL cache
     and single-flight lock - is owned here, per server, so two embedded
-    servers never share readiness state, and the probe sends through the raw
-    probe transport owner this server instance owns (the ACL's enforcing
-    class exposes no bypass on it).
+    servers never share readiness state.
 
     Args:
         mcp: The FastMCP server to attach the route to.
@@ -923,7 +921,7 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
 
     async def health_check(_request: Request) -> JSONResponse:
         """Report NextDNS API readiness as measured by a live credential probe."""
-        failure = await prober.check(_server_resources(mcp).raw_probe)
+        failure = await prober.check()
         if failure is None:
             return JSONResponse({"status": "ok"})
         return JSONResponse({"status": "error"}, status_code=503)

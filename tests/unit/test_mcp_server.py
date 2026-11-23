@@ -199,6 +199,7 @@ class TestServerLifespan:
     async def test_server_lifespan_closes_http_clients(self, mock_api_key, monkeypatch):
         """Server lifespan exit must close both clients owned by the server."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setattr(client_module, "_raw_probe_client", None)
 
         from nextdns_mcp import openapi as openapi_module
 
@@ -207,7 +208,6 @@ class TestServerLifespan:
 
         with (
             client_module.api_client_owned(resources.api_client),
-            client_module.raw_probe_owned(resources.raw_probe),
             doh_module.doh_client_owned(resources.doh_client),
         ):
             async with server._lifespan_manager():
@@ -222,7 +222,7 @@ class TestServerLifespan:
         assert probe_client.is_closed
         assert doh_client.is_closed
         assert resources.api_client._client is None
-        assert resources.raw_probe._transport is None
+        assert client_module._raw_probe_client is None
         assert resources.doh_client._client is None
 
     @pytest.mark.asyncio

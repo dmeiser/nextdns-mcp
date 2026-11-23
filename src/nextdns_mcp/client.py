@@ -640,33 +640,6 @@ class ApiClientOwner:
             await client.aclose()
 
 
-class RawProbeOwner:
-    """Owns one authenticated, ACL-free probe transport for one explicit lifetime.
-
-    Explicit owner for the probe transport state that used to live in the
-    module-global ``_raw_probe_client`` singleton. The /health readiness
-    check sends through this transport so the profile ACL's enforcing class
-    exposes no bypass; each owner lazily creates its transport on first use
-    and closes it on :meth:`aclose`.
-    """
-
-    def __init__(self) -> None:
-        self._transport: RawProbeTransport | None = None
-
-    def get(self) -> RawProbeTransport:
-        """Return this owner's probe transport, creating it on first use."""
-        if self._transport is None:
-            self._transport = create_raw_probe_client()
-        return self._transport
-
-    async def aclose(self) -> None:
-        """Close this owner's probe transport if one exists and reset it."""
-        if self._transport is not None:
-            transport = self._transport
-            self._transport = None
-            await transport.aclose()
-
-
 # The owner whose client the current context uses. A server lifespan sets this
 # to the owner its ServerResources holds (see nextdns_mcp.openapi), as may
 # standalone callers (tests, scripts) with ``api_client_owned`` for work that
@@ -677,7 +650,6 @@ class RawProbeOwner:
 # module-level default: an absent owner fails loudly instead of silently
 # serving one process-global client to independent servers.
 api_client_owner: ContextVar[ApiClientOwner | None] = ContextVar("nextdns_api_client_owner", default=None)
-raw_probe_owner: ContextVar[RawProbeOwner | None] = ContextVar("nextdns_raw_probe_owner", default=None)
 
 
 def current_api_client_owner() -> ApiClientOwner:
@@ -714,44 +686,29 @@ def api_client_owned(owner: ApiClientOwner) -> Iterator[ApiClientOwner]:
         api_client_owner.reset(token)
 
 
-@contextmanager
-def raw_probe_owned(owner: RawProbeOwner) -> Iterator[RawProbeOwner]:
-    """Publish ``owner`` as the current context's raw probe owner for the block."""
-    token = raw_probe_owner.set(owner)
-    try:
-        yield owner
-    finally:
-        raw_probe_owner.reset(token)
-
-
-def _current_raw_probe_owner() -> RawProbeOwner:
-    owner = raw_probe_owner.get()
-    if owner is None:
-        resources = request_resources()
-        if resources is not None:
-            owner = resources.raw_probe
-    if owner is None:
-        raise StateOwnershipError(
-            "No raw probe owner is active in this context. Server code runs inside a server "
-            "lifespan, which publishes one; standalone callers must wrap the work in "
-            "`with client_module.raw_probe_owned(client_module.RawProbeOwner()):`."
-        )
-    return owner
+_raw_probe_client: RawProbeTransport | None = None
 
 
 def get_raw_probe_client() -> RawProbeTransport:
-    """Return the current owner's ACL-free probe transport, creating it on first use.
+    """Return the shared ACL-free probe transport, creating it on first use.
 
     The /health readiness check uses this instead of :func:`get_api_client` so
     the class that enforces the profile ACL exposes no bypass at all, while the
     probe still observes the true upstream state.
     """
-    return _current_raw_probe_owner().get()
+    global _raw_probe_client
+    if _raw_probe_client is None:
+        _raw_probe_client = create_raw_probe_client()
+    return _raw_probe_client
 
 
 async def close_raw_probe_client() -> None:
-    """Close the current owner's probe transport if one exists and reset it."""
-    await _current_raw_probe_owner().aclose()
+    """Close the shared probe transport if one exists and reset the singleton."""
+    global _raw_probe_client
+    if _raw_probe_client is not None:
+        transport = _raw_probe_client
+        _raw_probe_client = None
+        await transport.aclose()
 
 
 def get_api_client() -> AccessControlledClient:
