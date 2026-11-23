@@ -58,3 +58,16 @@ class NextDNSResponseTooLargeError(NextDNSError):
     def __init__(self, message: str, max_response_bytes: int):
         super().__init__(message, status_code=None)
         self.max_response_bytes = max_response_bytes
+
+
+class ConfigurationError(ValueError):
+    """Raised when configuration values are invalid or malformed."""
+
+
+class MissingApiKeyError(ConfigurationError):
+    """Raised when a NextDNS API key has not been configured yet.
+
+    Subclasses ``ConfigurationError`` so that a single ``except
+    ConfigurationError`` covers both "no key configured yet" and "the value
+    you configured is invalid".
+    """
