@@ -10,6 +10,8 @@ from fastmcp import Client, FastMCP
 from nextdns_mcp import client as client_module
 from nextdns_mcp.openapi import StripExtraFieldsMiddleware, create_mcp_server
 from nextdns_mcp.tools import doh as doh_module
+from nextdns_mcp.tools import logs as logs_module
+from nextdns_mcp.tools.logs import redirects as logs_redirects
 
 
 class TestCreateMcpServer:
@@ -197,20 +199,23 @@ class TestServerLifespan:
 
     @pytest.mark.asyncio
     async def test_server_lifespan_closes_http_clients(self, mock_api_key, monkeypatch):
-        """Server lifespan exit must close both API and DoH clients and reset singletons."""
+        """Server lifespan exit must close every long-lived client and reset singletons."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
         monkeypatch.setattr(client_module, "_client", None)
         monkeypatch.setattr(doh_module, "_doh_client", None)
+        monkeypatch.setattr(logs_redirects, "_redirect_client", None)
 
         server = create_mcp_server()
         api_client = client_module.get_api_client()
         probe_client = client_module.get_raw_probe_client()
         doh_client = doh_module._get_doh_client()
+        redirect_client = logs_redirects._get_redirect_client()
 
         try:
             assert not api_client.is_closed
             assert not probe_client.is_closed
             assert not doh_client.is_closed
+            assert not redirect_client.is_closed
 
             async with server._lifespan_manager():
                 pass
@@ -218,9 +223,11 @@ class TestServerLifespan:
             assert api_client.is_closed
             assert probe_client.is_closed
             assert doh_client.is_closed
+            assert redirect_client.is_closed, "_server_lifespan left the download redirect client open"
             assert client_module._client is None
             assert client_module._raw_probe_client is None
             assert doh_module._doh_client is None
+            assert logs_redirects._redirect_client is None
         finally:
             if not api_client.is_closed:
                 await api_client.aclose()
@@ -228,6 +235,8 @@ class TestServerLifespan:
                 await probe_client.aclose()
             if not doh_client.is_closed:
                 await doh_client.aclose()
+            if not redirect_client.is_closed:
+                await redirect_client.aclose()
 
     @pytest.mark.asyncio
     async def test_real_client_session_closes_http_clients_on_disconnect(self, mock_api_key, monkeypatch):
@@ -240,6 +249,7 @@ class TestServerLifespan:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
         monkeypatch.setattr(client_module, "_client", None)
         monkeypatch.setattr(doh_module, "_doh_client", None)
+        monkeypatch.setattr(logs_redirects, "_redirect_client", None)
 
         server = create_mcp_server()
 
@@ -247,13 +257,17 @@ class TestServerLifespan:
             await mcp_client.list_tools()
             api_client = client_module.get_api_client()
             doh_client = doh_module._get_doh_client()
+            redirect_client = logs_redirects._get_redirect_client()
             assert not api_client.is_closed
             assert not doh_client.is_closed
+            assert not redirect_client.is_closed
 
         assert api_client.is_closed
         assert doh_client.is_closed
+        assert redirect_client.is_closed, "the Client session did not close the download redirect client"
         assert client_module._client is None
         assert doh_module._doh_client is None
+        assert logs_redirects._redirect_client is None
 
 
 class TestCompositeErrorResultsAreFlagged:
@@ -339,11 +353,11 @@ class TestDownloadOwnershipIsPerServer:
         self, mock_api_key, monkeypatch, tmp_path
     ):
         from nextdns_mcp import openapi as openapi_module
-        from nextdns_mcp.tools import logs as logs_module
 
         monkeypatch.setattr(openapi_module, "close_api_client", self._noop)
         monkeypatch.setattr(openapi_module, "close_raw_probe_client", self._noop)
         monkeypatch.setattr(openapi_module, "close_doh_client", self._noop)
+        monkeypatch.setattr(openapi_module, "close_redirect_client", self._noop)
 
         server_a_csv = tmp_path / "a" / "download.csv"
         server_b_csv = tmp_path / "b" / "download.csv"

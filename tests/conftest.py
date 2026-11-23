@@ -66,6 +66,24 @@ def restore_nextdns_modules() -> Iterator[None]:
             setattr(parent, child, module)
 
 
+@pytest.fixture(autouse=True)
+def reset_logs_redirect_client() -> Iterator[None]:
+    """Give every test a clean logs redirect-client singleton (issue #656).
+
+    The downloadLogs redirect chain reuses one persistent module-level client.
+    Tests patch ``httpx.AsyncClient`` with per-test fakes, so a client created
+    in one test must not leak into the next (or into a later real-client test).
+    The singleton global lives on the owning submodule - rebinding it on the
+    ``logs`` package would not reach ``redirects``' global (see the package
+    docstring) - so the reset goes through ``logs.redirects``.
+    """
+    from nextdns_mcp.tools.logs import redirects as logs_redirects
+
+    logs_redirects._redirect_client = None
+    yield
+    logs_redirects._redirect_client = None
+
+
 @pytest.fixture
 def set_env_api_key(monkeypatch, mock_api_key: str) -> str:
     """Set NEXTDNS_API_KEY environment variable."""
