@@ -178,14 +178,15 @@ async def _api_request_json(
 
 
 async def read_body_capped(response: httpx.Response, max_bytes: int) -> bytes:
-    """Read a (possibly streaming) response's decoded body up to ``max_bytes``.
+    """Read a (possibly streaming) response's decoded body until ``max_bytes`` is reached.
 
     ``aiter_bytes`` yields decoded bytes, so the result is what would be
     parsed. The read stops after the whole chunk that reaches ``max_bytes``,
     so the result exceeds ``max_bytes`` by up to one chunk, and is shorter
     only at end-of-stream. The caller is the download guard's bounded
-    error-body read; the bytes past its slice limit are what let it set its
-    ``response_body_truncated`` flag truthfully.
+    error-body read; its ``response_body_truncated`` flag is set either when
+    the returned body runs past the guard's byte slice or when the decoded
+    prefix exceeds ``MAX_RESPONSE_BODY_CHARS``.
     """
     parts: list[bytes] = []
     total = 0
