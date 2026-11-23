@@ -402,7 +402,7 @@ class TestSafeIdValidation:
         assert is_safe_profile_id("") is False
 
     # The entry-id traversal guard lives where the value is used: the generated tool
-    # refuses an id that could address another endpoint (spec_tools._UNSAFE_PATH_VALUE),
+    # refuses an id that could address another endpoint (spec_arguments._UNSAFE_PATH_VALUE),
     # which is the only place an entry id is ever put into a URL. See
     # tests/unit/test_spec_tools.py for that guard's cases.
 

@@ -21,7 +21,7 @@ import pytest
 from fastmcp import Client
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import spec_tools, transport
+from nextdns_mcp import spec_series, spec_tools, transport
 from nextdns_mcp.errors import NextDNSAuthError, NextDNSError, NextDNSRateLimitError, NextDNSServerError
 from nextdns_mcp.server import build_mcp_server
 from nextdns_mcp.tools import plots as plots_module
@@ -309,13 +309,13 @@ class TestSeriesCeilingIsMeasuredOnce:
     second full serialization of the decoded payload - the backstop written
     for transports that were never given the cap - measured a bound that had
     already been enforced, on every successful call. These drive the real
-    transport against the stub upstream with ``spec_tools.json`` replaced by a
+    transport against the stub upstream with ``spec_series.json`` replaced by a
     recorder, so the assertion is about the work the call does and not only
     about the answer it returns.
     """
 
     class _JsonRecorder:
-        """The json module as ``spec_tools`` sees it, recording every dumps call."""
+        """The json module as ``spec_series`` sees it, recording every dumps call."""
 
         def __init__(self) -> None:
             self.dumped: list[Any] = []
@@ -327,7 +327,7 @@ class TestSeriesCeilingIsMeasuredOnce:
     async def _call_series_tool(self, monkeypatch):
         """One real generated ``;series`` call, with the serializer watched."""
         recorder = self._JsonRecorder()
-        monkeypatch.setattr(spec_tools, "json", recorder)
+        monkeypatch.setattr(spec_series, "json", recorder)
         route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
         return recorder, await spec_tools.SpecApiTool(route).run({"profile_id": "abc123", "from": "-1d"})
 

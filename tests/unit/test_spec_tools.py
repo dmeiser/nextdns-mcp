@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 
-from nextdns_mcp import spec_tools, transport
+from nextdns_mcp import spec_arguments, spec_series, spec_tools, spec_validation, transport
 
 # Operations in nextdns-openapi.yaml, the one that is not offered, and the
 # operations the server performs itself.
@@ -616,7 +616,7 @@ class TestRefusalsBeforeTransport:
             ("profile_id", "profile_id", "path"),
             ("entry_id", "entry_id", "path"),
         ]
-        rendered = spec_tools._rendered_path(
+        rendered = spec_arguments._rendered_path(
             "/profiles/{profile_id}/denylist/{entry_id}",
             located,
             {"profile_id": "abc123", "entry_id": "{profile_id}"},
@@ -631,7 +631,7 @@ class TestRefusalsBeforeTransport:
         from types import SimpleNamespace
 
         problems = [SimpleNamespace(absolute_path=[f"f{i}"], message=f"bad {i}") for i in range(7)]
-        described = spec_tools._describe_schema_errors(problems[: spec_tools._SCHEMA_ERROR_LIMIT], 2)
+        described = spec_validation._describe_schema_errors(problems[: spec_validation._SCHEMA_ERROR_LIMIT], 2)
         assert "f0: bad 0" in described
         assert "f4: bad 4" in described
         assert "f5" not in described.split("; and")[0]
@@ -639,7 +639,7 @@ class TestRefusalsBeforeTransport:
 
     def test_a_root_schema_violation_is_located_at_the_arguments(self):
         error = SimpleNamespace(absolute_path=[])
-        assert spec_tools._schema_error_where(error) == "<arguments>"
+        assert spec_validation._schema_error_where(error) == "<arguments>"
 
 
 class TestDelegationGuardsRunFirst:
@@ -734,7 +734,7 @@ class TestSchemaErrorTextIsBounded:
         tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
         payload = (await tool.run({"profile_id": "abc123", "from": "-1d", "partials": "x" * 5000})).structured_content
         assert payload["code"] == "invalid_argument"
-        assert "x" * (spec_tools._SCHEMA_ERROR_MSG_CHARS + 1) not in payload["error"]
+        assert "x" * (spec_validation._SCHEMA_ERROR_MSG_CHARS + 1) not in payload["error"]
         assert len(payload["error"]) < 1200
         assert calls == []
 
@@ -839,13 +839,13 @@ class TestSeriesBudgetHelperEdges:
 
     def test_a_call_naming_no_from_is_not_priced_here(self):
         """The required SeriesFrom makes this defensive; the helper still says so."""
-        assert spec_tools._series_budget_for_generated_call(self._route(), {}) is None
+        assert spec_series._series_budget_for_generated_call(self._route(), {}) is None
 
     def test_an_unresolvable_range_without_an_interval_is_left_to_the_endpoint(self):
         """No interval means no local budget arithmetic; a garbage range is
         the endpoint's 400 to give, not this helper's guess."""
         query = {"from": "not-a-time", "to": "also-not-a-time"}
-        assert spec_tools._series_budget_for_generated_call(self._route(), query) is None
+        assert spec_series._series_budget_for_generated_call(self._route(), query) is None
 
 
 class TestSeriesStreamCeilingWiring:
@@ -894,9 +894,9 @@ class TestSeriesStreamCeilingWiring:
         async def injected(method, url, params=None, json_body=None, max_response_bytes=None): ...
 
         cap = {"max_response_bytes": spec_tools.MAX_SERIES_RESPONSE_BYTES}
-        assert spec_tools._ceiling_measured_on_the_wire(spec_tools._api_request_payload, cap)
-        assert not spec_tools._ceiling_measured_on_the_wire(injected, cap)
-        assert not spec_tools._ceiling_measured_on_the_wire(spec_tools._api_request_payload, {})
+        assert spec_series._ceiling_measured_on_the_wire(spec_tools._api_request_payload, cap)
+        assert not spec_series._ceiling_measured_on_the_wire(injected, cap)
+        assert not spec_series._ceiling_measured_on_the_wire(spec_tools._api_request_payload, {})
 
 
 def test_a_wire_measured_series_answer_is_not_priced_again_at_the_generator_door():
@@ -916,8 +916,8 @@ def test_a_wire_measured_series_answer_is_not_priced_again_at_the_generator_door
     dumped = len(json.dumps(payload, default=str))
     assert wire <= spec_tools.MAX_SERIES_RESPONSE_BYTES < dumped
 
-    assert spec_tools._series_refusal(route, payload, ceiling_measured_on_the_wire=True) is None
-    refused = spec_tools._series_refusal(route, payload)
+    assert spec_series._series_refusal(route, payload, ceiling_measured_on_the_wire=True) is None
+    refused = spec_series._series_refusal(route, payload)
     assert refused is not None
     assert refused["response_bytes"] == dumped
 
@@ -934,24 +934,24 @@ class TestSchemaProblemStreamIsBounded:
 
         validator = js.Draft202012Validator({"type": "array", "items": {"required": ["id"]}})
         body = [{"wrong": i} for i in range(1500)]
-        kept, extra = spec_tools._schema_problems(validator, body)
-        assert len(kept) == spec_tools._SCHEMA_ERROR_LIMIT
-        assert extra == spec_tools._SCHEMA_ERROR_COUNT_CAP  # counting stopped at the cap
+        kept, extra = spec_validation._schema_problems(validator, body)
+        assert len(kept) == spec_validation._SCHEMA_ERROR_LIMIT
+        assert extra == spec_validation._SCHEMA_ERROR_COUNT_CAP  # counting stopped at the cap
 
     async def test_an_over_cap_violation_tail_says_at_least(self, monkeypatch, calls):
         monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
         tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["replaceDenylist"])
-        body = [{"wrong": i} for i in range(spec_tools._SCHEMA_ERROR_COUNT_CAP + 100)]
+        body = [{"wrong": i} for i in range(spec_validation._SCHEMA_ERROR_COUNT_CAP + 100)]
         payload = (await tool.run({"profile_id": "abc123", "body": body})).structured_content
         assert payload["code"] == "invalid_argument"
-        assert f"and at least {spec_tools._SCHEMA_ERROR_COUNT_CAP} more" in payload["error"]
+        assert f"and at least {spec_validation._SCHEMA_ERROR_COUNT_CAP} more" in payload["error"]
         assert calls == []
 
 
 def test_series_refusal_ignores_a_non_mapping_answer():
     """A transport that answers with a bare list gets no annotation, no crash."""
     route = next(r for r in spec_tools.spec_routes() if r.path.endswith("/analytics/status;series"))
-    assert spec_tools._series_refusal(route, ["data", "rows"]) is None
+    assert spec_series._series_refusal(route, ["data", "rows"]) is None
 
 
 class TestLegacyInjectedTransportCompatibility:
@@ -1009,16 +1009,16 @@ class TestLegacyInjectedTransportCompatibility:
 
         async def star(method, url, **extra): ...
 
-        assert not spec_tools._transport_accepts_cap(legacy)
-        assert spec_tools._transport_accepts_cap(modern)
-        assert spec_tools._transport_accepts_cap(star)
+        assert not spec_series._transport_accepts_cap(legacy)
+        assert spec_series._transport_accepts_cap(modern)
+        assert spec_series._transport_accepts_cap(star)
 
     def test_the_default_transport_supports_the_cap(self):
-        assert spec_tools._transport_accepts_cap(spec_tools._api_request_payload)
+        assert spec_series._transport_accepts_cap(spec_tools._api_request_payload)
 
     def test_a_callable_without_an_introspectable_signature_is_treated_as_legacy(self):
         """The unpriced path still enforces the ceiling, so the guess is safe the only way."""
-        assert not spec_tools._transport_accepts_cap(iter)  # builtin whose signature() raises ValueError
+        assert not spec_series._transport_accepts_cap(iter)  # builtin whose signature() raises ValueError
 
 
 class TestTransportCapabilityProbeIsMemoized:
@@ -1041,7 +1041,7 @@ class TestTransportCapabilityProbeIsMemoized:
             return real_signature(obj, *args, **kwargs)
 
         monkeypatch.setattr(
-            spec_tools, "inspect", SimpleNamespace(signature=counting_signature, Parameter=inspect.Parameter)
+            spec_series, "inspect", SimpleNamespace(signature=counting_signature, Parameter=inspect.Parameter)
         )
         return seen
 
@@ -1086,10 +1086,10 @@ class TestTransportCapabilityProbeIsMemoized:
 
         async def capped_transport(method, url, params=None, json_body=None, max_response_bytes=None): ...
 
-        assert not spec_tools._transport_accepts_cap(legacy_transport)
-        assert spec_tools._transport_accepts_cap(capped_transport)
-        assert not spec_tools._transport_accepts_cap(legacy_transport)
-        assert spec_tools._transport_accepts_cap(capped_transport)
+        assert not spec_series._transport_accepts_cap(legacy_transport)
+        assert spec_series._transport_accepts_cap(capped_transport)
+        assert not spec_series._transport_accepts_cap(legacy_transport)
+        assert spec_series._transport_accepts_cap(capped_transport)
         assert inspections == [legacy_transport, capped_transport]
 
 
@@ -1097,21 +1097,21 @@ def test_a_big_non_series_payload_is_not_refused_by_the_series_backstop():
     """The ceiling is a ;series policy: a wide aggregate answer is data, not an overrun."""
     route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getDenylist")
     big = {"data": [{"id": f"entry-{i}", "name": "x" * 40} for i in range(30_000)]}
-    assert spec_tools._series_refusal(route, big) is None
+    assert spec_series._series_refusal(route, big) is None
 
 
 def test_truncate_description_no_boundary():
-    from nextdns_mcp import spec_tools
+    from nextdns_mcp import spec_descriptions
 
-    out = spec_tools._truncate_description("a" * 2000, 100)
+    out = spec_descriptions._truncate_description("a" * 2000, 100)
     assert len(out) == 100
 
 
 def test_truncate_description_prefers_boundary():
-    from nextdns_mcp import spec_tools
+    from nextdns_mcp import spec_descriptions
 
     text = "x" * 30 + "\n" + "y" * 30
-    out = spec_tools._truncate_description(text, 40)
+    out = spec_descriptions._truncate_description(text, 40)
     assert len(out) <= 40
     assert out.endswith("x")
 
@@ -1221,12 +1221,10 @@ import asyncio
 
 def test_split_body_drops_none():
 
-    from nextdns_mcp import spec_tools
-
     # located body prop with None
     located = [("typoSquatting", "typoSquatting", "body")]
     args = {"typoSquatting": None}
-    body = spec_tools._split_body_arguments(located, args)
+    body = spec_arguments._split_body_arguments(located, args)
     # should be None (no body props)
     assert body is None
 

@@ -1,6 +1,9 @@
 # ADR 0001 — OpenAPI-spec-generated tools ("parser, not transport")
 
-Status: accepted (4.0.0). Applies to `src/nextdns_mcp/spec_tools.py`,
+Status: accepted (4.0.0). Applies to `src/nextdns_mcp/spec_tools.py` (the
+composition — `SpecApiTool` and registration), `src/nextdns_mcp/spec_routes.py`,
+`src/nextdns_mcp/spec_descriptions.py`, `src/nextdns_mcp/spec_arguments.py`,
+`src/nextdns_mcp/spec_validation.py`, `src/nextdns_mcp/spec_series.py`,
 `src/nextdns_mcp/nextdns-openapi.yaml`, and everything that verifies them.
 
 ## Context
@@ -60,7 +63,9 @@ at startup and hard-fails on drift, and the container test pins the served catal
 
 The generator is a proxy for the document, with the exceptions below recorded here because
 a silent exception is what makes a generated surface impossible to trust. They are also
-recorded where they are implemented (`spec_tools.py`).
+recorded where they are implemented: the query normalizers and the path-segment
+guard in `spec_arguments.py`, the withheld operation in `spec_routes.py`, and
+the delegation in `spec_tools.py`.
 
 1. **Query normalizers for the analytics window** (`_QUERY_NORMALIZERS`: `from`, `to`,
    `partials`). Two spellings callers reach for fail *silently* upstream rather than
