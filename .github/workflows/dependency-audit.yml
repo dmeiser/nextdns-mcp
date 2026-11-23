@@ -2,9 +2,7 @@ name: Dependency Audit
 
 # Scans the Python dependency versions resolved in uv.lock for published
 # advisories (PyPI/OSV sources) with pip-audit. Runs on every PR and every
-# main push, so a dependency bump is audited at the moment it lands, and on a
-# weekly schedule, so an advisory published *after* a bump still shows up
-# against the current pins instead of waiting for the next bump.
+# main push, so a dependency bump is audited at the moment it lands.
 #
 # pip-audit reads requirements files, not uv.lock, so the exact locked pins are
 # exported first with `uv export` (every dependency group and extra, the
@@ -18,8 +16,6 @@ on:
   pull_request:
     branches: [ main, "fm/*" ]  # stacked feature branches (openapi-only stack)
   merge_group:
-  schedule:
-    - cron: '17 6 * * 1'  # Monday 06:17 UTC, off the hour from the other timers
   workflow_dispatch:
 
 permissions:
