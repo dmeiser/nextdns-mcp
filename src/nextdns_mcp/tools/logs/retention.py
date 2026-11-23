@@ -1,17 +1,17 @@
 """Per-server download retention: the registry, eviction, and temp-file removal.
 
-Successful downloads this process has handed out are registered here. The CSV
-must outlive the tool call - the caller reads the file at the returned path
-after the call returns - so it cannot be removed when the call ends.
+Successful downloads this server lifespan has handed out are registered here.
+The CSV must outlive the tool call - the caller reads the file at the returned
+path after the call returns - so it cannot be removed when the call ends.
 Registration is what bounds total disk use: the owning server's lifespan
 removes everything in its registry at shutdown, so successful downloads no
 longer accumulate on disk for the life of the container.
 
 Ownership is PER SERVER, not per process. The registry a download registers
 with is the one the current server lifespan owns (the ``_download_registry``
-context var, set by ``nextdns_mcp.openapi._server_lifespan``); a download
-handled outside any lifespan falls back to the process-global registry
-below. The registries used to be one process-global set that EVERY server's
+context var, set by ``nextdns_mcp.openapi._server_lifespan``); there is no
+process-global fallback, so a download outside any lifespan fails fast (see
+``MissingDownloadRegistryError``). Stdlib only; nothing here knows about HTTP. The registries used to be one process-global set that EVERY server's
 lifespan emptied, so one embedded server deleted another live server's
 tracked CSVs mid-read. Insertion-ordered, so the oldest entry is always
 first: that order is the eviction order (see ``_note_successful_download``).
@@ -63,7 +63,34 @@ def _unlink_temp_file(path: str) -> None:
     _remove_temp_file(path)
 
 
-_SUCCESSFUL_DOWNLOADS: dict[str, None] = {}
+class MissingDownloadRegistryError(RuntimeError):
+    """A download has no owning server lifespan to register with.
+
+    Registration is what bounds the CSV's lifetime: the owning lifespan
+    reclaims it at shutdown and evicts past ``MAX_RETAINED_DOWNLOADS``. Without
+    an owner neither reclaim point exists, so the download is refused rather
+    than left on disk for the life of the process.
+    """
+
+
+# Successful downloads this server lifespan has handed out. The CSV must
+# outlive the tool call - the caller reads the file at the returned path after
+# the call returns - so it cannot be removed when the call ends. Registration
+# is what bounds total disk use: the owning server's lifespan removes
+# everything in its registry at shutdown, so successful downloads no longer
+# accumulate on disk for the life of the container.
+#
+# Ownership is PER SERVER, not per process. The registry a download registers
+# with is the one the current server lifespan owns (the ``_download_registry``
+# context var, set by ``nextdns_mcp.openapi._server_lifespan``). There is no
+# process-global fallback: a download handled outside any lifespan has no
+# owner that could ever reclaim it, so registration fails fast with
+# ``MissingDownloadRegistryError`` instead of leaking the CSV for the life of
+# the process (issue #647). The registries used to be one process-global set
+# that EVERY server's lifespan emptied, so one embedded server deleted another
+# live server's tracked CSVs mid-read. Insertion-ordered, so the oldest entry
+# is always first: that order is the eviction order (see
+# ``_note_successful_download``).
 _download_registry: contextvars.ContextVar[dict[str, None] | None] = contextvars.ContextVar(
     "nextdns_download_registry", default=None
 )
@@ -76,9 +103,19 @@ MAX_RETAINED_DOWNLOADS = 8
 
 
 def _current_registry() -> dict[str, None]:
-    """The registry downloads register with now: the owning lifespan's, else the process-global."""
+    """The registry downloads register with now: the owning lifespan's.
+
+    Raises:
+        MissingDownloadRegistryError: when no server lifespan owns this
+            context. Nothing would ever reclaim a CSV registered there, so the
+            caller is told instead of the path joining an unowned registry.
+    """
     owned = _download_registry.get()
-    return owned if owned is not None else _SUCCESSFUL_DOWNLOADS
+    if owned is None:
+        raise MissingDownloadRegistryError(
+            "No server lifespan owns this call, so the downloaded CSV has no registry to be reclaimed from."
+        )
+    return owned
 
 
 def _remove_downloaded_file(path: str) -> bool:
@@ -93,7 +130,8 @@ def cleanup_successful_downloads() -> None:
     hundreds of MB; without this the file outlived the process that created
     it. Best effort and idempotent: a second call has nothing registered and
     does nothing. Because registration is per-lifespan, this reclaims only
-    the calling server's own downloads.
+    the calling server's own downloads, and raising outside a lifespan (see
+    ``_current_registry``) is a caller bug, not a fallback.
     """
     registry = _current_registry()
     for path in list(registry):
@@ -108,6 +146,11 @@ def _note_successful_download(path: str, downloaded: bool) -> None:
     oldest CSV is evicted and unlinked, so disk use stays bounded across a
     long server lifetime even when shutdown (the other reclaim point) is far
     away or never comes (SIGKILL).
+
+    Raises:
+        MissingDownloadRegistryError: when the download succeeded outside any
+            server lifespan. The path is NOT recorded and the caller must
+            remove the file - nothing would ever reclaim it.
     """
     if not downloaded:
         return

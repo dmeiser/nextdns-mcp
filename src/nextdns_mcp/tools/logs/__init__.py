@@ -48,8 +48,8 @@ from .guard import (
 from .preview import DOWNLOAD_PREVIEW_MAX_BYTES, DOWNLOAD_PREVIEW_MAX_LINES
 from .redirects import _MAX_DOWNLOAD_REDIRECTS, _follow_redirects_to_tempfile
 from .retention import (
-    _SUCCESSFUL_DOWNLOADS,
     MAX_RETAINED_DOWNLOADS,
+    MissingDownloadRegistryError,
     _current_registry,
     _download_registry,
     _note_successful_download,
@@ -68,9 +68,9 @@ __all__ = [
     "MAX_RETAINED_DOWNLOADS",
     "_MAX_DOWNLOAD_REDIRECTS",
     "_PIN_FETCH_LOCK",
-    "_SUCCESSFUL_DOWNLOADS",
     "DownloadRedirectRefusedError",
     "DownloadTooLargeError",
+    "MissingDownloadRegistryError",
     "_check_download_redirect_target",
     "_current_registry",
     "_download_error_details",

@@ -95,6 +95,34 @@ def _download_error_detail(status: Any, scheme: Any, host: Any) -> str:
     )
 
 
+def _register_successful_download(path: str, downloaded: bool) -> dict[str, Any] | None:
+    """Register a completed download with the owning lifespan's registry.
+
+    Returns the rejection payload when the download succeeded outside any
+    server lifespan - nothing could ever reclaim the CSV, so the caller must
+    not hand out the path - and None otherwise.
+    """
+    if not downloaded:
+        return None
+    try:
+        retention._note_successful_download(path, True)
+    except retention.MissingDownloadRegistryError as e:
+        logger.error(f"Downloaded logs could not be registered for reclaim: {client._log_safe_error(e)}")
+        return error_payload(ErrorCode.INTERNAL_ERROR, f"Downloaded logs could not be handed out: {e}")
+    return None
+
+
+def _http_error_payload(e: httpx.HTTPError) -> dict[str, Any]:
+    """The typed HTTP-error payload, with whatever request detail exists."""
+    status, scheme, host = _download_error_details(e)
+    detail = _download_error_detail(status, scheme, host)
+    return http_error_payload(
+        "HTTP error while downloading logs" + (f": {detail}" if detail else ""),
+        e,
+        fallback_code=ErrorCode.HTTP_ERROR,
+    )
+
+
 async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     """Stream a log CSV download to a temp file without double-buffering.
 
@@ -122,17 +150,18 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
         payload, downloaded = await _download_logs_controlled(profile_id, path)
         # The file must survive until the caller has read it; the server
         # lifespan reclaims it at shutdown (see cleanup_successful_downloads).
-        retention._note_successful_download(path, downloaded)
+        # Registration requires an owning lifespan: without one the CSV could
+        # never be reclaimed, so a successful download is rejected there and
+        # removed like any other unsuccessful download (downloaded stays False
+        # for the finally below).
+        rejection = _register_successful_download(path, downloaded)
+        if rejection is not None:
+            downloaded = False
+            return rejection
         return payload
     except httpx.HTTPError as e:
         logger.error(f"HTTP error downloading logs: {client._log_safe_error(e)}")
-        status, scheme, host = _download_error_details(e)
-        detail = _download_error_detail(status, scheme, host)
-        return http_error_payload(
-            "HTTP error while downloading logs" + (f": {detail}" if detail else ""),
-            e,
-            fallback_code=ErrorCode.HTTP_ERROR,
-        )
+        return _http_error_payload(e)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Unexpected error downloading logs: {client._log_safe_error(e)}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")
