@@ -391,7 +391,7 @@ def test_catalog_constants_are_imported_not_restated():
     assert validate_schema.SPEC_PATH == spec_tools.SPEC_PATH
     published = set(published_tool_names())
     assert validate_schema.local_tool_names() == published - set(spec_tools.spec_tool_names())
-    expected_local = {composite.tool.__name__ for composite in _COMPOSITE_TOOLS}
+    expected_local = {tool.__name__ for tool, _ in _COMPOSITE_TOOLS}
     if is_generative_ui_enabled():
         from nextdns_mcp.server import generative_ui_tool_names
 
