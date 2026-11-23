@@ -299,11 +299,14 @@ async def test_fixture_values_drive_config_precedence_and_doh_gate(
         async def get(self, *args, **kwargs):
             raise AssertionError("doh_lookup sent a request for a denied profile")
 
-    monkeypatch.setattr(doh_module, "_doh_client", ExplodingClient())
+    # The persistent DoH client lives behind an explicit owner (issues #149,
+    # #642): the exploding stand-in is adopted into a published owner.
+    monkeypatch.setattr(doh_module.DohClientOwner, "get", lambda self: ExplodingClient())
     deny = config.ProfileAccessControl(read_only=False, readable=None, writable=frozenset())
-    res = await doh_module.doh_lookup(
-        f"{mock_nextdns_base_url}/{mock_profile_id}/dns-query", "google.com", "A", mock_profile_id, deny
-    )
+    with doh_module.doh_client_owned(doh_module.DohClientOwner()):
+        res = await doh_module.doh_lookup(
+            f"{mock_nextdns_base_url}/{mock_profile_id}/dns-query", "google.com", "A", mock_profile_id, deny
+        )
     assert res["code"] == "read_access_denied"
     assert res["profile_id"] == mock_profile_id
     assert res["status_code"] == 403

@@ -127,7 +127,7 @@ class TestNoProcessGlobalFallback:
     def test_download_registry_accessor(self):
         token = logs_module._download_registry.set(None)
         try:
-            with pytest.raises(StateOwnershipError):
+            with pytest.raises(logs_module.MissingDownloadRegistryError):
                 logs_module.current_download_registry()
         finally:
             logs_module._download_registry.reset(token)

@@ -206,8 +206,6 @@ def downloads_owned(registry: DownloadRegistry | None = None) -> Iterator[Downlo
         _download_registry.reset(token)
 
 
-
-
 def _remove_downloaded_file(path: str) -> bool:
     """Registry-side cleanup of a finished download; see ``_remove_temp_file``."""
     return _remove_temp_file(path)

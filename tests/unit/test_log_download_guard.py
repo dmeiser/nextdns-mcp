@@ -748,15 +748,20 @@ class TestCancellationDuringAWrite:
         sink = _BlockingRawSink()
         monkeypatch.setattr(logs_module.os, "fdopen", sink.open_over)
         monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
-        # ``api_client`` is a lazy attribute that refuses to resolve without a
-        # key, and replacing it reads the current value, so the key comes first.
+        # The download resolves its client through the current owner (issue
+        # #642): the key comes first, then an owner carrying the scripted
+        # client is published around the whole flow.
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
         monkeypatch.setattr(
             client_module,
-            "api_client",
-            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", chunks=sink.chunks)]),
+            "create_nextdns_client",
+            lambda: _FakeClient(
+                [_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", chunks=sink.chunks)]
+            ),
         )
+        owner_cm = client_module.api_client_owned(client_module.ApiClientOwner())
+        owner_cm.__enter__()  # exited in this test's own finally, same task
 
         loop = asyncio.get_running_loop()
         cancel_requested = threading.Event()
@@ -776,6 +781,7 @@ class TestCancellationDuringAWrite:
         finally:
             thread.join(_WRITE_START_SECONDS + _RELEASE_SECONDS)
             await other
+            owner_cm.__exit__(None, None, None)
 
         assert watcher.loop_stayed_free, watcher.note
         assert created, "no temp directory was created, so the cleanup claim is unproven"
@@ -835,7 +841,7 @@ class TestDownloadTool:
         logs_module.cleanup_successful_downloads()
         assert not os.path.exists(payload["file_path"])
         assert not os.path.exists(os.path.dirname(payload["file_path"]))
-        registry.cleanup()  # idempotent: nothing registered, nothing to do
+        owned_registry.cleanup()  # idempotent: nothing registered, nothing to do
 
     async def test_a_successful_download_without_a_lifespan_is_rejected_and_cleaned_up(
         self, monkeypatch, unauthenticated, owned_api_client
@@ -1405,7 +1411,6 @@ class TestSuccessfulDownloadLifecycle:
             path = self._register(tmp_path, "owned")
             assert path in registry
             assert logs_module.current_download_registry() is registry
-
 
     def test_a_never_written_path_is_removed_without_a_trace(self, tmp_path):
         """FileNotFoundError means there is nothing to remove and nothing to report."""
