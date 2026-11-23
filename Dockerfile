@@ -5,8 +5,8 @@
 # different bytes than the ones CI verified; the tag stays to name the pin.
 FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS builder
 
-# Update system packages for security
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+# The image carries exactly the pinned base's package set: no build-time
+# `apt-get upgrade`, which would make the result depend on the mirrors that day.
 
 # Set working directory
 WORKDIR /app
@@ -52,8 +52,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # Pinned to the same base image digest as the builder stage.
 FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
-# Update system packages for security
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+# The image carries exactly the pinned base's package set: no build-time
+# `apt-get upgrade`, which would make the result depend on the mirrors that day.
 
 # OCI labels for container metadata
 LABEL org.opencontainers.image.title="NextDNS MCP Server"
