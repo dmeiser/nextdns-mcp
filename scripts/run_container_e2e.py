@@ -41,8 +41,6 @@ from scripts.validate_schema import (
     validate_tool_response,
 )
 
-HEALTH_FAILURE_CLASSES = ("auth", "unreachable")
-
 # When upstream answers 429, the call is retried after these delays instead of
 # being recorded FAILED: 15 + 30 + 60 = 105s across 4 total attempts
 # (DEFAULT_MAX_RETRIES), outlasting a 60s rolling/fixed window. The quota is
@@ -81,14 +79,16 @@ def _assert_health_ok(body: Any, health_url: str) -> tuple[bool, str]:
 
 
 def _assert_health_failure(body: dict[str, Any], health_url: str) -> tuple[bool, str]:
-    """Assert the 503 side: a documented failure class and a non-empty reason."""
-    failure_class = body.get("class")
-    if failure_class not in HEALTH_FAILURE_CLASSES:
-        return False, f"expected class in {HEALTH_FAILURE_CLASSES}, got {failure_class!r}"
-    reason = body.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        return False, f"expected a non-empty reason in the {health_url} 503 body, got {body}"
-    return True, f"GET {health_url} -> 503 class={failure_class} reason={reason!r}"
+    """Assert the 503 side: exactly ``{"status": "error"}``.
+
+    The body once carried a failure class and a reason, which turned an
+    unauthenticated route into an oracle for whether the configured API key is
+    accepted (issue #603). Those fields are now part of the contract by
+    absence: a 503 that carries them fails this check, it is not a bonus.
+    """
+    if body != {"status": "error"}:
+        return False, f'expected {{"status": "error"}} from {health_url}, got {body}'
+    return True, f'GET {health_url} -> 503 {{"status": "error"}}'
 
 
 def _leaks_key(body_text: str, api_key: str) -> bool:
@@ -103,8 +103,9 @@ def check_health_endpoint(health_url: str, api_key: str, expect_ok: bool, timeou
     contract a client actually receives. ``expect_ok`` selects which side to
     assert: ``True`` for a server whose configured credentials work (200 with
     exactly ``{"status": "ok"}``), ``False`` for one whose credentials do not
-    (503 carrying a failure class and a short reason). Either way the response
-    body must not contain the API key.
+    (503 with exactly ``{"status": "error"}`` — a body that names the failure
+    class or the reason is a contract violation, because this transport is
+    unauthenticated). Either way the response body must not contain the API key.
 
     Args:
         health_url: Absolute URL of the ``/health`` route to GET.
@@ -143,7 +144,7 @@ def _health_expect_ok(response: httpx.Response, body: Any, health_url: str) -> t
 
 
 def _health_expect_unavailable(response: httpx.Response, body: Any, health_url: str) -> tuple[bool, str]:
-    """The 503 side: a failure class and short reason, or a contract violation naming what was seen."""
+    """The 503 side: exactly {"status": "error"}, or a contract violation naming what was seen."""
     if response.status_code != 503:
         return False, f"expected HTTP 503 from {health_url}, got {response.status_code}: {body}"
     if not isinstance(body, dict) or body.get("status") != "error":
@@ -1318,10 +1319,10 @@ class ContainerE2ERunner:
         """Run the credential-free generative-UI check; returns the process exit code.
 
         The container for this check is started with an invalid API key on
-        purpose: ``/health`` must report that upstream authentication failure —
-        proving the image runs — while the Prefab sandbox needs nothing but its
-        own Deno runtime. The live-account rate limit therefore cannot turn this
-        check green or red.
+        purpose: ``/health`` must answer 503 — the probe reaches NextDNS and is
+        refused, which proves the image runs — while the Prefab sandbox needs
+        nothing but its own Deno runtime. The live-account rate limit therefore
+        cannot turn this check green or red.
         """
         if not await self._preflight_generative_ui():
             return 1
@@ -1507,7 +1508,7 @@ def parse_args() -> argparse.Namespace:
         "--expect-health",
         choices=["ok", "not-ok"],
         default=os.environ.get("EXPECT_HEALTH", "ok"),
-        help="Assert /health returns 200 (ok) or 503 with a failure class (not-ok) (default: ok)",
+        help="Assert /health returns 200 (ok) or 503 with the minimal error body (not-ok) (default: ok)",
     )
     parser.add_argument(
         "--health-only",
