@@ -215,6 +215,10 @@ _list_absent = common._list_absent  # (absent, verdict) — a failed read is not
 _rewrites_absent = common._rewrites_absent
 _entry_active = common._entry_active
 _unwrap_id = common._unwrap_id
+# The MCP content-block readers: the harness reads text out of the payloads its
+# actor prints, the container runner reads it out of live tool results, and both
+# go through this one. See ``ai_e2e_common`` for the shape rules.
+_content_texts = common._content_texts
 ABSENT = common.ABSENT
 PRESENT = common.PRESENT
 INDETERMINATE = common.INDETERMINATE
@@ -833,11 +837,16 @@ class ActorRun:
 
 
 def _flatten_text(res: Any) -> str:
-    """Flatten a tool result into readable text (bounded)."""
-    if isinstance(res, dict):
-        content = res.get("content")
-        if isinstance(content, list):
-            return "".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("text"))[:5000]
+    """Flatten a tool result into readable text (bounded).
+
+    Reading the text field of a block, in either shape it arrives in, is the
+    shared reader's answer (``ai_e2e_common``); what is the harness's own is
+    how the answer is used: an actor event joins every block that carries text,
+    because the failure it reports can be split across them, and anything that
+    is not a tool result is rendered as its string form.
+    """
+    if isinstance(res, dict) and isinstance(res.get("content"), list):
+        return "".join(_content_texts(res))[:5000]
     if isinstance(res, str):
         return res[:5000]
     if res is None:
@@ -1520,7 +1529,7 @@ async def _mcp_call(server: dict[str, Any], tool: str, arguments: dict[str, Any]
     data = getattr(res, "data", None)
     if data is None:
         data = getattr(res, "structured_content", None)
-    text = "".join(str(getattr(part, "text", "")) for part in (getattr(res, "content", None) or []))
+    text = "".join(_content_texts(res))
     error = ""
     if getattr(res, "is_error", False):
         error = text or "tool call failed"
