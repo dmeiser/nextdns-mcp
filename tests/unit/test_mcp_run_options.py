@@ -222,11 +222,11 @@ class TestIsLoopbackHost:
 
 
 class TestServerModuleReExports:
-    """The run-option helpers used to live in ``nextdns_mcp.server``.
+    """The catalog and run-option helpers used to live in ``nextdns_mcp.server``.
 
     External scripts and tests import them from there, so ``server.py``
     re-exports the moved names; these aliases must keep pointing at the
-    implementations in ``nextdns_mcp.run_options``.
+    implementations in ``nextdns_mcp.catalog`` and ``nextdns_mcp.run_options``.
     """
 
     def test_run_option_helpers_remain_importable_from_server(self):
@@ -237,3 +237,11 @@ class TestServerModuleReExports:
         assert server_module._resolve_transport is run_options._resolve_transport
         assert server_module._parse_port is run_options._parse_port
         assert server_module._is_loopback_host is run_options._is_loopback_host
+
+    def test_catalog_helpers_remain_importable_from_server(self):
+        import nextdns_mcp.server as server_module
+        from nextdns_mcp import catalog
+
+        assert server_module.generative_ui_tool_names is catalog.generative_ui_tool_names
+        assert server_module.generative_ui_content_tool_names is catalog.generative_ui_content_tool_names
+        assert server_module.generative_ui_data_tool_names is catalog.generative_ui_data_tool_names

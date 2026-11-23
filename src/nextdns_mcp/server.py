@@ -15,16 +15,17 @@ from fastmcp.tools.base import ToolResult
 from mcp.types import ToolAnnotations
 
 from .catalog import (  # noqa: F401
+    enabled_generative_ui_tool_names,
     generative_ui_content_tool_names,
     generative_ui_data_tool_names,
     generative_ui_tool_names,
+    register_generative_ui_provider,
 )
 from .client import get_api_client
 from .config import (
     NEXTDNS_BASE_URL,
     configure_logging,
     get_http_timeout,
-    is_generative_ui_enabled,
     validate_configuration,
 )
 from .openapi import create_mcp_server
@@ -96,9 +97,7 @@ def published_tool_names() -> list[str]:
     the server is constructed — before the tools exist — so the names have to be
     derivable without registering anything.
     """
-    names = [*spec_tool_names(), *(tool.__name__ for tool, _ in _COMPOSITE_TOOLS)]
-    if is_generative_ui_enabled():
-        names.extend(generative_ui_tool_names())
+    names = [*spec_tool_names(), *(tool.__name__ for tool, _ in _COMPOSITE_TOOLS), *enabled_generative_ui_tool_names()]
     return names
 
 
@@ -132,10 +131,7 @@ def build_mcp_server() -> FastMCP:
             annotations=_COMPOSITE_ANNOTATIONS,
             app=app_enabled,
         )(_with_error_flag(tool))
-    if is_generative_ui_enabled():
-        from .generative import NextDNSGenerativeUI
-
-        server.add_provider(NextDNSGenerativeUI())
+    register_generative_ui_provider(server)
     return server
 
 
