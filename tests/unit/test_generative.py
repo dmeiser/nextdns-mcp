@@ -4,8 +4,12 @@ import asyncio
 import inspect
 import json
 import os
+import shutil
+import stat
+import tempfile
 import threading
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -996,6 +1000,182 @@ def test_deno_command_raises_when_deno_missing(monkeypatch):
     monkeypatch.setattr(generative_sandbox.shutil, "which", lambda _name: None)
     with pytest.raises(RuntimeError, match="Deno is required"):
         generative_sandbox._deno_command()
+
+
+def _flag_paths(flag: str, cmd: list[str]) -> list[str]:
+    """Paths carried by one ``--allow-*`` launch flag; empty for a bare (unscoped) flag."""
+    for arg in cmd:
+        if arg == flag:
+            return []  # bare flag: the whole host filesystem
+        if arg.startswith(f"{flag}="):
+            return arg[len(flag) + 1 :].split(",")
+    raise AssertionError(f"{flag} missing from the Deno launch arguments")
+
+
+def test_deno_command_scopes_host_filesystem_access(isolated_sandbox_deno_dir, monkeypatch):
+    """Regression (dmeiser/nextdns-mcp#593): the Deno launch bounds host filesystem access.
+
+    Before the fix `_deno_command` passed bare ``--allow-read`` and ``--allow-write``,
+    so the subprocess running LLM-generated Prefab/Pyodide code could read or write
+    every file the server process can touch — a mounted ``NEXTDNS_API_KEY_FILE``
+    secret and the application source tree included. The fix scopes reads to the
+    sandbox assets plus its own cache directory, and writes to that cache directory
+    alone.
+    """
+    from prefab_ui.sandbox._pyodide import DENO_LOCK, PREFAB_SRC, RUNNER_JS
+
+    from nextdns_mcp import generative_sandbox
+
+    monkeypatch.setattr(generative_sandbox.shutil, "which", lambda _name: "/usr/local/bin/deno")
+    cmd = generative_sandbox._deno_command()
+
+    # Neither bare flag may survive: each must carry an explicit path list.
+    assert "--allow-read" not in cmd
+    assert "--allow-write" not in cmd
+    read_paths = {Path(p).resolve() for p in _flag_paths("--allow-read", cmd)}
+    write_paths = {Path(p).resolve() for p in _flag_paths("--allow-write", cmd)}
+    assert read_paths, "--allow-read must be scoped to explicit paths"
+    assert write_paths, "--allow-write must be scoped to explicit paths"
+
+    sandbox_dir = generative_sandbox._sandbox_deno_dir().resolve()
+
+    # Reads cover the sandbox assets the runner needs — the runner itself, the
+    # Prefab source tree it walks, the frozen lockfile — and its own cache dir.
+    assert {Path(RUNNER_JS).resolve(), Path(PREFAB_SRC).resolve(), Path(DENO_LOCK).resolve()} <= read_paths
+    # ...and nothing else: no path outside the assets and the sandbox cache dir.
+    assert read_paths <= {
+        Path(RUNNER_JS).resolve(),
+        Path(PREFAB_SRC).resolve(),
+        Path(DENO_LOCK).resolve(),
+        sandbox_dir,
+    }
+    # The server's own source tree is not readable: no read path is inside src/.
+    source_tree = Path(generative_sandbox.__file__).resolve().parents[1]
+    assert not any(p == source_tree or p.is_relative_to(source_tree) for p in read_paths)
+
+    # Writes reach only the dedicated sandbox cache directory.
+    assert write_paths == {sandbox_dir}
+    assert sandbox_dir != Path(tempfile.gettempdir()).resolve()
+
+
+@pytest.fixture
+def isolated_sandbox_deno_dir(monkeypatch, tmp_path):
+    """Pin the sandbox cache directory to ``tmp_path`` and reset the process-scoped cache.
+
+    ``_sandbox_deno_dir()`` caches one directory per process, so a test that
+    leaves that cache set both leaks a directory into the real temp dir and
+    leaks state into whichever test runs next.
+    """
+    from nextdns_mcp import generative_sandbox
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(generative_sandbox, "_sandbox_deno_dir_path", None)
+    yield tmp_path
+    cached = generative_sandbox._sandbox_deno_dir_path
+    if cached is not None:
+        shutil.rmtree(cached, ignore_errors=True)
+
+
+def test_sandbox_deno_dir_never_adopts_a_preexisting_path(isolated_sandbox_deno_dir):
+    """A planted directory or symlink at a guessable name is never adopted (issue #593 review).
+
+    The sandbox's writable path has to be created exclusively (``O_CREAT |
+    O_EXCL``, mode 0700). A predictable ``<tmp>/nextdns-mcp-sandbox-<uid>``
+    adopted with ``mkdir(exist_ok=True)`` silently accepts a symlink to ``/``,
+    which grants the worker the whole host, or another user's world-writable
+    directory, which exposes the module and wheel cache to poisoning before the
+    runner revokes its permissions.
+    """
+    from nextdns_mcp import generative_sandbox
+
+    tmp = isolated_sandbox_deno_dir
+    uid = os.getuid() if hasattr(os, "getuid") else "user"
+    planted_dir = tmp / f"nextdns-mcp-sandbox-{uid}"
+    planted_dir.mkdir()
+    planted_dir.chmod(0o777)  # umask would otherwise clip mkdir(mode=0o777)
+    planted_link = tmp / "nextdns-mcp-sandbox-link"
+    planted_link.symlink_to("/")
+
+    sandbox_dir = generative_sandbox._sandbox_deno_dir()
+
+    assert sandbox_dir not in (planted_dir, planted_link)
+    # Its own real directory, not a symlink, private to this process.
+    st = os.lstat(sandbox_dir)
+    assert stat.S_ISDIR(st.st_mode)
+    assert stat.S_IMODE(st.st_mode) == 0o700
+    if hasattr(os, "getuid"):
+        assert st.st_uid == os.getuid()
+    # Unpredictable name: the prefix plus a random suffix, never the uid key.
+    assert sandbox_dir.name.startswith("nextdns-mcp-sandbox-")
+    assert sandbox_dir.name != f"nextdns-mcp-sandbox-{uid}"
+    # The planted paths are left exactly as they were found.
+    assert os.readlink(planted_link) == "/"
+    assert stat.S_IMODE(planted_dir.stat().st_mode) == 0o777
+
+
+def test_sandbox_deno_dir_is_canonical_reused_and_recreated(isolated_sandbox_deno_dir):
+    """The directory is resolved, reused for the process lifetime, and recreated if removed.
+
+    A symlinked ``TMPDIR`` (or macOS ``/var`` -> ``/private/var``) must not put a
+    lexical path in the Deno flags that Deno resolves somewhere else, and a cache
+    directory removed mid-run must not leave the worker pointed at a missing path.
+    """
+    from nextdns_mcp import generative_sandbox
+
+    tmp = isolated_sandbox_deno_dir
+    link_root = tmp / "link-root"
+    link_root.symlink_to(tmp, target_is_directory=True)
+
+    first = generative_sandbox._sandbox_deno_dir()
+    assert not first.is_symlink()
+    assert first == first.resolve()
+    assert first != link_root / first.name
+    # The next worker start reuses the same cache instead of re-downloading.
+    assert generative_sandbox._sandbox_deno_dir() == first
+
+    shutil.rmtree(first)
+    second = generative_sandbox._sandbox_deno_dir()
+    assert second != first
+    assert second.is_dir()
+
+
+def test_sandbox_deno_dir_is_the_directory_both_launch_sites_name(isolated_sandbox_deno_dir, monkeypatch):
+    """``_deno_command`` and ``_sandbox_startup_env`` name one and the same cache directory."""
+    from nextdns_mcp import generative_sandbox
+
+    monkeypatch.setattr(generative_sandbox.shutil, "which", lambda _name: "/usr/local/bin/deno")
+    sandbox_dir = generative_sandbox._sandbox_deno_dir()
+
+    assert _flag_paths("--allow-write", generative_sandbox._deno_command()) == [str(sandbox_dir)]
+    assert str(sandbox_dir) in _flag_paths("--allow-read", generative_sandbox._deno_command())
+    assert generative_sandbox._sandbox_startup_env()["DENO_DIR"] == str(sandbox_dir)
+
+
+def test_sandbox_deno_dir_does_not_accumulate_across_restarts(isolated_sandbox_deno_dir):
+    """The exit hook removes the process cache instead of leaving a directory per run."""
+    from nextdns_mcp import generative_sandbox
+
+    sandbox_dir = generative_sandbox._sandbox_deno_dir()
+    assert sandbox_dir.is_dir()
+    generative_sandbox._drop_sandbox_deno_dir()
+    assert not sandbox_dir.exists()
+
+
+def test_drop_sandbox_deno_dir_without_a_created_cache_is_a_noop(isolated_sandbox_deno_dir):
+    """The exit hook must tolerate a cache that was never created (e.g. no sandbox ran)."""
+    from nextdns_mcp import generative_sandbox
+
+    generative_sandbox._drop_sandbox_deno_dir()  # must not raise when the cache is absent
+
+
+def test_sandbox_startup_env_relocates_deno_cache(isolated_sandbox_deno_dir, monkeypatch):
+    """DENO_DIR points at the sandbox cache dir so the wheel cache lands inside the only writable path."""
+    from nextdns_mcp import generative_sandbox
+
+    monkeypatch.setenv("NEXTDNS_API_KEY", "super-secret-key")
+    env = generative_sandbox._sandbox_startup_env()
+    assert env["DENO_DIR"] == str(generative_sandbox._sandbox_deno_dir())
+    assert "NEXTDNS_API_KEY" not in env
 
 
 def test_discard_startup_reclaims_only_completed_workers():

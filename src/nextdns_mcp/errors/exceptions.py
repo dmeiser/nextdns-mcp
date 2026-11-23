@@ -69,3 +69,16 @@ class StateOwnershipError(RuntimeError):
     that convenience from creeping back as a hidden fallback: a read or write
     outside an owner's scope fails loudly, naming how to publish one.
     """
+
+
+class ConfigurationError(ValueError):
+    """Raised when configuration values are invalid or malformed."""
+
+
+class MissingApiKeyError(ConfigurationError):
+    """Raised when a NextDNS API key has not been configured yet.
+
+    Subclasses ``ConfigurationError`` so that a single ``except
+    ConfigurationError`` covers both "no key configured yet" and "the value
+    you configured is invalid".
+    """

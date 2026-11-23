@@ -16,7 +16,10 @@ The package is split by responsibility, one concern per module:
 - ``rate_limit`` - the ``Retry-After`` and ``X-RateLimit-*`` metadata of a 429.
 - ``http`` - ``http_error_payload``, the composer: the only module here that reads a
   response, and the only one that imports ``body``, ``upstream`` and ``rate_limit``.
-- ``exceptions`` - ``NextDNSError`` and its four typed subclasses.
+- ``exceptions`` - ``NextDNSError`` and its four typed subclasses, plus the
+  ``ConfigurationError``/``MissingApiKeyError`` pair the configuration layer
+  raises (kept here so ``config`` and ``profile_access`` share one definition
+  without an import cycle).
 
 Import the surface from here (``from nextdns_mcp.errors import ErrorCode``); names
 beginning with ``_`` inside the submodules are package-internal, and a helper that
@@ -37,6 +40,8 @@ from .body import (
 )
 from .codes import ErrorCode, error_payload
 from .exceptions import (
+    ConfigurationError,
+    MissingApiKeyError,
     NextDNSAuthError,
     NextDNSError,
     NextDNSRateLimitError,
@@ -51,7 +56,9 @@ __all__ = [
     "BODY_SLICE_BYTES",
     "MAX_RESPONSE_BODY_CHARS",
     "TRUNCATION_MARKER",
+    "ConfigurationError",
     "ErrorCode",
+    "MissingApiKeyError",
     "NextDNSAuthError",
     "NextDNSError",
     "NextDNSRateLimitError",

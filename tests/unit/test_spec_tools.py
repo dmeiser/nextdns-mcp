@@ -1189,7 +1189,7 @@ def test_create_profile_guard_not_all_protected(monkeypatch):
 def test_create_profile_guard_reads_protected_profiles_once(monkeypatch):
     """One guard invocation takes a single snapshot: the denylist is read once."""
 
-    from nextdns_mcp import config, spec_tools
+    from nextdns_mcp import profile_access, spec_tools
 
     monkeypatch.setenv("NEXTDNS_READ_ONLY", "")
     monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "")
@@ -1197,14 +1197,14 @@ def test_create_profile_guard_reads_protected_profiles_once(monkeypatch):
     monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "abcdef")
 
     calls = 0
-    real_get_protected_profiles = config.get_protected_profiles
+    real_get_protected_profiles = profile_access.get_protected_profiles
 
     def counting_get_protected_profiles() -> frozenset[str]:
         nonlocal calls
         calls += 1
         return real_get_protected_profiles()
 
-    monkeypatch.setattr(config, "get_protected_profiles", counting_get_protected_profiles)
+    monkeypatch.setattr(profile_access, "get_protected_profiles", counting_get_protected_profiles)
 
     from types import SimpleNamespace
 

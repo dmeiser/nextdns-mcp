@@ -33,6 +33,11 @@ def _fold_word(word: str) -> str:
     return word
 
 
+def _flat_key(name: str) -> str:
+    """A name with separators and case removed — the flat-equal comparison key."""
+    return _WORD_SPLIT.sub("", name.casefold())
+
+
 def _words(text: str) -> set[str]:
     """Split a tool name or query into comparable words.
 
@@ -394,26 +399,30 @@ def _word_scorer(
     names: dict[str, set[str]],
     vocabulary: dict[str, set[str]],
     shared: tuple[set[str], set[str]] | None = None,
+    leading: Mapping[str, str] | None = None,
+    generic: set[str] | frozenset[str] | None = None,
 ) -> Callable[[str], int]:
     """A scorer for how much of the query each tool's own words account for.
 
-    Binds the catalog-wide discounting (shared names/values) and the leading-verb
-    exception once, so ranking callers score by tool name alone. `shared` carries
-    the precomputed ``(name_shared, vocab_shared)`` when the caller already has
-    them (the transform memoizes them per catalog); without it they are derived
+    Binds the catalog-wide discounting (shared names/values), the per-name
+    leading word, and the generic-verb set once, so ranking callers score by
+    tool name alone. `shared` carries the precomputed ``(name_shared,
+    vocab_shared)``, and `leading`/`generic` the per-name leading words and
+    the catalog's generic leading verbs, when the caller already has them
+    (the catalog word memo stores all four); without them they are derived
     here, which is what direct callers of this function expect.
     """
     name_shared, vocab_shared = _shared_word_sets(names, vocabulary) if shared is None else shared
-    leading = {name: _leading_word(name) for name in names}
-    generic = frozenset(_generic_leading_words(names))
+    leading_map = {name: _leading_word(name) for name in names} if leading is None else leading
+    generic_verbs = frozenset(_generic_leading_words(names)) if generic is None else frozenset(generic)
     return lambda name: _words_score(
         query_words,
         names.get(name),
         vocabulary.get(name),
         name_shared,
         vocab_shared,
-        leading.get(name, ""),
-        generic,
+        leading_map.get(name, ""),
+        generic_verbs,
     )
 
 
@@ -470,11 +479,12 @@ class _CatalogWords:
     """One catalog's word structures, computed once and reused on every query.
 
     The catalog is registered at startup and static while the server runs, so
-    every structure here is a constant of its tool NAMES; the transform's memo
-    keys on the sorted names, and a catalog under a different set of names
-    rebuilds them. FastMCP's own content hash still detects re-registered
-    descriptions for the BM25 index; this memo deliberately keys on names only,
-    because names are what these structures are keyed by.
+    every structure here is a constant of its tool NAMES; the memos on the
+    search transform and the call-shape middleware key on the sorted names,
+    and a catalog under a different set of names rebuilds them. FastMCP's
+    own content hash still detects re-registered descriptions for the BM25
+    index; these memos deliberately key on names only, because names are
+    what these structures are keyed by.
     """
 
     names: dict[str, set[str]]
@@ -485,6 +495,7 @@ class _CatalogWords:
     raw_names: set[str]
     name_shared: set[str]
     vocab_shared: set[str]
+    flat_names: dict[str, str]
 
 
 def _catalog_words_for(tools: Sequence[Tool]) -> _CatalogWords:
@@ -500,6 +511,7 @@ def _catalog_words_for(tools: Sequence[Tool]) -> _CatalogWords:
         raw_names=_catalog_name_words(tools),
         name_shared=name_shared,
         vocab_shared=vocab_shared,
+        flat_names={tool.name: _flat_key(tool.name) for tool in tools},
     )
 
 

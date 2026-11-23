@@ -22,6 +22,7 @@ import os
 from typing import Any
 
 from .config import ConfigurationError
+from .constants import LOOPBACK_HOSTS
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +34,11 @@ def _is_loopback_host(host: str) -> bool:
         host: Hostname or IP address to check.
 
     Returns:
-        True when the bind is restricted to loopback (127.0.0.1, ::1, localhost).
+        True when the bind is restricted to loopback. Reads the one shared
+        loopback definition in ``constants.LOOPBACK_HOSTS`` — the same set the
+        client allows as request destinations.
     """
-    return host in ("127.0.0.1", "::1", "localhost")
+    return host in LOOPBACK_HOSTS
 
 
 # The only transports the server supports. Anything else is a configuration

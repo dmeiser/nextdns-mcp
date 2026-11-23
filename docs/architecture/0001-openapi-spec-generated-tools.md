@@ -76,7 +76,7 @@ recorded where they are implemented (`spec_tools.py`).
    publish a tool that cannot answer. `downloadLogs` is delegated: the endpoint answers
    with a redirect to a signed URL, and the safe way to follow it — size cap, per-hop
    public-address checks, no API key on the follow-up request — already lives in
-   `tools/logs.py`, so the generated tool hands off to that instead of duplicating it.
+   `tools/logs/`, so the generated tool hands off to that instead of duplicating it.
 
 A guardrail is not a deviation: `_UNSAFE_PATH_VALUE` refuses a path argument that could
 address a *different* endpoint (`/`, `?`, `#`, `\`, whitespace, `..`, non-printables),

@@ -3,10 +3,11 @@
 SPDX-License-Identifier: MIT
 
 These live here so the direction of dependency is a straight line: the access
-control layer (``client``), the API transport (``transport``) and the call log
-(``call_log``) all read these definitions, and none of them has to import
-another to say what a profile id looks like, which HTTP methods change state,
-or which tool names belong to the disclosure transform. A shared home breaks
+control layer (``client``), the API transport (``transport``), the call log
+(``call_log``) and the run-options module (``run_options``) all read these
+definitions, and none of them has to import another to say what a profile id
+looks like, which HTTP methods change state, which tool names belong to the
+disclosure transform, or which hosts count as loopback. A shared home breaks
 the old ``utils`` -> ``client`` edge and keeps the synthetic-tool name set a
 single definition shared by the log and the transform. The DoH answer
 vocabulary (``VALID_DNS_RECORD_TYPES``, ``DNS_STATUS_CODES``) lives here for the
@@ -16,6 +17,13 @@ the package, so the edge cannot close a cycle.
 """
 
 import re
+
+# The loopback host names. The client allows them as request destinations so
+# local test doubles and loopback mock servers stay usable (no shipped tool
+# ever targets them), and the run-options check reads the same set to decide
+# whether an ``MCP_HOST`` bind is loopback-only. Membership is exact: ``127.0.0.2``
+# or ``evil.localhost`` is not in here and is not treated as loopback.
+LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
 
 # Safe identifier patterns to prevent path traversal and ACL bypass.
 # Profile IDs must match what api.nextdns.io actually issues, not the stale

@@ -10,6 +10,8 @@ from fastmcp import Client, FastMCP
 from nextdns_mcp import client as client_module
 from nextdns_mcp.openapi import StripExtraFieldsMiddleware, create_mcp_server
 from nextdns_mcp.tools import doh as doh_module
+from nextdns_mcp.tools import logs as logs_module
+from nextdns_mcp.tools.logs import redirects as logs_redirects
 
 
 class TestCreateMcpServer:
@@ -197,9 +199,10 @@ class TestServerLifespan:
 
     @pytest.mark.asyncio
     async def test_server_lifespan_closes_http_clients(self, mock_api_key, monkeypatch):
-        """Server lifespan exit must close both clients owned by the server."""
+        """Server lifespan exit must close every long-lived client owned by the server."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
         monkeypatch.setattr(client_module, "_raw_probe_client", None)
+        monkeypatch.setattr(logs_redirects, "_redirect_client", None)
 
         from nextdns_mcp import openapi as openapi_module
 
@@ -214,16 +217,20 @@ class TestServerLifespan:
                 api_client = client_module.get_api_client()
                 probe_client = client_module.get_raw_probe_client()
                 doh_client = doh_module.current_doh_client_owner().get()
+                redirect_client = logs_redirects._get_redirect_client()
                 assert not api_client.is_closed
                 assert not probe_client.is_closed
                 assert not doh_client.is_closed
+                assert not redirect_client.is_closed
 
         assert api_client.is_closed
         assert probe_client.is_closed
         assert doh_client.is_closed
+        assert redirect_client.is_closed, "_server_lifespan left the download redirect client open"
         assert resources.api_client._client is None
         assert client_module._raw_probe_client is None
         assert resources.doh_client._client is None
+        assert logs_redirects._redirect_client is None
 
     @pytest.mark.asyncio
     async def test_real_client_session_closes_http_clients_on_disconnect(self, mock_api_key, monkeypatch):
@@ -235,6 +242,8 @@ class TestServerLifespan:
         """
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
+        monkeypatch.setattr(logs_redirects, "_redirect_client", None)
+
         from nextdns_mcp import openapi as openapi_module
 
         server = create_mcp_server()
@@ -244,11 +253,16 @@ class TestServerLifespan:
             await mcp_client.list_tools()
             api_client = resources.api_client.get()
             doh_client = resources.doh_client.get()
+            redirect_client = logs_redirects._get_redirect_client()
             assert not api_client.is_closed
             assert not doh_client.is_closed
+            assert not redirect_client.is_closed
 
         assert api_client.is_closed
         assert doh_client.is_closed
+
+        assert redirect_client.is_closed, "the Client session did not close the download redirect client"
+        assert logs_redirects._redirect_client is None
 
     @pytest.mark.asyncio
     async def test_a_sibling_servers_shutdown_leaves_this_servers_clients_open(self, mock_api_key, monkeypatch):
@@ -354,7 +368,6 @@ class TestDownloadOwnershipIsPerServer:
         self, mock_api_key, monkeypatch, tmp_path
     ):
         from nextdns_mcp import openapi as openapi_module
-        from nextdns_mcp.tools import logs as logs_module
 
         server_a_csv = tmp_path / "a" / "download.csv"
         server_b_csv = tmp_path / "b" / "download.csv"

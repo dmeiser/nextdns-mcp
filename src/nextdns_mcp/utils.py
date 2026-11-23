@@ -10,6 +10,7 @@ its failures repeat) live in ``constants`` so no module here has to import a
 transport to describe an id.
 """
 
+import math
 import re
 from typing import Any
 
@@ -216,11 +217,32 @@ def build_series_params(
     )
 
 
+# The relative-offset grammar the analytics endpoints accept: a digit run
+# (``RELATIVE_AMOUNT_PATTERN``) followed by one unit letter (``RELATIVE_UNIT_CLASS``),
+# with each unit's size in ``RELATIVE_UNIT_SECONDS`` - ``-1d`` and ``-7d`` are the
+# forms, and "y" is a 365-day year, matching how the analytics endpoints read a
+# year. The unit letter is matched case-sensitively: an upper-case letter is a
+# different unit upstream ("-1M" reads as months), so folding it onto its
+# lower-case twin would size a months-long range as minutes.
+# Two paths read a relative offset and both recognize it from these one
+# definition each: ``charts.resolve_time_point`` resolves the amount to Unix
+# seconds, and ``normalize_time_value`` below rewrites the spellings the API
+# reads wrongly. Each path keeps its own sign, spacing and case policy for the
+# input forms it accepts; sharing the amount and unit grammar is what keeps a
+# unit or an amount shape from being recognized on one path and not the other.
+RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+RELATIVE_AMOUNT_PATTERN = r"\d+"
+# The unit letters as a regex character class, generated from the table so the
+# alphabet and the conversion data can never drift apart.
+RELATIVE_UNIT_CLASS = "[" + "".join(sorted(RELATIVE_UNIT_SECONDS)) + "]"
+
 # The spellings of a relative range that the analytics endpoints do NOT accept
 # but callers reach for: `now-1d` (Grafana/Prometheus) and a bare negative
-# number, which upstream reads as an absolute Unix timestamp.
-NOW_OFFSET_RE = re.compile(r"^now\s*(?:-\s*(\d+\s*[smhdwy]))?$", re.IGNORECASE)
-BARE_NEGATIVE_RE = re.compile(r"^-\d+$")
+# number, which upstream reads as an absolute Unix timestamp. Both recognizers
+# are built from the grammar above, so every offset rewritten here is one
+# ``charts.resolve_time_point`` can also price.
+NOW_OFFSET_RE = re.compile(rf"^now\s*(?:-\s*({RELATIVE_AMOUNT_PATTERN}\s*{RELATIVE_UNIT_CLASS}))?$", re.IGNORECASE)
+BARE_NEGATIVE_RE = re.compile(rf"^-{RELATIVE_AMOUNT_PATTERN}$")
 
 
 def normalize_time_value(value: Any) -> Any:
@@ -233,7 +255,14 @@ def normalize_time_value(value: Any) -> Any:
       caller has nothing to correct: across three runs the model retried that
       call ~40 times, varying the interval each time. A negative absolute time
       is not a thing, so it is read as the offset it means, in the API's own
-      relative-seconds spelling (``-86400s``, verified accepted).
+      relative-seconds spelling (``-86400s``, verified accepted). Only integer
+      seconds are accepted in that spelling; a fractional offset like
+      ``-86400.5`` is truncated toward zero (``-86400s``) rather than emitted
+      as ``-86400.5s``, which the API rejects, and a sub-second offset
+      truncates to ``now``. Non-finite floats (``NaN``, ``Infinity``) survive
+      Python's JSON decoder and keep the spelling they have always been sent
+      in - ``NaN`` unchanged for the chart layer to resolve, ``-Infinity`` as
+      the offset string upstream refuses.
     - ``now-1d``, the Grafana/Prometheus spelling. Upstream answers "`from` must
       be number"; the same span in its own spelling (``-1d``) works.
 
@@ -243,8 +272,30 @@ def normalize_time_value(value: Any) -> Any:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return f"{value}s" if value < 0 else value
+        return _normalize_numeric_time(value)
     return _normalize_time_text(value)
+
+
+def _normalize_numeric_time(value: float) -> Any:
+    """The offset spelling for a negative number; the number itself otherwise."""
+    if isinstance(value, float) and not math.isfinite(value):
+        # NaN and Infinity survive Python's JSON decoder (see
+        # charts._numeric_seconds). They keep the spelling they had before this
+        # rewrite - upstream refuses them, and the chart layer resolves them -
+        # because int() on either raises inside the tool call.
+        return _non_finite_time(value)
+    if value >= 0:
+        return value
+    # The API accepts only whole-second offsets; truncate toward zero.
+    # A sub-second negative offset truncates to zero seconds, i.e. now -
+    # a signless "0s" has no verified acceptance anywhere.
+    whole = int(value)
+    return f"{whole}s" if whole else "now"
+
+
+def _non_finite_time(value: float) -> Any:
+    """A non-finite float in the spelling it has always been sent as."""
+    return f"{value}s" if value < 0 else value
 
 
 def _normalize_time_text(value: Any) -> Any:

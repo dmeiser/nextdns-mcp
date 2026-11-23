@@ -1,0 +1,57 @@
+name: Dependency Audit
+
+# Scans the Python dependency versions resolved in uv.lock for published
+# advisories (PyPI/OSV sources) with pip-audit. Runs on every PR and every
+# main push, so a dependency bump is audited at the moment it lands.
+#
+# pip-audit reads requirements files, not uv.lock, so the exact locked pins are
+# exported first with `uv export` (every dependency group and extra, the
+# project itself excluded). Any known advisory makes pip-audit exit non-zero,
+# which fails this check.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches: [ main, "fm/*" ]  # stacked feature branches (openapi-only stack)
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    name: pip-audit (uv.lock)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.15
+
+      - name: Export locked dependencies
+        # --frozen plus the lock check means the audit judges the committed
+        # lockfile, never a re-resolved one. --no-hashes: hashes prove
+        # integrity, which is not what an advisory scan consumes.
+        run: |
+          uv lock --check
+          uv export --frozen --all-extras --no-emit-project --no-hashes \
+            --output-file "$RUNNER_TEMP/requirements-audit.txt"
+
+      - name: Run pip-audit
+        # Exact pin so the scanner's own advisory set is reproducible between
+        # runs (2.10.1, released 2026-06-10, well clear of the 7-day cooldown
+        # the repository applies to dependencies). Exits non-zero and prints
+        # name, version, advisory id and fix versions for each hit.
+        run: |
+          uvx --from 'pip-audit==2.10.1' pip-audit \
+            --requirement "$RUNNER_TEMP/requirements-audit.txt" --progress-spinner off

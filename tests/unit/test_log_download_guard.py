@@ -17,6 +17,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import io
 import ipaddress
+import logging
 import os
 import socket
 import tempfile
@@ -33,6 +34,7 @@ from nextdns_mcp import config
 from nextdns_mcp.client import AccessDeniedError
 from nextdns_mcp.errors import ErrorCode
 from nextdns_mcp.tools import logs as logs_module
+from nextdns_mcp.tools.logs import guard, preview, redirects, stream
 
 # example.com: an address Python's ipaddress module reports as globally routable.
 PUBLIC_IP = "93.184.216.34"
@@ -59,12 +61,16 @@ class _FakeResponse:
         location: str | None = None,
         status_code: int = 200,
         content_type: str = "text/csv",
+        set_cookie: str | None = None,
     ) -> None:
         self.request = httpx.Request("GET", url)
         self.status_code = status_code
-        self.headers = httpx.Headers(
-            {"location": location} if location else {} | ({"content-type": content_type} if content_type else {})
-        )
+        headers = {"location": location} if location else {} | ({"content-type": content_type} if content_type else {})
+        if set_cookie:
+            # A target's ``Set-Cookie`` is what the shared cookie jar has to
+            # survive: see the isolation test on the persistent redirect client.
+            headers["set-cookie"] = set_cookie
+        self.headers = httpx.Headers(headers)
         self._chunks = chunks or []
         # Tracks the fake's own consumption so is_stream_consumed matches a
         # real httpx stream: unconsumed until every chunk has been iterated.
@@ -127,12 +133,29 @@ class _FakeUnauthenticatedClient:
         self.responses = responses
         self.calls: list[tuple[str, str]] = []
         self.closed = False
+        # The shared client's cookie jar is cleared around every chain; a plain
+        # dict answers .clear() the way the real jar does.
+        self.cookies: dict[str, str] = {}
+        # What the jar held at each request, so a leak between downloads is visible.
+        self.jars: list[dict[str, str]] = []
+        # The timeout each request was sent with, so a config change mid-process
+        # either reaches the next download or visibly does not.
+        self.timeouts: list[Any] = []
+        self.constructions = 0
 
     def stream(self, method: str, url: str, **kwargs: Any) -> _FakeResponse:
+        self.jars.append(dict(self.cookies))
+        self.timeouts.append(kwargs.get("timeout"))
         self.calls.append((method, str(url)))
         if not self.responses:
             raise AssertionError(f"no scripted redirect response left for {url}")
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        # httpx merges a response's Set-Cookie into the client's own jar, so the
+        # fake has to, or a test cannot see whether the chain's clear runs.
+        for item in response.headers.get_list("set-cookie"):
+            name, _, value = item.partition("=")
+            self.cookies[name.strip()] = value.strip()
+        return response
 
     async def aclose(self) -> None:
         self.closed = True
@@ -149,9 +172,12 @@ def unauthenticated(monkeypatch):
             # The follow-up fetch must be built with redirect handling off: httpx's
             # own follow would skip the per-hop vetting entirely. And it must be
             # built with no headers, because the API key belongs to the first
-            # request only.
+            # request only. The pool must stay bounded so the persistent client
+            # cannot open unbounded connections (issue #656).
             assert kwargs.get("follow_redirects") is False
             assert not kwargs.get("headers")
+            assert isinstance(kwargs.get("limits"), httpx.Limits)
+            client.constructions += 1
             return client
 
         monkeypatch.setattr(httpx, "AsyncClient", factory)
@@ -287,7 +313,7 @@ class TestRedirectRefusal:
             raise AssertionError("a pinned host must not be resolved")
 
         monkeypatch.setattr(socket, "getaddrinfo", fail)
-        monkeypatch.setattr(logs_module, "ALLOWED_DOWNLOAD_HOSTS", frozenset({"cdn.nextdns.io"}))
+        monkeypatch.setattr(guard, "ALLOWED_DOWNLOAD_HOSTS", frozenset({"cdn.nextdns.io"}))
         await logs_module._check_download_redirect_target(httpx.URL("https://cdn.nextdns.io/file.csv"))
 
     async def test_a_public_https_target_is_accepted(self):
@@ -348,12 +374,108 @@ class TestUnauthenticatedFollowUp:
             )
         assert len(client.calls) == logs_module._MAX_DOWNLOAD_REDIRECTS + 1
 
-    async def test_the_follow_up_client_is_closed(self, tmp_path, unauthenticated):
-        client = unauthenticated([_FakeResponse("https://storage.example/file.csv", chunks=["a\n"])])
-        await logs_module._follow_redirects_to_tempfile(
-            httpx.URL("https://storage.example/file.csv"), str(tmp_path / "d.csv")
+    async def test_the_redirect_chain_reuses_one_client_closed_at_shutdown(self, tmp_path, unauthenticated):
+        """Two downloads share the persistent client instead of constructing and
+        closing a fresh one per chain (issue #656); the lifespan closes it at shutdown."""
+        client = unauthenticated(
+            [
+                _FakeResponse("https://storage.example/one.csv", chunks=["a\n"]),
+                _FakeResponse("https://storage.example/two.csv", chunks=["b\n"]),
+            ]
         )
+        for name in ("one.csv", "two.csv"):
+            await logs_module._follow_redirects_to_tempfile(
+                httpx.URL(f"https://storage.example/{name}"), str(tmp_path / name)
+            )
+        assert len(client.calls) == 2
+        assert client.constructions == 1, "each download constructed its own client"
+        assert client.closed is False, "a completed download must not close the shared client"
+        await logs_module.close_redirect_client()
         assert client.closed is True
+        assert redirects._redirect_client is None, "closing must reset the singleton"
+
+    async def test_close_before_any_download_is_a_noop(self):
+        """The shutdown close is safe when no download ever created the client."""
+        await logs_module.close_redirect_client()
+        assert redirects._redirect_client is None
+
+    async def test_a_cookie_from_one_download_does_not_reach_the_next(self, tmp_path, unauthenticated):
+        """The persistent client shares one cookie jar, so each chain must start from
+        an empty one and leave one: a fresh client per download used to guarantee that.
+
+        Removing both clears lets the target's cookie ride on the next download's
+        request; each clear is pinned on its own by the two tests that follow.
+        """
+        client = unauthenticated(
+            [
+                _FakeResponse("https://storage.example/one.csv", chunks=["a\n"], set_cookie="session=s1"),
+                _FakeResponse("https://storage.example/two.csv", chunks=["b\n"]),
+            ]
+        )
+        for name in ("one.csv", "two.csv"):
+            await logs_module._follow_redirects_to_tempfile(
+                httpx.URL(f"https://storage.example/{name}"), str(tmp_path / name)
+            )
+        assert client.jars == [{}, {}], f"a download requested with the previous download's cookies: {client.jars}"
+        assert client.cookies == {}, "a target's cookie lingered in the shared jar after its download"
+
+    async def test_a_dirty_jar_is_cleared_before_the_next_chain_starts(self, tmp_path, unauthenticated):
+        """The entry clear is what a jar dirtied outside any chain cannot get past.
+
+        Whatever left ``session`` in the jar - an interrupted chain, a future call
+        site that reuses the client - the next download must still request with an
+        empty one. Removing the entry clear fails this; the exit clear cannot cover
+        it, because the write happened after the previous chain ended.
+        """
+        client = unauthenticated([_FakeResponse("https://storage.example/one.csv", chunks=["a\n"])])
+        client.cookies["session"] = "stale"
+        await logs_module._follow_redirects_to_tempfile(
+            httpx.URL("https://storage.example/one.csv"), str(tmp_path / "one.csv")
+        )
+        assert client.jars == [{}], f"the chain started with a cookie already in the jar: {client.jars}"
+
+    async def test_a_cookie_set_mid_chain_still_reaches_the_next_hop(self, tmp_path, unauthenticated):
+        """The clears bracket the chain, not its hops: inside one download a target's
+        cookie is still sent to the next hop, exactly as a fresh client sent it."""
+        client = unauthenticated(
+            [
+                _FakeResponse(
+                    "https://storage.example/first.csv",
+                    location="https://storage.example/final.csv",
+                    set_cookie="session=s1",
+                ),
+                _FakeResponse("https://storage.example/final.csv", chunks=["host,reason\na.com,blocked\n"]),
+            ]
+        )
+        await logs_module._follow_redirects_to_tempfile(
+            httpx.URL("https://storage.example/first.csv"), str(tmp_path / "d.csv")
+        )
+        assert client.jars == [{}, {"session": "s1"}], "the chain must not clear its own hops' cookies"
+        assert client.cookies == {}, "the chain must leave an empty jar behind"
+
+    async def test_the_request_timeout_is_re_read_per_download(self, tmp_path, unauthenticated, monkeypatch):
+        """A fresh client per download re-read ``NEXTDNS_HTTP_TIMEOUT`` at construction;
+        the shared client must re-read it per request, or a mid-process change to the
+        setting silently stops applying to every later download (PM scope finding).
+
+        Removing the per-request ``timeout=`` leaves the first construction's
+        value baked in and fails the second assertion below.
+        """
+        client = unauthenticated(
+            [
+                _FakeResponse("https://storage.example/one.csv", chunks=["a\n"]),
+                _FakeResponse("https://storage.example/two.csv", chunks=["b\n"]),
+            ]
+        )
+        monkeypatch.setattr(redirects.client, "get_http_timeout", lambda: 5.0)
+        await logs_module._follow_redirects_to_tempfile(
+            httpx.URL("https://storage.example/one.csv"), str(tmp_path / "one.csv")
+        )
+        monkeypatch.setattr(redirects.client, "get_http_timeout", lambda: 9.0)
+        await logs_module._follow_redirects_to_tempfile(
+            httpx.URL("https://storage.example/two.csv"), str(tmp_path / "two.csv")
+        )
+        assert client.timeouts == [5.0, 9.0], f"the request timeout froze at first construction: {client.timeouts}"
 
 
 class TestTempFileCleanup:
@@ -456,7 +578,7 @@ class TestStreamingToDisk:
         The cap is what keeps a download's payload small enough to be worth sending
         to a model; a single large chunk must not be able to blow past it.
         """
-        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_LINES", 2)
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_LINES", 2)
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["l1\nl2\nl3\nl4\nl5\n"]), str(tmp_path / "d.csv")
         )
@@ -467,7 +589,7 @@ class TestStreamingToDisk:
 
     async def test_the_preview_stops_at_the_byte_cap(self, tmp_path, monkeypatch):
         """A line that would cross the byte cap is left out rather than truncated in half."""
-        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 8)
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_BYTES", 8)
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["abcdefgh\n"]), str(tmp_path / "d.csv")
         )
@@ -885,6 +1007,41 @@ class TestDownloadTool:
         assert payload["code"] == ErrorCode.READ_ACCESS_DENIED
         assert "Read access denied for profile: abc123" in payload["error"]
 
+    async def test_an_acl_denial_warns_server_side(self, monkeypatch, caplog, owned_api_client):
+        """WORK-250: an ACL denial mid-download leaves a server-side WARNING, not just a payload."""
+        caplog.set_level(logging.WARNING, logger="nextdns_mcp.tools.logs")
+
+        class Denied:
+            def stream(self, method, url, **kwargs):
+                raise AccessDeniedError(
+                    "Read access denied for profile: abc123",
+                    code=ErrorCode.READ_ACCESS_DENIED,
+                    profile_id="abc123",
+                )
+
+        with owned_api_client(Denied()):
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert payload["code"] == ErrorCode.READ_ACCESS_DENIED
+        assert any("Access denied downloading logs" in record.getMessage() for record in caplog.records)
+
+    async def test_a_refused_redirect_warns_server_side(self, monkeypatch, caplog, unauthenticated, owned_api_client):
+        """WORK-250: a refused redirect leaves a server-side WARNING, not just a payload."""
+        caplog.set_level(logging.WARNING, logger="nextdns_mcp.tools.logs")
+        unauthenticated([])
+
+        class Redirect:
+            def stream(self, method, url, **kwargs):
+                return _FakeResponse(
+                    "https://api.nextdns.io/profiles/abc123/logs/download", location="https://169.254.169.254/x"
+                )
+
+        with owned_api_client(Redirect()):
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert payload["code"] == ErrorCode.HTTP_ERROR
+        assert any("Refusing log download redirect" in record.getMessage() for record in caplog.records)
+
     async def test_a_refused_redirect_leaves_no_temp_directory(self, monkeypatch, unauthenticated, owned_api_client):
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
 
@@ -1001,7 +1158,7 @@ class TestStreamedFailureIsTyped:
             reads.append(response)
             return b""
 
-        monkeypatch.setattr(logs_module, "read_body_capped", watch_body)
+        monkeypatch.setattr(stream, "read_body_capped", watch_body)
         response = _FakeResponse("https://x/f.csv", status_code=502, chunks=["bad gateway"])
         async for _ in response.aiter_bytes():  # consume it, exactly as a completed download would
             pass
@@ -1249,6 +1406,9 @@ class TestPinnedWindowsSerialiseAcrossDownloads:
         responses = {a_url: _ProbingResponse(a_url, "a", 0.05), b_url: _ProbingResponse(b_url, "b", 0.06)}
 
         class _UrlClient:
+            def __init__(self) -> None:
+                self.cookies: dict[str, str] = {}
+
             def stream(self, method: str, url: str, **kwargs: Any) -> _FakeResponse:
                 if str(url) == b_url:
                     # The flip arms when B dials: from here the real resolver
@@ -1290,7 +1450,7 @@ class TestOversizedRecordsDropWhole:
         cap; later chunks still belong to THAT record. Appending their leading
         text to the preview would show a fragment and imply a record that
         never existed."""
-        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["A" * 30, "AAAA\nreal,row\n"]), str(tmp_path / "d.csv")
         )
@@ -1299,7 +1459,7 @@ class TestOversizedRecordsDropWhole:
         assert payload["size"] == 44
 
     async def test_an_oversized_record_spanning_several_chunks_stays_dropped(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["A" * 30, "more", "tail\nx,y\n"]), str(tmp_path / "d.csv")
         )
@@ -1314,7 +1474,7 @@ class TestOversizedRecordAtEof:
         """The carry survives into EOF mid-dropped-record; _flush_tail must not
         preview it (it is the same record already excluded), while the row
         itself still counts - it exists on disk."""
-        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["A" * 30, "xyz"]), str(tmp_path / "d.csv")
         )

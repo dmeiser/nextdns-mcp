@@ -65,7 +65,7 @@ from .spec_tools import endpoints_for_routes
 from .state import RESOURCES_LIFESPAN_KEY
 from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import DohClientOwner, doh_client_owner
-from .tools.logs import DownloadRegistry, _download_registry
+from .tools.logs import DownloadRegistry, _download_registry, close_redirect_client
 from .usage import server_instructions
 from .utils import BARE_NEGATIVE_RE, NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
@@ -772,6 +772,10 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             await close_raw_probe_client()
             await resources.doh_client.aclose()
             resources.downloads.cleanup()
+            # The downloadLogs redirect chain reuses one persistent unauthenticated
+            # client for keep-alive reuse (issue #656); like the transport above
+            # it is closed at shutdown.
+            await close_redirect_client()
             # The lazily-started Pyodide/Deno sandbox subprocess (issue #408) is
             # stopped by NextDNSGenerativeUI.lifespan(), which FastMCP unwinds
             # before this lifespan: this module has no dependency on the optional
