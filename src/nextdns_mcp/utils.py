@@ -188,7 +188,7 @@ def limit_range_error(limit: Any) -> dict[str, Any] | None:
     return None
 
 
-def _build_series_params(
+def build_series_params(
     from_time: str | int | None = None,
     to_time: str | int | None = None,
     interval: int | None = None,
@@ -204,7 +204,7 @@ def _build_series_params(
     endpoints take no ``limit``, so callers that expose one (as the plot tool
     does) keep it out of this set and validate it on its own.
     """
-    return _build_query_params(
+    return build_query_params(
         **{
             "from": from_time,
             "to": to_time,
@@ -219,8 +219,8 @@ def _build_series_params(
 # The spellings of a relative range that the analytics endpoints do NOT accept
 # but callers reach for: `now-1d` (Grafana/Prometheus) and a bare negative
 # number, which upstream reads as an absolute Unix timestamp.
-_NOW_OFFSET_RE = re.compile(r"^now\s*(?:-\s*(\d+\s*[smhdwy]))?$", re.IGNORECASE)
-_BARE_NEGATIVE_RE = re.compile(r"^-\d+$")
+NOW_OFFSET_RE = re.compile(r"^now\s*(?:-\s*(\d+\s*[smhdwy]))?$", re.IGNORECASE)
+BARE_NEGATIVE_RE = re.compile(r"^-\d+$")
 
 
 def normalize_time_value(value: Any) -> Any:
@@ -250,10 +250,10 @@ def normalize_time_value(value: Any) -> Any:
 def _normalize_time_text(value: Any) -> Any:
     """Rewrite the two text spellings the API reads wrongly (see normalize_time_value)."""
     text = str(value).strip()
-    match = _NOW_OFFSET_RE.match(text)
+    match = NOW_OFFSET_RE.match(text)
     if match:
         return "now" if match.group(1) is None else f"-{match.group(1).replace(' ', '')}"
-    if _BARE_NEGATIVE_RE.match(text):
+    if BARE_NEGATIVE_RE.match(text):
         return f"{text}s"
     return value
 
@@ -290,7 +290,7 @@ def _query_bool(value: Any) -> Any:
     return value
 
 
-def _build_query_params(**kwargs: Any) -> dict[str, Any]:
+def build_query_params(**kwargs: Any) -> dict[str, Any]:
     """Build a query-param dict, dropping None values and normalizing booleans."""
     return {k: _query_bool(v) for k, v in kwargs.items() if v is not None}
 

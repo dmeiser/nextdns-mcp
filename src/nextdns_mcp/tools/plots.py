@@ -26,7 +26,7 @@ from ..errors import ErrorCode, error_payload
 from ..transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ..utils import (
     PARTIALS_VALUES,
-    _build_series_params,
+    build_series_params,
     limit_range_error,
     normalize_partials,
     normalize_time_value,
@@ -191,7 +191,7 @@ async def _plot_analytics_series_impl(
     if isinstance(validated, _PlotParamsError):
         return validated.error
 
-    params: dict[str, Any] = _build_series_params(
+    params: dict[str, Any] = build_series_params(
         from_time=from_time,
         to_time=to_time,
         interval=interval,
