@@ -446,7 +446,7 @@ class TestAccessControlledClientRequestLogging:
     async def test_denied_request_query_string_not_logged_at_warning(
         self, mock_super_request: Any, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Fail-closed denial WARNING must log only method + path, never the query string."""
+        """Fail-closed denial WARNING must name the refusal only, never the request."""
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
 
         sensitive_query = "search=secret-search-term&device=secret-device-id"
@@ -461,14 +461,17 @@ class TestAccessControlledClientRequestLogging:
         assert exc_info.value.code == "access_denied"
         # The typed error's message still names the full URL the caller passed.
         assert str(exc_info.value) == f"Forbidden URL: {request_url}"
-        # No WARNING record may contain the query string.
+        # The WARNING record names the refusal and carries no request metadata:
+        # no query string, no path, no method (WORK-250 PM-verification scope).
         warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
         assert warning_messages
+        assert any("could not be classified against the profile ACL" in msg for msg in warning_messages)
         for msg in warning_messages:
             assert "secret-search-term" not in msg
             assert "secret-device-id" not in msg
             assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
-        assert any("/profiles/abc.def/logs" in msg for msg in warning_messages)
+            assert "/profiles" not in msg, f"Request path leaked at WARNING: {msg}"
+            assert "method=" not in msg, f"HTTP method leaked at WARNING: {msg}"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -489,7 +492,7 @@ class TestAccessControlledClientRequestLogging:
         env: dict[str, str],
         expected_code: str,
     ) -> None:
-        """Collection-denial WARNINGs must log only method + path, never the query string."""
+        """Collection-denial WARNINGs must name the refusal without any request metadata."""
         for key, value in env.items():
             clean_env(key, value)
 
@@ -508,7 +511,8 @@ class TestAccessControlledClientRequestLogging:
             assert "secret-search-term" not in msg
             assert "secret-device-id" not in msg
             assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
-        assert any(f"method={method}, url=/profiles" in msg for msg in warning_messages)
+            assert "/profiles" not in msg, f"Request path leaked at WARNING: {msg}"
+            assert "method=" not in msg, f"HTTP method leaked at WARNING: {msg}"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -650,6 +654,9 @@ class TestAccessControlledClientRequestLogging:
         for msg in messages:
             assert "secret-search-term" not in msg
             assert "?" not in msg, f"Query string leaked at WARNING or above: {msg}"
+            assert "method=" not in msg, f"HTTP method leaked at WARNING or above: {msg}"
+            assert "url=" not in msg, f"Request URL leaked at WARNING or above: {msg}"
+            assert "/profiles" not in msg, f"Request path leaked at WARNING or above: {msg}"
 
 
 class TestAccessControlledClientStreamLogging:
@@ -715,10 +722,10 @@ class TestRefusalPathsVisibleServerSide:
     """WORK-250: every ACL refusal is visible in the server log, not only in the caller's error.
 
     Independent of the opt-in JSONL call log, a denial must leave a WARNING record
-    on the server logger that identifies the refusal (profile id or blocked host),
-    while the caller-facing typed error is preserved. Record metadata is limited to
-    the safe profile id / host plus the redacted path — never the query string
-    (AGENT.md logging rule).
+    on the server logger that identifies the refusal by the applicable safe
+    profile id or blocked hostname, while the caller-facing typed error is
+    preserved. Record metadata is limited to that identifier — no HTTP method,
+    request path, or query string (WORK-250 PM-verification scope, AGENT.md:48).
     """
 
     @pytest.mark.asyncio
@@ -738,10 +745,12 @@ class TestRefusalPathsVisibleServerSide:
         assert "Read access denied for profile: abc123" in str(exc_info.value)
         warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
         assert any("Read access denied for profile: abc123" in msg for msg in warnings)
-        assert any("method=GET" in msg for msg in warnings)
         for msg in warnings:
             assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
             assert "secret-search-term" not in msg
+            assert "method=" not in msg, f"HTTP method leaked at WARNING: {msg}"
+            assert "url=" not in msg, f"Request URL leaked at WARNING: {msg}"
+            assert "/profiles" not in msg, f"Request path leaked at WARNING: {msg}"
 
     @pytest.mark.asyncio
     async def test_write_denial_warns_naming_the_profile(
@@ -763,6 +772,8 @@ class TestRefusalPathsVisibleServerSide:
         assert any("Write operation denied: server is in read-only mode" in msg for msg in warnings)
         for msg in warnings:
             assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
+            assert "method=" not in msg, f"HTTP method leaked at WARNING: {msg}"
+            assert "url=" not in msg, f"Request URL leaked at WARNING: {msg}"
 
     @pytest.mark.asyncio
     async def test_blocked_destination_warns_naming_the_host(
@@ -783,7 +794,8 @@ class TestRefusalPathsVisibleServerSide:
         for msg in warnings:
             assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
             assert "secret-cursor-token" not in msg
-            assert "steal" not in msg, f"Full URL path leaked at WARNING: {msg}"
+            assert "method=" not in msg, f"HTTP method leaked at WARNING: {msg}"
+            assert "steal" not in msg, f"Request path leaked at WARNING: {msg}"
 
 
 class TestLibraryLoggerRedaction:
