@@ -435,9 +435,12 @@ class SpecApiTool(Tool):
             return None
         from . import config as _config
 
-        writable = _config.get_writable_profiles_set()
-        protected = _config.get_protected_profiles()
-        if writable is not None and writable and writable.issubset(protected):
+        # One snapshot per invocation: the writable set and the protected
+        # denylist must come from the same read of the environment, and the
+        # snapshot loader already calls get_protected_profiles().
+        access = _config.load_profile_access_control()
+        writable = access.writable
+        if writable is not None and writable and writable.issubset(access.protected):
             return ToolResult(
                 structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no writable profile available"),
                 is_error=True,
