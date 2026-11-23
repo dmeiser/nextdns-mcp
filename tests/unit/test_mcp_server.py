@@ -199,44 +199,38 @@ class TestServerLifespan:
 
     @pytest.mark.asyncio
     async def test_server_lifespan_closes_http_clients(self, mock_api_key, monkeypatch):
-        """Server lifespan exit must close every long-lived client and reset singletons."""
+        """Server lifespan exit must close every long-lived client owned by the server."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(client_module, "_client", None)
-        monkeypatch.setattr(doh_module, "_doh_client", None)
+        monkeypatch.setattr(client_module, "_raw_probe_client", None)
         monkeypatch.setattr(logs_redirects, "_redirect_client", None)
 
+        from nextdns_mcp import openapi as openapi_module
+
         server = create_mcp_server()
-        api_client = client_module.get_api_client()
-        probe_client = client_module.get_raw_probe_client()
-        doh_client = doh_module._get_doh_client()
-        redirect_client = logs_redirects._get_redirect_client()
+        resources = openapi_module._server_resources(server)
 
-        try:
-            assert not api_client.is_closed
-            assert not probe_client.is_closed
-            assert not doh_client.is_closed
-            assert not redirect_client.is_closed
-
+        with (
+            client_module.api_client_owned(resources.api_client),
+            doh_module.doh_client_owned(resources.doh_client),
+        ):
             async with server._lifespan_manager():
-                pass
+                api_client = client_module.get_api_client()
+                probe_client = client_module.get_raw_probe_client()
+                doh_client = doh_module.current_doh_client_owner().get()
+                redirect_client = logs_redirects._get_redirect_client()
+                assert not api_client.is_closed
+                assert not probe_client.is_closed
+                assert not doh_client.is_closed
+                assert not redirect_client.is_closed
 
-            assert api_client.is_closed
-            assert probe_client.is_closed
-            assert doh_client.is_closed
-            assert redirect_client.is_closed, "_server_lifespan left the download redirect client open"
-            assert client_module._client is None
-            assert client_module._raw_probe_client is None
-            assert doh_module._doh_client is None
-            assert logs_redirects._redirect_client is None
-        finally:
-            if not api_client.is_closed:
-                await api_client.aclose()
-            if not probe_client.is_closed:
-                await probe_client.aclose()
-            if not doh_client.is_closed:
-                await doh_client.aclose()
-            if not redirect_client.is_closed:
-                await redirect_client.aclose()
+        assert api_client.is_closed
+        assert probe_client.is_closed
+        assert doh_client.is_closed
+        assert redirect_client.is_closed, "_server_lifespan left the download redirect client open"
+        assert resources.api_client._client is None
+        assert client_module._raw_probe_client is None
+        assert resources.doh_client._client is None
+        assert logs_redirects._redirect_client is None
 
     @pytest.mark.asyncio
     async def test_real_client_session_closes_http_clients_on_disconnect(self, mock_api_key, monkeypatch):
@@ -247,16 +241,18 @@ class TestServerLifespan:
         into the transport the server actually runs under.
         """
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(client_module, "_client", None)
-        monkeypatch.setattr(doh_module, "_doh_client", None)
+
         monkeypatch.setattr(logs_redirects, "_redirect_client", None)
 
+        from nextdns_mcp import openapi as openapi_module
+
         server = create_mcp_server()
+        resources = openapi_module._server_resources(server)
 
         async with Client(server) as mcp_client:
             await mcp_client.list_tools()
-            api_client = client_module.get_api_client()
-            doh_client = doh_module._get_doh_client()
+            api_client = resources.api_client.get()
+            doh_client = resources.doh_client.get()
             redirect_client = logs_redirects._get_redirect_client()
             assert not api_client.is_closed
             assert not doh_client.is_closed
@@ -264,10 +260,33 @@ class TestServerLifespan:
 
         assert api_client.is_closed
         assert doh_client.is_closed
+
         assert redirect_client.is_closed, "the Client session did not close the download redirect client"
-        assert client_module._client is None
-        assert doh_module._doh_client is None
         assert logs_redirects._redirect_client is None
+
+    @pytest.mark.asyncio
+    async def test_a_sibling_servers_shutdown_leaves_this_servers_clients_open(self, mock_api_key, monkeypatch):
+        """One embedded server's shutdown must not close another live server's clients."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        from nextdns_mcp import openapi as openapi_module
+
+        server_a = create_mcp_server()
+        server_b = create_mcp_server()
+        resources_a = openapi_module._server_resources(server_a)
+        resources_b = openapi_module._server_resources(server_b)
+
+        async with server_a._lifespan_manager():
+            a_api_client = resources_a.api_client.get()
+            # Server B starts and finishes WHILE server A is live:
+            async with server_b._lifespan_manager():
+                b_api_client = resources_b.api_client.get()
+                assert a_api_client is not b_api_client
+            # B's shutdown closed only B's client:
+            assert b_api_client.is_closed
+            assert not a_api_client.is_closed, "a sibling server's shutdown closed this server's client"
+
+        assert a_api_client.is_closed
 
 
 class TestCompositeErrorResultsAreFlagged:
@@ -331,7 +350,7 @@ class TestCompositeErrorResultsAreFlagged:
             "Answer": [{"name": "example.com.", "type": 1, "TTL": 300, "data": "142.250.190.46"}],
         }
         mock_client.get.return_value = mock_response
-        monkeypatch.setattr(doh_module, "_doh_client", mock_client)
+        monkeypatch.setattr(doh_module.DohClientOwner, "get", lambda self: mock_client)
 
         server = build_mcp_server()
         async with Client(server) as client:
@@ -344,20 +363,11 @@ class TestCompositeErrorResultsAreFlagged:
 class TestDownloadOwnershipIsPerServer:
     """One embedded server's shutdown must not delete another live server's CSVs."""
 
-    @staticmethod
-    async def _noop() -> None:
-        return None
-
     @pytest.mark.asyncio
     async def test_a_sibling_servers_shutdown_leaves_this_servers_downloads_alive(
         self, mock_api_key, monkeypatch, tmp_path
     ):
         from nextdns_mcp import openapi as openapi_module
-
-        monkeypatch.setattr(openapi_module, "close_api_client", self._noop)
-        monkeypatch.setattr(openapi_module, "close_raw_probe_client", self._noop)
-        monkeypatch.setattr(openapi_module, "close_doh_client", self._noop)
-        monkeypatch.setattr(openapi_module, "close_redirect_client", self._noop)
 
         server_a_csv = tmp_path / "a" / "download.csv"
         server_b_csv = tmp_path / "b" / "download.csv"
@@ -365,10 +375,13 @@ class TestDownloadOwnershipIsPerServer:
             csv.parent.mkdir(parents=True)
             csv.write_text("csv")
 
-        async with openapi_module._server_lifespan(None):  # type: ignore[arg-type]
+        server_a = openapi_module.create_mcp_server()
+        server_b = openapi_module.create_mcp_server()
+
+        async with openapi_module._server_lifespan(server_a):
             logs_module._note_successful_download(str(server_a_csv), True)
             # Server B starts and finishes WHILE server A is live:
-            async with openapi_module._server_lifespan(None):  # type: ignore[arg-type]
+            async with openapi_module._server_lifespan(server_b):
                 logs_module._note_successful_download(str(server_b_csv), True)
             # B's shutdown reclaims only B's registry:
             assert not server_b_csv.exists()

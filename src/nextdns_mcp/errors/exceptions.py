@@ -60,6 +60,17 @@ class NextDNSResponseTooLargeError(NextDNSError):
         self.max_response_bytes = max_response_bytes
 
 
+class StateOwnershipError(RuntimeError):
+    """State with an explicit owner was read or written with no owner active.
+
+    The process-global singletons this project replaced (the shared API
+    client, MCP server, DoH client, readiness cache, and download registry)
+    silently served any caller from any context. Their explicit owners keep
+    that convenience from creeping back as a hidden fallback: a read or write
+    outside an owner's scope fails loudly, naming how to publish one.
+    """
+
+
 class ConfigurationError(ValueError):
     """Raised when configuration values are invalid or malformed."""
 

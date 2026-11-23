@@ -75,7 +75,7 @@ class TestImportHasNoServerSideEffects:
             "import nextdns_mcp.server as server\n"
             "after = dict(os.environ)\n"
             "assert created == [], created\n"
-            "assert server._mcp_server is None\n"
+            "assert server.mcp_server_owner.get() is None\n"
             "assert after == before, sorted(set(after) ^ set(before))\n"
             "assert 'FASTMCP_CHECK_FOR_UPDATES' not in after\n"
             "print('ok')\n"
@@ -101,13 +101,15 @@ class TestImportHasNoServerSideEffects:
 
         monkeypatch.delenv("FASTMCP_CHECK_FOR_UPDATES", raising=False)
         monkeypatch.setattr(fastmcp.settings, "check_for_updates", "stable")
-        monkeypatch.setattr(server, "_mcp_server", None)
-
-        built = server.configure()
+        token = server.mcp_server_owner.set(None)
+        try:
+            built = server.configure()
+            assert built is server.get_mcp_server()
+        finally:
+            server.mcp_server_owner.reset(token)
 
         assert os.environ["FASTMCP_CHECK_FOR_UPDATES"] == "off"
         assert fastmcp.settings.check_for_updates == "off"
-        assert built is server.get_mcp_server()
 
     def test_sync_update_check_does_not_require_the_env_var_to_be_set(self, monkeypatch):
         """The helper must not crash when it is called on its own (issue #291)."""
@@ -145,9 +147,12 @@ class TestImportHasNoServerSideEffects:
         from nextdns_mcp import server
 
         monkeypatch.setenv("FASTMCP_CHECK_FOR_UPDATES", "stable")
-        monkeypatch.setattr(server, "_mcp_server", None)
 
-        server.configure()
+        token = server.mcp_server_owner.set(None)
+        try:
+            server.configure()
+        finally:
+            server.mcp_server_owner.reset(token)
 
         assert fastmcp.settings.check_for_updates == "stable"
 
@@ -166,11 +171,14 @@ class TestImportHasNoServerSideEffects:
         monkeypatch.setenv("NEXTDNS_API_KEY", "test_api_key_12345")
         monkeypatch.delenv("FASTMCP_CHECK_FOR_UPDATES", raising=False)
         monkeypatch.setattr(fastmcp.settings, "check_for_updates", "stable")
-        monkeypatch.setattr(server, "_mcp_server", None)
         monkeypatch.setattr(server, "configure_logging", lambda: None)
         monkeypatch.setattr(fastmcp.FastMCP, "run", lambda self, **kwargs: ran.append(kwargs))
 
-        server._run_server()
+        token = server.mcp_server_owner.set(None)
+        try:
+            server._run_server()
+        finally:
+            server.mcp_server_owner.reset(token)
 
         assert ran == [{}]  # stdio transport, no extra options
         assert os.environ["FASTMCP_CHECK_FOR_UPDATES"] == "off"

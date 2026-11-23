@@ -14,7 +14,7 @@ generator's own path through the access-controlled client.
 SPDX-License-Identifier: MIT
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC
 from types import SimpleNamespace
 from typing import Any
@@ -37,10 +37,15 @@ from nextdns_mcp.tools.plots import _plot_analytics_series_impl
 
 
 @pytest.fixture
-def mock_api_client(monkeypatch):
+def mock_api_client(monkeypatch, request):
     """Replace the module-level api_client with a mock."""
     client = AsyncMock()
-    monkeypatch.setattr(client_module, "api_client", client)
+    # The client lives behind an explicit owner now (issue #642): the mock
+    # becomes the owner's lazy build instead of patching a module attribute.
+    monkeypatch.setattr(client_module, "create_nextdns_client", lambda: client)
+    owner_cm = client_module.api_client_owned(client_module.ApiClientOwner())
+    owner_cm.__enter__()
+    request.addfinalizer(lambda: owner_cm.__exit__(None, None, None))
     return client
 
 
@@ -54,6 +59,19 @@ def spec_call() -> Callable[..., Any]:
         return result.structured_content
 
     return _call
+
+
+@pytest.fixture(autouse=True)
+def owned_api_client() -> Iterator[None]:
+    """Publish an API-client owner: the client state is owner-scoped now (issue #642).
+
+    Most tests here install the mock client owner via ``mock_api_client``;
+    the ACL-denial tests drive the transport directly and build a real (never
+    served) client from the test environment, since denials fire before any
+    network request.
+    """
+    with client_module.api_client_owned(client_module.ApiClientOwner()):
+        yield
 
 
 @pytest.fixture(autouse=True)

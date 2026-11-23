@@ -22,9 +22,9 @@ def allow_doh_read_access(monkeypatch):
 async def mock_doh_client(monkeypatch):
     """Install a mock persistent DoH client so no test hits the network.
 
-    doh.py keeps a single module-level AsyncClient for connection reuse
-    (see issue #149), so tests swap that cached client out rather than
-    patching httpx.AsyncClient.
+    doh.py holds its persistent AsyncClient behind an explicit owner for
+    connection reuse (issues #149, #642), so the fixture adopts the mock into
+    one owner and publishes it for the test's context.
     """
     mock_client = AsyncMock(spec=httpx.AsyncClient)
     mock_response = Mock()
@@ -34,8 +34,8 @@ async def mock_doh_client(monkeypatch):
         "Answer": [{"name": "google.com.", "type": 1, "TTL": 300, "data": "142.250.190.46"}],
     }
     mock_client.get.return_value = mock_response
-    monkeypatch.setattr(doh_module, "_doh_client", mock_client)
-    return mock_client
+    with doh_module.doh_client_owned(doh_module.DohClientOwner(client=mock_client)):
+        yield mock_client
 
 
 class TestDohLookup:
@@ -89,29 +89,18 @@ class TestDohLookup:
         assert result["_metadata"]["query_type"] == "A"
 
     @pytest.mark.asyncio
-    async def test_doh_lookup_uses_default_profile(self, monkeypatch):
+    async def test_doh_lookup_uses_default_profile(self, monkeypatch, mock_doh_client):
         """Test that dohLookup uses NEXTDNS_DEFAULT_PROFILE when profile_id not provided."""
         test_profile = "abc123"
 
-        # Patch environment and reload config
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", test_profile)
         monkeypatch.setenv("NEXTDNS_API_KEY", "dummy_key")
 
-        import importlib
-
-        importlib.reload(doh_module)
-
-        # Re-apply access after module reload.
-        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
-        # The reload reset the module-level client cache; reinstall the mock.
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_response = Mock()
         mock_response.json.return_value = {"Status": 0, "Answer": []}
-        mock_client.get.return_value = mock_response
-        monkeypatch.setattr(doh_module, "_doh_client", mock_client)
+        mock_doh_client.get.return_value = mock_response
 
-        # Use the reloaded module's function
-        result = await doh_module._dohLookup_impl("example.com")
+        result = await dohLookup("example.com")
 
         assert "data" in result
         assert "_metadata" in result
@@ -306,7 +295,7 @@ class TestDohClientReuse:
 
     @pytest.mark.asyncio
     async def test_doh_lookup_reuses_client_across_calls(self, mock_profile_id, mock_doh_client):
-        """Consecutive lookups must share the single persistent client."""
+        """Consecutive lookups must share the one client their owner holds."""
         first = await dohLookup("example.com", mock_profile_id, "A")
         second = await dohLookup("example.org", mock_profile_id, "A")
 
@@ -315,8 +304,8 @@ class TestDohClientReuse:
         assert mock_doh_client.get.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_get_doh_client_creates_client_once(self, monkeypatch):
-        """_get_doh_client must build exactly one client and reuse it."""
+    async def test_owner_get_creates_client_once(self, monkeypatch):
+        """An owner must build exactly one client and reuse it."""
         created = []
 
         def fake_client(timeout):
@@ -324,46 +313,63 @@ class TestDohClientReuse:
             created.append(client)
             return client
 
-        monkeypatch.setattr(doh_module, "_doh_client", None)
         monkeypatch.setattr(doh_module.httpx, "AsyncClient", fake_client)
 
-        first = doh_module._get_doh_client()
-        second = doh_module._get_doh_client()
+        owner = doh_module.DohClientOwner()
+        first = owner.get()
+        second = owner.get()
 
         assert first is second
         assert len(created) == 1
 
     @pytest.mark.asyncio
-    async def test_get_doh_client_applies_configured_timeout(self, monkeypatch):
+    async def test_owner_get_applies_configured_timeout(self, monkeypatch):
         """The persistent client must honor NEXTDNS_HTTP_TIMEOUT."""
         monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "7.5")
-        monkeypatch.setattr(doh_module, "_doh_client", None)
 
-        client = doh_module._get_doh_client()
+        client = doh_module.DohClientOwner().get()
 
         assert client.timeout is not None
         assert client.timeout.connect == 7.5
 
     @pytest.mark.asyncio
-    async def test_close_doh_client_closes_and_resets(self, monkeypatch):
-        """close_doh_client closes the active client and resets _doh_client to None."""
-        monkeypatch.setattr(doh_module, "_doh_client", None)
+    async def test_aclose_closes_and_resets(self, monkeypatch):
+        """aclose closes the owner's client and resets it for a fresh one."""
+        owner = doh_module.DohClientOwner()
 
-        client = doh_module._get_doh_client()
+        client = owner.get()
         assert not client.is_closed
-        assert doh_module._doh_client is client
 
-        await doh_module.close_doh_client()
+        await owner.aclose()
         assert client.is_closed
-        assert doh_module._doh_client is None
+        assert owner._client is None
 
     @pytest.mark.asyncio
-    async def test_close_doh_client_noop_when_none(self, monkeypatch):
-        """close_doh_client is a safe no-op when no client was created."""
-        monkeypatch.setattr(doh_module, "_doh_client", None)
+    async def test_aclose_noop_when_none(self, monkeypatch):
+        """aclose is a safe no-op when no client was created."""
+        await doh_module.DohClientOwner().aclose()
 
-        await doh_module.close_doh_client()
-        assert doh_module._doh_client is None
+    @pytest.mark.asyncio
+    async def test_close_doh_client_closes_the_published_owner(self, monkeypatch):
+        """The module delegate closes the currently published owner's client."""
+        owner = doh_module.DohClientOwner()
+        with doh_module.doh_client_owned(owner):
+            client = owner.get()
+            assert not client.is_closed
+            await doh_module.close_doh_client()
+            assert client.is_closed
+
+    @pytest.mark.asyncio
+    async def test_close_doh_client_without_an_owner_raises(self, monkeypatch):
+        """The module delegate fails loudly when no owner is published."""
+        from nextdns_mcp.errors import StateOwnershipError
+
+        token = doh_module.doh_client_owner.set(None)
+        try:
+            with pytest.raises(StateOwnershipError):
+                await doh_module.close_doh_client()
+        finally:
+            doh_module.doh_client_owner.reset(token)
 
 
 class TestOptionalProfileIdCoercion:
@@ -435,10 +441,10 @@ class TestProfileResolutionGuard:
     async def test_a_resolution_with_no_profile_and_no_error_is_an_internal_error(self, monkeypatch):
         monkeypatch.setattr(utils_module, "resolve_profile_id", lambda profile_id, **kwargs: (None, None))
 
-        def no_client() -> httpx.AsyncClient:
+        def no_client(self) -> httpx.AsyncClient:
             raise AssertionError("a lookup with no resolved profile must not build a DoH client")
 
-        monkeypatch.setattr(doh_module, "_get_doh_client", no_client)
+        monkeypatch.setattr(doh_module.DohClientOwner, "get", no_client)
 
         result = await dohLookup("example.com")
         assert result["code"] == "internal_error"

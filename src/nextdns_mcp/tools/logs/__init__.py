@@ -57,13 +57,15 @@ from .redirects import (
 )
 from .retention import (
     MAX_RETAINED_DOWNLOADS,
+    DownloadRegistry,
     MissingDownloadRegistryError,
-    _current_registry,
     _download_registry,
     _note_successful_download,
     _remove_downloaded_file,
     _unlink_temp_file,
     cleanup_successful_downloads,
+    current_download_registry,
+    downloads_owned,
 )
 from .stream import DownloadTooLargeError, _raise_for_streamed_status, _write_stream_to_tempfile, read_body_capped
 from .tool import _download_error_details, _download_logs_to_tempfile
@@ -77,10 +79,10 @@ __all__ = [
     "_MAX_DOWNLOAD_REDIRECTS",
     "_PIN_FETCH_LOCK",
     "DownloadRedirectRefusedError",
+    "DownloadRegistry",
     "DownloadTooLargeError",
     "MissingDownloadRegistryError",
     "_check_download_redirect_target",
-    "_current_registry",
     "_download_error_details",
     "_download_logs_to_tempfile",
     "_download_registry",
@@ -97,6 +99,8 @@ __all__ = [
     "cleanup_successful_downloads",
     "close_redirect_client",
     "contextvars",
+    "current_download_registry",
+    "downloads_owned",
     "httpx",
     "os",
     "read_body_capped",

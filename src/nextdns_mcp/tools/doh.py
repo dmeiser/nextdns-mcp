@@ -34,6 +34,9 @@ tidy-up: ``dohLookup`` is the name in every caller's tool list, and
 """
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -46,36 +49,100 @@ from ..config import (
     load_profile_access_control,
 )
 from ..constants import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES
-from ..errors import ErrorCode, error_payload, http_error_payload
+from ..errors import ErrorCode, StateOwnershipError, error_payload, http_error_payload
+from ..state import request_resources
 from ..transport import access_denied_payload
 from ..utils import resolve_default_profile
 
 logger = logging.getLogger(__name__)
 
-# Persistent DoH HTTP client, module-level for keep-alive connection reuse
-# (mirrors client.api_client).
-_doh_client: httpx.AsyncClient | None = None
+
+# The DoH client persists for keep-alive connection reuse, owned explicitly
+# (mirrors client.ApiClientOwner): a server lifespan owns one DohClientOwner
+# per server and publishes it with ``doh_client_owned``; standalone callers
+# build their own.
+class DohClientOwner:
+    """Owns one persistent DoH HTTP client for one explicit lifetime.
+
+    Explicit owner for the client state that used to live in the module-global
+    ``_doh_client`` singleton. The client is created lazily on first use and
+    reused until :meth:`aclose`, and two owners in one process never share a
+    client, so one owner's shutdown cannot close another owner's connections.
+    An existing client may be adopted (``DohClientOwner(client)``) - the owner
+    owns it from then on, including closing it.
+    """
+
+    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+        self._client = client
+
+    def get(self) -> httpx.AsyncClient:
+        """Return this owner's DoH client, creating it on first use."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=get_http_timeout())
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close this owner's DoH client if one exists and reset it.
+
+        The next :meth:`get` constructs a fresh client, picking up any updated
+        configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+        """
+        if self._client is not None:
+            client = self._client
+            self._client = None
+            await client.aclose()
 
 
-def _get_doh_client() -> httpx.AsyncClient:
-    """Return the persistent DoH HTTP client, creating it on first use."""
-    global _doh_client
-    if _doh_client is None:
-        _doh_client = httpx.AsyncClient(timeout=get_http_timeout())
-    return _doh_client
+# The owner whose DoH client the current context uses; published by a server
+# lifespan or by standalone callers for same-task work, and resolved from the
+# FastMCP request's lifespan context for served requests (see
+# nextdns_mcp.state). No module-level default: an absent owner fails loudly
+# instead of silently sharing one process-global client between independent
+# servers.
+doh_client_owner: ContextVar[DohClientOwner | None] = ContextVar("nextdns_doh_client_owner", default=None)
+
+
+def current_doh_client_owner() -> DohClientOwner:
+    """Return the owner of the DoH client state for the current context.
+
+    Resolution order: an owner published with :func:`doh_client_owned`, then
+    the resources of the FastMCP server serving this request.
+
+    Raises:
+        StateOwnershipError: When no owner is active. Code reached outside a
+            server lifespan must publish one with :func:`doh_client_owned`.
+    """
+    owner = doh_client_owner.get()
+    if owner is None:
+        resources = request_resources()
+        if resources is not None:
+            owner = resources.doh_client
+    if owner is None:
+        raise StateOwnershipError(
+            "No DoH client owner is active in this context. Server code runs inside a server "
+            "lifespan, which publishes one; standalone callers must wrap the work in "
+            "`with doh_module.doh_client_owned(doh_module.DohClientOwner()):`."
+        )
+    return owner
+
+
+@contextmanager
+def doh_client_owned(owner: DohClientOwner) -> Iterator[DohClientOwner]:
+    """Publish ``owner`` as the current context's DoH client owner for the block."""
+    token = doh_client_owner.set(owner)
+    try:
+        yield owner
+    finally:
+        doh_client_owner.reset(token)
 
 
 async def close_doh_client() -> None:
-    """Close the persistent DoH HTTP client if one exists and reset the singleton.
+    """Close the current owner's DoH client if one exists and reset it.
 
-    Subsequent calls to :func:`_get_doh_client` will construct a fresh client,
+    Subsequent calls to the owner's ``get`` will construct a fresh client,
     picking up any updated configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
     """
-    global _doh_client
-    if _doh_client is not None:
-        client = _doh_client
-        _doh_client = None
-        await client.aclose()
+    await current_doh_client_owner().aclose()
 
 
 def _validate_record_type(record_type: str) -> tuple[bool, str]:
@@ -139,7 +206,7 @@ async def doh_lookup(
     params = {"name": domain, "type": record_type}
     headers = {"accept": "application/dns-json"}
 
-    client = _get_doh_client()
+    client = current_doh_client_owner().get()
     try:
         response = await client.get(doh_url, params=params, headers=headers)
         response.raise_for_status()

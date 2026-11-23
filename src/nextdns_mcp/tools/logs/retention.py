@@ -9,21 +9,27 @@ longer accumulate on disk for the life of the container.
 
 Ownership is PER SERVER, not per process. The registry a download registers
 with is the one the current server lifespan owns (the ``_download_registry``
-context var, set by ``nextdns_mcp.openapi._server_lifespan``); there is no
-process-global fallback, so a download outside any lifespan fails fast (see
-``MissingDownloadRegistryError``). Stdlib only; nothing here knows about HTTP. The registries used to be one process-global set that EVERY server's
-lifespan emptied, so one embedded server deleted another live server's
-tracked CSVs mid-read. Insertion-ordered, so the oldest entry is always
-first: that order is the eviction order (see ``_note_successful_download``).
+context var, set by ``nextdns_mcp.openapi._server_lifespan``, or the
+resources of the FastMCP server serving this request); there is no
+process-global fallback, so a download outside any owner fails fast (see
+``MissingDownloadRegistryError``). The registries used to be one
+process-global set that EVERY server's lifespan emptied, so one embedded
+server deleted another live server's tracked CSVs mid-read.
+Insertion-ordered, so the oldest entry is always first: that order is the
+eviction order (see ``DownloadRegistry.note``).
 
 Stdlib only; nothing here knows about HTTP.
 
 SPDX-License-Identifier: MIT
 """
 
+import contextlib
 import contextvars
 import logging
 import os
+from collections.abc import Iterator
+
+from ...state import request_resources
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +97,55 @@ class MissingDownloadRegistryError(RuntimeError):
 # live server's tracked CSVs mid-read. Insertion-ordered, so the oldest entry
 # is always first: that order is the eviction order (see
 # ``_note_successful_download``).
-_download_registry: contextvars.ContextVar[dict[str, None] | None] = contextvars.ContextVar(
+class DownloadRegistry:
+    """Owns the successful downloadLogs CSVs for one explicit lifetime.
+
+    One server lifespan owns one registry; a standalone session owns one via
+    :func:`downloads_owned`. Insertion-ordered, so the oldest entry is always
+    first: that order is the eviction order.
+    """
+
+    def __init__(self) -> None:
+        self._paths: dict[str, None] = {}
+
+    def note(self, path: str, downloaded: bool) -> None:
+        """Register a fully-written CSV for reclaim; failures stay unregistered.
+
+        Registration is insertion-ordered, and past ``MAX_RETAINED_DOWNLOADS``
+        the oldest CSV is evicted and unlinked, so disk use stays bounded
+        across a long server lifetime even when shutdown (the other reclaim
+        point) is far away or never comes (SIGKILL).
+        """
+        if not downloaded:
+            return
+        self._paths[path] = None
+        while len(self._paths) > MAX_RETAINED_DOWNLOADS:
+            oldest = next(iter(self._paths))
+            if not _remove_downloaded_file(oldest):
+                break  # cannot evict: leave the overflow for shutdown reclaim rather than spin
+            self._paths.pop(oldest, None)
+
+    def cleanup(self) -> None:
+        """Remove every registered temp file and its directory.
+
+        Called once at the owning lifetime's end (server shutdown, or the end
+        of a ``downloads_owned`` block). A downloadLogs CSV can be hundreds of
+        MB; without this the file outlived the process that created it. Best
+        effort and idempotent: a second call has nothing registered and does
+        nothing.
+        """
+        for path in list(self._paths):
+            if _remove_downloaded_file(path):
+                self._paths.pop(path, None)
+
+    def __contains__(self, path: object) -> bool:
+        return path in self._paths
+
+    def __len__(self) -> int:
+        return len(self._paths)
+
+
+_download_registry: contextvars.ContextVar[DownloadRegistry | None] = contextvars.ContextVar(
     "nextdns_download_registry", default=None
 )
 
@@ -102,20 +156,47 @@ _download_registry: contextvars.ContextVar[dict[str, None] | None] = contextvars
 MAX_RETAINED_DOWNLOADS = 8
 
 
-def _current_registry() -> dict[str, None]:
-    """The registry downloads register with now: the owning lifespan's.
+def current_download_registry() -> DownloadRegistry:
+    """The registry downloads register with now.
+
+    Resolution order: a registry published with :func:`downloads_owned`, then
+    the resources of the FastMCP server serving this request.
 
     Raises:
-        MissingDownloadRegistryError: when no server lifespan owns this
-            context. Nothing would ever reclaim a CSV registered there, so the
-            caller is told instead of the path joining an unowned registry.
+        MissingDownloadRegistryError: When no registry owner is active.
+            Server code runs inside a server lifespan, which publishes one;
+            standalone callers must wrap the work in ``downloads_owned()``.
+            Nothing would ever reclaim a CSV registered without an owner, so
+            the caller is told instead of the path joining an unowned
+            registry.
     """
     owned = _download_registry.get()
     if owned is None:
+        resources = request_resources()
+        if resources is not None:
+            owned = resources.downloads
+    if owned is None:
         raise MissingDownloadRegistryError(
-            "No server lifespan owns this call, so the downloaded CSV has no registry to be reclaimed from."
+            "No server lifespan owns this call: the downloaded CSV has no registry to be "
+            "reclaimed from. Server code runs inside a server lifespan, which publishes one; "
+            "standalone callers must wrap the work in `downloads_owned()`."
         )
     return owned
+
+
+@contextlib.contextmanager
+def downloads_owned(registry: DownloadRegistry | None = None) -> Iterator[DownloadRegistry]:
+    """Publish a download registry owner for the block (a standalone session).
+
+    Yields the registry so the caller can inspect it; cleanup stays the
+    caller's explicit decision via ``registry.cleanup()``.
+    """
+    owner = registry if registry is not None else DownloadRegistry()
+    token = _download_registry.set(owner)
+    try:
+        yield owner
+    finally:
+        _download_registry.reset(token)
 
 
 def _remove_downloaded_file(path: str) -> bool:
@@ -130,13 +211,10 @@ def cleanup_successful_downloads() -> None:
     hundreds of MB; without this the file outlived the process that created
     it. Best effort and idempotent: a second call has nothing registered and
     does nothing. Because registration is per-lifespan, this reclaims only
-    the calling server's own downloads, and raising outside a lifespan (see
-    ``_current_registry``) is a caller bug, not a fallback.
+    the calling server's own downloads, and raising outside an owner (see
+    ``current_download_registry``) is a caller bug, not a fallback.
     """
-    registry = _current_registry()
-    for path in list(registry):
-        if _remove_downloaded_file(path):
-            registry.pop(path, None)
+    current_download_registry().cleanup()
 
 
 def _note_successful_download(path: str, downloaded: bool) -> None:
@@ -154,10 +232,4 @@ def _note_successful_download(path: str, downloaded: bool) -> None:
     """
     if not downloaded:
         return
-    registry = _current_registry()
-    registry[path] = None
-    while len(registry) > MAX_RETAINED_DOWNLOADS:
-        oldest = next(iter(registry))
-        if not _remove_downloaded_file(oldest):
-            break  # cannot evict: leave the overflow for shutdown reclaim rather than spin
-        registry.pop(oldest, None)
+    current_download_registry().note(path, downloaded)

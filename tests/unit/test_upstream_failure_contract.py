@@ -66,7 +66,7 @@ class _StubUpstream(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-async def stub_nextdns_api(monkeypatch):
+async def stub_nextdns_api(monkeypatch, request):
     """Serve canned upstream statuses over real HTTP through the real ACL client."""
     _UPSTREAM.update(
         {
@@ -93,20 +93,20 @@ async def stub_nextdns_api(monkeypatch):
         timeout=5.0,
         follow_redirects=False,
     )
-    # Every production read of the client goes through ``client.api_client``,
-    # which is served by the module's lazy ``__getattr__`` and therefore resolves
-    # to the ``_client`` singleton -- unless a real entry is sitting in the
-    # module dict, because a test that injected ``api_client`` directly leaves
-    # one behind on teardown (its monkeypatch probe is answered by that same
-    # ``__getattr__``). Such a leftover would shadow the stub and send these
-    # requests to the real api.nextdns.io on a dead event loop, so drop it here
-    # and again on the way out instead of depending on which tests ran before.
+    # Every production read of the client goes through the current owner's
+    # client: the stub becomes the owner's lazy build (issue #642 replaced the
+    # module-level ``_client`` singleton this fixture used to patch). Tool
+    # calls served by a real session build the client from this same patched
+    # factory inside their own lifespan-published owner.
     client_module.__dict__.pop("api_client", None)
-    monkeypatch.setattr(client_module, "_client", client)
+    monkeypatch.setattr(client_module, "create_nextdns_client", lambda: client)
     try:
-        yield base_url
+        with client_module.api_client_owned(client_module.ApiClientOwner()):
+            yield base_url
     finally:
         client_module.__dict__.pop("api_client", None)
+        if not client.is_closed:
+            await client.aclose()
         await client.aclose()
         httpd.shutdown()
         httpd.server_close()

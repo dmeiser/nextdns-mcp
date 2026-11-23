@@ -47,6 +47,7 @@ from .exceptions import (
     NextDNSRateLimitError,
     NextDNSResponseTooLargeError,
     NextDNSServerError,
+    StateOwnershipError,
 )
 from .http import http_error_payload
 from .upstream import upstream_error_codes, upstream_error_details
@@ -63,6 +64,7 @@ __all__ = [
     "NextDNSRateLimitError",
     "NextDNSResponseTooLargeError",
     "NextDNSServerError",
+    "StateOwnershipError",
     "cap_with_marker",
     "error_payload",
     "http_error_payload",
