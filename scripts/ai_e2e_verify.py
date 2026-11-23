@@ -7,6 +7,12 @@ dispatcher that maps ``step.verify`` onto them. Every verifier returns the
 same ``(status, error, reason, rest_verification)`` tuple the harness produced
 before the split. The harness module keeps the thin delegator; this module is
 the one that asks REST what actually happened.
+
+Dispatch is by EXACT verifier name, and every family handler ends with an
+unknown-name guard, so a verifier name nothing implements makes no REST call
+at all and fails with ``unknown verifier <name>``. A prefix test here would
+turn a typo such as ``logs_bogus`` into the ``logs_clear`` branch — a live
+``DELETE /profiles/<id>/logs`` against the account, reported as a pass.
 """
 
 from __future__ import annotations
@@ -17,6 +23,28 @@ from typing import Any
 import ai_e2e_common as common
 import ai_e2e_harness as harness
 
+# The verifier names each family below implements. The dispatcher matches these
+# exactly: an unknown name must reach the unknown-verifier answer, never a
+# neighbouring branch — one of which (logs_clear) is a destructive DELETE.
+_PROFILE_VERIFIERS = ("profile_exists", "profile_renamed", "profile_gone")
+_SETTINGS_VERIFIERS = ("settings_read", "settings_update")
+_LIST_VERIFIERS = (
+    "list_read",
+    "list_replace",
+    "list_add",
+    "list_update",
+    "list_remove",
+    "list_remove_added",
+)
+_REWRITE_VERIFIERS = ("rewrite_list", "rewrite_add", "rewrite_delete")
+_PLOT_VERIFIERS = ("plots", "dashboard")
+_LOG_VERIFIERS = ("logs_get", "logs_download", "logs_clear")
+
+
+def _unknown_verifier(verify: Any) -> tuple[str, str, str, dict[str, Any]]:
+    """A name no verifier implements: failed, and no request was made."""
+    return ("failed", f"unknown verifier {verify!r}", "", {})
+
 
 async def _get(m: Any, path: str, **kw: Any) -> Any:
     # Read-only by construction: an earlier `_req(method, ...)` helper took a
@@ -25,7 +53,7 @@ async def _get(m: Any, path: str, **kw: Any) -> Any:
     return await m.rest_get(path, **kw)
 
 
-def _rest_endpoint(base_profile: str, path: str) -> str:
+def _rest_endpoint(base_profile: str | None, path: str) -> str:
     return f"GET {base_profile}{path}"
 
 
@@ -33,6 +61,8 @@ async def _verify_profile_steps(
     m: Any, targets: Any, pid: str, step: Any, vd: dict[str, Any]
 ) -> tuple[str, str, str, dict[str, Any]]:
     """profile_exists / profile_renamed / profile_gone."""
+    if step.verify not in _PROFILE_VERIFIERS:
+        return _unknown_verifier(step.verify)
     if step.verify == "profile_exists":
         prof = await m.find_profile(targets.profile_name)
         if prof is None:
@@ -67,6 +97,8 @@ async def _verify_settings_steps(
     m: Any, pid: str, step: Any, vd: dict[str, Any]
 ) -> tuple[str, str, str, dict[str, Any]]:
     """settings_read / settings_update."""
+    if step.verify not in _SETTINGS_VERIFIERS:
+        return _unknown_verifier(step.verify)
     base_profile = f"/profiles/{pid}" if pid else None
     if step.verify == "settings_read":
         rest = await _get(m, f"{base_profile}{vd['spec']['path']}")
@@ -90,6 +122,8 @@ async def _verify_settings_steps(
 
 async def _verify_list_steps(m: Any, pid: str, step: Any, vd: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
     """list_read / list_replace / list_add / list_update / list_remove / list_remove_added."""
+    if step.verify not in _LIST_VERIFIERS:
+        return _unknown_verifier(step.verify)
     base_profile = f"/profiles/{pid}" if pid else None
     endpoint = f"{base_profile}{vd['spec']['path']}"
     if step.verify == "list_read":
@@ -174,6 +208,8 @@ async def _verify_rewrite_steps(
     m: Any, pid: str, step: Any, vd: dict[str, Any]
 ) -> tuple[str, str, str, dict[str, Any]]:
     """rewrite_list / rewrite_add / rewrite_delete."""
+    if step.verify not in _REWRITE_VERIFIERS:
+        return _unknown_verifier(step.verify)
     base_profile = f"/profiles/{pid}" if pid else None
     endpoint = f"{base_profile}/rewrites"
     if step.verify == "rewrite_list":
@@ -263,6 +299,8 @@ async def _verify_plot_step(m: Any, pid: str) -> tuple[str, str, str, dict[str, 
 
 async def _verify_log_steps(m: Any, pid: str, step: Any) -> tuple[str, str, str, dict[str, Any]]:
     """logs_get / logs_download / logs_clear."""
+    if step.verify not in _LOG_VERIFIERS:
+        return _unknown_verifier(step.verify)
     base_profile = f"/profiles/{pid}" if pid else None
     if step.verify == "logs_get":
         rest = await _get(m, f"{base_profile}/logs", params={"limit": 10})
@@ -312,13 +350,13 @@ async def _verify_log_steps(m: Any, pid: str, step: Any) -> tuple[str, str, str,
 async def verify_step(m: Any, targets: Any, pid: str, step: Any, run: Any) -> tuple[str, str, str, dict[str, Any]]:
     """REST-verify one step. Returns (status, error, reason, rest_verification)."""
     vd = step.vdata
-    if step.verify in ("profile_exists", "profile_renamed", "profile_gone"):
+    if step.verify in _PROFILE_VERIFIERS:
         return await _verify_profile_steps(m, targets, pid, step, vd)
-    if step.verify in ("settings_read", "settings_update"):
+    if step.verify in _SETTINGS_VERIFIERS:
         return await _verify_settings_steps(m, pid, step, vd)
-    if step.verify.startswith("list_"):
+    if step.verify in _LIST_VERIFIERS:
         return await _verify_list_steps(m, pid, step, vd)
-    if step.verify.startswith("rewrite_"):
+    if step.verify in _REWRITE_VERIFIERS:
         return await _verify_rewrite_steps(m, pid, step, vd)
     if step.verify == "analytics":
         return await _verify_analytics_step(m, pid, step, vd)
@@ -327,8 +365,8 @@ async def verify_step(m: Any, targets: Any, pid: str, step: Any, run: Any) -> tu
         # decide this step at all. The server's call log does (see
         # _expected_call_ok): the lookup ran and answered.
         return ("passed", "", "", {"note": "read-only DoH lookup; verdict from the server call log"})
-    if step.verify in {"plots", "dashboard"}:
+    if step.verify in _PLOT_VERIFIERS:
         return await _verify_plot_step(m, pid)
-    if step.verify.startswith("logs_"):
+    if step.verify in _LOG_VERIFIERS:
         return await _verify_log_steps(m, pid, step)
-    return ("failed", f"unknown verifier {step.verify!r}", "", {})
+    return _unknown_verifier(step.verify)

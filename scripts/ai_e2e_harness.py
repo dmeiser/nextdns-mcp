@@ -2640,6 +2640,12 @@ def main(argv: list[str] | None = None) -> int:
 # module keeps the thin delegators above and the shared primitives they name.
 # Importing them here — after the shared names are defined — avoids a circular
 # import: each module imports the harness's primitives from it.
+# Run as a script, this module is `__main__`, so those siblings would import a
+# SECOND copy of this 2,600-line file under its real name — two copies of every
+# constant, table and cache, and monkeypatches aimed at `ai_e2e_harness` that
+# the siblings would never see. Register this copy under its real name first.
+if __name__ == "__main__":
+    sys.modules.setdefault("ai_e2e_harness", sys.modules[__name__])
 import ai_e2e_cli as _cli
 import ai_e2e_run as _run
 import ai_e2e_steps as _steps

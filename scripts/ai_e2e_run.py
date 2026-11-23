@@ -366,7 +366,7 @@ def _step_result(
     )
 
 
-async def _adopt_profile_id(state: _RunState, m: Any, step: Any) -> None:
+async def _adopt_profile_id(state: _RunState, m: Any) -> None:
     """Adopt the test profile's id once this run can prove it created it."""
     # Capture the profile id as soon as the profile exists — even when
     # this step's own verdict failed. Otherwise every later prompt
@@ -444,10 +444,10 @@ async def _run_one_step(state: _RunState, m: Any, i: int, step: Any) -> None:
     state.report.results.append(_step_result(state, step, att, prompt, attempt, transients, fb))
 
     if not state.pid and step.verify in ("profile_exists", "profile_renamed"):
-        await _adopt_profile_id(state, m, step)
+        await _adopt_profile_id(state, m)
 
 
-def _select_reported(selection: list[tuple[int, Any]], total: int) -> str:
+def _select_reported(selection: list[tuple[int, Any]]) -> str:
     """How a targeted selection is named on the progress line."""
     return (
         ", ".join(s.id for _, s in selection)
@@ -469,7 +469,7 @@ async def run_harness_scoped(api_key: str, config: Any) -> Any:
     selected = harness.select_steps(steps, config.step_selection(len(steps)))
     total = len(steps)
     if len(selected) < total:
-        harness._progress(f"targeted run: {len(selected)} of {total} steps ({_select_reported(selected, total)})")
+        harness._progress(f"targeted run: {len(selected)} of {total} steps ({_select_reported(selected)})")
     harness._progress(f"profile name: {targets.profile_name}  ({len(selected)} of {total} steps)")
     # Before any temp file is created (the workdir's mkdtemp and every
     # per-step server's tempfile use TMPDIR), move scratch off the quota'd
