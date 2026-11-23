@@ -14,6 +14,8 @@ spellings the API reads.
 SPDX-License-Identifier: MIT
 """
 
+import math
+
 import pytest
 from fastmcp import Client
 
@@ -29,6 +31,12 @@ class TestTimeValues:
             # A bare negative number is an offset, never an absolute time.
             (-86400, "-86400s"),
             (-1, "-1s"),
+            # The API accepts only whole-second offsets: a fractional offset is
+            # truncated toward zero, not emitted as "-86400.5s" which it rejects.
+            (-86400.5, "-86400s"),
+            # A sub-second negative offset truncates to zero seconds, i.e. now -
+            # a signless "0s" has no verified acceptance anywhere.
+            (-0.5, "now"),
             ("-86400", "-86400s"),
             # The Grafana/Prometheus spelling, in the API's own relative form.
             ("now-1d", "-1d"),
@@ -46,6 +54,29 @@ class TestTimeValues:
     )
     def test_a_shape_the_api_accepts_is_left_alone(self, given):
         assert normalize_time_value(given) == given
+
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [
+            # NaN is not an offset and is not handed to int(): the chart layer
+            # resolves it. Infinity keeps the offset spelling upstream refuses.
+            (float("nan"), float("nan")),
+            (float("inf"), float("inf")),
+            (float("-inf"), "-infs"),
+        ],
+    )
+    def test_a_non_finite_float_is_not_handed_to_int(self, given, expected):
+        """int() on NaN/Infinity raises inside the tool call, so they keep their old spelling.
+
+        Both values survive Python's JSON decoder; the pre-existing behaviour
+        (NaN unchanged, -Infinity as an offset string upstream refuses) is
+        preserved exactly, and no exception escapes.
+        """
+        result = normalize_time_value(given)
+        if isinstance(expected, float) and math.isnan(expected):
+            assert math.isnan(result)
+        else:
+            assert result == expected
 
 
 class TestPartials:
@@ -189,6 +220,20 @@ class TestTheToolsSaySoThemselves:
         error = str(payload.get("error", ""))
         assert "more than the 2000-point series budget" not in error
         assert "Requested range spans" not in error
+
+    @pytest.mark.asyncio
+    async def test_an_overflowing_negative_offset_is_a_typed_refusal_not_a_crash(self):
+        """An overflowing decimal string coerces to float("-inf") in the middleware.
+
+        int(-inf) raises OverflowError, so a naive truncation crashes the tool
+        instead of refusing. The non-finite value must pass through to the
+        schema/budget checks, which answer with the typed invalid_argument.
+        """
+        payload = await self._call(
+            "getAnalyticsEncryptionSeries",
+            {"profile_id": "aa11aa", "from": "-" + "9" * 310 + ".0", "interval": 3600},
+        )
+        assert payload.get("code") == "invalid_argument", payload
 
     @pytest.mark.asyncio
     async def test_an_unknown_partials_names_the_values_that_work(self):

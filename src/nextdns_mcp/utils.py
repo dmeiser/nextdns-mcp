@@ -10,12 +10,13 @@ its failures repeat) live in ``constants`` so no module here has to import a
 transport to describe an id.
 """
 
+import math
 import re
 from typing import Any
 
 from .config import _BOOL_FALSE_TOKENS, _BOOL_TRUE_TOKENS, get_default_profile
 from .constants import PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
-from .errors import ErrorCode, error_payload
+from .errors import ErrorCode, cap_with_marker, error_payload
 
 
 def is_safe_profile_id(value: str | int) -> bool:
@@ -130,6 +131,31 @@ def resolve_default_profile(profile_id: str | int | None = None) -> tuple[str, N
     return target, None
 
 
+def _truncate_at_boundary(text: str, limit: int, *, sentence: bool = False) -> str:
+    """Cut ``text`` to ``limit`` chars, preferring a boundary near the budget over a mid-word cut.
+
+    Text at or below ``limit`` is returned unchanged. Otherwise the cut lands on
+    the last newline at or after the halfway point of the budget (``limit // 2``)
+    — and, when ``sentence`` is true, the last ``". "`` sentence break as well,
+    keeping the sentence's period. A boundary earlier than halfway would discard
+    more than half the budget, so it does not qualify: a text with no qualifying
+    boundary is hard-cut at the budget itself, and the cut CAN land mid-sentence.
+    Both truncate-to-budget callers (published spec descriptions and
+    search-result descriptions) share this one boundary selection so the two
+    paths cannot drift apart.
+    """
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    boundary = cut.rfind("\n")
+    if sentence:
+        boundary = max(boundary, cut.rfind(". "))
+    if boundary < limit // 2:
+        return cut.rstrip()
+    step = 1 if cut[boundary] == "\n" else 2
+    return cut[: boundary + step].rstrip()
+
+
 # The window a published ``limit`` argument may take. Both composite tools that
 # publish one reject a value outside it rather than clamping the caller's
 # request, so both owe the same bounds and the same error payload.
@@ -142,9 +168,17 @@ def limit_range_error(limit: Any) -> dict[str, Any] | None:
 
     ``bool`` is refused rather than read as its integer value: ``limit=True`` is
     a caller that sent a flag, and answering it as ``limit=1`` silently rewrites
-    the request in a way the caller cannot see or correct.
+    the request in a way the caller cannot see or correct. A non-numeric value
+    (e.g. a string reaching this helper from a direct Python caller, bypassing
+    the tool schema) is refused with the same typed payload instead of raising
+    ``TypeError`` on the range comparison.
     """
-    if isinstance(limit, bool) or limit < ANALYTICS_LIMIT_MIN or limit > ANALYTICS_LIMIT_MAX:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, (int, float))
+        or limit < ANALYTICS_LIMIT_MIN
+        or limit > ANALYTICS_LIMIT_MAX
+    ):
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,
             f"limit must be between {ANALYTICS_LIMIT_MIN} and {ANALYTICS_LIMIT_MAX}, got {limit}",
@@ -155,7 +189,7 @@ def limit_range_error(limit: Any) -> dict[str, Any] | None:
     return None
 
 
-def _build_series_params(
+def build_series_params(
     from_time: str | int | None = None,
     to_time: str | int | None = None,
     interval: int | None = None,
@@ -171,7 +205,7 @@ def _build_series_params(
     endpoints take no ``limit``, so callers that expose one (as the plot tool
     does) keep it out of this set and validate it on its own.
     """
-    return _build_query_params(
+    return build_query_params(
         **{
             "from": from_time,
             "to": to_time,
@@ -183,11 +217,32 @@ def _build_series_params(
     )
 
 
+# The relative-offset grammar the analytics endpoints accept: a digit run
+# (``RELATIVE_AMOUNT_PATTERN``) followed by one unit letter (``RELATIVE_UNIT_CLASS``),
+# with each unit's size in ``RELATIVE_UNIT_SECONDS`` - ``-1d`` and ``-7d`` are the
+# forms, and "y" is a 365-day year, matching how the analytics endpoints read a
+# year. The unit letter is matched case-sensitively: an upper-case letter is a
+# different unit upstream ("-1M" reads as months), so folding it onto its
+# lower-case twin would size a months-long range as minutes.
+# Two paths read a relative offset and both recognize it from these one
+# definition each: ``charts.resolve_time_point`` resolves the amount to Unix
+# seconds, and ``normalize_time_value`` below rewrites the spellings the API
+# reads wrongly. Each path keeps its own sign, spacing and case policy for the
+# input forms it accepts; sharing the amount and unit grammar is what keeps a
+# unit or an amount shape from being recognized on one path and not the other.
+RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+RELATIVE_AMOUNT_PATTERN = r"\d+"
+# The unit letters as a regex character class, generated from the table so the
+# alphabet and the conversion data can never drift apart.
+RELATIVE_UNIT_CLASS = "[" + "".join(sorted(RELATIVE_UNIT_SECONDS)) + "]"
+
 # The spellings of a relative range that the analytics endpoints do NOT accept
 # but callers reach for: `now-1d` (Grafana/Prometheus) and a bare negative
-# number, which upstream reads as an absolute Unix timestamp.
-_NOW_OFFSET_RE = re.compile(r"^now\s*(?:-\s*(\d+\s*[smhdwy]))?$", re.IGNORECASE)
-_BARE_NEGATIVE_RE = re.compile(r"^-\d+$")
+# number, which upstream reads as an absolute Unix timestamp. Both recognizers
+# are built from the grammar above, so every offset rewritten here is one
+# ``charts.resolve_time_point`` can also price.
+NOW_OFFSET_RE = re.compile(rf"^now\s*(?:-\s*({RELATIVE_AMOUNT_PATTERN}\s*{RELATIVE_UNIT_CLASS}))?$", re.IGNORECASE)
+BARE_NEGATIVE_RE = re.compile(rf"^-{RELATIVE_AMOUNT_PATTERN}$")
 
 
 def normalize_time_value(value: Any) -> Any:
@@ -200,7 +255,14 @@ def normalize_time_value(value: Any) -> Any:
       caller has nothing to correct: across three runs the model retried that
       call ~40 times, varying the interval each time. A negative absolute time
       is not a thing, so it is read as the offset it means, in the API's own
-      relative-seconds spelling (``-86400s``, verified accepted).
+      relative-seconds spelling (``-86400s``, verified accepted). Only integer
+      seconds are accepted in that spelling; a fractional offset like
+      ``-86400.5`` is truncated toward zero (``-86400s``) rather than emitted
+      as ``-86400.5s``, which the API rejects, and a sub-second offset
+      truncates to ``now``. Non-finite floats (``NaN``, ``Infinity``) survive
+      Python's JSON decoder and keep the spelling they have always been sent
+      in - ``NaN`` unchanged for the chart layer to resolve, ``-Infinity`` as
+      the offset string upstream refuses.
     - ``now-1d``, the Grafana/Prometheus spelling. Upstream answers "`from` must
       be number"; the same span in its own spelling (``-1d``) works.
 
@@ -210,17 +272,39 @@ def normalize_time_value(value: Any) -> Any:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return f"{value}s" if value < 0 else value
+        return _normalize_numeric_time(value)
     return _normalize_time_text(value)
+
+
+def _normalize_numeric_time(value: float) -> Any:
+    """The offset spelling for a negative number; the number itself otherwise."""
+    if isinstance(value, float) and not math.isfinite(value):
+        # NaN and Infinity survive Python's JSON decoder (see
+        # charts._numeric_seconds). They keep the spelling they had before this
+        # rewrite - upstream refuses them, and the chart layer resolves them -
+        # because int() on either raises inside the tool call.
+        return _non_finite_time(value)
+    if value >= 0:
+        return value
+    # The API accepts only whole-second offsets; truncate toward zero.
+    # A sub-second negative offset truncates to zero seconds, i.e. now -
+    # a signless "0s" has no verified acceptance anywhere.
+    whole = int(value)
+    return f"{whole}s" if whole else "now"
+
+
+def _non_finite_time(value: float) -> Any:
+    """A non-finite float in the spelling it has always been sent as."""
+    return f"{value}s" if value < 0 else value
 
 
 def _normalize_time_text(value: Any) -> Any:
     """Rewrite the two text spellings the API reads wrongly (see normalize_time_value)."""
     text = str(value).strip()
-    match = _NOW_OFFSET_RE.match(text)
+    match = NOW_OFFSET_RE.match(text)
     if match:
         return "now" if match.group(1) is None else f"-{match.group(1).replace(' ', '')}"
-    if _BARE_NEGATIVE_RE.match(text):
+    if BARE_NEGATIVE_RE.match(text):
         return f"{text}s"
     return value
 
@@ -257,7 +341,7 @@ def _query_bool(value: Any) -> Any:
     return value
 
 
-def _build_query_params(**kwargs: Any) -> dict[str, Any]:
+def build_query_params(**kwargs: Any) -> dict[str, Any]:
     """Build a query-param dict, dropping None values and normalizing booleans."""
     return {k: _query_bool(v) for k, v in kwargs.items() if v is not None}
 
@@ -275,6 +359,7 @@ def schema_required(schema: dict[str, Any] | None) -> list[str]:
 
 _CONTROL_CHARS_RE = re.compile(r"[\r\n\x00-\x1f\x7f-\x9f]")
 _MAX_LABEL_LENGTH = 200
+_LABEL_TRUNCATION_MARKER = "…"
 
 
 def sanitize_label(value: Any) -> str:
@@ -287,8 +372,9 @@ def sanitize_label(value: Any) -> str:
     exactly once, at extraction/shaping time: the cap appends a character, so
     a second pass would see a 201-character label and cut it again.
     """
-    text = str(value)
-    text = _CONTROL_CHARS_RE.sub("", text)
-    if len(text) > _MAX_LABEL_LENGTH:
-        text = text[:_MAX_LABEL_LENGTH] + "…"
-    return text
+    text = _CONTROL_CHARS_RE.sub("", str(value))
+    # errors.body.cap_with_marker holds the one cap-and-marker implementation,
+    # borrowed from the package root by public name; re-inlining the comparison
+    # here is the second copy of the cut both callers must make identically.
+    capped, _ = cap_with_marker(text, _MAX_LABEL_LENGTH, _LABEL_TRUNCATION_MARKER)
+    return capped

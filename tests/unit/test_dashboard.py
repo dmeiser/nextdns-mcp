@@ -39,7 +39,7 @@ class TestDashboardHelpers:
         """The card is the view's direct child, and wrapping never mutates the card."""
         card = Card(title="Card title")
         snapshot = card.model_dump(exclude={"id"})
-        result = ui._wrap_card_result(card, "Summary text")
+        result = ui.wrap_card_result(card, "Summary text")
         assert isinstance(result, ToolResult)
         assert result.content[0].text == "Summary text"
         view = result.structured_content["view"]
@@ -51,7 +51,7 @@ class TestDashboardHelpers:
         assert card.model_dump(exclude={"id"}) == snapshot
 
     def test_build_analytics_params(self):
-        p = data_mod._build_analytics_params("-1d", "now", limit=5, extra_key="val", none_key=None)
+        p = data_mod.build_analytics_params("-1d", "now", limit=5, extra_key="val", none_key=None)
         assert p["from"] == "-1d"
         assert p["to"] == "now"
         assert p["limit"] == 5
@@ -63,15 +63,15 @@ class TestDashboardHelpers:
         assert data_mod._format_share(0, 0) == "0.0%"
 
     def test_item_and_blocked_queries(self):
-        assert data_mod._item_queries({"queries": 42}) == 42
-        assert data_mod._item_queries({}) == 0
-        assert data_mod._item_queries({"queries": "abc"}) == 0
-        assert data_mod._item_queries({"queries": {"nested": 1}}) == 0
-        assert data_mod._item_queries({"queries": [1, 2]}) == 0
-        assert data_mod._item_queries({"queries": "123"}) == 123
-        assert data_mod._item_queries({"queries": float("inf")}) == 0
-        assert data_mod._item_queries({"queries": float("-inf")}) == 0
-        assert data_mod._item_queries({"queries": json.loads("1e400")}) == 0
+        assert data_mod.item_queries({"queries": 42}) == 42
+        assert data_mod.item_queries({}) == 0
+        assert data_mod.item_queries({"queries": "abc"}) == 0
+        assert data_mod.item_queries({"queries": {"nested": 1}}) == 0
+        assert data_mod.item_queries({"queries": [1, 2]}) == 0
+        assert data_mod.item_queries({"queries": "123"}) == 123
+        assert data_mod.item_queries({"queries": float("inf")}) == 0
+        assert data_mod.item_queries({"queries": float("-inf")}) == 0
+        assert data_mod.item_queries({"queries": json.loads("1e400")}) == 0
         assert data_mod._blocked_queries({"status": "blocked", "queries": 10}) == 10
         assert data_mod._blocked_queries({"status": "allowed", "queries": 10}) == 0
 
@@ -80,12 +80,12 @@ class TestDashboardHelpers:
             {"status": "default", "queries": 80},
             {"status": "blocked", "queries": 20},
         ]
-        kpis = data_mod._calculate_status_kpis(data)
+        kpis = data_mod.calculate_status_kpis(data)
         assert kpis["total"] == 100
         assert kpis["blocked"] == 20
         assert kpis["rate"] == 20.0
 
-        empty_kpis = data_mod._calculate_status_kpis([])
+        empty_kpis = data_mod.calculate_status_kpis([])
         assert empty_kpis["total"] == 0
         assert empty_kpis["rate"] == 0.0
 
@@ -138,19 +138,19 @@ class TestDashboardHelpers:
 
     def test_build_domains_card(self):
         data = [{"domain": "example.com", "queries": 50}, {}]
-        card = ui._build_domains_card("Title", "Desc", data)
+        card = ui.build_domains_card("Title", "Desc", data)
         assert card is not None
-        assert ui._build_domains_card("Title", "Desc", data, view_type="bar") is not None
-        assert ui._build_domains_card("Title", "Desc", data, view_type="pie") is not None
+        assert ui.build_domains_card("Title", "Desc", data, view_type="bar") is not None
+        assert ui.build_domains_card("Title", "Desc", data, view_type="pie") is not None
 
     def test_reasons_card(self):
         data = [{"name": "List A", "queries": 50}, {"id": "list-b", "queries": 50}]
-        card = ui._build_reasons_card(data)
+        card = ui.build_reasons_card(data)
         assert card is not None
-        assert ui._build_reasons_card(data, view_type="table") is not None
-        assert ui._build_reasons_card(data, view_type="pie") is not None
+        assert ui.build_reasons_card(data, view_type="table") is not None
+        assert ui.build_reasons_card(data, view_type="pie") is not None
 
-        empty_row = data_mod._reason_row({}, 0)
+        empty_row = data_mod.reason_row({}, 0)
         assert empty_row["name"] == "Unknown"
         assert empty_row["share"] == "0.0%"
 
@@ -161,10 +161,10 @@ class TestDashboardHelpers:
             {"id": "dev2"},
             {},
         ]
-        card = ui._build_devices_card(data)
+        card = ui.build_devices_card(data)
         assert card is not None
-        assert ui._build_devices_card(data, view_type="bar") is not None
-        assert ui._build_devices_card(data, view_type="pie") is not None
+        assert ui.build_devices_card(data, view_type="bar") is not None
+        assert ui.build_devices_card(data, view_type="pie") is not None
 
     def test_location_string_and_ips_card(self):
         assert data_mod._location_string({"city": "City", "country": "Country"}) == "City, Country"
@@ -181,24 +181,24 @@ class TestDashboardHelpers:
             },
             {},
         ]
-        card = ui._build_ips_card(data)
+        card = ui.build_ips_card(data)
         assert card is not None
 
     def test_gafam_card(self):
         data = [{"company": "google", "queries": 100}, {}]
-        chart_data, table_rows = data_mod._gafam_rows(data)
-        card = ui._build_gafam_card(chart_data, table_rows)
+        chart_data, table_rows = data_mod.gafam_rows(data)
+        card = ui.build_gafam_card(chart_data, table_rows)
         assert card is not None
-        assert ui._build_gafam_card(chart_data, table_rows, view_type="bar") is not None
-        assert ui._build_gafam_card(chart_data, table_rows, view_type="table") is not None
+        assert ui.build_gafam_card(chart_data, table_rows, view_type="bar") is not None
+        assert ui.build_gafam_card(chart_data, table_rows, view_type="table") is not None
 
     def test_security_card(self):
         enc = [{"encrypted": True, "queries": 90}, {"encrypted": False, "queries": 10}]
         dnssec = [{"validated": True, "queries": 20}, {"validated": False, "queries": 80}]
-        card = ui._build_security_card(data_mod._calc_rate(enc, "encrypted"), data_mod._calc_rate(dnssec, "validated"))
+        card = ui.build_security_card(data_mod.calc_rate(enc, "encrypted"), data_mod.calc_rate(dnssec, "validated"))
         assert card is not None
 
-        empty_card = ui._build_security_card(data_mod._calc_rate([], "encrypted"), data_mod._calc_rate([], "validated"))
+        empty_card = ui.build_security_card(data_mod.calc_rate([], "encrypted"), data_mod.calc_rate([], "validated"))
         assert empty_card is not None
 
     def test_destinations_card(self):
@@ -206,10 +206,10 @@ class TestDashboardHelpers:
             {"name": "United States", "code": "US", "queries": 100, "domains": ["google.com"]},
             {},
         ]
-        card = ui._build_destinations_card(data)
+        card = ui.build_destinations_card(data)
         assert card is not None
-        assert ui._build_destinations_card(data, view_type="bar") is not None
-        assert ui._build_destinations_card(data, view_type="pie") is not None
+        assert ui.build_destinations_card(data, view_type="bar") is not None
+        assert ui.build_destinations_card(data, view_type="pie") is not None
 
     def test_accumulate_domains_budgeted(self):
         # In-budget: labels fit exactly
@@ -219,19 +219,19 @@ class TestDashboardHelpers:
         # Old implementation would return first 60 chars with partial second label
         # New implementation stops after first label because second would exceed budget
         assert (
-            data_mod._destination_row({"domains": long_list})["sample_domains"]
+            data_mod.destination_row({"domains": long_list})["sample_domains"]
             == "verylongdomainnamethatisoverlimit.example.com"
         )
         # Exact boundary cases
-        assert data_mod._destination_row({"domains": ["a" * 30, "b" * 40]})["sample_domains"] == "a" * 30
+        assert data_mod.destination_row({"domains": ["a" * 30, "b" * 40]})["sample_domains"] == "a" * 30
         assert (
-            data_mod._destination_row({"domains": ["a" * 28, "b" * 30]})["sample_domains"] == "a" * 28 + ", " + "b" * 30
+            data_mod.destination_row({"domains": ["a" * 28, "b" * 30]})["sample_domains"] == "a" * 28 + ", " + "b" * 30
         )
         # Empty list returns "-"
-        assert data_mod._destination_row({"domains": []})["sample_domains"] == "-"
+        assert data_mod.destination_row({"domains": []})["sample_domains"] == "-"
         # Single overlong label gets truncated to budget
         over = "x" * 100
-        assert data_mod._destination_row({"domains": [over]})["sample_domains"] == over[:60]
+        assert data_mod.destination_row({"domains": [over]})["sample_domains"] == over[:60]
 
 
 class TestDashboardFetchAndValidation:
@@ -257,12 +257,12 @@ class TestDashboardFetchAndValidation:
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         upstream_err = {"code": "http_error", "error": "failed"}
         monkeypatch.setattr(data_mod, "_fetch_analytics_payload", AsyncMock(return_value=(None, upstream_err)))
-        _data, err = await data_mod._fetch_card_data("abc123", "endpoint")
+        _data, err = await data_mod.fetch_card_data("abc123", "endpoint")
         assert err == upstream_err
 
         # 2. Empty data flows through (no no_data error) for consistent empty-state cards
         monkeypatch.setattr(data_mod, "_fetch_analytics_payload", AsyncMock(return_value=({"data": []}, None)))
-        _data, err = await data_mod._fetch_card_data("abc123", "endpoint")
+        _data, err = await data_mod.fetch_card_data("abc123", "endpoint")
         assert err is None
         assert _data == []
 
@@ -783,25 +783,25 @@ class TestDashboardToolsExecution:
 
     def test_empty_cards_rendering(self):
         # Format summary with empty items
-        assert fmt._format_items_summary("Test", "items", [], 0) == "[Rendered Test (0 items, 0 queries)]"
-        assert fmt._format_items_summary("GAFAM Dominance", None, [], 0) == "[Rendered GAFAM Dominance (0 queries)]"
+        assert fmt.format_items_summary("Test", "items", [], 0) == "[Rendered Test (0 items, 0 queries)]"
+        assert fmt.format_items_summary("GAFAM Dominance", None, [], 0) == "[Rendered GAFAM Dominance (0 queries)]"
 
         # Empty cards render fallback text
-        assert ui._build_domains_card("Domains", "desc", [], view_type="table") is not None
-        assert ui._build_domains_card("Domains", "desc", [], view_type="bar") is not None
-        assert ui._build_reasons_card([], view_type="table") is not None
-        assert ui._build_reasons_card([], view_type="bar") is not None
-        assert ui._build_devices_card([], view_type="table") is not None
-        assert ui._build_devices_card([], view_type="bar") is not None
-        assert ui._build_devices_card([], view_type="pie") is not None
-        assert ui._build_devices_card([{"name": "iPhone", "queries": 10}], view_type="table") is not None
-        assert ui._build_ips_card([]) is not None
-        assert ui._build_gafam_card([], [], view_type="table") is not None
-        assert ui._build_gafam_card([], [], view_type="bar") is not None
-        assert ui._build_destinations_card([], view_type="table") is not None
-        assert ui._build_destinations_card([], view_type="bar") is not None
-        assert ui._build_destinations_card([], view_type="pie") is not None
-        assert ui._build_destinations_card([{"name": "US", "queries": 10}], view_type="table") is not None
+        assert ui.build_domains_card("Domains", "desc", [], view_type="table") is not None
+        assert ui.build_domains_card("Domains", "desc", [], view_type="bar") is not None
+        assert ui.build_reasons_card([], view_type="table") is not None
+        assert ui.build_reasons_card([], view_type="bar") is not None
+        assert ui.build_devices_card([], view_type="table") is not None
+        assert ui.build_devices_card([], view_type="bar") is not None
+        assert ui.build_devices_card([], view_type="pie") is not None
+        assert ui.build_devices_card([{"name": "iPhone", "queries": 10}], view_type="table") is not None
+        assert ui.build_ips_card([]) is not None
+        assert ui.build_gafam_card([], [], view_type="table") is not None
+        assert ui.build_gafam_card([], [], view_type="bar") is not None
+        assert ui.build_destinations_card([], view_type="table") is not None
+        assert ui.build_destinations_card([], view_type="bar") is not None
+        assert ui.build_destinations_card([], view_type="pie") is not None
+        assert ui.build_destinations_card([{"name": "US", "queries": 10}], view_type="table") is not None
         # Interval unparseable fallback
         assert data_mod._overview_interval("invalid", "now") == 86400
 
@@ -872,7 +872,7 @@ class TestFanoutShortCircuit:
             data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("status", rejection), "status")
         )
 
-        _, _, _, _, extra, err = await data_mod._fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
+        _, _, _, _, extra, err = await data_mod.fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
 
         assert err == rejection
         assert extra is None
@@ -887,7 +887,7 @@ class TestFanoutShortCircuit:
             data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("status", gateway), "status")
         )
 
-        _, _, _, _, extra, err = await data_mod._fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
+        _, _, _, _, extra, err = await data_mod.fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
 
         assert err == gateway
         assert len(started) == 12
@@ -980,7 +980,7 @@ class TestExtraSectionBinding:
 
         monkeypatch.setattr(data_mod, "_build_extra_tasks", desynced_build)
 
-        _, _, _, _, extra, err = await data_mod._fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
+        _, _, _, _, extra, err = await data_mod.fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
 
         assert err is None
         assert extra is not None
@@ -1062,7 +1062,7 @@ class TestFailClosedNoneGuards:
     async def test_card_fetch_none_is_internal_error(self, clean_env, monkeypatch, section):
         """``(None, None)`` from the card fetcher must not reach the renderer."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(tool_mod, "_fetch_card_data", AsyncMock(return_value=(None, None)))
+        monkeypatch.setattr(tool_mod, "fetch_card_data", AsyncMock(return_value=(None, None)))
 
         res = await dash_module.overviewDashboard(section=section)
         assert isinstance(res, dict)
@@ -1541,18 +1541,18 @@ class TestSanitizeLabel:
 
     def test_label_helpers_sanitize(self):
         evil = {"domain": "x.example\nINJECTED"}
-        assert "\n" not in data_mod._domain_label(evil)
-        assert "\n" not in data_mod._device_label({"id": "1", "name": "phone\r\nINJECTED"})
-        assert "\n" not in data_mod._reason_label({"name": "reason\x00INJECTED"})
-        assert "\n" not in data_mod._destination_label({"name": "US\x1bINJECTED"})
+        assert "\n" not in data_mod.domain_label(evil)
+        assert "\n" not in data_mod.device_label({"id": "1", "name": "phone\r\nINJECTED"})
+        assert "\n" not in data_mod.reason_label({"name": "reason\x00INJECTED"})
+        assert "\n" not in data_mod.destination_label({"name": "US\x1bINJECTED"})
 
     def test_device_row_sanitizes_model(self):
-        row = data_mod._device_row({"name": "Phone", "model": "A\r\nB\x00", "queries": 1}, 1)
+        row = data_mod.device_row({"name": "Phone", "model": "A\r\nB\x00", "queries": 1}, 1)
         assert row["model"] == "AB"
         assert row["device"] == "Phone (AB)"
 
     def test_ip_row_sanitizes_ip_isp_location(self):
-        row = data_mod._ip_row(
+        row = data_mod.ip_row(
             {
                 "ip": "1.2.3.4\nINJECTED",
                 "queries": 5,
@@ -1570,7 +1570,7 @@ class TestSanitizeLabel:
         assert chart_row["label"] == table_row["company"]
 
     def test_destination_row_sanitizes_code_and_sample_domains(self):
-        row = data_mod._destination_row(
+        row = data_mod.destination_row(
             {"name": "United States", "code": "US\x00", "queries": 1, "domains": ["a.example\r\nb"]}
         )
         assert row["code"] == "US"
@@ -1581,14 +1581,14 @@ class TestSanitizeLabel:
         assert "\n" not in data_mod._accumulate_domains(["evil.example\nINJECTED"], budget=60)
 
     def test_oversized_labels_capped_in_rows(self):
-        row = data_mod._device_row({"name": "n", "model": "m" * 300, "queries": 1}, 1)
+        row = data_mod.device_row({"name": "n", "model": "m" * 300, "queries": 1}, 1)
         assert len(row["model"]) == 201
         assert row["model"].endswith("…")
-        ip_row = data_mod._ip_row({"ip": "1.1.1.1", "queries": 1, "network": {"isp": "i" * 300}, "geo": {}})
+        ip_row = data_mod.ip_row({"ip": "1.1.1.1", "queries": 1, "network": {"isp": "i" * 300}, "geo": {}})
         assert len(ip_row["isp"]) == 201
 
     def test_ip_summary_items_sanitize(self):
-        items = fmt._ip_summary_items([{"ip": "1.2.3.4\r\nINJECTED", "queries": 2}])
+        items = fmt.ip_summary_items([{"ip": "1.2.3.4\r\nINJECTED", "queries": 2}])
         assert items == [("1.2.3.4INJECTED", 2)]
 
     def test_format_top_items_does_not_double_sanitize(self):

@@ -1,7 +1,17 @@
 """Configuration module for NextDNS MCP Server.
 
-This module handles all configuration loading, validation, and constants
-for the NextDNS MCP server.
+This module handles configuration loading and validation for the NextDNS MCP
+server: the API key, the API base URL, the HTTP timeout, the download size
+cap, the tool-search mode, and the startup validation that ties them
+together.
+
+Two concerns used to live here and now have their own modules, re-exported
+below so every existing ``nextdns_mcp.config`` import keeps resolving:
+
+- logging setup — :mod:`nextdns_mcp.logging_config` (``configure_logging``);
+- profile access control — :mod:`nextdns_mcp.profile_access` (read-only
+  mode, the readable/writable/protected profile lists, and the per-request
+  :class:`ProfileAccessControl` snapshot).
 
 SPDX-License-Identifier: MIT
 """
@@ -9,55 +19,106 @@ SPDX-License-Identifier: MIT
 import logging
 import math
 import os
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
-from .constants import SAFE_PROFILE_ID_PATTERN
+# DNS_STATUS_CODES and VALID_DNS_RECORD_TYPES are re-exported here: callers
+# already read them off this module, and the definitions live in
+# ``constants`` so the tool layer owns nothing that the base layer republishes.
+# The import is eager rather than lazy because ``constants`` imports nothing
+# from this package, so this edge cannot close a cycle.
+from .constants import DNS_STATUS_CODES, SAFE_PROFILE_ID_PATTERN, VALID_DNS_RECORD_TYPES
+from .errors import ConfigurationError, MissingApiKeyError
+from .logging_config import configure_logging
+from .profile_access import _BOOL_FALSE_TOKENS as _BOOL_FALSE_TOKENS  # noqa: PLC0414
+from .profile_access import (
+    _BOOL_TOKENS,
+    ALLOW_ALL_PROFILES,
+    ProfileAccessControl,
+    _parse_bool_env,
+    can_read_profile,
+    can_write_profile,
+    get_protected_profiles,
+    get_readable_profiles,
+    get_readable_profiles_set,
+    get_writable_profiles,
+    get_writable_profiles_set,
+    is_read_only,
+    load_profile_access_control,
+    parse_profile_list,
+)
+from .profile_access import _BOOL_TRUE_TOKENS as _BOOL_TRUE_TOKENS  # noqa: PLC0414
+from .profile_access import _combine_readable as _combine_readable  # noqa: PLC0414
+from .profile_access import _combine_set_readable as _combine_set_readable  # noqa: PLC0414
+from .profile_access import _is_allow_all as _is_allow_all  # noqa: PLC0414
+from .profile_access import _is_empty_profile_list as _is_empty_profile_list  # noqa: PLC0414
+from .profile_access import _mutable_profile_set as _mutable_profile_set  # noqa: PLC0414
+from .profile_access import _normalized_profile_ids as _normalized_profile_ids  # noqa: PLC0414
+from .profile_access import _profile_ids_env as _profile_ids_env  # noqa: PLC0414
+from .profile_access import _profile_list_env as _profile_list_env  # noqa: PLC0414
+from .profile_access import _read_only_from_env as _read_only_from_env  # noqa: PLC0414
+
+# The pre-split module had no __all__, so star imports bound every public
+# attribute - including the stdlib names, ``dataclass`` and
+# ``SAFE_PROFILE_ID_PATTERN`` it imported - and no underscore-prefixed
+# helper. ``__all__`` pins exactly that surface: the private helpers above
+# stay importable by name but stay out of star imports, and the incidental
+# re-exports (``dataclass``, ``SAFE_PROFILE_ID_PATTERN``) remain importable
+# from here as they were before the split.
+__all__ = [
+    "ALLOW_ALL_PROFILES",
+    "DEFAULT_API_BASE",
+    "DEFAULT_DOWNLOAD_MAX_BYTES",
+    "DEFAULT_HTTP_TIMEOUT",
+    "DEFAULT_TOOL_SEARCH_MODE",
+    "DNS_STATUS_CODES",
+    "SAFE_PROFILE_ID_PATTERN",
+    "TOOL_SEARCH_MODES",
+    "VALID_DNS_RECORD_TYPES",
+    "Any",
+    "Collection",
+    "ConfigurationError",
+    "MissingApiKeyError",
+    "ProfileAccessControl",
+    "can_read_profile",
+    "can_write_profile",
+    "configure_logging",
+    "dataclass",
+    "get_api_key",
+    "get_default_profile",
+    "get_download_max_bytes",
+    "get_http_timeout",
+    "get_protected_profiles",
+    "get_readable_profiles",
+    "get_readable_profiles_set",
+    "get_tool_search_mode",
+    "get_writable_profiles",
+    "get_writable_profiles_set",
+    "is_generative_ui_enabled",
+    "is_read_only",
+    "load_profile_access_control",
+    "logger",
+    "logging",
+    "math",
+    "os",
+    "parse_profile_list",
+    "validate_configuration",
+]
 
 logger = logging.getLogger(__name__)
-
-
-class ConfigurationError(ValueError):
-    """Raised when configuration values are invalid or malformed."""
-
-
-class MissingApiKeyError(ConfigurationError):
-    """Raised when a NextDNS API key has not been configured yet.
-
-    Subclasses ``ConfigurationError`` so that a single ``except
-    ConfigurationError`` covers both "no key configured yet" and "the value
-    you configured is invalid".
-    """
-
-
-def configure_logging() -> None:
-    """Configure root logging for the NextDNS MCP server.
-
-    Called only from the ``__main__`` entrypoint so that importing this
-    module has no logging side effects.
-
-    The ``httpx`` and ``httpcore`` loggers are pinned to WARNING: httpx logs
-    every request at INFO with the fully merged URL, whose query string can
-    carry the PII the client redacts from its own request line (issue #139).
-    """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    for library_logger in ("httpx", "httpcore"):
-        logging.getLogger(library_logger).setLevel(logging.WARNING)
 
 
 # Core API configuration. Overridable via NEXTDNS_API_BASE - the name the
 # harness and container-E2E scripts already pass into the server's
 # environment; before this the override reached the child process and was
 # simply ignored, so a custom base configured the harness's REST checks but
-# not the MCP server under test. Read once at import: the ACL client's
-# base_url, the DoH allowlist host and the startup banner all resolve from
-# this constant, so the override configures every one of them.
+# not the MCP server under test. Read at use time through get_api_base(),
+# matching the harness's api_base() convention: the ACL client's base_url,
+# the destination allow-list host and the startup banner all resolve through
+# the getter, so a long-lived process that changes NEXTDNS_API_BASE picks the
+# new endpoint up on the next client creation without a reimport or restart.
 DEFAULT_API_BASE = "https://api.nextdns.io"
-NEXTDNS_BASE_URL = os.getenv("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
 
 # Default HTTP request timeout in seconds
 DEFAULT_HTTP_TIMEOUT: float = 30.0
@@ -67,8 +128,24 @@ DEFAULT_HTTP_TIMEOUT: float = 30.0
 # the OS temp directory. Overridable via NEXTDNS_DOWNLOAD_MAX_BYTES.
 DEFAULT_DOWNLOAD_MAX_BYTES: int = 1024 * 1024 * 1024  # 1 GiB
 
-# Constants for profile access control
-ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
+
+def get_api_base() -> str:
+    """Get the API base URL from the environment, read at call time.
+
+    Returns:
+        str: The configured base URL with any trailing slash removed
+            (default ``https://api.nextdns.io``).
+
+    Raises:
+        ConfigurationError: If NEXTDNS_API_BASE does not use https://. The
+            scheme check runs on every read, not only at startup validation,
+            so a runtime change cannot silently redirect the API key to a
+            plaintext endpoint.
+    """
+    base_url = os.getenv("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
+    if not base_url.lower().startswith("https://"):
+        raise ConfigurationError("NEXTDNS_API_BASE must use https://")
+    return base_url
 
 
 def get_api_key() -> str | None:
@@ -151,35 +228,6 @@ def get_default_profile() -> str | None:
     return os.getenv("NEXTDNS_DEFAULT_PROFILE")
 
 
-_BOOL_TRUE_TOKENS = frozenset(("true", "1", "yes", "on"))
-_BOOL_FALSE_TOKENS = frozenset(("false", "0", "no", "off", ""))
-_BOOL_TOKENS = _BOOL_TRUE_TOKENS | _BOOL_FALSE_TOKENS
-
-
-def _parse_bool_env(value: str) -> bool | None:
-    """Parse a boolean environment value.
-
-    Returns ``True``/``False`` for recognized tokens and ``None`` for any
-    unrecognized value, so callers can distinguish "off" from a typo.
-    """
-    normalized = value.strip().lower()
-    if normalized in _BOOL_TRUE_TOKENS:
-        return True
-    if normalized in _BOOL_FALSE_TOKENS:
-        return False
-    return None
-
-
-def _read_only_from_env() -> bool:
-    """Read NEXTDNS_READ_ONLY once."""
-    return _parse_bool_env(os.getenv("NEXTDNS_READ_ONLY", "")) is True
-
-
-def is_read_only() -> bool:
-    """Check if read-only mode is enabled."""
-    return _read_only_from_env()
-
-
 def is_generative_ui_enabled() -> bool:
     """Check if Generative UI (on-the-fly Prefab UI generation) is enabled.
 
@@ -187,30 +235,6 @@ def is_generative_ui_enabled() -> bool:
     NEXTDNS_GENERATIVE_UI to 'true', '1', 'on', or 'yes'.
     """
     return _parse_bool_env(os.getenv("NEXTDNS_GENERATIVE_UI", "off")) is True
-
-
-def get_readable_profiles() -> set[str] | None:
-    """Get readable profile list from environment.
-
-    Returns:
-        None if empty/unset (deny all), empty set if "ALL" (allow all),
-        or set of specific profile IDs
-    """
-    profiles = os.getenv("NEXTDNS_READABLE_PROFILES", "")
-    return parse_profile_list(profiles)
-
-
-def get_writable_profiles() -> set[str] | None:
-    """Get writable profile list from environment.
-
-    Returns:
-        None if empty/unset (deny all), empty set if "ALL" (allow all),
-        or set of specific profile IDs
-    """
-    if is_read_only():
-        return None  # Read-only mode = deny all writes
-    profiles = os.getenv("NEXTDNS_WRITABLE_PROFILES", "")
-    return parse_profile_list(profiles)
 
 
 # Tool-search modes accepted by NEXTDNS_TOOL_SEARCH. "bm25" (the default)
@@ -253,250 +277,6 @@ def get_tool_search_mode() -> str:
     return raw
 
 
-def _is_empty_profile_list(profile_str: str) -> bool:
-    """Check if profile string is empty or whitespace."""
-    return not profile_str or not profile_str.strip()
-
-
-def _is_allow_all(profile_str: str) -> bool:
-    """Check if profile string means 'allow all'."""
-    return profile_str.strip().upper() == "ALL"
-
-
-def _normalized_profile_ids(raw: str) -> set[str]:
-    """The comma-separated profile ids in ``raw``, stripped and lowercased.
-
-    The one parsing rule every profile list in the environment goes through,
-    so the writable/readable lists and the protected denylist cannot parse
-    the same string differently.
-    """
-    return {p.strip().lower() for p in raw.split(",") if p.strip()}
-
-
-def parse_profile_list(profile_str: str) -> set[str] | None:
-    """Parse a comma-separated list of profile IDs into an access decision.
-
-    Returns:
-        None - deny everything (unset, empty, or a list that names no profile:
-        ``",,,"`` is punctuation, not a grant);
-        the empty set - allow everything (the literal ``ALL``/``all``);
-        a non-empty set - exactly those ids, lowercased.
-
-        The None/set() sentinel is the shape every caller in this module and
-        the client consumes; the distinction is documented here and pinned by
-        tests rather than re-shaped per call site.
-    """
-    if _is_empty_profile_list(profile_str):
-        return None  # Empty/unset = deny all
-    if _is_allow_all(profile_str):
-        return set()  # Empty set = allow all
-    ids = _normalized_profile_ids(profile_str)
-    if not ids:
-        # Non-blank input that parses to no ids (e.g. ",,," or ", ,"): it is
-        # neither unset nor ALL, and it names nothing - fail closed. Reading a
-        # malformed allowlist as "allow all" inverts a typo into the widest
-        # possible grant.
-        return None
-    return ids
-
-
-@dataclass(frozen=True)
-class ProfileAccessControl:
-    """Immutable snapshot of the profile access control environment.
-
-    Every request takes exactly one snapshot (see
-    :func:`load_profile_access_control`) and runs all of its access checks
-    against it, so a change to the process environment that lands while a
-    request is in flight cannot desynchronize the checks from each other or
-    from the decision to send the request upstream.
-
-    ``readable`` is the *combined* readable set (write implies read) and
-    ``writable`` is the raw writable set; both use ``None`` for "deny all" and
-    an empty set for "allow all".
-    """
-
-    read_only: bool
-    readable: frozenset[str] | None
-    writable: frozenset[str] | None
-    protected: frozenset[str] = frozenset()
-
-    def can_read(self, profile_id: str) -> bool:
-        """Return whether the snapshot allows reading ``profile_id``."""
-        if self.readable is None:
-            return False
-        if not self.readable:
-            return True
-        return profile_id.lower() in self.readable
-
-    def can_write(self, profile_id: str) -> bool:
-        """Return whether the snapshot allows writing ``profile_id``."""
-        if self.read_only or self.writable is None:
-            return False
-        if profile_id.lower() in self.protected:
-            return False
-        if not self.writable:
-            return True
-        return profile_id.lower() in self.writable
-
-    @property
-    def any_readable(self) -> bool:
-        """Whether the global (deny-all) read gate is open."""
-        return self.readable is not None
-
-    @property
-    def any_writable(self) -> bool:
-        """Whether the global (deny-all) write gate is open."""
-        return not self.read_only and self.writable is not None
-
-
-def get_protected_profiles() -> frozenset[str]:
-    """Get the protected-profile denylist from ``NEXTDNS_PROTECTED_PROFILES``.
-
-    Protected profiles are never writable, even when ``NEXTDNS_WRITABLE_PROFILES``
-    is ``ALL``; reads are unaffected (writes-only by design, documented in
-    docs/safety.md). Intended for data-bearing or production profiles that a
-    test agent must not modify or delete.
-
-    A denylist entry that cannot match any profile id is a configuration
-    error, not an ignored entry: a typo in a *protection* list silently
-    protects nothing, which is the worst possible failure mode for a
-    denylist. The check runs at startup (``validate_configuration`` reads the
-    access-control snapshot) and on each snapshot load, and says what the
-    valid shape is.
-
-    Returns:
-        frozenset[str]: Lowercased profile IDs (empty when unset/empty).
-
-    Raises:
-        ConfigurationError: If any entry is not a valid profile-id shape.
-    """
-    raw = os.getenv("NEXTDNS_PROTECTED_PROFILES", "")
-    ids = _normalized_profile_ids(raw)
-    invalid = sorted(pid for pid in ids if not SAFE_PROFILE_ID_PATTERN.match(pid))
-    if invalid:
-        raise ConfigurationError(
-            f"NEXTDNS_PROTECTED_PROFILES contains entries that cannot match any profile id: {', '.join(invalid)}. "
-            "Profile ids are 6 or 10 lowercase alphanumeric characters."
-        )
-    return frozenset(ids)
-
-
-def load_profile_access_control() -> ProfileAccessControl:
-    """Read the profile ACL environment exactly once and return a snapshot.
-
-    Each of NEXTDNS_READ_ONLY, NEXTDNS_READABLE_PROFILES,
-    NEXTDNS_WRITABLE_PROFILES and NEXTDNS_PROTECTED_PROFILES is read once, so
-    all decisions derived from the returned snapshot agree with each other.
-
-    The snapshot is deliberately not cached across requests: it is a
-    per-request value, so the next request re-reads the environment and no
-    invalidation step (or TTL) is needed. Configuration changes therefore take
-    effect on the next request, never retroactively on one already in flight.
-    """
-    read_only = _read_only_from_env()
-    readable = parse_profile_list(os.getenv("NEXTDNS_READABLE_PROFILES", ""))
-    # Read-only mode denies all writes, so the writable set stays None.
-    writable = None if read_only else parse_profile_list(os.getenv("NEXTDNS_WRITABLE_PROFILES", ""))
-    return ProfileAccessControl(
-        read_only=read_only,
-        readable=_combine_readable(readable, writable),
-        writable=None if writable is None else frozenset(writable),
-        protected=get_protected_profiles(),
-    )
-
-
-def _combine_readable(readable: set[str] | None, writable: set[str] | None) -> frozenset[str] | None:
-    """Combine the readable and writable sets into the effective readable set.
-
-    Returns:
-        None if nothing is readable (deny all), an empty frozenset if all
-        profiles are readable (allow all), else the set of readable profile IDs.
-    """
-    # No writable profiles: the readable list alone decides, and both unset = deny all
-    if writable is None:
-        return None if readable is None else frozenset(readable)
-
-    # Readable unset but writable set: writable profiles are implicitly readable
-    if readable is None:
-        return frozenset(writable)
-
-    return _combine_set_readable(readable, writable)
-
-
-def _combine_set_readable(readable: set[str], writable: set[str]) -> frozenset[str]:
-    """Combine two explicitly configured sets.
-
-    An empty set means ALL on either side, and ALL on either side makes every
-    profile readable; otherwise the combination is readable plus writable
-    (write implies read).
-    """
-    if not readable or not writable:
-        return frozenset(ALLOW_ALL_PROFILES)
-    return frozenset(readable | writable)
-
-
-def get_readable_profiles_set() -> set[str] | None:
-    """Get the set of profiles that are allowed to be read.
-
-    Convenience wrapper that takes a fresh snapshot; callers performing
-    several checks for one request should take a single snapshot with
-    :func:`load_profile_access_control` instead.
-
-    Returns:
-        None if no profiles are readable (deny all),
-        empty set if all profiles are readable (allow all),
-        or set of specific profile IDs
-    """
-    readable = load_profile_access_control().readable
-    return None if readable is None else set(readable)
-
-
-def get_writable_profiles_set() -> set[str] | None:
-    """Get the set of profiles that are allowed to be written to.
-
-    Convenience wrapper that takes a fresh snapshot; callers performing
-    several checks for one request should take a single snapshot with
-    :func:`load_profile_access_control` instead.
-
-    Returns:
-        None if no profiles are writable (deny all),
-        empty set if all profiles are writable (allow all),
-        or set of specific profile IDs
-    """
-    writable = load_profile_access_control().writable
-    return None if writable is None else set(writable)
-
-
-def can_read_profile(profile_id: str) -> bool:
-    """Check if a profile can be read.
-
-    Convenience wrapper around a fresh snapshot; see
-    :func:`load_profile_access_control`.
-
-    Args:
-        profile_id: The profile ID to check
-
-    Returns:
-        True if the profile can be read, False otherwise
-    """
-    return load_profile_access_control().can_read(profile_id)
-
-
-def can_write_profile(profile_id: str) -> bool:
-    """Check if a profile can be written to.
-
-    Convenience wrapper around a fresh snapshot; see
-    :func:`load_profile_access_control`.
-
-    Args:
-        profile_id: The profile ID to check
-
-    Returns:
-        True if the profile can be written to, False otherwise
-    """
-    return load_profile_access_control().can_write(profile_id)
-
-
 def _log_api_key_error() -> None:
     """Log error message for missing API key."""
     logger.critical("NEXTDNS_API_KEY is required")
@@ -505,8 +285,12 @@ def _log_api_key_error() -> None:
     logger.critical("  - NEXTDNS_API_KEY_FILE pointing to a Docker secret")
 
 
-def _log_profile_access(profile_set: set[str] | None, access_type: str) -> None:
-    """Log profile access configuration."""
+def _log_profile_access(profile_set: Collection[str] | None, access_type: str) -> None:
+    """Log profile access configuration.
+
+    Takes the snapshot's frozensets as-is: this function only reads the value
+    to decide which of the three sentences to log, so it needs no mutable copy.
+    """
     if profile_set is None:
         logger.info(f"No profiles are {access_type} (deny all by default)")
     elif not profile_set:
@@ -531,16 +315,14 @@ def _log_protected_profiles(access: ProfileAccessControl) -> None:
 def _log_access_control_settings() -> None:
     """Log current access control configuration."""
     access = load_profile_access_control()
-    readable = None if access.readable is None else set(access.readable)
-    writable = None if access.writable is None else set(access.writable)
     read_only = access.read_only
 
     if read_only:
         logger.info("Read-only mode is ENABLED - all write operations are disabled")
 
-    _log_profile_access(readable, "readable")
+    _log_profile_access(access.readable, "readable")
     if not read_only:
-        _log_profile_access(writable, "writable")
+        _log_profile_access(access.writable, "writable")
     _log_protected_profiles(access)
 
 
@@ -563,9 +345,7 @@ def validate_configuration() -> None:
 
     get_http_timeout()
     get_download_max_bytes()
-    base_url = os.getenv("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
-    if not base_url.lower().startswith("https://"):
-        raise ConfigurationError("NEXTDNS_API_BASE must use https://")
+    get_api_base()  # Validates NEXTDNS_API_BASE (https scheme) at startup.
     for env_name, default in (
         ("NEXTDNS_READ_ONLY", ""),
         ("NEXTDNS_GENERATIVE_UI", "off"),
@@ -575,11 +355,3 @@ def validate_configuration() -> None:
             raise ConfigurationError(f"Invalid {env_name}: {raw!r}. Expected one of {sorted(_BOOL_TOKENS - {''})}.")
 
     _log_access_control_settings()
-
-
-def __getattr__(name: str) -> Any:
-    if name in {"DNS_STATUS_CODES", "VALID_DNS_RECORD_TYPES"}:
-        from .tools.doh import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES
-
-        return {"DNS_STATUS_CODES": DNS_STATUS_CODES, "VALID_DNS_RECORD_TYPES": VALID_DNS_RECORD_TYPES}[name]
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

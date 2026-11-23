@@ -12,7 +12,7 @@ This allows AI/CLI clients to send extra fields without causing errors, while st
 
 | Variable | Type | Default | Required | Description |
 |----------|------|---------|----------|-------------|
-| NEXTDNS_API_BASE | string (URL) | https://api.nextdns.io | No | Sets the REST base URL and the DoH allowlist host; must use `https://` (a non-https value fails startup with `ConfigurationError`). Read once at import — changing it requires a process restart |
+| NEXTDNS_API_BASE | string (URL) | https://api.nextdns.io | No | Sets the REST base URL and the DoH allowlist host; must use `https://` (a non-https value fails startup with `ConfigurationError`, and every runtime read re-checks it). Read at use time — a long-lived process picks up a changed value on the next client creation (recreate the shared client with `close_api_client()`), no process restart or reimport needed. A client that is still open keeps the base it was created with, and its destination allow-list moves with that base, until it is recreated |
 | NEXTDNS_API_KEY | string | - | Yes | API key used for authenticated NextDNS API calls |
 | NEXTDNS_API_KEY_FILE | string (path) | - | No | Path to a file containing only the API key (e.g., Docker secret) |
 | NEXTDNS_DEFAULT_PROFILE | string | - | No | Default profile ID used only by `overviewDashboard`, `dohLookup`, and `plotAnalytics` when they omit `profile_id`; every generated operation tool requires an explicit `profile_id` |
@@ -68,7 +68,7 @@ Everything the server says about its own catalog comes from the document it gene
 - Error hints name a call the caller can actually make: the hint that points at profile discovery reads `listProfiles()`.
 - Each tool's description is the document's own description of the operation, so what a call accepts is stated where the caller finds the tool.
 
-`NEXTDNS_TOOL_SEARCH` composes with the catalog: with progressive disclosure on — the default, `bm25` — `tools/list` exposes only `search_tools` + `call_tool` and the search index covers the full operation set, so the catalog is read by searching it; `NEXTDNS_TOOL_SEARCH=off` restores the full listing. The instructions list the tool names only when the catalog is small enough for that to be cheaper than searching; the 81-tool catalog points at `search_tools` and leaves the names to `tools/list`.
+`NEXTDNS_TOOL_SEARCH` composes with the catalog: with progressive disclosure on — the default, `bm25` — `tools/list` exposes only `search_tools` + `call_tool` and the search index covers the full operation set, so the catalog is read by searching it; `NEXTDNS_TOOL_SEARCH=off` restores the full listing. The instructions list the tool names only when the catalog is small enough for that to be cheaper than searching; the 81-tool catalog points at `search_tools` and leaves the names to `tools/list`. Why disclosure defaults to `bm25` and how its fallback answers an unmatchable query are recorded in [ADR 0003](architecture/0003-bm25-progressive-tool-disclosure.md).
 
 ## Examples
 

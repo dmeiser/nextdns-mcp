@@ -38,6 +38,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import logging
 import time
+import weakref
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, NamedTuple
@@ -52,15 +53,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .call_log import CallLogMiddleware, call_log_path
-from .client import close_api_client, get_api_client
+from .client import close_api_client, close_raw_probe_client, get_raw_probe_client
 from .config import ConfigurationError, get_api_key, get_default_profile, get_tool_search_mode
 from .constants import SYNTHETIC_TOOL_NAMES
 from .spec_tools import endpoints_for_routes
 from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import close_doh_client
-from .tools.logs import _download_registry, cleanup_successful_downloads
+from .tools.logs import _download_registry, cleanup_successful_downloads, close_redirect_client
 from .usage import server_instructions
-from .utils import _BARE_NEGATIVE_RE, _NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
+from .utils import BARE_NEGATIVE_RE, NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +87,13 @@ HEALTH_FAILURE_UNREACHABLE = "unreachable"
 """Failure class: NextDNS could not be probed, or answered unusably."""
 
 
-class HealthFailure(NamedTuple):
-    """A failed readiness probe.
+class _HealthFailure(NamedTuple):
+    """A failed readiness probe, kept on the operator's side of the boundary.
+
+    Both fields are reported to the server log (`_log_readiness_failure`) and
+    never over ``/health``: the HTTP transport is unauthenticated by design, so
+    the class and reason would tell any host that can reach the port whether the
+    configured API key is accepted (issue #603).
 
     Attributes:
         failure_class: ``"auth"`` or ``"unreachable"``.
@@ -102,7 +108,7 @@ class HealthFailure(NamedTuple):
 
 
 # Cached probe result as (monotonic timestamp, failure or None when healthy).
-_health_probe_cache: tuple[float, HealthFailure | None] | None = None
+_health_probe_cache: tuple[float, _HealthFailure | None] | None = None
 
 # Guards probe *construction*, not cache reads: concurrent ``/health`` pollers
 # that all miss an empty (or just-expired) cache used to each fire their own
@@ -319,44 +325,57 @@ def _schema_declared_types(schema: dict[str, Any]) -> set[str]:
     return set()
 
 
-def _cast_or_original(cast: Callable[[str], Any], s: str) -> Any:
-    """Apply a numeric cast; a ValueError leaves the original string unchanged."""
+def _is_bool_shaped(s: str) -> bool:
+    """Whether the string spells a boolean: ``true`` or ``false``, any case."""
+    return s.lower() in ("true", "false")
+
+
+def _to_bool(s: str) -> bool:
+    """The boolean cast: only ``true`` in any capitalization reads as True."""
+    return s.lower() == "true"
+
+
+def _to_float_or_original(s: str) -> Any:
+    """Apply the number cast; a ValueError leaves the original string unchanged.
+
+    ``is_float_shaped`` is a shape test, not a parse, so an accepted string can
+    still fail ``float()``; it comes back unchanged rather than raising out of
+    the coercion layer. The integer row needs no such guard: ``is_integer_shaped``
+    already ran ``int(s)`` and rejected anything it cannot parse.
+    """
     try:
-        return cast(s)
+        return float(s)
     except ValueError:
         return s
 
 
-def _coerce_bool_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
-    """(handled, value) for a schema that explicitly expects a boolean."""
-    lowered = s.lower()
-    if "boolean" in schema_types and lowered in ("true", "false"):
-        return True, lowered == "true"
-    return False, s
+def _coerce_string_by_type(s: str, schema_types: set[str]) -> Any:
+    """Coerce a string to the scalar type the schema declares, or leave it.
 
+    One table, one row per JSON Schema scalar type: the declared type that
+    authorizes the coercion, the shape guard the string must pass, and the cast
+    to apply. The first match wins, so a schema declaring both ``integer`` and
+    ``number`` gets the int. A string no row claims is returned as written —
+    identifier-like values (profile and entry IDs) stay strings.
 
-def _coerce_int_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
-    """(handled, value) for a schema that explicitly expects an integer.
-
-    ``is_integer_shaped`` already ran ``int(s)`` and rejected anything it
-    cannot parse, so the cast here cannot fail: it returns the value directly
-    instead of re-entering the guarded-cast helper for a second parse.
+    The rows are assembled per call so the shape guards are read from this
+    module's globals each time, which keeps a test that patches
+    ``is_float_shaped`` here able to reach the guarded number cast.
     """
-    if "integer" in schema_types and is_integer_shaped(s):
-        return True, int(s)
-    return False, s
-
-
-def _coerce_float_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
-    """(handled, value) for a schema that explicitly expects a number."""
-    if "number" in schema_types and is_float_shaped(s):
-        return True, _cast_or_original(float, s)
-    return False, s
+    rows: tuple[tuple[str, Callable[[str], bool], Callable[[str], Any]], ...] = (
+        ("boolean", _is_bool_shaped, _to_bool),
+        ("integer", is_integer_shaped, int),
+        ("number", is_float_shaped, _to_float_or_original),
+    )
+    for declared_type, is_shaped, cast in rows:
+        if declared_type in schema_types and is_shaped(s):
+            return cast(s)
+    return s
 
 
 def _preserves_time_string(value: str, schema_types: set[str]) -> bool:
     """Whether a string time value must survive coercion untouched."""
-    return "string" in schema_types and bool(_BARE_NEGATIVE_RE.match(value) or _NOW_OFFSET_RE.match(value))
+    return "string" in schema_types and bool(BARE_NEGATIVE_RE.match(value) or NOW_OFFSET_RE.match(value))
 
 
 class StripExtraFieldsMiddleware(Middleware):
@@ -380,15 +399,20 @@ class StripExtraFieldsMiddleware(Middleware):
     served (everything is registered at startup), so re-fetching each tool's
     schema through FastMCP re-decodes the same large JSON Schema on every
     single call, and rebuilding the owner index re-walks the whole catalog.
-    The caches key on the server identity, so a second server instance in the
-    same process cannot read the first one's catalog.
+    The caches key on the server object itself — never ``id(server)``, whose
+    value Python recycles after garbage collection — so a second server
+    instance in the same process cannot read a dead server's catalog.
     """
 
     def __init__(self, tool_names: Sequence[str] = ()) -> None:
-        # (server identity, tool name) -> that tool's parameter schema.
-        self._schema_cache: dict[tuple[int, str], dict[str, Any]] = {}
-        # (server identity) -> argument-name owner index, built on first use.
-        self._owner_cache: tuple[int, dict[str, tuple[str, ...]]] | None = None
+        # server -> tool name -> that tool's parameter schema. The weak key is
+        # the server object, not id(server): id() values are reused once an
+        # object is collected, which let a new server read a dead server's
+        # cached schema. Entries vanish with the server they belong to.
+        self._schema_cache: weakref.WeakKeyDictionary[FastMCP, dict[str, dict[str, Any]]] = weakref.WeakKeyDictionary()
+        # server -> argument-name owner index, built on first use. Same weak
+        # keying as _schema_cache, for the same id()-reuse reason.
+        self._owner_cache: weakref.WeakKeyDictionary[FastMCP, dict[str, tuple[str, ...]]] = weakref.WeakKeyDictionary()
         # The server's registration list: the only source that enumerates the
         # real tools under disclosure (see _catalog_argument_index).
         self._tool_names: tuple[str, ...] = tuple(tool_names)
@@ -400,22 +424,27 @@ class StripExtraFieldsMiddleware(Middleware):
         be shadowed by it, and misses are off the served path anyway (FastMCP
         rejects unknown names right after this middleware returns).
         """
-        key = (id(fastmcp_server), tool_name)
-        cached = self._schema_cache.get(key)
+        server_cache = self._schema_cache.get(fastmcp_server)
+        if server_cache is None:
+            server_cache = {}
+            self._schema_cache[fastmcp_server] = server_cache
+        cached = server_cache.get(tool_name)
         if cached is not None:
             return cached
         tool = await fastmcp_server.get_tool(tool_name)
         if tool is None:
             return None
         parameters: dict[str, Any] = tool.parameters or {}
-        self._schema_cache[key] = parameters
+        server_cache[tool_name] = parameters
         return parameters
 
     async def _owner_index(self, fastmcp_server: FastMCP) -> dict[str, tuple[str, ...]]:
         """The registered catalog's argument-owner index, built once per server."""
-        if self._owner_cache is None or self._owner_cache[0] != id(fastmcp_server):
-            self._owner_cache = (id(fastmcp_server), await _catalog_argument_index(fastmcp_server, self._tool_names))
-        return self._owner_cache[1]
+        cached = self._owner_cache.get(fastmcp_server)
+        if cached is None:
+            cached = await _catalog_argument_index(fastmcp_server, self._tool_names)
+            self._owner_cache[fastmcp_server] = cached
+        return cached
 
     def _get_schema_property_types(self, prop_schema: Any) -> set[str]:
         """Extract JSON Schema type(s) from a property schema.
@@ -441,11 +470,7 @@ class StripExtraFieldsMiddleware(Middleware):
         """
         if _preserves_time_string(s, schema_types):
             return s
-        for coerce in (_coerce_bool_value, _coerce_int_value, _coerce_float_value):
-            handled, value = coerce(s, schema_types)
-            if handled:
-                return value
-        return s
+        return _coerce_string_by_type(s, schema_types)
 
     def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
         """Coerce a value using its property schema.
@@ -589,7 +614,12 @@ async def _server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         try:
             await close_api_client()
         finally:
+            await close_raw_probe_client()
             await close_doh_client()
+            # The downloadLogs redirect chain reuses one persistent unauthenticated
+            # client for keep-alive reuse (issue #656); like the singletons above
+            # it is closed at shutdown.
+            await close_redirect_client()
             # The lazily-started Pyodide/Deno sandbox subprocess (issue #408) is
             # stopped by NextDNSGenerativeUI.lifespan(), which FastMCP unwinds
             # before this lifespan: this module has no dependency on the optional
@@ -715,12 +745,19 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
     ``GET /health`` is a real readiness check, not a liveness constant: it
     probes the NextDNS API with the configured API key and returns ``200 OK``
     with ``{"status": "ok"}`` only when that probe succeeds. A failing probe
-    returns ``503`` together with the failure class (``auth`` or
-    ``unreachable``) and a short reason. Results are cached for
-    ``HEALTH_CACHE_TTL`` seconds so a polling load balancer cannot hammer the
-    API. The route is registered with FastMCP's ``custom_route`` so it is served
-    alongside the ``/mcp`` streamable-HTTP endpoint; in stdio mode there is no
-    HTTP surface, so the route is simply not reachable.
+    returns ``503`` with the minimal body ``{"status": "error"}`` — no failure
+    class and no reason. The HTTP transport is unauthenticated by design
+    (``docs/safety.md``: an authenticating reverse proxy is the caller's job),
+    so anything this body says is readable by every host that can reach the
+    port. A class of ``auth`` plus a reason naming the upstream status is an
+    oracle for "is this API key accepted", which is not something a route that
+    cannot identify its caller should answer. The class and reason stay on the
+    operator's side of the boundary, in the process log
+    (``_log_readiness_failure``). Results are cached for ``HEALTH_CACHE_TTL``
+    seconds so a polling load balancer cannot hammer the API. The route is
+    registered with FastMCP's ``custom_route`` so it is served alongside the
+    ``/mcp`` streamable-HTTP endpoint; in stdio mode there is no HTTP surface,
+    so the route is simply not reachable.
 
     Args:
         mcp: The FastMCP server to attach the route to.
@@ -728,13 +765,9 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
 
     async def health_check(_request: Request) -> JSONResponse:
         """Report NextDNS API readiness as measured by a live credential probe."""
-        failure = await check_nextdns_readiness()
-        if failure is None:
+        if await check_nextdns_readiness() is None:
             return JSONResponse({"status": "ok"})
-        return JSONResponse(
-            {"status": "error", "class": failure.failure_class, "reason": failure.reason},
-            status_code=503,
-        )
+        return JSONResponse({"status": "error"}, status_code=503)
 
     mcp.custom_route("/health", methods=["GET"])(health_check)
 
@@ -758,7 +791,7 @@ def _register_compat_endpoints(mcp: FastMCP) -> None:
     mcp.custom_route("/v1/models", methods=["GET"])(v1_models)
 
 
-def _cached_readiness() -> tuple[bool, HealthFailure | None]:
+def _cached_readiness() -> tuple[bool, _HealthFailure | None]:
     """Whether the cached probe result is still valid, and what it said.
 
     ``(fresh, failure)``; ``failure`` is the cached result (``None`` meaning
@@ -770,7 +803,7 @@ def _cached_readiness() -> tuple[bool, HealthFailure | None]:
     return True, cached[1]
 
 
-async def check_nextdns_readiness() -> HealthFailure | None:
+async def check_nextdns_readiness() -> _HealthFailure | None:
     """Return the readiness result, probing NextDNS at most once per cache window.
 
     Single-flight: concurrent pollers that all miss an empty or expired cache
@@ -780,7 +813,7 @@ async def check_nextdns_readiness() -> HealthFailure | None:
 
     Returns:
         None when the configured credentials work against NextDNS, otherwise a
-        HealthFailure describing why the service is not ready.
+        _HealthFailure describing why the service is not ready.
     """
     global _health_probe_cache
 
@@ -796,33 +829,50 @@ async def check_nextdns_readiness() -> HealthFailure | None:
             return failure
         failure = await _run_health_probe()
         _health_probe_cache = (time.monotonic(), failure)
+        if failure is not None:
+            # One record per real probe, not per poll: the detail lives here
+            # because it cannot live in the /health body (see #603).
+            _log_readiness_failure(failure)
         return failure
 
 
-async def _run_health_probe() -> HealthFailure | None:
+def _log_readiness_failure(failure: _HealthFailure) -> None:
+    """Report a failed probe to the operator, where the response body cannot.
+
+    The class and reason identify why the server is not ready — an auth failure
+    and an unreachable API need different fixes — so closing the body has to
+    move that detail, not drop it. Both fields are built from a status code, an
+    exception type name, and configuration state (`_HealthFailure`), never from a
+    request URL or an exception message, so this WARNING needs no redaction
+    pass (`_redacted()` in `client.py` guards those shapes).
+    """
+    logger.warning("NextDNS readiness probe failed: class=%s reason=%s", failure.failure_class, failure.reason)
+
+
+async def _run_health_probe() -> _HealthFailure | None:
     """Probe the NextDNS API once with the configured credentials.
 
-    The request goes through the client's RAW transport (``raw_request``), which
-    bypasses profile access control: a local ACL denial must not mask the true
-    upstream authentication state. Only the status code and the exception type
-    name are reported, never the API key, the auth headers, or the response
-    body.
+    The request goes through the raw probe transport
+    (``client.get_raw_probe_client()``), which bypasses profile access control:
+    a local ACL denial must not mask the true upstream authentication state.
+    Only the status code and the exception type name are reported, never the
+    API key, the auth headers, or the response body.
 
     Returns:
-        None when NextDNS accepted the credentials, otherwise a HealthFailure.
+        None when NextDNS accepted the credentials, otherwise a _HealthFailure.
     """
     try:
-        client = get_api_client()
-        response = await client.raw_request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
+        probe_client = get_raw_probe_client()
+        response = await probe_client.request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
     except ConfigurationError:
         return _configuration_failure()
     except httpx.TimeoutException:
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_UNREACHABLE,
             f"NextDNS API did not respond within {HEALTH_PROBE_TIMEOUT:g}s",
         )
     except httpx.HTTPError as exc:
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_UNREACHABLE,
             f"Could not reach the NextDNS API ({type(exc).__name__})",
         )
@@ -832,24 +882,24 @@ async def _run_health_probe() -> HealthFailure | None:
     return _probe_status_failure(response)
 
 
-def _configuration_failure() -> HealthFailure:
+def _configuration_failure() -> _HealthFailure:
     """Classify a ConfigurationError from building the client: no key at all is auth."""
     if not get_api_key():
-        return HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
-    return HealthFailure(
+        return _HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
+    return _HealthFailure(
         HEALTH_FAILURE_UNREACHABLE,
         "NextDNS client configuration is invalid (check NEXTDNS_HTTP_TIMEOUT)",
     )
 
 
-def _probe_status_failure(response: httpx.Response) -> HealthFailure:
+def _probe_status_failure(response: httpx.Response) -> _HealthFailure:
     """Classify a non-success probe answer: 401/403 is auth, anything else unreachable."""
     if response.status_code in (401, 403):
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_AUTH,
             f"NextDNS API rejected the configured credentials (HTTP {response.status_code})",
         )
-    return HealthFailure(
+    return _HealthFailure(
         HEALTH_FAILURE_UNREACHABLE,
         f"NextDNS API answered with an unusable status (HTTP {response.status_code})",
     )

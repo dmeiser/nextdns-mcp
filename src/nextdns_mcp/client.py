@@ -8,19 +8,20 @@ import posixpath
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 import httpx
 
 from .config import (
-    NEXTDNS_BASE_URL,
     ConfigurationError,
     ProfileAccessControl,
+    get_api_base,
     get_api_key,
     get_http_timeout,
     load_profile_access_control,
 )
-from .constants import SAFE_PROFILE_ID_PATTERN, is_write_operation
+from .constants import LOOPBACK_HOSTS, SAFE_PROFILE_ID_PATTERN, is_write_operation
 from .errors import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -29,14 +30,16 @@ logger = logging.getLogger(__name__)
 # X-Api-Key client header, so without a destination allow-list the account's API
 # key follows the request to whatever host the URL names (issue #262). These are
 # the two NextDNS hosts the code actually calls: the REST API base and the DoH
-# endpoint built by tools/doh.py. The host of NEXTDNS_BASE_URL is added as well
-# so pointing that existing constant at a self-hosted/proxy base keeps working
-# without inventing a second configuration mechanism.
+# endpoint built by tools/doh.py. The host of the API base the requesting client
+# resolved at construction is added as well (see _configured_destination_base and
+# _allowed_destination_hosts) so pointing NEXTDNS_API_BASE at a self-hosted/proxy
+# base keeps working without inventing a second configuration mechanism, and so
+# the allowance cannot move out from under a client that is still in use.
 ALLOWED_DESTINATION_HOSTS = frozenset({"api.nextdns.io", "dns.nextdns.io"})
 
-# Loopback destinations are allowed so local test doubles and loopback mock
-# servers stay usable; no shipped tool ever targets them.
-LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+# The loopback allowance this client also sends requests to lives in
+# ``constants.LOOPBACK_HOSTS`` — the same set the run-options check reads to
+# decide whether an ``MCP_HOST`` bind is loopback-only.
 
 
 def _normalized_host(host: str | None) -> str:
@@ -44,15 +47,64 @@ def _normalized_host(host: str | None) -> str:
     return (host or "").strip().rstrip(".").lower()
 
 
-def allowed_destination_hosts() -> frozenset[str]:
-    """Return every host this client may send a request to.
+def _configured_destination_base() -> str:
+    """Return the configured API base as it stands at this moment.
+
+    A client calls this once, at construction, and keeps the value, so its
+    destination allowance cannot move under it later: NEXTDNS_API_BASE is
+    resolved per client, at creation (config.get_api_base()), and the base a
+    client actually sends relative requests to is that same value.
+
+    An invalid (non-https) NEXTDNS_API_BASE yields ``""`` rather than raising:
+    the client factory refuses that configuration before building anything, and
+    a client constructed by hand then simply gains no configured host, so its
+    requests are judged against the built-in allow-list alone. A rejected value
+    never widens the list.
+    """
+    try:
+        return get_api_base()
+    except ConfigurationError:
+        return ""
+
+
+# Memo of ``_allowed_destination_hosts()`` keyed on the base each client
+# captured at construction, so the per-request destination check does not
+# rebuild the set and re-parse a URL on every call. Keyed on that base (not
+# computed once at import) because the answer changes with it - one entry per
+# distinct configured base, which is a handful at most.
+_ALLOWED_HOSTS_BY_BASE: dict[str, frozenset[str]] = {}
+
+
+def _allowed_destination_hosts(configured_base: str = "") -> frozenset[str]:
+    """Return every host a request may be sent to, for one configured base.
 
     See :data:`ALLOWED_DESTINATION_HOSTS` for the NextDNS endpoints and
-    :data:`LOOPBACK_HOSTS` for the local test-double allowance.
+    :data:`LOOPBACK_HOSTS` for the local test-double allowance. The third entry
+    is the host of ``configured_base`` - the API base the requesting client
+    resolved when it was created - so a self-hosted/proxy deployment needs no
+    second configuration mechanism.
+
+    Passing the client's own value rather than re-reading the environment per
+    request is what keeps the guard and the base from drifting apart across the
+    reset boundary: a client kept alive while the environment names a new base
+    keeps sending relative requests to its old host, and it must keep being
+    allowed to reach that host; a client created after the change uses and is
+    allowed to reach the new one. A client aimed at a base that was never the
+    configured one gains no allowance (issue #262).
+
+    The answer only changes when ``configured_base`` does, so it is memoized
+    per base.
     """
+    cached = _ALLOWED_HOSTS_BY_BASE.get(configured_base)
+    if cached is not None:
+        return cached
     hosts = set(ALLOWED_DESTINATION_HOSTS) | set(LOOPBACK_HOSTS)
-    hosts.add(_normalized_host(httpx.URL(NEXTDNS_BASE_URL).host))
-    return frozenset(hosts)
+    configured = _normalized_host(httpx.URL(str(configured_base)).host) if configured_base else ""
+    if configured:
+        hosts.add(configured)
+    result = frozenset(hosts)
+    _ALLOWED_HOSTS_BY_BASE[configured_base] = result
+    return result
 
 
 def _redacted(url: str) -> str:
@@ -195,8 +247,123 @@ def _unmatchable_profile_url(request_path: str | None) -> bool:
     return _is_unclassifiable_profiles_path(request_path)
 
 
-class AccessControlledClient(httpx.AsyncClient):
-    """HTTP client wrapper that enforces profile access control."""
+def _destination_host(base_url: Any, url: Any) -> str:
+    """Return the host a request would actually be sent to.
+
+    Relative URLs resolve against the client's ``base_url``, exactly as
+    httpx merges them, so a client built on a non-NextDNS base is caught
+    here too. A relative URL on a client with no base URL yields "".
+    """
+    parsed = httpx.URL(str(url))
+    if parsed.is_absolute_url or parsed.scheme or parsed.host:
+        return _normalized_host(parsed.host)
+    return _normalized_host(httpx.URL(str(base_url)).host)
+
+
+def _check_destination(base_url: Any, method: str, url: Any, configured_base: str = "") -> None:
+    """Refuse a request whose destination host is not an approved NextDNS host.
+
+    Runs before the request is handed to httpx, so nothing is sent and the
+    X-Api-Key header never leaves the process. The message carries the host
+    only - never the URL (which may hold query-string PII) and never any
+    credential. ``configured_base`` is the API base this client resolved when
+    it was created; see :func:`_allowed_destination_hosts` for why it is passed
+    in rather than re-read here.
+    """
+    host = _destination_host(base_url, url)
+    if not host:
+        # No host resolves: the request is relative and this client has no
+        # base URL, so httpx itself rejects it before any I/O. There is no
+        # destination to allow or to protect, and no key to leak.
+        return
+    if host in _allowed_destination_hosts(configured_base):
+        return
+
+    error_msg = f"Blocked request to non-NextDNS host: {host}"
+    logger.warning(error_msg)
+    raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED)
+
+
+class AccessControlledClient:
+    """HTTP client that enforces profile access control (issue #639).
+
+    Composition wrapper around a private ``httpx.AsyncClient`` — the ACL
+    client used to subclass the concrete httpx class, which leaked the
+    base's whole public transport surface (``send``, ``build_request``, ...)
+    past the ACL door. Here the wrapped client is private, and the only ways
+    to move a request through this class are :meth:`request` and
+    :meth:`stream` plus the method conveniences built on ``request()``;
+    every one of them runs the single :meth:`_authorize` decision, so the
+    ACL is the one doorway rather than an inheritance-narrowed one.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str | httpx.URL | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: Any = None,
+        transport: Any = None,
+        follow_redirects: bool = False,
+        configured_base: str | None = None,
+    ) -> None:
+        kwargs: dict[str, Any] = {"headers": headers, "follow_redirects": follow_redirects}
+        if base_url is not None:
+            kwargs["base_url"] = base_url
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if transport is not None:
+            kwargs["transport"] = transport
+        self._client = httpx.AsyncClient(**kwargs)
+        # The destination allowance is the API base this client was created on,
+        # so changing NEXTDNS_API_BASE later cannot move the guard off the host
+        # this client is still sending to. Pass configured_base alongside
+        # base_url whenever both come from one configuration read: resolving the
+        # environment a second time here could name a different base from the one
+        # the client is actually aimed at, which is the drift this field exists to
+        # prevent. Unset (a hand-built client) falls back to one read here.
+        self._configured_base = _configured_destination_base() if configured_base is None else configured_base
+
+    async def __aenter__(self) -> Self:
+        await self._client.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self._client.__aexit__(exc_type, exc_value, traceback)
+
+    async def aclose(self) -> None:
+        """Close the wrapped httpx client."""
+        await self._client.aclose()
+
+    @property
+    def base_url(self) -> httpx.URL:
+        """The base URL the wrapped client resolves relative requests against."""
+        return self._client.base_url
+
+    @property
+    def headers(self) -> httpx.Headers:
+        """The client-level default headers, including the X-Api-Key credential."""
+        return self._client.headers
+
+    @property
+    def timeout(self) -> httpx.Timeout:
+        """The configured request timeout."""
+        return self._client.timeout
+
+    @property
+    def follow_redirects(self) -> bool:
+        """Whether the wrapped client follows redirects (always False here)."""
+        return self._client.follow_redirects
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the wrapped client has been closed."""
+        return self._client.is_closed
 
     def _check_write_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
         """Check write access against the request snapshot; raise AccessDeniedError if denied."""
@@ -210,7 +377,7 @@ class AccessControlledClient(httpx.AsyncClient):
         else:
             error_msg = f"Write access denied for profile: {profile_id}"
 
-        logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
+        logger.warning(error_msg)
         raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED, profile_id=profile_id)
 
     def _check_read_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -219,7 +386,7 @@ class AccessControlledClient(httpx.AsyncClient):
             return
 
         error_msg = f"Read access denied for profile: {profile_id}"
-        logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
+        logger.warning(error_msg)
         raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED, profile_id=profile_id)
 
     def _check_collection_write_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -231,12 +398,12 @@ class AccessControlledClient(httpx.AsyncClient):
         """
         if access.read_only:
             error_msg = "Write operation denied: server is in read-only mode"
-            logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
+            logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
         if not access.any_writable:
             error_msg = "Write access denied: no profiles are writable"
-            logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
+            logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
     def _check_collection_read_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -248,7 +415,7 @@ class AccessControlledClient(httpx.AsyncClient):
         """
         if not access.any_readable:
             error_msg = "Read access denied: no profiles are readable"
-            logger.warning(f"{error_msg} (method={method}, url={_redacted(url)})")
+            logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED)
 
     def _check_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
@@ -265,68 +432,6 @@ class AccessControlledClient(httpx.AsyncClient):
         else:
             self._check_collection_read_access(method, url, access)
 
-    async def raw_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        """Make an HTTP request WITHOUT any profile access-control check.
-
-        This is the raw transport path: it goes straight to ``httpx`` and is
-        used by server-level probes that must observe the true upstream state.
-        The ``/health`` readiness check uses it because a local ACL denial (for
-        example a deny-all readable-profile configuration) would otherwise be
-        indistinguishable from a real NextDNS authentication failure.
-
-        The destination allow-list is still enforced (issue #262): this path
-        carries the X-Api-Key client header just like every other one, so the
-        key must never leave for a non-NextDNS host. Only the profile ACL is
-        skipped.
-
-        Args:
-            method: HTTP method
-            url: Request URL
-            **kwargs: Additional request arguments
-
-        Returns:
-            The unmodified response from the API.
-
-        Raises:
-            AccessDeniedError: If the destination host is not an approved
-                NextDNS host. No network request is made.
-        """
-        self._check_destination(method, url)
-        return await super().request(method, url, **kwargs)
-
-    def _destination_host(self, url: Any) -> str:
-        """Return the host a request would actually be sent to.
-
-        Relative URLs resolve against this client's ``base_url``, exactly as
-        httpx merges them, so a client built on a non-NextDNS base is caught
-        here too. A relative URL on a client with no base URL yields "".
-        """
-        parsed = httpx.URL(str(url))
-        if parsed.is_absolute_url or parsed.scheme or parsed.host:
-            return _normalized_host(parsed.host)
-        return _normalized_host(httpx.URL(str(self.base_url)).host)
-
-    def _check_destination(self, method: str, url: Any) -> None:
-        """Refuse a request whose destination host is not an approved NextDNS host.
-
-        Runs before the request is handed to httpx, so nothing is sent and the
-        X-Api-Key header never leaves the process. The message carries the host
-        only - never the URL (which may hold query-string PII) and never any
-        credential.
-        """
-        host = self._destination_host(url)
-        if not host:
-            # No host resolves: the request is relative and this client has no
-            # base URL, so httpx itself rejects it before any I/O. There is no
-            # destination to allow or to protect, and no key to leak.
-            return
-        if host in allowed_destination_hosts():
-            return
-
-        error_msg = f"Blocked request to non-NextDNS host: {host}"
-        logger.warning(f"{error_msg} (method={method})")
-        raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED)
-
     def _authorize(self, method: str, url: Any) -> None:
         """Apply the destination allow-list and the profile ACL to one request.
 
@@ -334,7 +439,7 @@ class AccessControlledClient(httpx.AsyncClient):
         no request leaves the process without both an approved destination host
         and an access-control decision.
         """
-        self._check_destination(method, url)
+        _check_destination(self._client.base_url, method, url, self._configured_base)
 
         url_str = str(url)
         request_path = _normalized_request_path(url_str)
@@ -349,13 +454,16 @@ class AccessControlledClient(httpx.AsyncClient):
             self._check_access(profile_id, method, url_str, access)
         elif _unmatchable_profile_url(request_path):
             # Fail closed: a URL whose profile cannot be classified is denied
-            # instead of being allowed to bypass the profile ACL check.
-            logger.warning(f"Forbidden URL: {_redacted(url_str)} (method={method})")
+            # instead of being allowed to bypass the profile ACL check. The log
+            # record names the refusal only: no safe profile id or host exists
+            # for an unclassifiable URL, so no request metadata is logged. The
+            # caller-facing error still carries the full URL.
+            logger.warning("Forbidden URL: request could not be classified against the profile ACL")
             raise AccessDeniedError(f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id="")
         else:
             self._check_collection_access(method, url_str, access)
 
-    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:  # type: ignore[override]
+    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Make an HTTP request with access control checks.
 
         Args:
@@ -384,10 +492,38 @@ class AccessControlledClient(httpx.AsyncClient):
         # unchanged. Schema-aware coercion of tool arguments already happens in
         # StripExtraFieldsMiddleware, so blindly coercing body values would corrupt
         # string fields such as profile names ("12345") or passwords ("0012").
-        return await super().request(method, url, **kwargs)
+        return await self._client.request(method, url, **kwargs)
+
+    async def get(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a GET request with access control checks (httpx convenience)."""
+        return await self.request("GET", url, **kwargs)
+
+    async def post(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a POST request with access control checks (httpx convenience)."""
+        return await self.request("POST", url, **kwargs)
+
+    async def put(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a PUT request with access control checks (httpx convenience)."""
+        return await self.request("PUT", url, **kwargs)
+
+    async def patch(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a PATCH request with access control checks (httpx convenience)."""
+        return await self.request("PATCH", url, **kwargs)
+
+    async def delete(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a DELETE request with access control checks (httpx convenience)."""
+        return await self.request("DELETE", url, **kwargs)
+
+    async def head(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make a HEAD request with access control checks (httpx convenience)."""
+        return await self.request("HEAD", url, **kwargs)
+
+    async def options(self, url: Any, **kwargs: Any) -> httpx.Response:
+        """Make an OPTIONS request with access control checks (httpx convenience)."""
+        return await self.request("OPTIONS", url, **kwargs)
 
     @asynccontextmanager
-    async def stream(self, method: str, url: Any, **kwargs: Any) -> AsyncIterator[httpx.Response]:  # type: ignore[override]
+    async def stream(self, method: str, url: Any, **kwargs: Any) -> AsyncIterator[httpx.Response]:
         """Stream a response with the destination allow-list and access control checks.
 
         httpx's ``stream()`` does not call ``request()``, so the guards are
@@ -407,8 +543,41 @@ class AccessControlledClient(httpx.AsyncClient):
         # decision and cannot drift apart again (issues #262, #285).
         self._authorize(method, url)
 
-        async with super().stream(method, url, **kwargs) as response:
+        async with self._client.stream(method, url, **kwargs) as response:
             yield response
+
+
+def _authenticated_client_kwargs() -> dict[str, Any]:
+    """Validate the configuration and return the shared client constructor kwargs.
+
+    Both the ACL client and the raw probe client are built from these kwargs,
+    so they always carry the same credentials, base URL, and timeout.
+
+    The API base is resolved exactly once per client here and handed to the
+    constructor twice - as ``base_url`` and as ``configured_base`` - because
+    resolving it separately for the destination allowance would be a second
+    read of the same setting: a configuration change landing between the two
+    would leave the client aimed at one host and its guard allowing another.
+    """
+    key = get_api_key()
+    if not key or not key.strip():
+        raise ConfigurationError(
+            "NEXTDNS_API_KEY is required. Set the NEXTDNS_API_KEY environment "
+            "variable or NEXTDNS_API_KEY_FILE pointing to a Docker secret."
+        )
+
+    base_url = get_api_base()
+    return {
+        "base_url": base_url,
+        "configured_base": base_url,
+        "headers": {
+            "X-Api-Key": key.strip(),
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        "timeout": get_http_timeout(),
+        "follow_redirects": False,
+    }
 
 
 def create_nextdns_client() -> AccessControlledClient:
@@ -422,28 +591,95 @@ def create_nextdns_client() -> AccessControlledClient:
         ConfigurationError: If the API key is absent or empty, or
             NEXTDNS_HTTP_TIMEOUT is not a positive number of seconds.
     """
-    key = get_api_key()
-    if not key or not key.strip():
-        raise ConfigurationError(
-            "NEXTDNS_API_KEY is required. Set the NEXTDNS_API_KEY environment "
-            "variable or NEXTDNS_API_KEY_FILE pointing to a Docker secret."
-        )
+    return AccessControlledClient(**_authenticated_client_kwargs())
 
-    headers = {
-        "X-Api-Key": key.strip(),
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
 
-    return AccessControlledClient(
-        base_url=NEXTDNS_BASE_URL,
-        headers=headers,
-        timeout=get_http_timeout(),
-        follow_redirects=False,
-    )
+class RawProbeTransport:
+    """ACL-free transport for server-level probes (the /health readiness check).
+
+    Composition wrapper around a private ``httpx.AsyncClient``, kept separate
+    from :class:`AccessControlledClient` so the profile ACL has no bypass
+    doorway on the class that enforces it: a probe here deliberately skips the
+    profile ACL because a local ACL denial (for example a deny-all
+    readable-profile configuration) would otherwise be indistinguishable from a
+    real NextDNS authentication failure.
+
+    The destination allow-list is still enforced on every request (issue #262):
+    this path carries the X-Api-Key client header just like every other one, so
+    the key must never leave for a non-NextDNS host. Only the profile ACL is
+    skipped.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        configured_base = kwargs.pop("configured_base", None)
+        self._client = httpx.AsyncClient(**kwargs)
+        # Same rule as AccessControlledClient: the allowance is the base this
+        # probe was created on, taken from the one configuration read that also
+        # set base_url when the factory built it.
+        self._configured_base = _configured_destination_base() if configured_base is None else configured_base
+
+    async def __aenter__(self) -> Self:
+        await self._client.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self._client.__aexit__(exc_type, exc_value, traceback)
+
+    async def aclose(self) -> None:
+        """Close the wrapped httpx client."""
+        await self._client.aclose()
+
+    @property
+    def base_url(self) -> httpx.URL:
+        """The base URL the wrapped client resolves relative requests against."""
+        return self._client.base_url
+
+    @property
+    def headers(self) -> httpx.Headers:
+        """The client-level default headers, including the X-Api-Key credential."""
+        return self._client.headers
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the wrapped client has been closed."""
+        return self._client.is_closed
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Send a request with NO profile ACL check; the destination allow-list still applies.
+
+        Args:
+            method: HTTP method
+            url: Request URL
+            **kwargs: Additional request arguments
+
+        Returns:
+            The unmodified response from the API.
+
+        Raises:
+            AccessDeniedError: If the destination host is not an approved
+                NextDNS host. No network request is made.
+        """
+        _check_destination(self._client.base_url, method, url, self._configured_base)
+        return await self._client.request(method, url, **kwargs)
+
+
+def create_raw_probe_client() -> RawProbeTransport:
+    """Create the authenticated, ACL-free transport used by server-level probes.
+
+    Raises:
+        ConfigurationError: If the API key is absent or empty, or
+            NEXTDNS_HTTP_TIMEOUT is not a positive number of seconds.
+    """
+    return RawProbeTransport(**_authenticated_client_kwargs())
 
 
 _client: AccessControlledClient | None = None
+_raw_probe_client: RawProbeTransport | None = None
 
 
 def get_api_client() -> AccessControlledClient:
@@ -462,13 +698,36 @@ async def close_api_client() -> None:
     """Close the shared authenticated API client if one exists and reset the singleton.
 
     Subsequent calls to :func:`get_api_client` will construct a fresh client,
-    picking up any updated configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+    picking up any updated configuration (such as ``NEXTDNS_HTTP_TIMEOUT``
+    or ``NEXTDNS_API_BASE``).
     """
     global _client
     if _client is not None:
         client = _client
         _client = None
         await client.aclose()
+
+
+def get_raw_probe_client() -> RawProbeTransport:
+    """Return the shared ACL-free probe transport, creating it on first use.
+
+    The /health readiness check uses this instead of :func:`get_api_client` so
+    the class that enforces the profile ACL exposes no bypass at all, while the
+    probe still observes the true upstream state.
+    """
+    global _raw_probe_client
+    if _raw_probe_client is None:
+        _raw_probe_client = create_raw_probe_client()
+    return _raw_probe_client
+
+
+async def close_raw_probe_client() -> None:
+    """Close the shared probe transport if one exists and reset the singleton."""
+    global _raw_probe_client
+    if _raw_probe_client is not None:
+        transport = _raw_probe_client
+        _raw_probe_client = None
+        await transport.aclose()
 
 
 def __getattr__(name: str) -> Any:

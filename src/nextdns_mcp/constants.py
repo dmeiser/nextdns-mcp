@@ -3,15 +3,27 @@
 SPDX-License-Identifier: MIT
 
 These live here so the direction of dependency is a straight line: the access
-control layer (``client``), the API transport (``transport``) and the call log
-(``call_log``) all read these definitions, and none of them has to import
-another to say what a profile id looks like, which HTTP methods change state,
-or which tool names belong to the disclosure transform. A shared home breaks
+control layer (``client``), the API transport (``transport``), the call log
+(``call_log``) and the run-options module (``run_options``) all read these
+definitions, and none of them has to import another to say what a profile id
+looks like, which HTTP methods change state, which tool names belong to the
+disclosure transform, or which hosts count as loopback. A shared home breaks
 the old ``utils`` -> ``client`` edge and keeps the synthetic-tool name set a
-single definition shared by the log and the transform.
+single definition shared by the log and the transform. The DoH answer
+vocabulary (``VALID_DNS_RECORD_TYPES``, ``DNS_STATUS_CODES``) lives here for the
+same reason: ``config`` publishes those names to its callers and must never
+reach up into the tool layer to spell them, and this module imports nothing from
+the package, so the edge cannot close a cycle.
 """
 
 import re
+
+# The loopback host names. The client allows them as request destinations so
+# local test doubles and loopback mock servers stay usable (no shipped tool
+# ever targets them), and the run-options check reads the same set to decide
+# whether an ``MCP_HOST`` bind is loopback-only. Membership is exact: ``127.0.0.2``
+# or ``evil.localhost`` is not in here and is not treated as loopback.
+LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
 
 # Safe identifier patterns to prevent path traversal and ACL bypass.
 # Profile IDs must match what api.nextdns.io actually issues, not the stale
@@ -36,6 +48,34 @@ WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # tool the wrapper dispatches to, so logging these names would double-count
 # discovery. This is the one definition; the log and the transform read it.
 SYNTHETIC_TOOL_NAMES = frozenset({"search_tools", "call_tool"})
+
+# The answer vocabulary of the DoH lookup tool: the record types it accepts and
+# the rcode descriptions it reports back. These are data the tool formats, not
+# a policy it enforces, and ``config`` re-exports both names to its callers, so
+# the definition sits below both layers instead of in the tool that reads them.
+VALID_DNS_RECORD_TYPES = [
+    "A",
+    "AAAA",
+    "CNAME",
+    "MX",
+    "NS",
+    "PTR",
+    "SOA",
+    "TXT",
+    "SRV",
+    "CAA",
+    "DNSKEY",
+    "DS",
+]
+
+DNS_STATUS_CODES = {
+    0: "NOERROR - Success",
+    1: "FORMERR - Format error",
+    2: "SERVFAIL - Server failure",
+    3: "NXDOMAIN - Non-existent domain",
+    4: "NOTIMP - Not implemented",
+    5: "REFUSED - Query refused",
+}
 
 
 def is_write_operation(method: str) -> bool:

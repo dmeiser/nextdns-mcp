@@ -7,7 +7,7 @@ reaches it through this module. It owns exactly one thing: sending a request
 through ``client.api_client`` - the access-controlled client that enforces the
 profile read/write allowlists, read-only mode and the protected-profile
 denylist - and turning every way a request can fail into the standardized
-payload shape the server documents (``errors.py``):
+payload shape the server documents (the ``errors`` package):
 
 - an ``AccessDeniedError`` from the ACL layer becomes the typed denial payload
   (never a network request was made at that point);
@@ -110,7 +110,7 @@ async def _api_request(
     """Make an HTTP request through the access-controlled client and return JSON.
 
     Access-control denials raised by the ACL layer are reported as standardized
-    error payloads (see ``errors.py``) rather than raised exceptions, so callers
+    error payloads (see the ``errors`` package) rather than raised exceptions, so callers
     get a consistent, typed failure shape:
     ``{"error": ..., "code": "read_access_denied" | "write_access_denied" | "access_denied", "status_code": 403, ...}``.
 
@@ -178,12 +178,15 @@ async def _api_request_json(
 
 
 async def read_body_capped(response: httpx.Response, max_bytes: int) -> bytes:
-    """Read a (possibly streaming) response's decoded body up to ``max_bytes``.
+    """Read a (possibly streaming) response's decoded body until ``max_bytes`` is reached.
 
     ``aiter_bytes`` yields decoded bytes, so the result is what would be
-    parsed - at most ``max_bytes`` of it, read no further once the cap is
-    reached. Shared by the capped-request path and the download guard's
-    bounded error-body read, which used to carry its own copy of this loop.
+    parsed. The read stops after the whole chunk that reaches ``max_bytes``,
+    so the result exceeds ``max_bytes`` by up to one chunk, and is shorter
+    only at end-of-stream. The caller is the download guard's bounded
+    error-body read; its ``response_body_truncated`` flag is set either when
+    the returned body runs past the guard's byte slice or when the decoded
+    prefix exceeds ``MAX_RESPONSE_BODY_CHARS``.
     """
     parts: list[bytes] = []
     total = 0

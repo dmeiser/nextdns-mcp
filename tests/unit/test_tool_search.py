@@ -878,6 +878,192 @@ class TestATypedNameSaysWhichNamesThereAre:
         assert "search_tools(query)" in str(raised.value)
 
 
+class TestUnknownNameReusesTheCatalogsWordData:
+    """PERF-3: the unknown-name path must not rebuild the catalog's word data per call.
+
+    Measured at the intake probe, every unknown ``call_tool`` name re-ran the
+    flat and word normalizations over the whole catalog and rebuilt the
+    name-word, vocabulary, shared-word, and generic-leading structures the
+    suggestion ranking binds. With the catalog unchanged and its data built,
+    a subsequent unknown request — bare name or search-answer shape — must
+    perform zero catalog-side normalizations and zero ranking-data rebuilds,
+    while the refusal and the ranked suggestion come out exactly as before.
+    """
+
+    @pytest.fixture
+    def tools(self):
+        from fastmcp.tools.base import Tool
+
+        return [
+            Tool.from_function(lambda: None, name="getDenylist"),
+            Tool.from_function(lambda: None, name="plotAnalytics"),
+        ]
+
+    @pytest.fixture
+    def middleware(self, tools):
+        class _StaticTransform:
+            async def get_tool_catalog(self, context):
+                return list(tools)
+
+        return ts.CallToolShapeMiddleware(transform=_StaticTransform(), endpoints={})
+
+    @pytest.fixture
+    def work_counts(self, monkeypatch):
+        """Counters on the catalog-side rebuild entry points and normalizations.
+
+        Each name is patched in the module whose code actually calls it: the
+        memo helper resolves ``_catalog_words_for`` through ``tool_search``'s
+        import, the structure builders run inside ``tool_search_rank``, and
+        the normalizers run on both sides.
+        """
+        from collections import Counter
+
+        import nextdns_mcp.tool_search_rank as rank
+
+        counts: Counter[str] = Counter()
+        for module, name in (
+            (ts, "_catalog_words_for"),
+            (rank, "_name_words"),
+            (rank, "_vocabulary_words"),
+            (rank, "_shared_word_sets"),
+            (rank, "_generic_leading_words"),
+        ):
+            original = getattr(module, name)
+
+            def count_rebuild(*args, _original=original, _name=name, **kwargs):
+                counts[_name] += 1
+                return _original(*args, **kwargs)
+
+            monkeypatch.setattr(module, name, count_rebuild)
+
+        normalized: list[str] = []
+        for module in (ts, rank):
+            for name in ("_flat_key", "_words"):
+                original = getattr(module, name)
+
+                def count_normalization(text, _original=original, _normalized=normalized):
+                    _normalized.append(text)
+                    return _original(text)
+
+                monkeypatch.setattr(module, name, count_normalization)
+        return counts, normalized
+
+    @staticmethod
+    async def _resolve(middleware, name):
+        from types import SimpleNamespace
+
+        from fastmcp.exceptions import ToolError
+
+        context = SimpleNamespace(
+            message=SimpleNamespace(name="call_tool", arguments={"name": name, "arguments": {}}),
+            fastmcp_context=object(),
+        )
+
+        async def call_next(context):
+            return "ran"
+
+        try:
+            return await middleware.on_call_tool(context, call_next)
+        except ToolError as raised:
+            return raised
+
+    async def test_a_repeated_unknown_name_rebuilds_nothing(self, middleware, work_counts):
+        from fastmcp.exceptions import ToolError
+
+        counts, normalized = work_counts
+
+        first = await self._resolve(middleware, "generate analytics plot")
+        assert isinstance(first, ToolError)
+        assert "plotAnalytics takes" in str(first)
+        # The first unknown request built the catalog's data: both candidates
+        # were flat-normalized and word-tokenized exactly once.
+        assert counts["_catalog_words_for"] == 1
+        assert set(normalized) == {"getDenylist", "plotAnalytics", "generate analytics plot"}
+
+        normalized.clear()
+        snapshot = dict(counts)
+        second = await self._resolve(middleware, "generate analytics plot")
+
+        assert str(second) == str(first)
+        # Zero catalog-side normalizations: only the typed name itself was
+        # folded and tokenized, no candidate name was touched.
+        assert set(normalized) == {"generate analytics plot"}
+        # Zero ranking-data rebuilds: no memo entry point fired again.
+        assert dict(counts) == snapshot
+
+    async def test_the_search_answer_shape_reuses_the_built_data(self, middleware, work_counts):
+        counts, normalized = work_counts
+        bare = await self._resolve(middleware, "generate analytics plot")
+        normalized.clear()
+        snapshot = dict(counts)
+
+        answered = await self._resolve(middleware, [{"name": "generate analytics plot"}])
+
+        assert str(answered) == str(bare)
+        assert set(normalized) == {"generate analytics plot"}
+        assert dict(counts) == snapshot
+
+    async def test_an_exact_name_skips_the_catalog_data_entirely(self, middleware, work_counts):
+        counts, normalized = work_counts
+
+        result = await self._resolve(middleware, [{"name": "plotAnalytics"}])
+
+        assert result == "ran"
+        assert counts["_catalog_words_for"] == 0
+        assert normalized == []
+
+    def test_an_exact_name_resolves_from_the_map_without_matching(self, tools):
+        """The resolver answers an exact name from the map alone — no word data."""
+        by_name = {tool.name: tool for tool in tools}
+        assert ts._resolved_entry("plotAnalytics", by_name) == ("plotAnalytics", by_name["plotAnalytics"])
+
+    def test_the_unmemoized_fallback_normalizes_each_candidate_once(self, tools, work_counts):
+        """Direct callers without a catalog keep the linear O(catalog) contract.
+
+        The hoisted lookup must not rebuild per comprehension iteration: on
+        the fallback path each candidate is flat-normalized once and
+        tokenized once, whatever the catalog size.
+        """
+        from collections import Counter
+
+        counts, normalized = work_counts
+        names = [tool.name for tool in tools]
+
+        assert ts._match_tool_name("generate analytics plot", names) == ""
+
+        per_candidate = Counter(text for text in normalized if text in set(names))
+        assert per_candidate == Counter({"getDenylist": 2, "plotAnalytics": 2})
+        # The fallback builds just the two comparison dicts — no ranking-data
+        # rebuild at all.
+        assert counts["_catalog_words_for"] == 0
+        assert counts["_name_words"] == 0
+        assert counts["_vocabulary_words"] == 0
+
+    async def test_the_real_server_builds_the_data_once_across_unknown_calls(self, monkeypatch):
+        """End to end on the built server: two unknown calls, one catalog build."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+
+        from fastmcp import Client
+
+        builds = 0
+        original = ts._catalog_words_for
+
+        def count_build(tools):
+            nonlocal builds
+            builds += 1
+            return original(tools)
+
+        monkeypatch.setattr(ts, "_catalog_words_for", count_build)
+
+        async with Client(build_mcp_server()) as client:
+            for _ in range(2):
+                with pytest.raises(Exception, match="Its words match") as raised:
+                    await client.call_tool("call_tool", {"name": "generate analytics plot", "arguments": {}})
+        assert "plotAnalytics takes" in str(raised.value)
+        assert builds == 1
+
+
 class TestTheGenericVerbGate:
     """A verb shared by a dozen names says what to do, not which tool (gemini ARCH-2).
 

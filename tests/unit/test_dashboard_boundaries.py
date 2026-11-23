@@ -65,6 +65,28 @@ def test_dashboard_never_imports_a_sibling_tool_module():
                 pytest.fail(f"{module_file.name} imports sibling tool module .{node.module}")
 
 
+def test_dashboard_imports_no_private_name_from_a_sibling_dashboard_module():
+    """Cross-module helpers cross under public names (issue #637).
+
+    The package modules shared row shapers, card builders, and summary
+    helpers by importing each other's ``_``-prefixed names, so a private
+    rename in the owning module silently broke its siblings. A name that
+    crosses a module boundary is that module's API and lives without the
+    underscore; ``_``-prefixed names stay module-internal, like the
+    dashboard-internal ``data._fetch_analytics_payload`` documented in
+    AGENT.md. This fails if a cited private import is restored.
+    """
+    sibling_modules = {"data", "components", "formatters", "tool"}
+    for module_file in sorted(PACKAGE_DIR.glob("*.py")):
+        for node in _import_statements(module_file):
+            if not node.level or not node.module:
+                continue
+            if node.module.split(".")[0] not in sibling_modules:
+                continue
+            for alias in node.names:
+                assert not alias.name.startswith("_"), f"{module_file.name} imports private .{node.module}.{alias.name}"
+
+
 def test_dashboard_imports_no_private_name_from_the_shared_charts_modules():
     """Anything crossing into ``charts`` or ``chart_ui`` crosses under a public name."""
     for module_file in sorted(PACKAGE_DIR.glob("*.py")):
@@ -140,3 +162,37 @@ def test_package_public_surface():
     """Callers import the tool from the package, so the package must export it."""
     assert dashboard.overviewDashboard.__module__.startswith("nextdns_mcp.tools.dashboard")
     assert "overviewDashboard" in dashboard.__all__
+
+
+def test_overview_dashboard_delegates_once():
+    """The published wrapper ends in one delegation, with nothing after it (WORK-279).
+
+    ``overviewDashboard`` used to close with two identical
+    ``return await _overview_dashboard_impl(...)`` blocks in a row; the second
+    could never run and read as a second implementation path. This test pins
+    the removal so a copy-paste re-introduction fails on the broken tree - the
+    same shape ``8f6249c`` pinned for the dead ``OpenApiSpecNotFound`` class.
+    """
+    module_file = PACKAGE_DIR / "tool.py"
+    tree = ast.parse(module_file.read_text(encoding="utf-8"), filename=str(module_file))
+    (func,) = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "overviewDashboard"
+    ]
+    returns = [node for node in ast.walk(func) if isinstance(node, ast.Return)]
+    assert len(returns) == 1, f"expected exactly one delegation to _overview_dashboard_impl, found {len(returns)}"
+    assert func.body[-1] is returns[0], "a statement sits after the delegation; the return must be the tail"
+    call = returns[0].value
+    assert isinstance(call, ast.Await) and isinstance(call.value, ast.Call), "the delegation must be a single await"
+    assert isinstance(call.value.func, ast.Name) and call.value.func.id == "_overview_dashboard_impl"
+    assert not call.value.args, "the delegation must pass every argument by keyword"
+    assert [kw.arg for kw in call.value.keywords] == [
+        "profile_id",
+        "from_time",
+        "to_time",
+        "limit",
+        "section",
+        "view_type",
+        "domain_view",
+    ], "the delegation's keyword arguments drifted from the published signature"

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "nextdns": {
+        "type": "local",
+        "command": [".venv/bin/python", "-m", "nextdns_mcp.server"],
+        "environment": {
+          "NEXTDNS_API_KEY": "${NEXTDNS_API_KEY}",
+          "NEXTDNS_READABLE_PROFILES": "ALL",
+          "NEXTDNS_WRITABLE_PROFILES": "ALL",
+          "PYTHONPATH": "src"
+        }
+      }
+    }
+  }
+}

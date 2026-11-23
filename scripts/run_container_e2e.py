@@ -41,8 +41,6 @@ from scripts.validate_schema import (
     validate_tool_response,
 )
 
-HEALTH_FAILURE_CLASSES = ("auth", "unreachable")
-
 # When upstream answers 429, the call is retried after these delays instead of
 # being recorded FAILED: 15 + 30 + 60 = 105s across 4 total attempts
 # (DEFAULT_MAX_RETRIES), outlasting a 60s rolling/fixed window. The quota is
@@ -81,14 +79,16 @@ def _assert_health_ok(body: Any, health_url: str) -> tuple[bool, str]:
 
 
 def _assert_health_failure(body: dict[str, Any], health_url: str) -> tuple[bool, str]:
-    """Assert the 503 side: a documented failure class and a non-empty reason."""
-    failure_class = body.get("class")
-    if failure_class not in HEALTH_FAILURE_CLASSES:
-        return False, f"expected class in {HEALTH_FAILURE_CLASSES}, got {failure_class!r}"
-    reason = body.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        return False, f"expected a non-empty reason in the {health_url} 503 body, got {body}"
-    return True, f"GET {health_url} -> 503 class={failure_class} reason={reason!r}"
+    """Assert the 503 side: exactly ``{"status": "error"}``.
+
+    The body once carried a failure class and a reason, which turned an
+    unauthenticated route into an oracle for whether the configured API key is
+    accepted (issue #603). Those fields are now part of the contract by
+    absence: a 503 that carries them fails this check, it is not a bonus.
+    """
+    if body != {"status": "error"}:
+        return False, f'expected {{"status": "error"}} from {health_url}, got {body}'
+    return True, f'GET {health_url} -> 503 {{"status": "error"}}'
 
 
 def _leaks_key(body_text: str, api_key: str) -> bool:
@@ -103,8 +103,9 @@ def check_health_endpoint(health_url: str, api_key: str, expect_ok: bool, timeou
     contract a client actually receives. ``expect_ok`` selects which side to
     assert: ``True`` for a server whose configured credentials work (200 with
     exactly ``{"status": "ok"}``), ``False`` for one whose credentials do not
-    (503 carrying a failure class and a short reason). Either way the response
-    body must not contain the API key.
+    (503 with exactly ``{"status": "error"}`` — a body that names the failure
+    class or the reason is a contract violation, because this transport is
+    unauthenticated). Either way the response body must not contain the API key.
 
     Args:
         health_url: Absolute URL of the ``/health`` route to GET.
@@ -143,7 +144,7 @@ def _health_expect_ok(response: httpx.Response, body: Any, health_url: str) -> t
 
 
 def _health_expect_unavailable(response: httpx.Response, body: Any, health_url: str) -> tuple[bool, str]:
-    """The 503 side: a failure class and short reason, or a contract violation naming what was seen."""
+    """The 503 side: exactly {"status": "error"}, or a contract violation naming what was seen."""
     if response.status_code != 503:
         return False, f"expected HTTP 503 from {health_url}, got {response.status_code}: {body}"
     if not isinstance(body, dict) or body.get("status") != "error":
@@ -340,8 +341,18 @@ def _load_spec_once(path: Path) -> dict[str, Any]:
 
 
 # The "unwrap `data`, read `id`" idiom a create/add answer needs, shared with
-# the actor harness rather than re-typed per site.
+# the actor harness rather than re-typed per site, and the id-to-string
+# fallback that same unwrap uses.
 _unwrap_id = ai_e2e_common._unwrap_id
+_id_text = ai_e2e_common._id_text
+# The text field of a content block is read by the same implementation the
+# actor harness uses for the payloads its actor prints: a change to how a text
+# block is read then lands once. Which blocks this runner admits is its own
+# boundary and stays here - SDK objects judged by their type, the image flag,
+# and the last-text-block-wins rule in
+# ``ContainerE2ERunner._parse_response_content``.
+_content_blocks = ai_e2e_common._content_blocks
+_content_block_text = ai_e2e_common._content_block_text
 
 # Early-access security toggles reported from the NextDNS dashboard but not
 # listed in the official API docs. This E2E verifies whether the API actually
@@ -455,11 +466,14 @@ def _parse_json_text(text: str) -> Any:
         return text
 
 
-def _content_block_text(block: Any) -> str | None:
-    """The text of a text content block; None for anything that is not one."""
-    if isinstance(block, TextContent) or getattr(block, "type", "") == "text":
-        return getattr(block, "text", "")
-    return None
+def _is_text_content(block: Any) -> bool:
+    """The container's SDK-object boundary: a TextContent, or a block whose type says text.
+
+    Dict-shaped blocks are not admitted — a live tool result's blocks are SDK
+    objects, and the field of an admitted block is read by the shared
+    implementation rather than by a second copy here.
+    """
+    return isinstance(block, TextContent) or getattr(block, "type", "") == "text"
 
 
 def _skips_schema_validation(spec: dict[str, Any], parsed_json: Any) -> bool:
@@ -480,7 +494,7 @@ def _first_profile_id(res: Any) -> str:
     """The id of the first profile in a listProfiles answer, '' when there is none."""
     if not isinstance(res, dict) or not res.get("data"):
         return ""
-    return str(res["data"][0].get("id") or "")
+    return _id_text(res["data"][0].get("id"))
 
 
 def _document_reads(operations: dict[str, str]) -> list[str]:
@@ -596,15 +610,16 @@ class ContainerE2ERunner:
         """Split a tool result into (response_text, has_image, parsed_json)."""
         response_text = ""
         has_image = False
-        parsed_json: Any = None
 
         for content_block in getattr(result, "content", []):
             if isinstance(content_block, ImageContent) or getattr(content_block, "type", "") == "image":
                 has_image = True
                 continue
-            block_text = _content_block_text(content_block)
-            if block_text is not None:
-                response_text = block_text
+            # The SDK-object boundary is this runner's own: only a TextContent
+            # (or a block whose type says text) is admitted, and the text field
+            # of an admitted block is read by the shared implementation.
+            if _is_text_content(content_block):
+                response_text = _content_block_text(content_block)
 
         # Empty text parses to None on its own; no guard needed.
         parsed_json = _parse_json_text(response_text)
@@ -1318,10 +1333,10 @@ class ContainerE2ERunner:
         """Run the credential-free generative-UI check; returns the process exit code.
 
         The container for this check is started with an invalid API key on
-        purpose: ``/health`` must report that upstream authentication failure —
-        proving the image runs — while the Prefab sandbox needs nothing but its
-        own Deno runtime. The live-account rate limit therefore cannot turn this
-        check green or red.
+        purpose: ``/health`` must answer 503 — the probe reaches NextDNS and is
+        refused, which proves the image runs — while the Prefab sandbox needs
+        nothing but its own Deno runtime. The live-account rate limit therefore
+        cannot turn this check green or red.
         """
         if not await self._preflight_generative_ui():
             return 1
@@ -1507,7 +1522,7 @@ def parse_args() -> argparse.Namespace:
         "--expect-health",
         choices=["ok", "not-ok"],
         default=os.environ.get("EXPECT_HEALTH", "ok"),
-        help="Assert /health returns 200 (ok) or 503 with a failure class (not-ok) (default: ok)",
+        help="Assert /health returns 200 (ok) or 503 with the minimal error body (not-ok) (default: ok)",
     )
     parser.add_argument(
         "--health-only",

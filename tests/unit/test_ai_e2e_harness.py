@@ -974,9 +974,11 @@ class _FakeClient:
         self._delete_ok = delete_ok
         self._post_result = post_result
         self.deleted: list[str] = []
+        self.got: list[tuple[str, dict | None]] = []
         self.posted: list[tuple[str, dict]] = []
 
     async def rest_get(self, path, params=None):
+        self.got.append((path, params))
         if path in self._by_path:
             return self._by_path[path]
         if path == "/profiles":
@@ -2773,6 +2775,48 @@ class TestVerifyStepVerdicts:
         )
         assert status == "skipped"
         assert rest["endpoint"] == "GET /profiles/plotpid/logs"
+
+    @pytest.mark.parametrize(
+        "verify",
+        ["logs_bogus", "list_bogus", "rewrite_bogus", "profile_bogus", "settings_bogus", "bogus"],
+    )
+    def test_unknown_verifier_makes_no_request_and_names_itself(self, h, verify):
+        """A verifier name no branch implements is a bug, not a live API call.
+
+        Dispatch used to be by prefix (`startswith("logs_")`), and the family
+        helper's last branch was an unguarded fallthrough, so a typo such as
+        `logs_bogus` landed in `logs_clear` — a real `DELETE /profiles/<id>/logs`
+        against the account, reported as a pass. Unknown `list_*` / `rewrite_*`
+        names fell into the last branch and raised KeyError on vdata the step
+        never carried. Every unknown name now answers the pre-split contract:
+        failed, `unknown verifier <name>`, no REST call of any kind.
+        """
+        import asyncio
+
+        targets = h.TaskTargets(profile_name="P", tag="tg")
+        client = _FakeClient()
+        status, err, reason, rest = asyncio.run(
+            h._verify_step(client, targets, "pid1", self._step(h, verify), self._run(h))
+        )
+        assert status == "failed"
+        assert err == f"unknown verifier {verify!r}"
+        assert reason == "" and rest == {}
+        assert client.got == [] and client.deleted == [] and client.posted == []
+
+    def test_no_catalog_step_names_an_unimplemented_verifier(self, h, all_steps):
+        """The catalog and the dispatcher must agree on the verifier names."""
+        v = h._verify
+        implemented = (
+            set(v._PROFILE_VERIFIERS)
+            | set(v._SETTINGS_VERIFIERS)
+            | set(v._LIST_VERIFIERS)
+            | set(v._REWRITE_VERIFIERS)
+            | set(v._PLOT_VERIFIERS)
+            | set(v._LOG_VERIFIERS)
+            | {"analytics", "tool_ok"}
+        )
+        named = {s.verify for s in all_steps}
+        assert named - implemented == set(), f"catalog verifiers with no branch: {sorted(named - implemented)}"
 
 
 # =========================================================================== #

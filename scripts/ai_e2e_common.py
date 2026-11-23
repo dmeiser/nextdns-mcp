@@ -9,6 +9,8 @@ This module holds the deterministic building blocks used by the E2E harness
   (``check_from_call`` and the ``_is_*`` / ``_*_reason`` detectors);
 * the constant tables describing the server surface (the 7 settings
   categories, the 7 list types, the analytics/plot metrics, the run sections);
+* the MCP content-block readers both runners use to pull text out of a tool
+  result (``_content_blocks`` / ``_content_block_text`` / ``_content_texts``);
 * the REST read-back helpers the *measuring* half uses to independently verify
   server state via the raw NextDNS REST API (never via the MCP tool response).
 
@@ -505,6 +507,51 @@ def _raised_error_text(res: Any) -> str:
 
 
 # =========================================================================== #
+# MCP content blocks (pure helpers, shared by both E2E runners)
+# =========================================================================== #
+
+
+def _content_blocks(result: Any) -> list[Any]:
+    """The content blocks an MCP tool result carries, in the order the server sent them.
+
+    The same answer is an SDK object on a live tool call and a plain dict in the
+    JSON the actor harness prints, so a reader has to know both shapes. The three
+    readers that used to sit in the runners each knew one of them, and each had
+    its own way of answering "this payload carries no blocks": an empty list,
+    ``None``, or falling through to the payload's string form.
+    """
+    content = result.get("content") if isinstance(result, dict) else getattr(result, "content", None)
+    return list(content) if isinstance(content, (list, tuple)) else []
+
+
+def _content_block_text(block: Any) -> str:
+    """The text field a content block carries, in whichever shape it carries it.
+
+    A block is a plain dict in the JSON the actor harness prints and an SDK
+    object on a live tool call, so a reader has to know both shapes. Which
+    blocks count as text blocks is each caller's own admission rule and stays
+    in the caller - the container admits SDK objects by their type, the actor
+    harness admits the dict blocks its events print by their payload - so this
+    answers only the question both ask: given a block, what is its text. A
+    block that carries no text field answers the empty string.
+    """
+    text = block.get("text") if isinstance(block, dict) else getattr(block, "text", "")
+    return "" if text is None else str(text)
+
+
+def _content_texts(result: Any) -> list[str]:
+    """The text of every content block that carries text, in send order.
+
+    Blocks that carry no text - an image, a resource link, an empty answer -
+    contribute nothing. How the texts are combined is the caller's: the actor
+    harness joins them to report an error, so it reads this; the container
+    runner keeps the last block of a typed answer, so it admits blocks its own
+    way and reads each one through ``_content_block_text``.
+    """
+    return [text for block in _content_blocks(result) if (text := _content_block_text(block))]
+
+
+# =========================================================================== #
 # REST read-back helpers (pure; used by the measuring half)
 # =========================================================================== #
 
@@ -540,6 +587,17 @@ def _list_values(name: str, tag: str) -> list[str]:
     return [template.format(tag=tag)]
 
 
+def _id_text(value: Any) -> str:
+    """A payload's id as the string every caller compares it against; ``""`` when it has none.
+
+    A NextDNS id is a string, but a JSON payload can carry any scalar - or omit
+    the field - and the sites that read one each re-typed the same fallback in
+    their own words. This is the one wording: a missing, null, or zero id is
+    the empty string, anything else is its ``str``.
+    """
+    return str(value) if value else ""
+
+
 def _unwrap_id(response: Any) -> str:
     """The ``id`` a create/add answer carries, unwrapping its ``data`` envelope.
 
@@ -551,7 +609,7 @@ def _unwrap_id(response: Any) -> str:
     if not isinstance(response, dict):
         return ""
     inner = response.get("data") if isinstance(response.get("data"), dict) else response
-    return str(inner.get("id") or "") if isinstance(inner, dict) else ""
+    return _id_text(inner.get("id")) if isinstance(inner, dict) else ""
 
 
 def _list_added(name: str, tag: str) -> str | None:

@@ -14,7 +14,7 @@ SPDX-License-Identifier: MIT
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Literal, Protocol, get_args
+from typing import Any, Literal, NamedTuple, Protocol, get_args
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.components import Card
@@ -24,39 +24,39 @@ from ...coercion import OptionalProfileId
 from ...errors import ErrorCode, error_payload
 from ...utils import limit_range_error, normalize_time_value, resolve_default_profile
 from .components import (
-    _append_extra_cards,
-    _assemble_overview_layout,
-    _build_destinations_card,
-    _build_devices_card,
-    _build_domains_card,
-    _build_gafam_card,
-    _build_ips_card,
-    _build_kpi_app,
-    _build_page_app,
-    _build_reasons_card,
-    _build_security_card,
-    _wrap_card_result,
+    append_extra_cards,
+    assemble_overview_layout,
+    build_destinations_card,
+    build_devices_card,
+    build_domains_card,
+    build_gafam_card,
+    build_ips_card,
+    build_kpi_app,
+    build_page_app,
+    build_reasons_card,
+    build_security_card,
+    wrap_card_result,
 )
 from .data import (
-    _build_analytics_params,
-    _calc_rate,
-    _calculate_status_kpis,
-    _destination_label,
-    _device_label,
-    _domain_label,
-    _fetch_card_data,
-    _fetch_overview_payloads,
-    _fetch_security_payloads,
-    _gafam_rows,
-    _item_queries,
-    _payload_data,
-    _reason_label,
+    build_analytics_params,
+    calc_rate,
+    calculate_status_kpis,
+    destination_label,
+    device_label,
+    domain_label,
+    fetch_card_data,
+    fetch_overview_payloads,
+    fetch_security_payloads,
+    gafam_rows,
+    item_queries,
+    payload_data,
+    reason_label,
 )
 from .formatters import (
-    _format_items_summary,
-    _gafam_summary_items,
-    _ip_summary_items,
-    _overview_top_summary,
+    format_items_summary,
+    gafam_summary_items,
+    ip_summary_items,
+    overview_top_summary,
 )
 
 
@@ -86,7 +86,7 @@ async def _card_analytics_impl(
     view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Fetch, word, and render the single card described by ``spec``."""
-    data, err = await _fetch_card_data(
+    data, err = await fetch_card_data(
         profile_id, spec.endpoint, from_time=from_time, to_time=to_time, limit=limit, **spec.fetch_extra
     )
     if err:
@@ -94,16 +94,16 @@ async def _card_analytics_impl(
     if data is None:
         return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = spec.items(data)
-    summary = _format_items_summary(spec.summary_title, spec.summary_noun, items, sum(q for _, q in items))
-    return _wrap_card_result(spec.build_card(data, view_type), summary)
+    summary = format_items_summary(spec.summary_title, spec.summary_noun, items, sum(q for _, q in items))
+    return wrap_card_result(spec.build_card(data, view_type), summary)
 
 
 _RESOLVED_DOMAINS_SPEC = _CardSpec(
     endpoint="domains",
     summary_title="Resolved Domains",
     summary_noun="domains",
-    items=lambda data: [(_domain_label(item), _item_queries(item)) for item in data],
-    build_card=lambda data, view_type: _build_domains_card(
+    items=lambda data: [(domain_label(item), item_queries(item)) for item in data],
+    build_card=lambda data, view_type: build_domains_card(
         "Resolved Domains",
         "Domains that resolved without being blocked.",
         data,
@@ -116,8 +116,8 @@ _BLOCKED_DOMAINS_SPEC = _CardSpec(
     endpoint="domains",
     summary_title="Blocked Domains",
     summary_noun="domains",
-    items=lambda data: [(_domain_label(item), _item_queries(item)) for item in data],
-    build_card=lambda data, view_type: _build_domains_card(
+    items=lambda data: [(domain_label(item), item_queries(item)) for item in data],
+    build_card=lambda data, view_type: build_domains_card(
         "Blocked Domains",
         "Domains blocked by security, privacy, or parental controls.",
         data,
@@ -131,8 +131,8 @@ _ROOT_DOMAINS_SPEC = _CardSpec(
     endpoint="domains",
     summary_title="Root Domains",
     summary_noun="domains",
-    items=lambda data: [(_domain_label(item), _item_queries(item)) for item in data],
-    build_card=lambda data, view_type: _build_domains_card(
+    items=lambda data: [(domain_label(item), item_queries(item)) for item in data],
+    build_card=lambda data, view_type: build_domains_card(
         "Root Domains",
         "Aggregate queries for root domains and subdomains.",
         data,
@@ -145,32 +145,32 @@ _REASONS_SPEC = _CardSpec(
     endpoint="reasons",
     summary_title="Reasons for Blocking",
     summary_noun="blocklists",
-    items=lambda data: [(_reason_label(item), _item_queries(item)) for item in data],
-    build_card=lambda data, view_type: _build_reasons_card(data, view_type=view_type),
+    items=lambda data: [(reason_label(item), item_queries(item)) for item in data],
+    build_card=lambda data, view_type: build_reasons_card(data, view_type=view_type),
 )
 
 _DEVICES_SPEC = _CardSpec(
     endpoint="devices",
     summary_title="Device Analytics",
     summary_noun="devices",
-    items=lambda data: [(_device_label(item), _item_queries(item)) for item in data],
-    build_card=lambda data, view_type: _build_devices_card(data, view_type=view_type),
+    items=lambda data: [(device_label(item), item_queries(item)) for item in data],
+    build_card=lambda data, view_type: build_devices_card(data, view_type=view_type),
 )
 
 _IPS_SPEC = _CardSpec(
     endpoint="ips",
     summary_title="IP Analytics",
     summary_noun="IP addresses",
-    items=_ip_summary_items,
-    build_card=lambda data, view_type: _build_ips_card(data),
+    items=ip_summary_items,
+    build_card=lambda data, view_type: build_ips_card(data),
 )
 
 _COUNTRIES_SPEC = _CardSpec(
     endpoint="destinations",
     summary_title="Traffic Destinations",
     summary_noun="countries",
-    items=lambda data: [(_destination_label(item), _item_queries(item)) for item in data],
-    build_card=lambda data, view_type: _build_destinations_card(data, view_type=view_type),
+    items=lambda data: [(destination_label(item), item_queries(item)) for item in data],
+    build_card=lambda data, view_type: build_destinations_card(data, view_type=view_type),
     fetch_extra={"type": "countries"},
 )
 
@@ -183,17 +183,17 @@ async def _gafam_analytics_impl(
     view_type: Literal["auto", "pie", "bar", "table"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the GAFAM dominance donut chart and table."""
-    data, err = await _fetch_card_data(
+    data, err = await fetch_card_data(
         profile_id, "destinations", from_time=from_time, to_time=to_time, limit=limit, type="gafam"
     )
     if err:
         return err
     if data is None:
         return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
-    chart_data, table_rows = _gafam_rows(data)
-    items = _gafam_summary_items(chart_data)
-    summary = _format_items_summary("GAFAM Dominance", None, items, sum(q for _, q in items))
-    return _wrap_card_result(_build_gafam_card(chart_data, table_rows, view_type=view_type), summary)
+    chart_data, table_rows = gafam_rows(data)
+    items = gafam_summary_items(chart_data)
+    summary = format_items_summary("GAFAM Dominance", None, items, sum(q for _, q in items))
+    return wrap_card_result(build_gafam_card(chart_data, table_rows, view_type=view_type), summary)
 
 
 async def _security_analytics_impl(
@@ -204,14 +204,14 @@ async def _security_analytics_impl(
     view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render the security analytics cards (Encrypted DNS and DNSSEC rates)."""
-    params = _build_analytics_params(from_time=from_time, to_time=to_time)
-    (encryption_payload, enc_err), (dnssec_payload, sec_err) = await _fetch_security_payloads(profile_id, params)
+    params = build_analytics_params(from_time=from_time, to_time=to_time)
+    (encryption_payload, enc_err), (dnssec_payload, sec_err) = await fetch_security_payloads(profile_id, params)
     first_err = enc_err or sec_err
     if first_err:
         return first_err
 
-    encryption_rate = _calc_rate(_payload_data(encryption_payload), "encrypted")
-    dnssec_rate = _calc_rate(_payload_data(dnssec_payload), "validated")
+    encryption_rate = calc_rate(payload_data(encryption_payload), "encrypted")
+    dnssec_rate = calc_rate(payload_data(dnssec_payload), "validated")
     enc_val, enc_total, enc_pct = encryption_rate
     dnssec_val, dnssec_total, dnssec_pct = dnssec_rate
 
@@ -219,7 +219,7 @@ async def _security_analytics_impl(
         f"[Rendered Security Analytics: Encrypted DNS {enc_pct:.2f}% ({enc_val:,}/{enc_total:,}), "
         f"DNSSEC {dnssec_pct:.2f}% ({dnssec_val:,}/{dnssec_total:,})]"
     )
-    return _wrap_card_result(_build_security_card(encryption_rate, dnssec_rate), summary)
+    return wrap_card_result(build_security_card(encryption_rate, dnssec_rate), summary)
 
 
 async def _kpi_analytics_impl(
@@ -230,16 +230,16 @@ async def _kpi_analytics_impl(
     view_type: Literal["auto", "bar", "table", "pie"] = "auto",
 ) -> dict[str, Any] | ToolResult:
     """Render top KPI metric cards."""
-    data, err = await _fetch_card_data(profile_id, "status", from_time=from_time, to_time=to_time)
+    data, err = await fetch_card_data(profile_id, "status", from_time=from_time, to_time=to_time)
     if err:
         return err
     if data is None:
         return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
-    kpis = _calculate_status_kpis(data)
+    kpis = calculate_status_kpis(data)
     summary = (
         f"[Rendered NextDNS KPI Metrics: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%)]"
     )
-    return ToolResult(content=summary, structured_content=_build_kpi_app(kpis))
+    return ToolResult(content=summary, structured_content=build_kpi_app(kpis))
 
 
 DashboardSection = Literal[
@@ -346,22 +346,22 @@ async def _render_overview_page(
         blocked_data,
         extra_payloads,
         fetch_err,
-    ) = await _fetch_overview_payloads(pid, from_time, to_time, limit, include_extra=include_extra)
+    ) = await fetch_overview_payloads(pid, from_time, to_time, limit, include_extra=include_extra)
     if fetch_err:
         return fetch_err
 
     eff_domain_view = _resolve_domain_view(domain_view, view_type)
-    kpis = _calculate_status_kpis(_payload_data(status_payload))
-    view = _assemble_overview_layout(kpis, series_payload, resolved_data, blocked_data, domain_view=eff_domain_view)
+    kpis = calculate_status_kpis(payload_data(status_payload))
+    view = assemble_overview_layout(kpis, series_payload, resolved_data, blocked_data, domain_view=eff_domain_view)
     if include_extra and extra_payloads is not None:
-        _append_extra_cards(view, extra_payloads, domain_view=eff_domain_view, view_type=view_type)
+        append_extra_cards(view, extra_payloads, domain_view=eff_domain_view, view_type=view_type)
 
-    top_summary = _overview_top_summary(resolved_data, blocked_data)
+    top_summary = overview_top_summary(resolved_data, blocked_data)
     summary = (
         f"[Rendered NextDNS Dashboard: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
         f"{top_summary}]"
     )
-    return ToolResult(content=summary, structured_content=_build_page_app(view))
+    return ToolResult(content=summary, structured_content=build_page_app(view))
 
 
 def _validate_dashboard_arg(name: str, value: Any, allowed_literal: Any) -> dict[str, Any] | None:
@@ -389,28 +389,52 @@ def _validate_overview_dashboard_args(section: Any, view_type: Any, domain_view:
     return None
 
 
+class _OverviewWindow(NamedTuple):
+    """The resolved profile and normalized window every section handler consumes.
+
+    The explicit ``error`` field is always ``None`` here; it exists so the
+    caller inspects one named field on the error variant instead of
+    discriminating positional tuple members.
+    """
+
+    profile_id: str
+    from_time: str | int
+    to_time: str | int
+    error: None = None
+
+
+class _OverviewWindowError(NamedTuple):
+    """The typed payload that stopped overview preflight."""
+
+    error: dict[str, Any]
+    profile_id: None = None
+    from_time: None = None
+    to_time: None = None
+
+
 def _overview_preflight(
     profile_id: OptionalProfileId,
     from_time: str | int,
     to_time: str | int,
-) -> tuple[str, str | int, str | int] | dict[str, Any]:
+) -> _OverviewWindow | _OverviewWindowError:
     """Resolve the profile and read the window once, in one order, for every section.
 
-    Returns ``(pid, from_time, to_time)`` with the window already normalized, or
-    the typed payload that stopped the call. Sections used to disagree here: the
-    single widgets bounded the range before they touched the profile, and
-    ``overview``/``all`` the other way round, so the same bad call answered a
-    different error depending on the section named.
+    Returns a named ``_OverviewWindow`` with the window already normalized, or
+    an ``_OverviewWindowError`` carrying the typed payload that stopped the
+    call. Sections used to disagree here: the single widgets bounded the range
+    before they touched the profile, and ``overview``/``all`` the other way
+    round, so the same bad call answered a different error depending on the
+    section named.
     """
     resolved = resolve_default_profile(profile_id)
     if resolved[1] is not None:
-        return resolved[1]
+        return _OverviewWindowError(error=resolved[1])
     norm_from = normalize_time_value(from_time)
     norm_to = normalize_time_value(to_time)
     range_err = analytics_range_error(norm_from, norm_to)
     if range_err is not None:
-        return range_err
-    return resolved[0], norm_from, norm_to
+        return _OverviewWindowError(error=range_err)
+    return _OverviewWindow(profile_id=resolved[0], from_time=norm_from, to_time=norm_to)
 
 
 async def _overview_dashboard_impl(
@@ -431,9 +455,8 @@ async def _overview_dashboard_impl(
         return limit_err
 
     window = _overview_preflight(profile_id, from_time, to_time)
-    if isinstance(window, dict):
-        return window
-    pid, norm_from, norm_to = window
+    if isinstance(window, _OverviewWindowError):
+        return window.error
 
     # A single widget asks for top-N rows, so its response is bounded by ``limit``;
     # only the pages that request ``status;series`` can breach the point budget,
@@ -442,11 +465,13 @@ async def _overview_dashboard_impl(
     # "auto" reaches each card's own default (#547).
     handler = _WIDGET_DISPATCH.get(section)
     if handler is not None:
-        return await handler(pid, norm_from, norm_to, limit, view_type)
+        return await handler(window.profile_id, window.from_time, window.to_time, limit, view_type)
 
     # Only the page sections reach here: ``section`` is validated against
     # ``DashboardSection`` and the import-time guard gives every other name a handler.
-    return await _render_overview_page(pid, norm_from, norm_to, limit, section, domain_view, view_type)
+    return await _render_overview_page(
+        window.profile_id, window.from_time, window.to_time, limit, section, domain_view, view_type
+    )
 
 
 async def overviewDashboard(
@@ -489,15 +514,6 @@ async def overviewDashboard(
         view_type: Visualization format: "auto" (default: table or card default), "bar", "table", or "pie".
         domain_view: Visualization format for domain cards in overview mode: "table" (default), "bar", or "pie".
     """
-    return await _overview_dashboard_impl(
-        profile_id=profile_id,
-        from_time=from_time,
-        to_time=to_time,
-        limit=limit,
-        section=section,
-        view_type=view_type,
-        domain_view=domain_view,
-    )
     return await _overview_dashboard_impl(
         profile_id=profile_id,
         from_time=from_time,
