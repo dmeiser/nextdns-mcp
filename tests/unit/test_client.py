@@ -445,7 +445,7 @@ class TestRawProbeClientSingleton:
 
     def test_get_raw_probe_client_caches_instance(self, monkeypatch, mock_api_key) -> None:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(client_module, "_raw_probe_client", None)
+        client_module._set_raw_probe_client_singleton_for_tests(None)
 
         first = client_module.get_raw_probe_client()
         second = client_module.get_raw_probe_client()
@@ -458,27 +458,27 @@ class TestRawProbeClientSingleton:
     @pytest.mark.asyncio
     async def test_close_raw_probe_client_closes_and_resets(self, monkeypatch, mock_api_key) -> None:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(client_module, "_raw_probe_client", None)
+        client_module._set_raw_probe_client_singleton_for_tests(None)
 
         transport = client_module.get_raw_probe_client()
         assert not transport.is_closed
 
         await client_module.close_raw_probe_client()
         assert transport.is_closed
-        assert client_module._raw_probe_client is None
+        assert client_module._get_raw_probe_client_singleton_for_tests() is None
 
     @pytest.mark.asyncio
-    async def test_close_raw_probe_client_noop_when_none(self, monkeypatch) -> None:
-        monkeypatch.setattr(client_module, "_raw_probe_client", None)
+    async def test_close_raw_probe_client_noop_when_none(self) -> None:
+        client_module._set_raw_probe_client_singleton_for_tests(None)
 
         await client_module.close_raw_probe_client()
-        assert client_module._raw_probe_client is None
+        assert client_module._get_raw_probe_client_singleton_for_tests() is None
 
     def test_get_raw_probe_client_requires_an_api_key(self, monkeypatch) -> None:
         """No key means no probe transport: the same fail-fast as the ACL client."""
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
         monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
-        monkeypatch.setattr(client_module, "_raw_probe_client", None)
+        client_module._set_raw_probe_client_singleton_for_tests(None)
 
         with pytest.raises(ConfigurationError):
             client_module.get_raw_probe_client()

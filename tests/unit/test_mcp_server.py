@@ -203,7 +203,7 @@ class TestServerLifespan:
     async def test_server_lifespan_closes_http_clients(self, mock_api_key, monkeypatch):
         """Server lifespan exit must close every long-lived client owned by the server."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        monkeypatch.setattr(client_module, "_raw_probe_client", None)
+        client_module._set_raw_probe_client_singleton_for_tests(None)
         monkeypatch.setattr(logs_redirects, "_redirect_client", None)
 
         from nextdns_mcp import lifespan as lifespan_module
@@ -230,7 +230,7 @@ class TestServerLifespan:
         assert doh_client.is_closed
         assert redirect_client.is_closed, "_server_lifespan left the download redirect client open"
         assert resources.api_client._client is None
-        assert client_module._raw_probe_client is None
+        assert client_module._get_raw_probe_client_singleton_for_tests() is None
         assert resources.doh_client._client is None
         assert logs_redirects._redirect_client is None
 

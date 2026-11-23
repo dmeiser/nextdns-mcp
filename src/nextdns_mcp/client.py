@@ -789,6 +789,38 @@ async def close_raw_probe_client() -> None:
         await transport.aclose()
 
 
+# Test-support seam for the one process-global state left after issue #642 moved
+# the API client, DoH client, readiness cache and server instance onto explicit
+# owners (issue #660). Tests read and reset this global to exercise lazy creation
+# and shutdown; doing it through these two functions instead of naming
+# ``_raw_probe_client`` keeps the suite off the private attribute name, so the
+# name can change without editing tests. Production code never calls them: it
+# goes through get_raw_probe_client / close_raw_probe_client above.
+def _get_raw_probe_client_singleton_for_tests() -> RawProbeTransport | None:
+    """Return the shared probe transport without creating one (test support only).
+
+    Unlike :func:`get_raw_probe_client` this reads the slot as it is: no
+    transport is built and no configuration is read, so a test can capture the
+    value it is about to replace, or assert a shutdown cleared it, without the
+    read itself creating the thing it is checking for.
+    """
+    return _raw_probe_client
+
+
+def _set_raw_probe_client_singleton_for_tests(transport: RawProbeTransport | None) -> None:
+    """Install ``transport`` in the shared probe slot, or clear it (test support only).
+
+    Passing ``None`` is how a test asks for lazy creation; passing a double is how
+    it injects one. What the setter replaces is discarded, not closed: a double
+    owns no real connection, and a test that wants the real transport closed calls
+    :func:`close_raw_probe_client`. A plain call has no teardown the way
+    ``monkeypatch.setattr`` does, so conftest's ``restore_lazy_singletons`` fixture
+    writes back the value each test started with.
+    """
+    global _raw_probe_client
+    _raw_probe_client = transport
+
+
 def get_api_client() -> AccessControlledClient:
     """Return the current owner's shared authenticated API client, creating it on first use.
 
