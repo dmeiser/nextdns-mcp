@@ -58,7 +58,14 @@ from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
 from .tools import logs as _logs
 from .transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload, is_error_payload
-from .utils import is_safe_profile_id, normalize_partials, normalize_time_value, resolve_profile_id, schema_required
+from .utils import (
+    _truncate_at_boundary,
+    is_safe_profile_id,
+    normalize_partials,
+    normalize_time_value,
+    resolve_profile_id,
+    schema_required,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +165,7 @@ def load_spec(path: Path = SPEC_PATH) -> dict[str, Any]:
     return spec
 
 
-_OFFERABLE_ROUTES: list[HTTPRoute] | None = None
+_OFFERABLE_ROUTES: tuple[HTTPRoute, ...] | None = None
 
 
 def _is_offerable(route: HTTPRoute) -> bool:
@@ -176,17 +183,18 @@ def spec_routes(spec: dict[str, Any] | None = None) -> list[HTTPRoute]:
     and the coverage check all ask the same question about the same file, and
     re-reading and re-parsing it for each was the cold-start cost. A caller
     that hands in a spec (tests do, with modified documents) always gets a
-    fresh parse - the cache is for the shipped one only. The cached list is
-    shared; callers must treat it as read-only.
+    fresh parse - the cache is for the shipped one only. The cache itself is
+    stored as a tuple and never handed out: every call gets its own list, so
+    a caller that mutates its result cannot corrupt what later calls see.
     """
     global _OFFERABLE_ROUTES
     if spec is None and _OFFERABLE_ROUTES is not None:
-        return _OFFERABLE_ROUTES
+        return list(_OFFERABLE_ROUTES)
     parsed = parse_openapi_to_http_routes(load_spec() if spec is None else spec)
-    offerable = sorted(filter(_is_offerable, parsed), key=lambda route: str(route.operation_id))
+    offerable = tuple(sorted(filter(_is_offerable, parsed), key=lambda route: str(route.operation_id)))
     if spec is None:
         _OFFERABLE_ROUTES = offerable
-    return offerable
+    return list(offerable)
 
 
 def endpoints_for_routes(routes: list[HTTPRoute] | None = None) -> dict[str, tuple[str, str]]:
@@ -204,14 +212,7 @@ def endpoints_for_routes(routes: list[HTTPRoute] | None = None) -> dict[str, tup
 
 def _truncate_description(text: str, limit: int) -> str:
     """Truncate ``text`` to ``limit`` chars, preferring a sentence/paragraph boundary."""
-    if len(text) <= limit:
-        return text
-    cut = text[:limit]
-    boundary = max(cut.rfind("\n"), cut.rfind(". "))
-    if boundary < limit // 2:
-        return cut.rstrip()
-    step = 1 if cut[boundary] == "\n" else 2
-    return cut[: boundary + step].rstrip()
+    return _truncate_at_boundary(text, limit, sentence=True)
 
 
 def describe(route: HTTPRoute) -> str:

@@ -42,12 +42,12 @@ import os
 import threading
 import time
 from collections.abc import Mapping
-from itertools import islice
 from typing import Any
 
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 
 from .constants import SYNTHETIC_TOOL_NAMES, is_write_operation
+from .json_bounds import BoundSpec, bound_json
 
 logger = logging.getLogger(__name__)
 
@@ -143,41 +143,23 @@ def result_error(res: Any) -> str:
     return ""
 
 
-def _project_list(value: list[Any], depth: int) -> list[Any]:
-    """Keep the leading items; when items were dropped, say how many.
-
-    The omission marker exists so a reader can tell a small result from a
-    truncated one; a list that fits whole is returned untouched. Depth is
-    capped in ``_project_value`` before this runs, so items past
-    ``PROJECT_MAX_DEPTH`` arrive already projected to ``None``.
-    """
-    kept = [_project_value(item, depth + 1) for item in value[:PROJECT_MAX_ITEMS]]
-    if len(value) > PROJECT_MAX_ITEMS:
-        kept.append({"_omitted_items": len(value) - PROJECT_MAX_ITEMS})
-    return kept
-
-
-def _project_dict(value: dict[Any, Any], depth: int) -> dict[Any, Any]:
-    """Keep the leading keys; each value is projected one level deeper.
-
-    ``islice`` consumes the items view lazily: a huge mapping yields only the
-    first ``PROJECT_MAX_KEYS`` items to the projection instead of materializing
-    the whole item list just to slice it.
-    """
-    return {key: _project_value(item, depth + 1) for key, item in islice(value.items(), PROJECT_MAX_KEYS)}
+# The caps this module applies to a result: strings are cut, lists keep a few
+# leading items and name the dropped ones, dicts keep the leading keys, and
+# anything deeper than the depth cap is dropped whole. The walk itself is the
+# shared bounder; only these numbers and the marker key are call-log's own.
+OMITTED_ITEMS_KEY = "_omitted_items"
+_PROJECTION_BOUNDS = BoundSpec(
+    max_string_chars=PROJECT_MAX_STRING_CHARS,
+    max_items=PROJECT_MAX_ITEMS,
+    omitted_key=OMITTED_ITEMS_KEY,
+    max_keys=PROJECT_MAX_KEYS,
+    max_depth=PROJECT_MAX_DEPTH,
+)
 
 
 def _project_value(value: Any, depth: int = 0) -> Any:
     """A size-bounded projection of one result value (see ``PROJECT_*``)."""
-    if depth > PROJECT_MAX_DEPTH:
-        return None
-    if isinstance(value, str):
-        return value[:PROJECT_MAX_STRING_CHARS]
-    if isinstance(value, dict):
-        return _project_dict(value, depth)
-    if isinstance(value, list):
-        return _project_list(value, depth)
-    return value
+    return bound_json(value, _PROJECTION_BOUNDS, depth)[0]
 
 
 def _project_result(structured: Any) -> Any:

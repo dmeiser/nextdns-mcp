@@ -44,7 +44,7 @@ def _normalized_host(host: str | None) -> str:
     return (host or "").strip().rstrip(".").lower()
 
 
-def allowed_destination_hosts() -> frozenset[str]:
+def _allowed_destination_hosts() -> frozenset[str]:
     """Return every host this client may send a request to.
 
     See :data:`ALLOWED_DESTINATION_HOSTS` for the NextDNS endpoints and
@@ -320,7 +320,7 @@ class AccessControlledClient(httpx.AsyncClient):
             # base URL, so httpx itself rejects it before any I/O. There is no
             # destination to allow or to protect, and no key to leak.
             return
-        if host in allowed_destination_hosts():
+        if host in _allowed_destination_hosts():
             return
 
         error_msg = f"Blocked request to non-NextDNS host: {host}"

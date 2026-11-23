@@ -18,8 +18,8 @@ from ...charts import resolve_time_point, series_budget_error
 from ...errors import ErrorCode, error_payload
 from ...transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ...utils import (
-    _build_query_params,
-    _build_series_params,
+    build_query_params,
+    build_series_params,
     normalize_time_value,
     sanitize_label,
 )
@@ -43,7 +43,7 @@ def _build_analytics_params(
     **extra: Any,
 ) -> dict[str, Any]:
     """Build normalized query parameters for analytics endpoints."""
-    return _build_query_params(
+    return build_query_params(
         **{
             "from": normalize_time_value(from_time),
             "to": normalize_time_value(to_time),
@@ -479,7 +479,7 @@ async def _fetch_overview_payloads(
     params = _build_analytics_params(from_time=from_time, to_time=to_time)
     dom_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="default")
     blk_params = _build_analytics_params(from_time=from_time, to_time=to_time, limit=limit, status="blocked")
-    ser_params = _build_series_params(from_time=from_time, to_time=to_time, interval=interval)
+    ser_params = build_series_params(from_time=from_time, to_time=to_time, interval=interval)
 
     sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
     stop = _FanoutStop()

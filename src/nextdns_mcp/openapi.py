@@ -60,7 +60,7 @@ from .tool_search import CallToolShapeMiddleware, build_search_transform
 from .tools.doh import close_doh_client
 from .tools.logs import _download_registry, cleanup_successful_downloads
 from .usage import server_instructions
-from .utils import _BARE_NEGATIVE_RE, _NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
+from .utils import BARE_NEGATIVE_RE, NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ HEALTH_FAILURE_UNREACHABLE = "unreachable"
 """Failure class: NextDNS could not be probed, or answered unusably."""
 
 
-class HealthFailure(NamedTuple):
+class _HealthFailure(NamedTuple):
     """A failed readiness probe.
 
     Attributes:
@@ -102,7 +102,7 @@ class HealthFailure(NamedTuple):
 
 
 # Cached probe result as (monotonic timestamp, failure or None when healthy).
-_health_probe_cache: tuple[float, HealthFailure | None] | None = None
+_health_probe_cache: tuple[float, _HealthFailure | None] | None = None
 
 # Guards probe *construction*, not cache reads: concurrent ``/health`` pollers
 # that all miss an empty (or just-expired) cache used to each fire their own
@@ -319,44 +319,57 @@ def _schema_declared_types(schema: dict[str, Any]) -> set[str]:
     return set()
 
 
-def _cast_or_original(cast: Callable[[str], Any], s: str) -> Any:
-    """Apply a numeric cast; a ValueError leaves the original string unchanged."""
+def _is_bool_shaped(s: str) -> bool:
+    """Whether the string spells a boolean: ``true`` or ``false``, any case."""
+    return s.lower() in ("true", "false")
+
+
+def _to_bool(s: str) -> bool:
+    """The boolean cast: only ``true`` in any capitalization reads as True."""
+    return s.lower() == "true"
+
+
+def _to_float_or_original(s: str) -> Any:
+    """Apply the number cast; a ValueError leaves the original string unchanged.
+
+    ``is_float_shaped`` is a shape test, not a parse, so an accepted string can
+    still fail ``float()``; it comes back unchanged rather than raising out of
+    the coercion layer. The integer row needs no such guard: ``is_integer_shaped``
+    already ran ``int(s)`` and rejected anything it cannot parse.
+    """
     try:
-        return cast(s)
+        return float(s)
     except ValueError:
         return s
 
 
-def _coerce_bool_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
-    """(handled, value) for a schema that explicitly expects a boolean."""
-    lowered = s.lower()
-    if "boolean" in schema_types and lowered in ("true", "false"):
-        return True, lowered == "true"
-    return False, s
+def _coerce_string_by_type(s: str, schema_types: set[str]) -> Any:
+    """Coerce a string to the scalar type the schema declares, or leave it.
 
+    One table, one row per JSON Schema scalar type: the declared type that
+    authorizes the coercion, the shape guard the string must pass, and the cast
+    to apply. The first match wins, so a schema declaring both ``integer`` and
+    ``number`` gets the int. A string no row claims is returned as written —
+    identifier-like values (profile and entry IDs) stay strings.
 
-def _coerce_int_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
-    """(handled, value) for a schema that explicitly expects an integer.
-
-    ``is_integer_shaped`` already ran ``int(s)`` and rejected anything it
-    cannot parse, so the cast here cannot fail: it returns the value directly
-    instead of re-entering the guarded-cast helper for a second parse.
+    The rows are assembled per call so the shape guards are read from this
+    module's globals each time, which keeps a test that patches
+    ``is_float_shaped`` here able to reach the guarded number cast.
     """
-    if "integer" in schema_types and is_integer_shaped(s):
-        return True, int(s)
-    return False, s
-
-
-def _coerce_float_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
-    """(handled, value) for a schema that explicitly expects a number."""
-    if "number" in schema_types and is_float_shaped(s):
-        return True, _cast_or_original(float, s)
-    return False, s
+    rows: tuple[tuple[str, Callable[[str], bool], Callable[[str], Any]], ...] = (
+        ("boolean", _is_bool_shaped, _to_bool),
+        ("integer", is_integer_shaped, int),
+        ("number", is_float_shaped, _to_float_or_original),
+    )
+    for declared_type, is_shaped, cast in rows:
+        if declared_type in schema_types and is_shaped(s):
+            return cast(s)
+    return s
 
 
 def _preserves_time_string(value: str, schema_types: set[str]) -> bool:
     """Whether a string time value must survive coercion untouched."""
-    return "string" in schema_types and bool(_BARE_NEGATIVE_RE.match(value) or _NOW_OFFSET_RE.match(value))
+    return "string" in schema_types and bool(BARE_NEGATIVE_RE.match(value) or NOW_OFFSET_RE.match(value))
 
 
 class StripExtraFieldsMiddleware(Middleware):
@@ -441,11 +454,7 @@ class StripExtraFieldsMiddleware(Middleware):
         """
         if _preserves_time_string(s, schema_types):
             return s
-        for coerce in (_coerce_bool_value, _coerce_int_value, _coerce_float_value):
-            handled, value = coerce(s, schema_types)
-            if handled:
-                return value
-        return s
+        return _coerce_string_by_type(s, schema_types)
 
     def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
         """Coerce a value using its property schema.
@@ -758,7 +767,7 @@ def _register_compat_endpoints(mcp: FastMCP) -> None:
     mcp.custom_route("/v1/models", methods=["GET"])(v1_models)
 
 
-def _cached_readiness() -> tuple[bool, HealthFailure | None]:
+def _cached_readiness() -> tuple[bool, _HealthFailure | None]:
     """Whether the cached probe result is still valid, and what it said.
 
     ``(fresh, failure)``; ``failure`` is the cached result (``None`` meaning
@@ -770,7 +779,7 @@ def _cached_readiness() -> tuple[bool, HealthFailure | None]:
     return True, cached[1]
 
 
-async def check_nextdns_readiness() -> HealthFailure | None:
+async def check_nextdns_readiness() -> _HealthFailure | None:
     """Return the readiness result, probing NextDNS at most once per cache window.
 
     Single-flight: concurrent pollers that all miss an empty or expired cache
@@ -780,7 +789,7 @@ async def check_nextdns_readiness() -> HealthFailure | None:
 
     Returns:
         None when the configured credentials work against NextDNS, otherwise a
-        HealthFailure describing why the service is not ready.
+        _HealthFailure describing why the service is not ready.
     """
     global _health_probe_cache
 
@@ -799,7 +808,7 @@ async def check_nextdns_readiness() -> HealthFailure | None:
         return failure
 
 
-async def _run_health_probe() -> HealthFailure | None:
+async def _run_health_probe() -> _HealthFailure | None:
     """Probe the NextDNS API once with the configured credentials.
 
     The request goes through the client's RAW transport (``raw_request``), which
@@ -809,7 +818,7 @@ async def _run_health_probe() -> HealthFailure | None:
     body.
 
     Returns:
-        None when NextDNS accepted the credentials, otherwise a HealthFailure.
+        None when NextDNS accepted the credentials, otherwise a _HealthFailure.
     """
     try:
         client = get_api_client()
@@ -817,12 +826,12 @@ async def _run_health_probe() -> HealthFailure | None:
     except ConfigurationError:
         return _configuration_failure()
     except httpx.TimeoutException:
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_UNREACHABLE,
             f"NextDNS API did not respond within {HEALTH_PROBE_TIMEOUT:g}s",
         )
     except httpx.HTTPError as exc:
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_UNREACHABLE,
             f"Could not reach the NextDNS API ({type(exc).__name__})",
         )
@@ -832,24 +841,24 @@ async def _run_health_probe() -> HealthFailure | None:
     return _probe_status_failure(response)
 
 
-def _configuration_failure() -> HealthFailure:
+def _configuration_failure() -> _HealthFailure:
     """Classify a ConfigurationError from building the client: no key at all is auth."""
     if not get_api_key():
-        return HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
-    return HealthFailure(
+        return _HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
+    return _HealthFailure(
         HEALTH_FAILURE_UNREACHABLE,
         "NextDNS client configuration is invalid (check NEXTDNS_HTTP_TIMEOUT)",
     )
 
 
-def _probe_status_failure(response: httpx.Response) -> HealthFailure:
+def _probe_status_failure(response: httpx.Response) -> _HealthFailure:
     """Classify a non-success probe answer: 401/403 is auth, anything else unreachable."""
     if response.status_code in (401, 403):
-        return HealthFailure(
+        return _HealthFailure(
             HEALTH_FAILURE_AUTH,
             f"NextDNS API rejected the configured credentials (HTTP {response.status_code})",
         )
-    return HealthFailure(
+    return _HealthFailure(
         HEALTH_FAILURE_UNREACHABLE,
         f"NextDNS API answered with an unusable status (HTTP {response.status_code})",
     )

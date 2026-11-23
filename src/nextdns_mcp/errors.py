@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+from .json_bounds import BoundSpec, bound_json
+
 # Server-side cap on the number of characters of an unparseable upstream
 # response body inlined into an error payload. The tool result is read by an
 # LLM client, so a multi-hundred-KB HTML error page must not be copied
@@ -69,27 +71,11 @@ def error_payload(code: str, message: str, **extra: Any) -> dict[str, Any]:
     return payload
 
 
-def _bound_string(value: str) -> tuple[str, bool]:
-    """Cap one free-form string, flagging the cut with ``TRUNCATION_MARKER``."""
-    if len(value) > MAX_RESPONSE_BODY_CHARS:
-        return value[:MAX_RESPONSE_BODY_CHARS] + TRUNCATION_MARKER, True
-    return value, False
-
-
-def _bound_dict(value: dict[Any, Any]) -> tuple[dict[Any, Any], bool]:
-    """Rebuild a dict with every element bounded."""
-    bounded: dict[Any, Any] = {}
-    truncated = False
-    for key, item in value.items():
-        bounded[key], cut = _bound_value(item)
-        truncated = truncated or cut
-    return bounded, truncated
-
-
-def _bound_list(value: list[Any]) -> tuple[list[Any], bool]:
-    """Rebuild a list with every element bounded."""
-    bounded_items = [_bound_value(item) for item in value]
-    return [item for item, _ in bounded_items], any(cut for _, cut in bounded_items)
+# The caps this module applies to an upstream document: strings are cut at the
+# body cap and cut values carry the marker, and nothing else is trimmed - the
+# structure of an upstream error document is the diagnosis, so only its size
+# is not. Containers are rebuilt, never edited in place.
+_BODY_BOUNDS = BoundSpec(max_string_chars=MAX_RESPONSE_BODY_CHARS, string_marker=TRUNCATION_MARKER)
 
 
 def _bound_value(value: Any) -> tuple[Any, bool]:
@@ -105,13 +91,7 @@ def _bound_value(value: Any) -> tuple[Any, bool]:
     Returns:
         A ``(bounded_value, truncated)`` pair.
     """
-    if isinstance(value, str):
-        return _bound_string(value)
-    if isinstance(value, dict):
-        return _bound_dict(value)
-    if isinstance(value, list):
-        return _bound_list(value)
-    return value, False
+    return bound_json(value, _BODY_BOUNDS)
 
 
 def _bound_structured_fields(payload: dict[str, Any]) -> bool:
@@ -183,7 +163,7 @@ _UPSTREAM_CODE_GLOSS = {
 }
 
 
-def upstream_error_summary(body: Any) -> str:
+def _upstream_error_summary(body: Any) -> str:
     """One clause naming what upstream rejected: details, or the codes alone.
 
     Some failures carry a `detail` naming the parameter; others carry only a
@@ -431,7 +411,7 @@ def _add_upstream_diagnosis(payload: dict[str, Any], parsed: Any) -> None:
     if codes:
         payload["upstream_code"] = codes[0]
         payload["upstream_codes"] = codes
-    summary = upstream_error_summary(parsed)
+    summary = _upstream_error_summary(parsed)
     if summary:
         payload["error"] = f"{payload['error']} | {summary}"
 
@@ -483,3 +463,14 @@ class NextDNSResponseTooLargeError(NextDNSError):
     def __init__(self, message: str, max_response_bytes: int):
         super().__init__(message, status_code=None)
         self.max_response_bytes = max_response_bytes
+
+
+def _cap_with_marker(text: str, limit: int, marker: str) -> tuple[str, bool]:
+    """Cut ``text`` past ``limit`` characters, marking the cut and flagging it.
+
+    Shared cap-and-marker implementation: the comparison, prefix slice, marker
+    append, and truncation flag live in :func:`json_bounds.bound_json` (via
+    :class:`json_bounds.BoundSpec`), so this is a thin adapter keeping the
+    ``(text, limit, marker)`` call shape both callers use.
+    """
+    return bound_json(text, BoundSpec(max_string_chars=limit, string_marker=marker))
