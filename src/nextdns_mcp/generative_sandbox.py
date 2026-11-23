@@ -243,7 +243,11 @@ class HardenedPyodideSandbox(PyodideSandbox):
     This subclass keeps the upstream subprocess protocol but vendors ``_start`` with a
     sanitized environment, a bounded heap, and the bounded launch arguments built by
     :func:`_deno_command`, and discards the worker after every execution so no
-    interpreter state survives between calls.
+    interpreter state survives between calls. Its ``_start`` is also the method that
+    enforces the wire bound: it wraps the fresh pipe in :class:`_BoundedStdout` so an
+    oversized result is rejected during the read. The provider's ``_CombinedSandbox``
+    resolves startup here (this class is first in its MRO), so this override is the
+    single live wrap site on the provider path.
     """
 
     async def start(self) -> None:
@@ -264,12 +268,15 @@ class HardenedPyodideSandbox(PyodideSandbox):
             self._stop()
 
     async def _start(self) -> None:
-        # Vendored from PyodideSandbox._start (prefab-ui 0.21.1) with three
-        # changes: the subprocess environment is sanitized (secrets stripped,
-        # DENO_DIR pointed at the sandbox's private cache dir), the V8 heap is
-        # bounded, and the worker is launched with the bounded filesystem
-        # grants built by _deno_command instead of upstream's bare
-        # --allow-read/--allow-write.
+        # Vendored from PyodideSandbox._start (prefab-ui 0.21.1). The startup path
+        # deviates from upstream in these respects: the subprocess environment is an
+        # explicit allowlist (_sandbox_env) with DENO_DIR pointed at the sandbox's
+        # private cache dir, the V8 heap is bounded, the worker is launched with the
+        # bounded filesystem grants built by _deno_command instead of upstream's bare
+        # --allow-read/--allow-write, the worker's stdout is wrapped in
+        # _BoundedStdout to enforce the wire limit, and the readiness wait aborts at
+        # stderr EOF rather than only once the worker is dead (_read_startup_line;
+        # upstream keeps reading until the process dies).
         # Keep in sync with prefab_ui.sandbox._pyodide on upgrades.
         starting = _spawn_deno(_sandbox_startup_env())
         try:
@@ -354,13 +361,18 @@ class _BoundedStdout:
 
 
 class _BoundedResultSandbox(_Sandbox):
-    """Sandbox whose worker stdout enforces MAX_RESULT_BYTES during the read.
+    """An intentional, redundant statement of the wire bound — not an active override.
 
-    Wraps the worker process stdout in :class:`_BoundedStdout` after every
-    start (including auto-restarts after a crash) so an oversized result is
-    rejected while the response line is still being read — before the host
-    buffers the whole line, JSON-decodes it, and allocates the validated
-    ``PrefabApp``.
+    Under ``_CombinedSandbox``, the MRO resolves ``_start`` to
+    ``HardenedPyodideSandbox._start`` (that class precedes this one in the base
+    order), so this override never runs: the bound is enforced by the hardened
+    class's own :class:`_BoundedStdout` wrap. The class is kept as an explicit
+    declaration that every worker start must carry the bound, so a future reordering
+    of ``_CombinedSandbox``'s bases — or a refactor of the vendored ``_start`` — is
+    confronted with the contract it has to preserve. If this override is ever reached
+    (for example by constructing this class directly, as the unit tests do), it still
+    wraps correctly: it calls ``super()._start()`` and bounds any stdout the base
+    start left unwrapped.
     """
 
     async def _start(self) -> None:
@@ -375,4 +387,12 @@ class _BoundedResultSandbox(_Sandbox):
 
 
 class _CombinedSandbox(HardenedPyodideSandbox, _BoundedResultSandbox):
-    """Sandbox carrying both the hardened env/heap/isolation and the bounded stdout reader."""
+    """The sandbox the provider constructs: a hardened worker plus the bounded stdout reader.
+
+    Startup resolves to ``HardenedPyodideSandbox._start`` — first in the base order —
+    which is the method that wraps the worker's stdout in :class:`_BoundedStdout` and
+    enforces the wire bound on every start, including the auto-restart inside
+    ``PyodideSandbox.run``. ``_BoundedResultSandbox`` sits below it as a deliberately
+    redundant declaration of the same bound rather than a second code path; see its
+    docstring for why it is retained.
+    """
