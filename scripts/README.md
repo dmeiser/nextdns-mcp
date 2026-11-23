@@ -23,7 +23,7 @@ Options:
 - `--artifacts-dir`: Directory for report output (default: `artifacts/`)
 - `--health-url`: `/health` URL to validate (default: derived from `--endpoint`)
 - `--api-key`: Credential the server was configured with; only used to assert it never appears in a `/health` response
-- `--expect-health`: Assert `/health` returns `200` (`ok`) or `503` with a failure class (`not-ok`) (default: `ok`)
+- `--expect-health`: Assert `/health` returns `200` (`ok`) or `503` with exactly `{"status": "error"}` (`not-ok`) (default: `ok`)
 - `--health-only`: Validate only the `/health` endpoint and skip the MCP tool suite (default: `false`)
 #### Live-run rate limits
 
@@ -58,11 +58,11 @@ uv run python scripts/run_container_e2e.py --health-only --expect-health not-ok 
   --health-url http://127.0.0.1:8001/health --api-key "<the invalid key>"
 ```
 
-That asserts a `503` carrying a `class` of `auth` (or `unreachable`, when that is what the
-failure actually is) and a non-empty `reason`, and that the body leaks no key material. The
-`200 {"status": "ok"}` path is asserted on the credentialed container run, so a server whose
-credentials are rejected can no longer pass by always answering `ok`. The `E2E Container` CI
-job wires both cases up.
+That asserts a `503` whose body is exactly `{"status": "error"}` — a body that also names the
+failure class or a reason is a contract violation, since this route is unauthenticated (issue
+#603) — and that the body leaks no key material. The `200 {"status": "ok"}` path is asserted on
+the credentialed container run, so a server whose credentials are rejected can no longer pass by
+always answering `ok`. The `E2E Container` CI job wires both cases up.
 
 ### Schema Validation
 

@@ -67,6 +67,14 @@ def _configured_destination_base() -> str:
         return ""
 
 
+# Memo of ``_allowed_destination_hosts()`` keyed on the base each client
+# captured at construction, so the per-request destination check does not
+# rebuild the set and re-parse a URL on every call. Keyed on that base (not
+# computed once at import) because the answer changes with it - one entry per
+# distinct configured base, which is a handful at most.
+_ALLOWED_HOSTS_BY_BASE: dict[str, frozenset[str]] = {}
+
+
 def _allowed_destination_hosts(configured_base: str = "") -> frozenset[str]:
     """Return every host a request may be sent to, for one configured base.
 
@@ -83,12 +91,20 @@ def _allowed_destination_hosts(configured_base: str = "") -> frozenset[str]:
     allowed to reach that host; a client created after the change uses and is
     allowed to reach the new one. A client aimed at a base that was never the
     configured one gains no allowance (issue #262).
+
+    The answer only changes when ``configured_base`` does, so it is memoized
+    per base.
     """
+    cached = _ALLOWED_HOSTS_BY_BASE.get(configured_base)
+    if cached is not None:
+        return cached
     hosts = set(ALLOWED_DESTINATION_HOSTS) | set(LOOPBACK_HOSTS)
     configured = _normalized_host(httpx.URL(str(configured_base)).host) if configured_base else ""
     if configured:
         hosts.add(configured)
-    return frozenset(hosts)
+    result = frozenset(hosts)
+    _ALLOWED_HOSTS_BY_BASE[configured_base] = result
+    return result
 
 
 def _redacted(url: str) -> str:

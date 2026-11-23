@@ -1091,13 +1091,23 @@ def test_check_health_endpoint_rejects_health_body_with_extra_fields():
 
 def test_check_health_endpoint_requires_200_when_credentials_are_expected_usable():
     """Expecting readiness but getting 503 is a contract failure, not a pass."""
-    body = '{"status": "error", "class": "auth", "reason": "rejected (HTTP 401)"}'
+    body = '{"status": "error"}'
     with patch("scripts.run_container_e2e.httpx.get") as mock_get:
         mock_get.return_value = _health_response(503, body)
         passed, detail = check_health_endpoint(HEALTH_URL, API_KEY, expect_ok=True)
 
     assert passed is False
     assert "expected HTTP 200" in detail
+
+
+def test_check_health_endpoint_accepts_503_with_the_minimal_body():
+    """A 503 carrying exactly {"status": "error"} is the documented failure shape."""
+    with patch("scripts.run_container_e2e.httpx.get") as mock_get:
+        mock_get.return_value = _health_response(503, '{"status": "error"}')
+        passed, detail = check_health_endpoint(HEALTH_URL, API_KEY, expect_ok=False)
+
+    assert passed is True
+    assert "503" in detail
 
 
 @pytest.mark.parametrize(
@@ -1107,38 +1117,30 @@ def test_check_health_endpoint_requires_200_when_credentials_are_expected_usable
         ("unreachable", "NextDNS API did not respond within 5s"),
     ],
 )
-def test_check_health_endpoint_accepts_503_with_class_and_reason(failure_class, reason):
-    """A 503 carrying a documented failure class and a reason passes."""
+def test_check_health_endpoint_rejects_503_that_discloses_the_failure_class(failure_class, reason):
+    """A 503 that names the class or the reason is the #603 disclosure, not a pass.
+
+    The container E2E job runs this against a server started with an invalid
+    credential, so it is the check that the served image — not just the unit —
+    keeps the failure detail off an unauthenticated route.
+    """
     payload = json.dumps({"status": "error", "class": failure_class, "reason": reason})
     with patch("scripts.run_container_e2e.httpx.get") as mock_get:
         mock_get.return_value = _health_response(503, payload)
         passed, detail = check_health_endpoint(HEALTH_URL, API_KEY, expect_ok=False)
 
-    assert passed is True
+    assert passed is False
     assert failure_class in detail
 
 
-def test_check_health_endpoint_rejects_503_with_unknown_class():
-    """A 503 whose class is outside the documented set is a failure."""
-    payload = '{"status": "error", "class": "banana", "reason": "why not"}'
+def test_check_health_endpoint_rejects_503_with_extra_fields():
+    """Any extra key in the 503 body is outside the documented minimal shape."""
     with patch("scripts.run_container_e2e.httpx.get") as mock_get:
-        mock_get.return_value = _health_response(503, payload)
+        mock_get.return_value = _health_response(503, '{"status": "error", "detail": "ConnectError"}')
         passed, detail = check_health_endpoint(HEALTH_URL, API_KEY, expect_ok=False)
 
     assert passed is False
-    assert "banana" in detail
-
-
-@pytest.mark.parametrize("reason", ["", "   "])
-def test_check_health_endpoint_rejects_503_without_a_reason(reason):
-    """A 503 with an empty reason gives an operator nothing to act on."""
-    payload = json.dumps({"status": "error", "class": "auth", "reason": reason})
-    with patch("scripts.run_container_e2e.httpx.get") as mock_get:
-        mock_get.return_value = _health_response(503, payload)
-        passed, detail = check_health_endpoint(HEALTH_URL, API_KEY, expect_ok=False)
-
-    assert passed is False
-    assert "reason" in detail
+    assert "ConnectError" in detail
 
 
 def test_check_health_endpoint_rejects_503_with_wrong_status_field():
@@ -1635,7 +1637,7 @@ async def test_generative_ui_only_calls_the_tool_in_the_container(tmp_path):
 
     with (
         patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=True)),
-        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, "503 class=auth")),
+        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, '503 {"status": "error"}')),
         patch.object(runner, "_open_session") as open_session,
     ):
         open_session.return_value.__aenter__ = AsyncMock(return_value=session)
@@ -1656,7 +1658,7 @@ async def test_generative_ui_only_fails_when_the_tool_is_not_served(tmp_path):
 
     with (
         patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=True)),
-        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, "503 class=auth")),
+        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, '503 {"status": "error"}')),
         patch.object(runner, "_open_session") as open_session,
         patch.object(runner, "execute_call", AsyncMock()) as execute,
     ):
@@ -1680,7 +1682,7 @@ async def test_generative_ui_only_fails_when_the_sandbox_has_no_deno(tmp_path):
 
     with (
         patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=True)),
-        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, "503 class=auth")),
+        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, '503 {"status": "error"}')),
         patch.object(runner, "_open_session") as open_session,
     ):
         open_session.return_value.__aenter__ = AsyncMock(return_value=session)
@@ -1692,7 +1694,7 @@ async def test_generative_ui_only_fails_when_the_sandbox_has_no_deno(tmp_path):
 
 
 async def test_generative_ui_only_needs_no_endpoint_and_no_credential(tmp_path):
-    """Health failure with a valid failure class is expected here; a dead endpoint still fails."""
+    """The health probe is skipped once the endpoint fails to come up; that run still fails."""
     runner = _ui_runner(tmp_path)
     with (
         patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=False)),

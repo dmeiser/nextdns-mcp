@@ -2,10 +2,14 @@
 
 ``GET /health`` is a real readiness check: it probes the NextDNS API with the
 configured API key and returns ``200 OK`` with ``{"status": "ok"}`` only when
-that probe succeeds. Failures return ``503`` with the failure class and a short
-reason, and the result is cached so health polling cannot hammer the API.
+that probe succeeds. Failures return ``503`` with the minimal body
+``{"status": "error"}`` — never the failure class or the reason, since the
+HTTP transport is unauthenticated by design (issue #603). The class and reason
+move to the server log instead. The result is cached so health polling cannot
+hammer the API.
 """
 
+import logging
 from collections.abc import Iterator
 
 import httpx
@@ -88,20 +92,62 @@ async def test_health_returns_200_when_the_credential_probe_succeeds(monkeypatch
     assert client.calls == [("GET", HEALTH_PROBE_PATH, {"timeout": HEALTH_PROBE_TIMEOUT})]
 
 
-async def test_health_returns_503_auth_class_when_nextdns_rejects_the_key(monkeypatch, mock_api_key):
-    """An upstream 401 is reported as 503 with the auth failure class."""
+async def test_unauthenticated_health_does_not_disclose_auth_class(monkeypatch, mock_api_key):
+    """An upstream 401 answers 503 with no class and no reason to read (issue #603).
+
+    Before the fix this body was ``{"status": "error", "class": "auth",
+    "reason": "... (HTTP 401)"}``, which told any host that could reach the
+    port that the configured key was rejected.
+    """
     _install_client(monkeypatch, _response(401, '{"error":"API key not found","token":"super-secret"}'))
 
     status_code, body = await _call_health()
 
     assert status_code == 503
-    assert body["class"] == "auth"
-    assert body["status"] == "error"
-    assert "401" in body["reason"]
+    assert "class" not in body
+    assert "reason" not in body
+
+
+async def test_unauthenticated_health_does_not_disclose_unreachable_class(monkeypatch, mock_api_key):
+    """An upstream ConnectError answers 503 with no class and no reason to read."""
+    _install_client(monkeypatch, httpx.ConnectError("no route to host"))
+
+    status_code, body = await _call_health()
+
+    assert status_code == 503
+    assert "class" not in body
+    assert "reason" not in body
+
+
+async def test_health_503_body_is_exactly_the_minimal_error_shape(monkeypatch, mock_api_key):
+    """The failure body carries the status field and nothing else."""
+    _install_client(monkeypatch, _response(401))
+
+    status_code, body = await _call_health()
+
+    assert status_code == 503
+    assert body == {"status": "error"}
+
+
+async def test_health_failure_detail_reaches_the_server_log(monkeypatch, mock_api_key, caplog):
+    """Closing the body moves the diagnostic, it does not drop it.
+
+    An operator still has to tell "NextDNS rejected the key" from "NextDNS is
+    down", and the log is the only place left that can say so.
+    """
+    _install_client(monkeypatch, _response(401))
+
+    with caplog.at_level(logging.WARNING, logger="nextdns_mcp.openapi"):
+        status_code, body = await _call_health()
+
+    assert status_code == 503
+    assert body == {"status": "error"}
+    assert "class=auth" in caplog.text
+    assert "HTTP 401" in caplog.text
 
 
 async def test_health_never_leaks_key_material_or_the_probe_body(monkeypatch, mock_api_key):
-    """Failure payloads carry the class and a short reason, never secrets or the raw body."""
+    """Failure payloads carry nothing but the status field, never secrets or the raw body."""
     secret = mock_api_key
     upstream_body = f'{{"error":"invalid key","api_key":"{secret}"}}'
     _install_client(monkeypatch, _response(401, upstream_body))
@@ -111,12 +157,11 @@ async def test_health_never_leaks_key_material_or_the_probe_body(monkeypatch, mo
     serialized = str(body)
     assert secret not in serialized
     assert upstream_body not in serialized
-    assert body["class"] == "auth"
-    assert body["reason"] == "NextDNS API rejected the configured credentials (HTTP 401)"
+    assert body == {"status": "error"}
 
 
-async def test_health_returns_503_auth_class_when_no_api_key_is_usable(monkeypatch):
-    """A missing or empty API key is reported as 503 with the auth class, not a 500."""
+async def test_health_returns_503_when_no_api_key_is_usable(monkeypatch):
+    """A missing or empty API key is reported as 503, not a 500 — and says no more."""
     monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
     monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
     monkeypatch.setattr(client_module, "_client", None)
@@ -126,13 +171,11 @@ async def test_health_returns_503_auth_class_when_no_api_key_is_usable(monkeypat
     status_code, body = await _call_health()
 
     assert status_code == 503
-    assert body["status"] == "error"
-    assert body["class"] == "auth"
-    assert "API key" in body["reason"]
+    assert body == {"status": "error"}
 
 
-async def test_health_reports_an_invalid_http_timeout_as_unreachable(monkeypatch, mock_api_key):
-    """An invalid NEXTDNS_HTTP_TIMEOUT is never mislabeled as an auth failure."""
+async def test_an_invalid_http_timeout_is_reported_as_unready_without_naming_it(monkeypatch, mock_api_key):
+    """An invalid NEXTDNS_HTTP_TIMEOUT still yields 503, without leaking the cause."""
     monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
     monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "not-a-number")
     monkeypatch.setattr(client_module, "_client", None)
@@ -142,8 +185,8 @@ async def test_health_reports_an_invalid_http_timeout_as_unreachable(monkeypatch
     status_code, body = await _call_health()
 
     assert status_code == 503
-    assert body["class"] == "unreachable"
-    assert "NEXTDNS_HTTP_TIMEOUT" in body["reason"]
+    assert body == {"status": "error"}
+    assert "NEXTDNS_HTTP_TIMEOUT" not in str(body)
 
 
 async def test_configuration_failure_is_cached_like_any_other_probe_result(monkeypatch):
@@ -161,37 +204,35 @@ async def test_configuration_failure_is_cached_like_any_other_probe_result(monke
     assert openapi._health_probe_cache is first_result
 
 
-async def test_health_returns_503_unreachable_class_on_timeout(monkeypatch, mock_api_key):
-    """A probe that times out is reported as 503 with the unreachable class."""
+async def test_health_returns_503_on_timeout(monkeypatch, mock_api_key):
+    """A probe that times out is a 503 with the minimal body."""
     _install_client(monkeypatch, httpx.ReadTimeout("timed out"))
 
     status_code, body = await _call_health()
 
     assert status_code == 503
-    assert body["class"] == "unreachable"
-    assert "5s" in body["reason"]
+    assert body == {"status": "error"}
 
 
-async def test_health_returns_503_unreachable_class_when_nextdns_is_down(monkeypatch, mock_api_key):
-    """A connection error is reported as 503 with the unreachable class."""
+async def test_health_returns_503_when_nextdns_is_down(monkeypatch, mock_api_key):
+    """A connection error is a 503 with the minimal body."""
     _install_client(monkeypatch, httpx.ConnectError("no route to host"))
 
     status_code, body = await _call_health()
 
     assert status_code == 503
-    assert body["class"] == "unreachable"
-    assert "ConnectError" in body["reason"]
+    assert body == {"status": "error"}
 
 
-async def test_health_returns_503_unreachable_class_on_upstream_server_error(monkeypatch, mock_api_key):
-    """A non-auth error status from NextDNS is reported as unreachable."""
+async def test_health_returns_503_on_upstream_server_error(monkeypatch, mock_api_key):
+    """A non-auth error status from NextDNS is a 503 with the minimal body."""
     _install_client(monkeypatch, _response(503, "upstream boom"))
 
     status_code, body = await _call_health()
 
     assert status_code == 503
-    assert body["class"] == "unreachable"
-    assert "503" in body["reason"]
+    assert body == {"status": "error"}
+    assert "503" not in str(body)
 
 
 async def test_second_health_call_within_the_window_does_not_re_probe(monkeypatch, mock_api_key):
@@ -251,7 +292,7 @@ async def test_health_served_by_http_app(monkeypatch, mock_api_key):
 
 
 async def test_health_served_by_http_app_reports_failures(monkeypatch, mock_api_key):
-    """A failing probe surfaces as a 503 JSON body over the real HTTP app."""
+    """A failing probe surfaces as a 503 minimal JSON body over the real HTTP app."""
     _install_client(monkeypatch, _response(401))
     server = get_mcp_server()
     app = server.http_app()
@@ -263,7 +304,7 @@ async def test_health_served_by_http_app_reports_failures(monkeypatch, mock_api_
         response = await client.get("/health")
 
     assert response.status_code == 503
-    assert response.json()["class"] == "auth"
+    assert response.json() == {"status": "error"}
 
 
 async def test_concurrent_pollers_share_one_probe(monkeypatch, mock_api_key):

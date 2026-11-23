@@ -135,8 +135,9 @@ jobs:
       - name: Start container with an invalid credential for the /health check
         run: |
           # A deliberately invalid (not absent) key: the server starts and serves
-          # /health, so the readiness probe runs for real and must report the
-          # upstream authentication failure. Needs no NextDNS credential and
+          # /health, so the readiness probe runs for real and must answer 503
+          # (without naming why in the body - that route is unauthenticated).
+          # Needs no NextDNS credential and
           # performs no live write, so it runs on every PR including forks.
           docker run -d \
             --name nextdns-container-e2e-health \

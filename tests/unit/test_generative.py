@@ -779,7 +779,11 @@ async def test_generate_ui_execution_timeout():
 
 
 def test_sandbox_env_strips_host_secrets(monkeypatch):
-    """Sensitive host variables (especially NEXTDNS_API_KEY) never reach the Deno subprocess."""
+    """Host variables outside the allowlist never reach the Deno subprocess.
+
+    The sanitizer is an allowlist, not a name-substring blocklist, so
+    credential-bearing variables with unmarked names are dropped too.
+    """
     from nextdns_mcp.generative_sandbox import _sandbox_env
 
     monkeypatch.setenv("NEXTDNS_API_KEY", "super-secret-key")
@@ -788,6 +792,13 @@ def test_sandbox_env_strips_host_secrets(monkeypatch):
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
     monkeypatch.setenv("SOME_PASSWORD", "hunter2")
     monkeypatch.setenv("MY_PRIVATE_KEY", "pem")
+    monkeypatch.setenv("DB_DSN", "postgres://user:pass@db/internal")
+    monkeypatch.setenv("SERVICE_ACCOUNT_JSON", '{"client_email":"svc@example.com"}')
+    monkeypatch.setenv("APP_CONFIG_JSON", '{"api_key":"leak-me"}')
+    monkeypatch.setenv("RANDOM_UNMARKED_VAR", "whatever")
+    # Credential-bearing names inside the DENO_ namespace must not pass on a prefix.
+    monkeypatch.setenv("DENO_AUTH_TOKENS", "deadbeef@deno.land")
+    monkeypatch.setenv("DENO_KV_ACCESS_TOKEN", "kv_pat_x")
     env = _sandbox_env()
     for stripped in (
         "NEXTDNS_API_KEY",
@@ -796,10 +807,23 @@ def test_sandbox_env_strips_host_secrets(monkeypatch):
         "AWS_SECRET_ACCESS_KEY",
         "SOME_PASSWORD",
         "MY_PRIVATE_KEY",
+        "DB_DSN",
+        "SERVICE_ACCOUNT_JSON",
+        "APP_CONFIG_JSON",
+        "RANDOM_UNMARKED_VAR",
+        "DENO_AUTH_TOKENS",
+        "DENO_KV_ACCESS_TOKEN",
     ):
         assert stripped not in env
-    # Non-secret variables the worker needs are preserved.
+    # Approved variables the worker needs are preserved.
     assert env.get("PATH") == os.environ.get("PATH")
+    assert env.get("HOME") == os.environ.get("HOME")
+    # Only the explicitly approved Deno runtime variables pass through.
+    monkeypatch.setenv("DENO_DIR", "/tmp/deno-cache")
+    monkeypatch.setenv("DENO_NO_UPDATE_CHECK", "1")
+    env = _sandbox_env()
+    assert env["DENO_DIR"] == "/tmp/deno-cache"
+    assert env["DENO_NO_UPDATE_CHECK"] == "1"
 
 
 def test_sandbox_env_is_a_copy(monkeypatch):
@@ -938,10 +962,20 @@ async def test_generate_ui_cold_start_timeout_is_distinct():
 
 
 class _FakeStderr:
-    def __init__(self, lines: list[bytes]) -> None:
+    """A stderr pipe that answers from a canned list, then reports EOF.
+
+    ``reads`` counts submissions, and ``max_reads`` makes a reader that keeps
+    submitting after EOF fail loudly instead of spinning for the whole test run.
+    """
+
+    def __init__(self, lines: list[bytes], max_reads: int = 4) -> None:
         self._lines = list(lines)
+        self._max_reads = max_reads
+        self.reads = 0
 
     def readline(self) -> bytes:
+        self.reads += 1
+        assert self.reads <= self._max_reads, f"stderr read {self.reads} times; expected at most {self._max_reads}"
         return self._lines.pop(0) if self._lines else b""
 
 
@@ -1017,18 +1051,36 @@ async def test_await_ready_raises_when_worker_dies():
     proc = _FakeProc([b"import error\n", b""], returncode=1)
     with pytest.raises(RuntimeError, match="Pyodide sandbox failed to start"):
         await _await_ready(proc)
+    assert proc.stderr.reads == 2  # the log line, then the EOF that ends the wait
 
 
 @pytest.mark.asyncio
-async def test_read_startup_line_passes_through_empty_lines_while_alive():
-    """An empty readline with the worker still alive must not raise."""
+async def test_await_ready_raises_on_stderr_eof_while_worker_alive():
+    """A worker that closes stderr without signalling must fail startup, not spin.
+
+    An empty `readline()` is EOF, so readiness can never arrive; before the fix the
+    `while True` loop re-submitted reads to the executor until the caller's cold-start
+    timeout cancelled it (issue #595).
+    """
+    from nextdns_mcp.generative_sandbox import _await_ready
+
+    proc = _FakeProc([b"boot log\n"], returncode=None)  # poll() stays None: the worker is alive
+    with pytest.raises(RuntimeError, match="Pyodide sandbox failed to start"):
+        await _await_ready(proc)
+    assert proc.stderr.reads == 2  # the log line, then the EOF that ends the wait
+
+
+@pytest.mark.asyncio
+async def test_read_startup_line_raises_on_eof_while_worker_alive():
+    """EOF on a live worker's stderr is a failed startup, the same as a dead one."""
     from nextdns_mcp.generative_sandbox import _read_startup_line
 
-    proc = _FakeProc([b""], returncode=None)
+    stderr = _FakeStderr([b""])
     lines: list[str] = []
-    decoded = await _read_startup_line(proc, proc.stderr, lines)  # type: ignore[arg-type]
-    assert decoded == ""
-    assert lines == [""]
+    with pytest.raises(RuntimeError, match="Pyodide sandbox failed to start"):
+        await _read_startup_line(stderr, lines)
+    assert stderr.reads == 1
+    assert lines == []
 
 
 @pytest.mark.asyncio

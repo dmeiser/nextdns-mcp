@@ -15,7 +15,7 @@ from typing import Any
 
 from .config import _BOOL_FALSE_TOKENS, _BOOL_TRUE_TOKENS, get_default_profile
 from .constants import PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
-from .errors import ErrorCode, _cap_with_marker, error_payload
+from .errors import ErrorCode, cap_with_marker, error_payload
 
 
 def is_safe_profile_id(value: str | int) -> bool:
@@ -322,7 +322,8 @@ def sanitize_label(value: Any) -> str:
     a second pass would see a 201-character label and cut it again.
     """
     text = _CONTROL_CHARS_RE.sub("", str(value))
-    # errors._cap_with_marker holds the one cap-and-marker implementation; re-inlining
-    # the comparison here is the second copy of the cut both callers must make identically.
-    capped, _ = _cap_with_marker(text, _MAX_LABEL_LENGTH, _LABEL_TRUNCATION_MARKER)
+    # errors.body.cap_with_marker holds the one cap-and-marker implementation,
+    # borrowed from the package root by public name; re-inlining the comparison
+    # here is the second copy of the cut both callers must make identically.
+    capped, _ = cap_with_marker(text, _MAX_LABEL_LENGTH, _LABEL_TRUNCATION_MARKER)
     return capped

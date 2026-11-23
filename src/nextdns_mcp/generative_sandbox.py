@@ -36,29 +36,60 @@ WIRE_LINE_SLACK = 4096
 MAX_WIRE_LINE_BYTES = MAX_RESULT_BYTES + WIRE_LINE_SLACK
 _READ_CHUNK_SIZE = 65536
 
-# Host environment variables matching any of these markers (case-insensitive)
-# are never forwarded to the Deno sandbox subprocess. Generated code executes
-# with Pyodide's full ``os`` module, so anything in the subprocess environment
-# is readable from LLM-generated code; key material such as NEXTDNS_API_KEY
-# must not cross that boundary.
-_SENSITIVE_ENV_MARKERS = (
-    "KEY",
-    "SECRET",
-    "TOKEN",
-    "PASSWORD",
-    "PASSWD",
-    "CREDENTIAL",
-    "PRIVATE",
-    "AUTH",
+# Exact host environment variables approved for the Deno sandbox subprocess.
+# Generated code executes with Pyodide's full ``os`` module, so anything in the
+# subprocess environment is readable from LLM-generated code. A name-substring
+# blocklist is not sufficient: credential-bearing variables with unmarked
+# names (``DB_DSN``, ``SERVICE_ACCOUNT_JSON``, ``APP_CONFIG_JSON``) would cross
+# the boundary, so the default is to forward nothing not explicitly approved.
+# The ``DENO_`` name space is NOT blanket-approved: it contains credentials
+# (``DENO_AUTH_TOKENS``, ``DENO_KV_ACCESS_TOKEN``), so the runtime variables
+# the worker may honor are listed explicitly instead.
+_SANDBOX_ENV_ALLOWLIST = frozenset(
+    {
+        # Process discovery and the user's home (Deno's cache dir).
+        "PATH",
+        "HOME",
+        # Locale, so Pyodide/Deno decode UTF-8 consistently with the host.
+        "LANG",
+        "LC_ALL",
+        # Temp-dir selection for the worker's scratch files.
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        # Windows equivalents of HOME/PATH-adjacent state.
+        "SYSTEMROOT",
+        "WINDIR",
+        "USERPROFILE",
+        # Deno runtime knobs the worker may honor. These are named one by one
+        # because the DENO_ namespace also holds credentials, which must not
+        # pass on a prefix: DENO_AUTH_TOKENS is a list of bearer tokens for
+        # private module registries and DENO_KV_ACCESS_TOKEN a Deno KV PAT.
+        # DENO_CERT/DENO_TLS_CA_STORE are certificate paths and stores, not
+        # key material, and a private-CA host needs them to fetch the CDN.
+        "DENO_DIR",
+        "DENO_NO_UPDATE_CHECK",
+        "DENO_V8_FLAGS",
+        "DENO_UNSTABLE_DETECT_CJS",
+        "DENO_CERT",
+        "DENO_TLS_CA_STORE",
+    }
 )
+# LC_* covers locale variants (LC_CTYPE, LC_MESSAGES, ...).
+_SANDBOX_ENV_PREFIXES = ("LC_",)
 
 
 def _sandbox_env() -> dict[str, str]:
-    """Copy of the host environment with secret-bearing variables removed."""
+    """Allowlisted copy of the host environment for the Deno subprocess.
+
+    Only variables the worker needs to start are forwarded; everything else —
+    including every credential, whatever its name — stays on the host side of
+    the boundary.
+    """
     return {
         name: value
         for name, value in os.environ.items()
-        if not any(marker in name.upper() for marker in _SENSITIVE_ENV_MARKERS)
+        if name in _SANDBOX_ENV_ALLOWLIST or name.startswith(_SANDBOX_ENV_PREFIXES)
     }
 
 
@@ -117,15 +148,18 @@ def _startup_error(stderr_lines: list[str]) -> RuntimeError:
     return RuntimeError(f"Pyodide sandbox failed to start:\n{err}")
 
 
-async def _read_startup_line(
-    proc: subprocess.Popen[bytes],
-    proc_stderr: Any,
-    stderr_lines: list[str],
-) -> str:
-    """Read one startup stderr line, raising if the worker died before signalling."""
+async def _read_startup_line(proc_stderr: Any, stderr_lines: list[str]) -> str:
+    """Read one startup stderr line, raising if the worker stopped signalling before readiness.
+
+    An empty read from a pipe is EOF, not a quiet moment: it means every write end of
+    the worker's stderr is closed, so the ``pyodide:ready`` signal can never arrive —
+    whether the worker died or is still alive with that pipe closed. Returning the
+    empty line instead would leave ``_await_ready`` submitting reads forever, one
+    executor future per spin, until the caller's cold-start timeout cancelled it.
+    """
     loop = asyncio.get_event_loop()
     line = await loop.run_in_executor(None, proc_stderr.readline)
-    if not line and proc.poll() is not None:
+    if not line:
         raise _startup_error(stderr_lines)
     decoded = line.decode().rstrip()
     stderr_lines.append(decoded)
@@ -133,11 +167,15 @@ async def _read_startup_line(
 
 
 async def _await_ready(proc: subprocess.Popen[bytes]) -> None:
-    """Drain the worker's stderr until it signals readiness, as upstream does."""
+    """Drain the worker's stderr until it signals readiness, as upstream does.
+
+    Raises once stderr reaches EOF: the readiness signal can no longer arrive, so
+    there is nothing left to wait for and ``_start`` reclaims the worker.
+    """
     assert proc.stderr is not None
     stderr_lines: list[str] = []
     while True:
-        decoded = await _read_startup_line(proc, proc.stderr, stderr_lines)
+        decoded = await _read_startup_line(proc.stderr, stderr_lines)
         if "pyodide:ready" in decoded:
             break
 
