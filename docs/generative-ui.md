@@ -27,3 +27,5 @@ The server additionally enforces:
 - CSP built via `_build_csp()` applied to the renderer resource.
 
 Hosts remain responsible for the guarantees above; backend guards are defense in depth, not a substitute.
+
+Why the provider is opt-in, how the sandbox is hardened, and what those guards are in service of is recorded in [ADR 0002](architecture/0002-generative-ui-opt-in-provider.md).

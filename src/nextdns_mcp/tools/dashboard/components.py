@@ -6,8 +6,9 @@ through ``data``, the shared series primitives through ``nextdns_mcp.charts`` an
 shared chart components through ``nextdns_mcp.chart_ui``; it never calls the transport
 itself, and it never writes the summary text a model reads back - that is ``formatters``.
 
-Names beginning with ``_`` are package-internal: the dashboard package's public
-surface is what ``__init__`` re-exports.
+Names beginning with ``_`` are private to this module: helpers shared with
+the other dashboard modules cross under public names (issue #637), and the
+package's public surface is what ``__init__`` re-exports.
 
 SPDX-License-Identifier: MIT
 """
@@ -45,17 +46,17 @@ from ...charts import (
 )
 from .data import (
     ExtraDashboardPayloads,
-    _calc_rate,
-    _destination_label,
-    _destination_row,
-    _device_label,
-    _device_row,
-    _domain_label,
-    _gafam_rows,
-    _ip_row,
-    _item_queries,
-    _reason_label,
-    _reason_row,
+    calc_rate,
+    destination_label,
+    destination_row,
+    device_label,
+    device_row,
+    domain_label,
+    gafam_rows,
+    ip_row,
+    item_queries,
+    reason_label,
+    reason_row,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,7 @@ def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
 def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     """Build domain data table."""
     rows: list[dict[str, Any]] = [
-        {"domain": _domain_label(item, key_name), "queries": _item_queries(item)} for item in data
+        {"domain": domain_label(item, key_name), "queries": item_queries(item)} for item in data
     ]
     return DataTable(
         columns=[
@@ -164,7 +165,7 @@ def _render_domain_content(title: str, data: list[dict[str, Any]], key_name: str
     elif view_type in ("table", "auto"):
         _domain_table(data, key_name)
     else:
-        chart_data = [{"label": _domain_label(item, key_name), "queries": _item_queries(item)} for item in data]
+        chart_data = [{"label": domain_label(item, key_name), "queries": item_queries(item)} for item in data]
         _render_chart_view(chart_data, title, color, view_type)
 
 
@@ -179,7 +180,7 @@ def _build_analytics_card(title: str, description: str, render_content) -> Card:
     return card
 
 
-def _build_domains_card(
+def build_domains_card(
     title: str,
     description: str,
     data: list[dict[str, Any]],
@@ -197,8 +198,8 @@ def _build_domains_card(
 
 def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     """Build reasons data table."""
-    total = sum(_item_queries(item) for item in data)
-    rows: list[dict[str, Any]] = [_reason_row(item, total) for item in data]
+    total = sum(item_queries(item) for item in data)
+    rows: list[dict[str, Any]] = [reason_row(item, total) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
@@ -209,7 +210,7 @@ def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     )
 
 
-def _build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
+def build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the reasons for blocking card."""
 
     def _render():
@@ -218,7 +219,7 @@ def _build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> 
         elif view_type == "table":
             _reasons_table(data)
         else:
-            chart_data = [{"label": _reason_label(item), "queries": _item_queries(item)} for item in data]
+            chart_data = [{"label": reason_label(item), "queries": item_queries(item)} for item in data]
             if view_type == "pie":
                 _pie_chart(chart_data)
             else:
@@ -233,8 +234,8 @@ def _build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> 
 
 def _devices_table(data: list[dict[str, Any]]) -> DataTable:
     """Build devices data table."""
-    total = sum(_item_queries(item) for item in data)
-    rows: list[dict[str, Any]] = [_device_row(item, total) for item in data]
+    total = sum(item_queries(item) for item in data)
+    rows: list[dict[str, Any]] = [device_row(item, total) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="device", header="Device", sortable=True),
@@ -253,11 +254,11 @@ def _render_device_content(data: list[dict[str, Any]], view_type: str) -> None:
     elif view_type in ("table", "auto"):
         _devices_table(data)
     else:
-        chart_data = [{"label": _device_label(item), "queries": _item_queries(item)} for item in data]
+        chart_data = [{"label": device_label(item), "queries": item_queries(item)} for item in data]
         _render_chart_view(chart_data, "Queries", "#3b82f6", view_type)
 
 
-def _build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
+def build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the devices card."""
     return _build_analytics_card(
         "Devices",
@@ -266,9 +267,9 @@ def _build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> 
     )
 
 
-def _build_ips_card(data: list[dict[str, Any]]) -> Card:
+def build_ips_card(data: list[dict[str, Any]]) -> Card:
     """Build the IP addresses card."""
-    rows: list[dict[str, Any]] = [_ip_row(item) for item in data]
+    rows: list[dict[str, Any]] = [ip_row(item) for item in data]
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle("IPs")
@@ -301,7 +302,7 @@ def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
     )
 
 
-def _build_gafam_card(
+def build_gafam_card(
     chart_data: list[dict[str, Any]],
     table_rows: list[dict[str, Any]],
     view_type: str = "auto",
@@ -337,7 +338,7 @@ def _build_security_section(title: str, val: int, total: int, pct: float) -> Col
     return col
 
 
-def _build_security_card(encryption_rate: tuple[int, int, float], dnssec_rate: tuple[int, int, float]) -> Card:
+def build_security_card(encryption_rate: tuple[int, int, float], dnssec_rate: tuple[int, int, float]) -> Card:
     """Build the security card from the encrypted DNS and DNSSEC rate tuples."""
     enc_val, enc_total, enc_pct = encryption_rate
     dnssec_val, dnssec_total, dnssec_pct = dnssec_rate
@@ -354,7 +355,7 @@ def _build_security_card(encryption_rate: tuple[int, int, float], dnssec_rate: t
 
 def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
     """Build destinations table."""
-    rows: list[dict[str, Any]] = [_destination_row(item) for item in data]
+    rows: list[dict[str, Any]] = [destination_row(item) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="country", header="Country", sortable=True),
@@ -373,11 +374,11 @@ def _render_destination_content(data: list[dict[str, Any]], view_type: str) -> N
     elif view_type in ("table", "auto"):
         _destinations_table(data)
     else:
-        chart_data = [{"label": _destination_label(item), "queries": _item_queries(item)} for item in data]
+        chart_data = [{"label": destination_label(item), "queries": item_queries(item)} for item in data]
         _render_chart_view(chart_data, "Queries", "#3b82f6", view_type)
 
 
-def _build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
+def build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the destination countries card."""
     return _build_analytics_card(
         "Traffic Destination",
@@ -386,7 +387,7 @@ def _build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto"
     )
 
 
-def _assemble_overview_layout(
+def assemble_overview_layout(
     kpis: dict[str, Any],
     series_payload: dict[str, Any],
     resolved_data: list[dict[str, Any]],
@@ -399,14 +400,14 @@ def _assemble_overview_layout(
         _build_kpi_row(kpis)
         _build_queries_series_card(series_payload)
         with Row(gap=4):
-            _build_domains_card(
+            build_domains_card(
                 "Resolved Domains",
                 "Domains that resolved without being blocked.",
                 resolved_data,
                 view_type=domain_view,
                 color="#3b82f6",
             )
-            _build_domains_card(
+            build_domains_card(
                 "Blocked Domains",
                 "Domains blocked by security, privacy, or parental controls.",
                 blocked_data,
@@ -416,7 +417,7 @@ def _assemble_overview_layout(
     return view
 
 
-def _append_extra_cards(
+def append_extra_cards(
     view: Column,
     payloads: ExtraDashboardPayloads,
     domain_view: str = "table",
@@ -433,37 +434,37 @@ def _append_extra_cards(
     """
     with view:
         with Row(gap=4):
-            _build_reasons_card(payloads.reasons, view_type=view_type)
-            _build_devices_card(payloads.devices, view_type=view_type)
+            build_reasons_card(payloads.reasons, view_type=view_type)
+            build_devices_card(payloads.devices, view_type=view_type)
         with Row(gap=4):
-            _build_domains_card("Root Domains", "Aggregate root domains.", payloads.root_domains, view_type=domain_view)
-            _build_ips_card(payloads.ips)
+            build_domains_card("Root Domains", "Aggregate root domains.", payloads.root_domains, view_type=domain_view)
+            build_ips_card(payloads.ips)
         with Row(gap=4):
-            gafam_chart, gafam_table = _gafam_rows(payloads.gafam)
-            _build_gafam_card(gafam_chart, gafam_table, view_type=view_type)
-            _build_destinations_card(payloads.countries, view_type=view_type)
+            gafam_chart, gafam_table = gafam_rows(payloads.gafam)
+            build_gafam_card(gafam_chart, gafam_table, view_type=view_type)
+            build_destinations_card(payloads.countries, view_type=view_type)
         with Row(gap=4):
-            _build_security_card(
-                _calc_rate(payloads.encryption, "encrypted"),
-                _calc_rate(payloads.dnssec, "validated"),
+            build_security_card(
+                calc_rate(payloads.encryption, "encrypted"),
+                calc_rate(payloads.dnssec, "validated"),
             )
 
 
-def _build_page_app(view: Column) -> PrefabApp:
+def build_page_app(view: Column) -> PrefabApp:
     """Wrap an assembled dashboard view in the served Prefab app."""
     return PrefabApp(view=view, theme=DASHBOARD_THEME)
 
 
-def _build_kpi_app(kpis: dict[str, Any]) -> PrefabApp:
+def build_kpi_app(kpis: dict[str, Any]) -> PrefabApp:
     """Build the standalone KPI page: the three metric cards, nothing else."""
     with Column(gap=4, css_class="p-6") as view:
         _build_kpi_row(kpis)
-    return _build_page_app(view)
+    return build_page_app(view)
 
 
-def _wrap_card_result(card: Card, summary_text: str) -> ToolResult:
+def wrap_card_result(card: Card, summary_text: str) -> ToolResult:
     """Wrap a single visual card into a ToolResult."""
     with Column(gap=4, css_class="p-6", children=[card]) as view:
         pass
-    app = _build_page_app(view)
+    app = build_page_app(view)
     return ToolResult(content=summary_text, structured_content=app)

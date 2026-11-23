@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp.client import AccessControlledClient, AccessDeniedError
+from nextdns_mcp.client import AccessControlledClient, AccessDeniedError, RawProbeTransport
 
 API_KEY = "test-key-12345"
 API_BASE = "https://api.nextdns.io"
@@ -199,31 +199,39 @@ class TestNonApprovedDestinationsRefused:
 
 
 class TestRawPathKeepsTheDestinationAllowList:
-    """raw_request() skips the profile ACL, never the destination allow-list.
+    """The probe transport skips the profile ACL, never the destination allow-list.
 
-    raw_request() is the ACL-free transport path used by the /health readiness
-    probe, but it carries the same X-Api-Key client header as every other path,
-    so a caller-supplied off-site URL must still be refused there.
+    RawProbeTransport is the ACL-free path used by the /health readiness
+    probe, but it carries the same X-Api-Key client header as every other
+    path, so a caller-supplied off-site URL must still be refused there.
     """
 
-    async def test_raw_request_to_off_site_host_is_refused(self, recorder: Callable[..., object]) -> None:
-        client, seen = recorder()
-        async with client:
+    async def test_raw_request_to_off_site_host_is_refused(self) -> None:
+        seen: list[httpx.Request] = []
+        raw = RawProbeTransport(
+            base_url=API_BASE,
+            transport=httpx.MockTransport(lambda request: seen.append(request) or httpx.Response(200)),  # type: ignore[func-returns-value]
+            headers={"X-Api-Key": API_KEY},
+        )
+        async with raw:
             with pytest.raises(AccessDeniedError) as exc_info:
-                await client.raw_request("GET", "https://evil.example/profiles/abc123/settings")
+                await raw.request("GET", "https://evil.example/profiles/abc123/settings")
 
         assert exc_info.value.code == "access_denied"
         assert seen == []
 
-    async def test_raw_request_to_approved_host_still_proceeds(
-        self, monkeypatch: pytest.MonkeyPatch, recorder: Callable[..., object]
-    ) -> None:
+    async def test_raw_request_to_approved_host_still_proceeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The probe path is unaffected: a deny-all ACL still lets it reach the base host."""
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "")
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "")
-        client, seen = recorder()
-        async with client:
-            response = await client.raw_request("GET", "/health")
+        seen: list[httpx.Request] = []
+        raw = RawProbeTransport(
+            base_url=API_BASE,
+            transport=httpx.MockTransport(lambda request: seen.append(request) or httpx.Response(200)),  # type: ignore[func-returns-value]
+            headers={"X-Api-Key": API_KEY},
+        )
+        async with raw:
+            response = await raw.request("GET", "/health")
 
         assert response.status_code == 200
         assert seen[0].url.host == "api.nextdns.io"

@@ -94,6 +94,41 @@ class TestKeyCap:
         assert consumed == ["a", "b"]
 
 
+class TestKeyBounding:
+    def test_keys_pass_through_uncapped_when_the_spec_does_not_bound_them(self):
+        spec = BoundSpec(max_string_chars=4)
+        bounded, cut = bound_json({"abcdef": "x"}, spec)
+        assert bounded == {"abcdef": "x"}
+        assert cut is False
+
+    def test_a_long_key_is_cut_marked_and_flagged_when_the_spec_bounds_keys(self):
+        spec = BoundSpec(max_string_chars=4, string_marker="…", bound_keys=True)
+        bounded, cut = bound_json({"abcdef": "v"}, spec)
+        assert bounded == {"abcd…": "v"}
+        assert cut is True
+
+    def test_a_key_under_the_cap_keeps_its_text_and_value(self):
+        spec = BoundSpec(max_string_chars=4, string_marker="…", bound_keys=True)
+        bounded, cut = bound_json({"abc": "x"}, spec)
+        assert bounded == {"abc": "x"}
+        assert cut is False
+
+    def test_cut_keys_that_collide_are_named_so_no_field_is_lost(self):
+        spec = BoundSpec(max_string_chars=4, string_marker="…", bound_keys=True)
+        bounded, cut = bound_json({"abcde one": 1, "abcde two": 2, "abcde three": 3}, spec)
+        assert bounded == {"abcd…": 1, "abcd… [duplicate 2]": 2, "abcd… [duplicate 3]": 3}
+        assert cut is True
+
+    def test_a_non_string_key_passes_through_without_a_flag(self):
+        # ``json`` never decodes a non-string key, but a caller that walks a
+        # document it did not write must not fail on a key the string cap
+        # cannot be applied to.
+        spec = BoundSpec(max_string_chars=4, string_marker="…", bound_keys=True)
+        bounded, cut = bound_json({422: "x"}, spec)
+        assert bounded == {422: "x"}
+        assert cut is False
+
+
 class TestDepthCap:
     def test_a_nesting_past_the_depth_cap_is_projected_to_none(self):
         spec = BoundSpec(max_string_chars=200, max_depth=2)
@@ -109,7 +144,7 @@ class TestDepthCap:
 
 class TestCallerSpecs:
     def test_the_error_path_spec_matches_the_module_constants(self):
-        from nextdns_mcp.errors import _BODY_BOUNDS
+        from nextdns_mcp.errors.body import _BODY_BOUNDS
 
         assert _BODY_BOUNDS.max_string_chars == errors.MAX_RESPONSE_BODY_CHARS
         assert _BODY_BOUNDS.string_marker == errors.TRUNCATION_MARKER
@@ -127,6 +162,16 @@ class TestCallerSpecs:
             max_keys=call_log.PROJECT_MAX_KEYS,
             max_depth=call_log.PROJECT_MAX_DEPTH,
         )
+
+    def test_the_error_path_spec_bounds_keys_and_the_call_log_one_does_not(self):
+        from nextdns_mcp.call_log import _PROJECTION_BOUNDS
+        from nextdns_mcp.errors.body import _BODY_BOUNDS
+
+        # The errors caller inlines documents it did not write, so keys are
+        # capped there (issue #600); the call log writes its own projection
+        # and keeps keys verbatim.
+        assert _BODY_BOUNDS.bound_keys is True
+        assert _PROJECTION_BOUNDS.bound_keys is False
 
     def test_the_spec_is_frozen(self):
         from dataclasses import FrozenInstanceError

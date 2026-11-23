@@ -52,7 +52,7 @@ from .tool_search_answer import (
     _fallback_answer,
 )
 from .tool_search_rank import (
-    _catalog_words_for,
+    _catalog_words_memo,
     _CatalogWords,
     _named_tools,
     _rank_by_name_overlap,
@@ -144,12 +144,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
 
     def _catalog_words(self, tools: Sequence[Tool]) -> _CatalogWords:
         """The catalog's word structures, memoized by its sorted tool names."""
-        key = tuple(sorted(tool.name for tool in tools))
-        memo = self._word_memos.get(key)
-        if memo is None:
-            memo = _catalog_words_for(tools)
-            self._word_memos[key] = memo
-        return memo
+        return _catalog_words_memo(self._word_memos, tools)
 
     def _augment_query(self, query: str, variants: set[str]) -> str:
         """Widen a lexical query with the catalog's own other spellings.
