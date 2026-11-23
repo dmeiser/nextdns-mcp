@@ -102,10 +102,6 @@ startup, which hard-fails the E2E run when the served catalog drifts from the sp
 
 - **`ai_e2e_harness.py`** - Python. An MCP-native LLM harness is the actor; the script measures.
 - **`ai_e2e_common.py`** - Python. Shared, pure (network-free) helpers (result model, constant tables, REST read-back).
-- **`ai_e2e_steps.py`** - Python. The step catalog builder (one small builder per checklist family).
-- **`ai_e2e_verify.py`** - Python. The REST verifiers (one per family of checks, keyed by `step.verify`).
-- **`ai_e2e_run.py`** - Python. The per-run orchestration (provisioning, per-step loop, teardown).
-- **`ai_e2e_cli.py`** - Python. The CLI entry point (argument parsing, selection, reporting).
 
 The harness provisions its own isolated test profile, drives the live MCP server
 through an MCP-native actor (default `opencode`, configurable), then independently
