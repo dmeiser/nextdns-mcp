@@ -44,16 +44,14 @@ from fastmcp.tools.base import Tool
 from .config import ConfigurationError
 from .constants import is_write_operation
 from .tool_search_rank import (
-    _WORD_SPLIT,
     _catalog_words_for,
     _CatalogWords,
-    _name_words,
+    _flat_key,
     _named_tools,
     _rank_by_name_overlap,
     _strip_scope_mentions,
     _tool_properties,
     _variant_words,
-    _vocabulary_words,
     _word_scorer,
     _words,
 )
@@ -118,8 +116,20 @@ def _is_write_tool(name: str, endpoints: Mapping[str, tuple[str, str]] | None, t
     return _annotation_says_write(tool)
 
 
-# camelCase / snake_case / non-word splitter, used for both tool names and
-# queries so 'queryTimeSeries' and 'query time series' compare equal.
+def _catalog_words_memo(memos: dict[tuple[str, ...], _CatalogWords], tools: Sequence[Tool]) -> _CatalogWords:
+    """One catalog's word structures, shared by the search and call-shape paths.
+
+    The transform's query ranking and the middleware's unknown-name matching
+    and suggestions all read the same constants of a static catalog; both
+    memoize them keyed on the sorted tool names, and a catalog under a
+    different set of names rebuilds them.
+    """
+    key = tuple(sorted(tool.name for tool in tools))
+    memo = memos.get(key)
+    if memo is None:
+        memo = _catalog_words_for(tools)
+        memos[key] = memo
+    return memo
 
 
 class FallbackBM25SearchTransform(BM25SearchTransform):
@@ -171,12 +181,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
 
     def _catalog_words(self, tools: Sequence[Tool]) -> _CatalogWords:
         """The catalog's word structures, memoized by its sorted tool names."""
-        key = tuple(sorted(tool.name for tool in tools))
-        memo = self._word_memos.get(key)
-        if memo is None:
-            memo = _catalog_words_for(tools)
-            self._word_memos[key] = memo
-        return memo
+        return _catalog_words_memo(self._word_memos, tools)
 
     def _augment_query(self, query: str, variants: set[str]) -> str:
         """Widen a lexical query with the catalog's own other spellings.
@@ -456,17 +461,33 @@ def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
     return _budget_results([_compact_entry(tool) for tool in tools])
 
 
-def _closest_tools(name: str, tools: Sequence[Tool], limit: int = 3) -> list[Tool]:
+def _closest_tools(
+    name: str, tools: Sequence[Tool], limit: int = 3, catalog: _CatalogWords | None = None
+) -> list[Tool]:
     """The tools a typed name's words come closest to, ranked as search_tools ranks them.
 
     A caller that types ``denylists.updateDenylistEntry`` or "generate analytics
     plot" has described a task in this catalog's vocabulary without naming a
     tool. Ranking those words with the rule search_tools already uses turns a
     dead end into a correction the caller can act on.
+
+    The ranking data comes from the catalog's word memo when the caller holds
+    it — the shape middleware memoizes it per catalog, so a repeated unknown
+    name performs no ranking-data rebuild; without it the structures are
+    derived from ``tools`` here.
     """
     if not tools:
         return []
-    scorer = _word_scorer(_words(name), _name_words(tools), _vocabulary_words(tools))
+    if catalog is None:
+        catalog = _catalog_words_for(tools)
+    scorer = _word_scorer(
+        _words(name),
+        catalog.names,
+        catalog.vocabulary,
+        (catalog.name_shared, catalog.vocab_shared),
+        catalog.leading,
+        catalog.generic_verbs,
+    )
     ordered = sorted(tools, key=lambda tool: -scorer(tool.name))
     return [tool for tool in ordered[:limit] if scorer(tool.name) > 0]
 
@@ -477,7 +498,7 @@ def _required_arguments(tool: Tool) -> str:
     return ", ".join(required) if required else "no arguments"
 
 
-def _unknown_tool_message(name: str, tools: Sequence[Tool]) -> str:
+def _unknown_tool_message(name: str, tools: Sequence[Tool], catalog: _CatalogWords | None = None) -> str:
     """Say what the caller can call instead of a name that is not a tool.
 
     FastMCP's own answer is ``Unknown tool: '<x>'``. Under disclosure the caller
@@ -485,7 +506,7 @@ def _unknown_tool_message(name: str, tools: Sequence[Tool]) -> str:
     and a caller that typed a name has already decided it knows the tool. Live,
     it guesses again instead, shorter each time.
     """
-    closest = _closest_tools(name, tools)
+    closest = _closest_tools(name, tools, catalog=catalog)
     if not closest:
         return (
             f"{name!r} is not a tool of this server. search_tools(query) returns "
@@ -497,19 +518,44 @@ def _unknown_tool_message(name: str, tools: Sequence[Tool]) -> str:
     )
 
 
-def _flat_equal_matches(name: str, names: Sequence[str]) -> list[str]:
-    """Catalog entries equal to the typed name once separators and case are gone."""
-    flat = _WORD_SPLIT.sub("", name.casefold())
-    return [candidate for candidate in names if _WORD_SPLIT.sub("", candidate.casefold()) == flat]
+def _flat_name_keys(names: Sequence[str], catalog: _CatalogWords | None) -> Mapping[str, str]:
+    """The flat comparison key of each candidate — from the memo when held."""
+    if catalog is not None:
+        return catalog.flat_names
+    return {candidate: _flat_key(candidate) for candidate in names}
 
 
-def _word_equal_matches(name: str, names: Sequence[str]) -> list[str]:
-    """Catalog entries whose word set equals the typed name's word set."""
+def _name_word_sets(names: Sequence[str], catalog: _CatalogWords | None) -> Mapping[str, set[str]]:
+    """The word set of each candidate — from the memo when held."""
+    if catalog is not None:
+        return catalog.names
+    return {candidate: _words(candidate) for candidate in names}
+
+
+def _flat_equal_matches(name: str, names: Sequence[str], catalog: _CatalogWords | None = None) -> list[str]:
+    """Catalog entries equal to the typed name once separators and case are gone.
+
+    The per-candidate flat keys are a constant of the catalog and live in its
+    word memo; a caller holding the memo (the shape middleware does) passes it
+    so a repeated unknown name re-normalizes nothing catalog-side. Without the
+    memo each candidate is normalized here.
+    """
+    flat = _flat_key(name)
+    return [candidate for candidate in names if _flat_name_keys(names, catalog).get(candidate) == flat]
+
+
+def _word_equal_matches(name: str, names: Sequence[str], catalog: _CatalogWords | None = None) -> list[str]:
+    """Catalog entries whose word set equals the typed name's word set.
+
+    The candidate word sets live in the catalog's word memo when the caller
+    holds it (the shape middleware does); without the memo each candidate is
+    tokenized here.
+    """
     words = _words(name)
-    return [candidate for candidate in names if _words(candidate) == words]
+    return [candidate for candidate in names if _name_word_sets(names, catalog).get(candidate) == words]
 
 
-def _match_tool_name(name: str, names: Sequence[str]) -> str:
+def _match_tool_name(name: str, names: Sequence[str], catalog: _CatalogWords | None = None) -> str:
     """The catalog entry a mistyped name unambiguously means, or ''.
 
     Two readings only, both exact. The same name with separators and case
@@ -519,14 +565,15 @@ def _match_tool_name(name: str, names: Sequence[str]) -> str:
     neither is left alone - the caller gets the diagnosis, not a guess.
 
     A reading is dropped when two catalog entries satisfy it, so an ambiguous
-    name is never resolved.
+    name is never resolved. The catalog's word memo, when the caller holds it,
+    supplies the per-candidate comparison data so nothing is recomputed.
     """
     if not name or name in names:
         return ""
-    flat_matches = _flat_equal_matches(name, names)
+    flat_matches = _flat_equal_matches(name, names, catalog)
     if len(flat_matches) == 1:
         return flat_matches[0]
-    word_matches = _word_equal_matches(name, names)
+    word_matches = _word_equal_matches(name, names, catalog)
     return word_matches[0] if len(word_matches) == 1 else ""
 
 
@@ -655,7 +702,9 @@ def _passthrough_resolution(resolved: str, by_name: dict[str, Tool]) -> tuple[st
     return None
 
 
-def _resolved_entry(resolved: str, by_name: dict[str, Tool]) -> tuple[str, Tool] | None:
+def _resolved_entry(
+    resolved: str, by_name: dict[str, Tool], catalog: _CatalogWords | None = None
+) -> tuple[str, Tool] | None:
     """The (name, entry) the supplied name refers to in the catalog, or None if it matches nothing.
 
     A name that is itself a tool is used as given; one that normalises to exactly
@@ -663,7 +712,7 @@ def _resolved_entry(resolved: str, by_name: dict[str, Tool]) -> tuple[str, Tool]
     """
     if resolved in by_name:
         return resolved, by_name[resolved]
-    matched = _match_tool_name(resolved, list(by_name))
+    matched = _match_tool_name(resolved, list(by_name), catalog)
     if matched:
         logger.warning("call_tool name %r is not a tool; it matches %r once normalised", resolved, matched)
         return matched, by_name[matched]
@@ -715,6 +764,7 @@ class CallToolShapeMiddleware(Middleware):
         self._call_tool_name = call_tool_name
         self._transform = transform
         self._endpoints = endpoints
+        self._catalog_memos: dict[tuple[str, ...], _CatalogWords] = {}
 
     def _is_exact_ready_call(self, supplied: Any, arguments: Mapping[str, Any]) -> bool:
         """A well-formed exact call: the name is a real operation, parameters are inside.
@@ -784,11 +834,26 @@ class CallToolShapeMiddleware(Middleware):
         passthrough = _passthrough_resolution(resolved, by_name)
         if passthrough is not None:
             return passthrough
-        entry = _resolved_entry(resolved, by_name)
+        return self._resolve_against_catalog(resolved, tools, by_name)
+
+    def _resolve_against_catalog(
+        self, resolved: str, tools: Sequence[Tool], by_name: dict[str, Tool]
+    ) -> tuple[str | None, Tool | None]:
+        """The resolution for a name that is not itself a tool.
+
+        An exact name needs no catalog word data: the matching and the
+        suggestion ranking exist for names that are NOT tools, so the memo
+        is built only when one of those paths actually runs; the first
+        unknown request on a catalog builds it and every later one reuses it.
+        """
+        if resolved in by_name:
+            return resolved, by_name[resolved]
+        catalog = self._catalog_words(tools)
+        entry = _resolved_entry(resolved, by_name, catalog)
         if entry is None:
-            raise ToolError(_unknown_tool_message(resolved, tools))
+            raise ToolError(_unknown_tool_message(resolved, tools, catalog))
         if self._loose_write_refused(resolved, by_name, entry):
-            raise ToolError(_unknown_tool_message(resolved, tools))
+            raise ToolError(_unknown_tool_message(resolved, tools, catalog))
         return entry
 
     def _loose_write_refused(self, resolved: str, by_name: dict[str, Tool], entry: tuple[str, Tool]) -> bool:
@@ -838,6 +903,16 @@ class CallToolShapeMiddleware(Middleware):
         if not moved:
             return arguments
         return _moved_into_arguments(arguments, nested, moved)
+
+    def _catalog_words(self, tools: Sequence[Tool]) -> _CatalogWords:
+        """The catalog's word structures, memoized by its sorted tool names.
+
+        Unknown-name matching and the suggestion ranking read these
+        structures; they are constants of a static catalog, so the first
+        unknown request on a catalog builds them and every later one reuses
+        them instead of re-normalizing and re-ranking the whole catalog.
+        """
+        return _catalog_words_memo(self._catalog_memos, tools)
 
     async def _catalog(self, context: MiddlewareContext) -> Sequence[Tool]:
         """Every tool this server will accept through call_tool."""
