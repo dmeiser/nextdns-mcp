@@ -81,7 +81,10 @@ def _resolved_imports(module_file: Path) -> set[str]:
             continue
         if node.level == 0:
             if node.module:
-                resolved.add(node.module)
+                # Resolve per alias: ``from nextdns_mcp import client`` names the
+                # dependency in the alias, not in ``node.module``, so a check that
+                # kept only the module could not see that spelling either.
+                resolved.update(f"{node.module}.{alias.name}" for alias in node.names)
             continue
         base = ".".join(parts[: len(parts) - (node.level - 1)])
         if node.module:
@@ -109,10 +112,15 @@ def _package_imports(module_file: Path) -> set[str]:
 
 
 def test_logs_is_a_package_not_a_module():
-    """The god module stayed split: a package directory, one concern per module."""
+    """The god module stayed split: a package directory, exactly these modules, one concern each.
+
+    Asserted as set equality, not containment: a check that only lists the seven
+    expected files cannot see an eighth module appear beside them, which is the
+    drift (a concern leaking back out into a new file) the rule exists to catch.
+    """
     assert PACKAGE_DIR.is_dir()
-    for name in PACKAGE_MODULES:
-        assert (PACKAGE_DIR / name).is_file(), f"{name} missing from the logs package"
+    actual = sorted(p.name for p in PACKAGE_DIR.glob("*.py"))
+    assert actual == sorted(PACKAGE_MODULES), f"logs/ holds {actual}, expected {sorted(PACKAGE_MODULES)}"
     assert not (PACKAGE_DIR.parent / "logs.py").exists(), "logs.py came back beside the package"
 
 
@@ -126,11 +134,13 @@ def test_every_module_names_its_concern():
 def test_import_edges_run_one_way():
     """No sibling imports ``__init__``; every intra-package import stays inside §2's DAG."""
     for name in PACKAGE_MODULES:
-        imports = _package_imports(PACKAGE_DIR / name)
         owner = name.removesuffix(".py")
-        assert owner != "__init__" or imports <= ALLOWED_PACKAGE_IMPORTS["__init__"]
+        imports = _package_imports(PACKAGE_DIR / name)
+        assert imports <= ALLOWED_PACKAGE_IMPORTS[owner], (
+            f"{name} imports {sorted(imports - ALLOWED_PACKAGE_IMPORTS[owner])}, outside the recorded edges"
+        )
         if owner == "__init__":
-            continue
+            continue  # the surface may re-export from any sibling
         assert "__init__" not in imports, f"{name} imports the package surface back"
         assert imports <= ALLOWED_PACKAGE_IMPORTS[owner], f"{name} imports {imports - ALLOWED_PACKAGE_IMPORTS[owner]}"
     for owner, required in REQUIRED_PACKAGE_IMPORTS.items():
