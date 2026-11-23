@@ -216,11 +216,32 @@ def build_series_params(
     )
 
 
+# The relative-offset grammar the analytics endpoints accept: a digit run
+# (``RELATIVE_AMOUNT_PATTERN``) followed by one unit letter (``RELATIVE_UNIT_CLASS``),
+# with each unit's size in ``RELATIVE_UNIT_SECONDS`` - ``-1d`` and ``-7d`` are the
+# forms, and "y" is a 365-day year, matching how the analytics endpoints read a
+# year. The unit letter is matched case-sensitively: an upper-case letter is a
+# different unit upstream ("-1M" reads as months), so folding it onto its
+# lower-case twin would size a months-long range as minutes.
+# Two paths read a relative offset and both recognize it from these one
+# definition each: ``charts.resolve_time_point`` resolves the amount to Unix
+# seconds, and ``normalize_time_value`` below rewrites the spellings the API
+# reads wrongly. Each path keeps its own sign, spacing and case policy for the
+# input forms it accepts; sharing the amount and unit grammar is what keeps a
+# unit or an amount shape from being recognized on one path and not the other.
+RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+RELATIVE_AMOUNT_PATTERN = r"\d+"
+# The unit letters as a regex character class, generated from the table so the
+# alphabet and the conversion data can never drift apart.
+RELATIVE_UNIT_CLASS = "[" + "".join(sorted(RELATIVE_UNIT_SECONDS)) + "]"
+
 # The spellings of a relative range that the analytics endpoints do NOT accept
 # but callers reach for: `now-1d` (Grafana/Prometheus) and a bare negative
-# number, which upstream reads as an absolute Unix timestamp.
-NOW_OFFSET_RE = re.compile(r"^now\s*(?:-\s*(\d+\s*[smhdwy]))?$", re.IGNORECASE)
-BARE_NEGATIVE_RE = re.compile(r"^-\d+$")
+# number, which upstream reads as an absolute Unix timestamp. Both recognizers
+# are built from the grammar above, so every offset rewritten here is one
+# ``charts.resolve_time_point`` can also price.
+NOW_OFFSET_RE = re.compile(rf"^now\s*(?:-\s*({RELATIVE_AMOUNT_PATTERN}\s*{RELATIVE_UNIT_CLASS}))?$", re.IGNORECASE)
+BARE_NEGATIVE_RE = re.compile(rf"^-{RELATIVE_AMOUNT_PATTERN}$")
 
 
 def normalize_time_value(value: Any) -> Any:
