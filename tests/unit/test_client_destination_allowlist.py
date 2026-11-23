@@ -222,6 +222,69 @@ class TestAllowListFollowsTheCreationTimeBase:
         assert hosts == client_module.ALLOWED_DESTINATION_HOSTS | client_module.LOOPBACK_HOSTS
 
 
+class TestFactoryResolvesOneBasePerClient:
+    """One configuration read per client: the aim and the allowance cannot be two different bases."""
+
+    @staticmethod
+    def _flaky_getter() -> str:
+        """A getter that moves between two hosts, standing in for a config reload."""
+        TestFactoryResolvesOneBasePerClient.reads += 1
+        return (
+            "https://proxy-a.internal.example.com"
+            if TestFactoryResolvesOneBasePerClient.reads == 1
+            else "https://proxy-b.internal.example.com"
+        )
+
+    reads: ClassVar[int] = 0
+
+    def test_factory_reads_the_base_once_and_passes_it_to_both_uses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        type(self).reads = 0
+        monkeypatch.setenv("NEXTDNS_API_KEY", API_KEY)
+        monkeypatch.setattr(client_module, "get_api_base", self._flaky_getter)
+
+        client = client_module.create_nextdns_client()
+
+        assert str(client.base_url) == "https://proxy-a.internal.example.com"
+        assert client._configured_base == "https://proxy-a.internal.example.com"
+        assert type(self).reads == 1
+
+    async def test_relative_request_through_that_client_passes_its_own_guard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """QA's probe: a base that moves mid-creation must not leave the client's own host refused.
+
+        The factory's kwargs are handed to the constructor exactly as the
+        factory builds them, and the request goes through a recording transport,
+        so this fails (AccessDeniedError, zero transport calls) if the allowance
+        ever resolves to a second, different read of the setting.
+        """
+        type(self).reads = 0
+        monkeypatch.setenv("NEXTDNS_API_KEY", API_KEY)
+        monkeypatch.setattr(client_module, "get_api_base", self._flaky_getter)
+
+        seen: list[httpx.Request] = []
+        client = AccessControlledClient(
+            transport=httpx.MockTransport(lambda request: seen.append(request) or httpx.Response(200)),  # type: ignore[func-returns-value]
+            **client_module._authenticated_client_kwargs(),
+        )
+        async with client:
+            response = await client.request("GET", "/profiles/abc123/settings")
+
+        assert response.status_code == 200
+        assert [r.url.host for r in seen] == ["proxy-a.internal.example.com"]
+
+    async def test_probe_client_shares_the_same_single_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        type(self).reads = 0
+        monkeypatch.setenv("NEXTDNS_API_KEY", API_KEY)
+        monkeypatch.setattr(client_module, "get_api_base", self._flaky_getter)
+
+        probe = client_module.create_raw_probe_client()
+
+        assert str(probe.base_url) == "https://proxy-a.internal.example.com"
+        assert probe._configured_base == "https://proxy-a.internal.example.com"
+        await probe.aclose()
+
+
 class TestNonApprovedDestinationsRefused:
     """A request to any other host is refused before it reaches the transport."""
 

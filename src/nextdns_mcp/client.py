@@ -289,6 +289,7 @@ class AccessControlledClient:
         timeout: Any = None,
         transport: Any = None,
         follow_redirects: bool = False,
+        configured_base: str | None = None,
     ) -> None:
         kwargs: dict[str, Any] = {"headers": headers, "follow_redirects": follow_redirects}
         if base_url is not None:
@@ -298,10 +299,14 @@ class AccessControlledClient:
         if transport is not None:
             kwargs["transport"] = transport
         self._client = httpx.AsyncClient(**kwargs)
-        # Resolved once, here: the destination allowance is the API base this
-        # client was created on, so changing NEXTDNS_API_BASE later cannot move
-        # the guard off the host this client is still sending to.
-        self._configured_base = _configured_destination_base()
+        # The destination allowance is the API base this client was created on,
+        # so changing NEXTDNS_API_BASE later cannot move the guard off the host
+        # this client is still sending to. Pass configured_base alongside
+        # base_url whenever both come from one configuration read: resolving the
+        # environment a second time here could name a different base from the one
+        # the client is actually aimed at, which is the drift this field exists to
+        # prevent. Unset (a hand-built client) falls back to one read here.
+        self._configured_base = _configured_destination_base() if configured_base is None else configured_base
 
     async def __aenter__(self) -> Self:
         await self._client.__aenter__()
@@ -528,6 +533,12 @@ def _authenticated_client_kwargs() -> dict[str, Any]:
 
     Both the ACL client and the raw probe client are built from these kwargs,
     so they always carry the same credentials, base URL, and timeout.
+
+    The API base is resolved exactly once per client here and handed to the
+    constructor twice - as ``base_url`` and as ``configured_base`` - because
+    resolving it separately for the destination allowance would be a second
+    read of the same setting: a configuration change landing between the two
+    would leave the client aimed at one host and its guard allowing another.
     """
     key = get_api_key()
     if not key or not key.strip():
@@ -536,8 +547,10 @@ def _authenticated_client_kwargs() -> dict[str, Any]:
             "variable or NEXTDNS_API_KEY_FILE pointing to a Docker secret."
         )
 
+    base_url = get_api_base()
     return {
-        "base_url": get_api_base(),
+        "base_url": base_url,
+        "configured_base": base_url,
         "headers": {
             "X-Api-Key": key.strip(),
             "Accept": "application/json",
@@ -579,11 +592,12 @@ class RawProbeTransport:
     """
 
     def __init__(self, **kwargs: Any) -> None:
+        configured_base = kwargs.pop("configured_base", None)
         self._client = httpx.AsyncClient(**kwargs)
-        # Resolved once, here: the destination allowance is the API base this
-        # client was created on, so changing NEXTDNS_API_BASE later cannot move
-        # the guard off the host this client is still sending to.
-        self._configured_base = _configured_destination_base()
+        # Same rule as AccessControlledClient: the allowance is the base this
+        # probe was created on, taken from the one configuration read that also
+        # set base_url when the factory built it.
+        self._configured_base = _configured_destination_base() if configured_base is None else configured_base
 
     async def __aenter__(self) -> Self:
         await self._client.__aenter__()
