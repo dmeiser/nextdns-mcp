@@ -15,6 +15,22 @@ substitution of gate-for-transport is the one place the server sends an
 authorized request without ``AccessControlledClient`` holding the door, and it
 is the reason this module builds its own denial payload through the shared
 transport helper rather than depending on the ACL's ``AccessDeniedError``.
+
+Three names, one operation, in the order a call passes through them. The
+camelCase one is the published tool, the snake_case ones are not: the server
+registers a composite tool under the wrapper function's own ``__name__``
+(``server._COMPOSITE_TOOLS``), so ``dohLookup`` is what callers see and it
+keeps the camelCase of the generated operation tools, while the wrapper itself
+exists to hold the MCP-facing signature and docstring apart from the request
+logic (AGENT.md). ``_dohLookup_impl`` is the private half that wrapper
+forwards to by keyword: profile resolution, the one access snapshot the whole
+lookup is authorized by, record-type validation, and the resolver URL.
+``doh_lookup`` is the function that sends - snake_case because it is a helper
+with no tool name of its own - and the read gate is checked again on it, so
+the decision to query and the query itself are authorized by the same
+environment snapshot (issue #179). Renaming any of the three is not a
+tidy-up: ``dohLookup`` is the name in every caller's tool list, and
+``doh_lookup`` is the send-time gate the access-control tests call directly.
 """
 
 import logging
