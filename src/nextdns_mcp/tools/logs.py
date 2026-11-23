@@ -346,8 +346,8 @@ def _append_preview(preview: list[str], preview_bytes: int, text: str) -> int:
 
 # Read off a failed stream at most this much of the body, so http_error_payload
 # can quote the upstream error document without reading a hostile multi-megabyte
-# failure page into memory. The size is errors.py's own body slice, so the read
-# always covers what the payload will show.
+# failure page into memory. The size is the errors package's own body slice
+# (errors/body.py), so the read always covers what the payload will show.
 _ERROR_BODY_READ_BYTES = BODY_SLICE_BYTES
 
 
