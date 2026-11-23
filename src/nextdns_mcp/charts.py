@@ -258,20 +258,6 @@ def _format_resolved(seconds: float | None) -> str:
         return f"out of range ({seconds!r})"
 
 
-def _json_safe(value: Any) -> Any:
-    """A JSON-representable rendering of a value an error payload echoes back.
-
-    ``Infinity`` and ``NaN`` survive Python's JSON decoder (see
-    ``_numeric_seconds``), and a caller can name them as a time argument. An
-    un-serializable value in the payload would drop the whole refusal when the
-    tool result is encoded, so the caller gets no typed error at all; the text
-    form names the same value.
-    """
-    if isinstance(value, float) and not math.isfinite(value):
-        return repr(value)
-    return value
-
-
 def _unresolved_range_error(from_time: str | int, to_time: str | int) -> dict[str, Any]:
     """Typed error for a range whose endpoints do not resolve to instants."""
     return error_payload(
@@ -280,8 +266,8 @@ def _unresolved_range_error(from_time: str | int, to_time: str | int) -> dict[st
             f"Could not interpret the requested time range ({from_time!r} to {to_time!r}); "
             "use a Unix timestamp, an ISO 8601 timestamp, 'now', or a relative offset such as '-7d'"
         ),
-        from_time=_json_safe(from_time),
-        to_time=_json_safe(to_time),
+        from_time=from_time,
+        to_time=to_time,
     )
 
 
@@ -290,8 +276,8 @@ def _empty_range_error(from_time: str | int, to_time: str | int) -> dict[str, An
     return error_payload(
         ErrorCode.INVALID_ARGUMENT,
         f"Requested time range must end after it starts, got {from_time!r} to {to_time!r}",
-        from_time=_json_safe(from_time),
-        to_time=_json_safe(to_time),
+        from_time=from_time,
+        to_time=to_time,
     )
 
 

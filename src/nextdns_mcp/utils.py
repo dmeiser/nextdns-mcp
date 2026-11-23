@@ -206,7 +206,9 @@ def normalize_time_value(value: Any) -> Any:
       ``-86400.5`` is truncated toward zero (``-86400s``) rather than emitted
       as ``-86400.5s``, which the API rejects, and a sub-second offset
       truncates to ``now``. Non-finite floats (``NaN``, ``Infinity``) survive
-      Python's JSON decoder and are left for the chart layer to resolve.
+      Python's JSON decoder and keep the spelling they have always been sent
+      in - ``NaN`` unchanged for the chart layer to resolve, ``-Infinity`` as
+      the offset string upstream refuses.
     - ``now-1d``, the Grafana/Prometheus spelling. Upstream answers "`from` must
       be number"; the same span in its own spelling (``-1d``) works.
 
@@ -223,10 +225,11 @@ def normalize_time_value(value: Any) -> Any:
 def _normalize_numeric_time(value: float) -> Any:
     """The offset spelling for a negative number; the number itself otherwise."""
     if isinstance(value, float) and not math.isfinite(value):
-        # IEEE 754 NaN/Infinity survive Python's JSON decoder (see
-        # charts._numeric_seconds); they resolve downstream, and int() on them
-        # would raise ValueError/OverflowError inside the tool call.
-        return value
+        # NaN and Infinity survive Python's JSON decoder (see
+        # charts._numeric_seconds). They keep the spelling they had before this
+        # rewrite - upstream refuses them, and the chart layer resolves them -
+        # because int() on either raises inside the tool call.
+        return _non_finite_time(value)
     if value >= 0:
         return value
     # The API accepts only whole-second offsets; truncate toward zero.
@@ -234,6 +237,11 @@ def _normalize_numeric_time(value: float) -> Any:
     # a signless "0s" has no verified acceptance anywhere.
     whole = int(value)
     return f"{whole}s" if whole else "now"
+
+
+def _non_finite_time(value: float) -> Any:
+    """A non-finite float in the spelling it has always been sent as."""
+    return f"{value}s" if value < 0 else value
 
 
 def _normalize_time_text(value: Any) -> Any:

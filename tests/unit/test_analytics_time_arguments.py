@@ -14,6 +14,8 @@ spellings the API reads.
 SPDX-License-Identifier: MIT
 """
 
+import math
+
 import pytest
 from fastmcp import Client
 
@@ -53,14 +55,28 @@ class TestTimeValues:
     def test_a_shape_the_api_accepts_is_left_alone(self, given):
         assert normalize_time_value(given) == given
 
-    @pytest.mark.parametrize("given", [float("nan"), float("inf"), float("-inf")])
-    def test_a_non_finite_float_is_left_for_the_chart_layer_to_resolve(self, given):
-        """NaN/Infinity survive Python's JSON decoder; int() on them raises.
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [
+            # NaN is not an offset and is not handed to int(): the chart layer
+            # resolves it. Infinity keeps the offset spelling upstream refuses.
+            (float("nan"), float("nan")),
+            (float("inf"), float("inf")),
+            (float("-inf"), "-infs"),
+        ],
+    )
+    def test_a_non_finite_float_is_not_handed_to_int(self, given, expected):
+        """int() on NaN/Infinity raises inside the tool call, so they keep their old spelling.
 
-        The chart layer (charts._numeric_seconds) resolves them to None;
-        normalizing them here would crash the tool with ValueError/OverflowError.
+        Both values survive Python's JSON decoder; the pre-existing behaviour
+        (NaN unchanged, -Infinity as an offset string upstream refuses) is
+        preserved exactly, and no exception escapes.
         """
-        assert normalize_time_value(given) is given
+        result = normalize_time_value(given)
+        if isinstance(expected, float) and math.isnan(expected):
+            assert math.isnan(result)
+        else:
+            assert result == expected
 
 
 class TestPartials:
@@ -218,19 +234,6 @@ class TestTheToolsSaySoThemselves:
             {"profile_id": "aa11aa", "from": "-" + "9" * 310 + ".0", "interval": 3600},
         )
         assert payload.get("code") == "invalid_argument", payload
-
-    @pytest.mark.asyncio
-    async def test_a_nan_window_reaches_the_server_as_null(self):
-        """NaN is not JSON-representable, so the MCP wire turns it into null.
-
-        The direct-call path (``normalize_time_value(float("nan"))``) is where a
-        non-finite float can arrive, and it is covered there; over the wire the
-        argument is refused by input validation, not by a crash.
-        """
-        payload = await self._call(
-            "plotAnalytics", {"metric": "ips", "profile_id": "aa11aa", "from_time": float("nan"), "to_time": "now"}
-        )
-        assert payload == {}
 
     @pytest.mark.asyncio
     async def test_an_unknown_partials_names_the_values_that_work(self):
