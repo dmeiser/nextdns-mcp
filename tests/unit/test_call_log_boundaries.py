@@ -19,6 +19,7 @@ from nextdns_mcp import call_log
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = REPO_ROOT / "src" / "nextdns_mcp" / "call_log"
+SCRIPTS_DIR = REPO_ROOT / "scripts"
 
 # One concern per module, with the line budget each one carries. A split costs
 # lines over the module it replaces (a docstring and an import block per
@@ -211,13 +212,67 @@ def test_public_name_is_defined_in_its_own_module_and_reachable_from_the_package
     assert name in call_log.__all__, f"{name} is not in the package's public surface"
 
 
+def _reader_import_forms() -> tuple[list[str], list[str]]:
+    """How the e2e harness modules import the server's own row reader.
+
+    Scans every ``scripts/ai_e2e_*.py`` module rather than the one file that
+    happens to hold the reader today: that file was split apart once (WORK-285)
+    and will be split again, and a probe that pins a filename goes red when a
+    refactor moves a correct import instead of when a wrong one appears.
+
+    Returns ``(root_imports, submodule_imports)``: the modules holding the
+    package-root form ``from nextdns_mcp.call_log import read_call_log_rows``,
+    and how any module reaches the reader through a submodule instead - either
+    ``from nextdns_mcp.call_log.<module> import read_call_log_rows``, or a
+    submodule imported from the package root and then dotted into. Function-local
+    imports count: the harness keeps its reader inside the step that needs it.
+    """
+    root_imports: list[str] = []
+    submodule_imports: list[str] = []
+    submodules = {name.removesuffix(".py") for name in PACKAGE_MODULES if name != "__init__.py"}
+    for path in sorted(SCRIPTS_DIR.glob("ai_e2e_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
+        aliased: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            if node.module == "nextdns_mcp.call_log":
+                for alias in node.names:
+                    if alias.name == "read_call_log_rows":
+                        root_imports.append(path.name)
+                    elif alias.name in submodules:
+                        aliased.add(alias.asname or alias.name)
+            elif node.module.startswith("nextdns_mcp.call_log.") and any(
+                alias.name == "read_call_log_rows" for alias in node.names
+            ):
+                submodule_imports.append(f"{path.name}: from {node.module} import read_call_log_rows")
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "read_call_log_rows"
+                and isinstance(node.value, ast.Name)
+                and node.value.id in aliased
+            ):
+                submodule_imports.append(f"{path.name}: read through the imported {node.value.id} submodule")
+    return root_imports, submodule_imports
+
+
 def test_openapi_and_the_harness_keep_the_package_root_import():
     """The two consumers whose import lines this split may not touch.
 
     The harness reads rows with the server's own reader on purpose; a second
-    parser is free to drift from what the server actually writes.
+    parser is free to drift from what the server actually writes. Which harness
+    module holds that import is the harness's business, so the probe reads the
+    import itself from every harness module, and still fails when no module makes
+    it - otherwise a refactor that drops the reader would pass vacuously.
     """
     openapi = (REPO_ROOT / "src" / "nextdns_mcp" / "openapi.py").read_text(encoding="utf-8")
     assert "from .call_log import CallLogMiddleware, call_log_path" in openapi
-    harness = (REPO_ROOT / "scripts" / "ai_e2e_harness.py").read_text(encoding="utf-8")
-    assert "from nextdns_mcp.call_log import read_call_log_rows" in harness
+    root_imports, submodule_imports = _reader_import_forms()
+    assert not submodule_imports, "the harness reached past the package for the row reader: " + "; ".join(
+        submodule_imports
+    )
+    assert root_imports, (
+        "no scripts/ai_e2e_*.py module imports read_call_log_rows: the harness must reuse the "
+        "server's own row reader rather than keep a second parser of its own"
+    )
