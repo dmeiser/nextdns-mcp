@@ -43,7 +43,7 @@ nets make discovery survive a bad query, and disclosure never touches authorizat
   `ConfigurationError` (`src/nextdns_mcp/config.py:216-252`). `bm25` is the default
   because every live-model validation of this contract ran under it; the full listing is
   the explicit opt-out.
-  the transform is mounted when the `FastMCP` instance is constructed, because the
+- The transform is mounted when the `FastMCP` instance is constructed, because the
   middleware that repairs `call_tool` shape has to exist on the instance before any call
   is served (`src/nextdns_mcp/openapi.py:649-691`). A mode that config accepts and this
   module has not implemented raises at startup rather than silently meaning "no

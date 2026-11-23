@@ -17,9 +17,9 @@ and takes that endpoint's own arguments, so the name says what the call does.
 - **Discovery**: By default (`NEXTDNS_TOOL_SEARCH=bm25`), `tools/list` exposes
   only `search_tools` + `call_tool`, and the model finds the operation tools
   by searching; they stay callable either way. Set `NEXTDNS_TOOL_SEARCH=off`
-  to advertise the full catalog. Why disclosure is the default and how its
-  fallback works is recorded in
-  [ADR 0003](architecture/0003-bm25-progressive-tool-disclosure.md). in the listing instead.
+  to advertise the full catalog in the listing instead. Why disclosure is the
+  default and how its fallback works is recorded in
+  [ADR 0003](architecture/0003-bm25-progressive-tool-disclosure.md).
 
 ## Finding the tools
 
