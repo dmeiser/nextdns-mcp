@@ -907,6 +907,85 @@ class TestFanoutShortCircuit:
         assert stop.error is rate_limited
 
 
+class TestExtraSectionBinding:
+    """Each extra dashboard section keeps the payload of its own endpoint.
+
+    ``_build_extra_tasks`` keys its fetch tasks by ``ExtraDashboardPayloads`` field
+    name and the overview gather carries that name through to the unpacking layer, so
+    no layer pairs a payload with a field by position. A reordered task literal, a
+    fifth leading fetch, or a name list built somewhere else cannot then rotate every
+    section at once - ``countries`` rows read as ``gafam``, ``dnssec`` as
+    ``encryption`` - with no exception and no assertion to fail on.
+    """
+
+    EXTRA_SECTIONS = ("reasons", "devices", "ips", "root_domains", "gafam", "countries", "encryption", "dnssec")
+
+    @staticmethod
+    def _distinct_fetch(started):
+        """A transport stub where every endpoint answers with a row only it could produce."""
+
+        async def fake_fetch(pid, endpoint, params=None):
+            query = params or {}
+            started.append((endpoint, query.get("type") or query.get("root")))
+            if endpoint == "status":
+                return {"data": [{"status": "default", "queries": 1}]}, None
+            if endpoint == "status;series":
+                return {"data": [], "meta": {"series": {"times": []}}}, None
+            marker = endpoint
+            if endpoint == "domains" and query.get("root") == "true":
+                marker = "root_domains"
+            elif endpoint == "destinations":
+                marker = str(query.get("type"))
+            return {"data": [{"label": marker, "queries": 1}]}, None
+
+        return fake_fetch
+
+    @pytest.mark.asyncio
+    async def test_permuted_task_order_keeps_every_section_on_its_own_payload(self, monkeypatch):
+        """With the 8 extra tasks built in reverse, each field still carries its own endpoint's rows."""
+        started = []
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", self._distinct_fetch(started))
+        real_build = data_mod._build_extra_tasks
+
+        def reversed_build(*args, **kwargs):
+            tasks = real_build(*args, **kwargs)
+            return {name: tasks[name] for name in reversed(list(tasks))}
+
+        monkeypatch.setattr(data_mod, "_build_extra_tasks", reversed_build)
+
+        _, _, _, _, extra, err = await data_mod._fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
+
+        assert err is None
+        assert extra is not None
+        assert {section: getattr(extra, section)[0]["label"] for section in self.EXTRA_SECTIONS} == {
+            "reasons": "reasons",
+            "devices": "devices",
+            "ips": "ips",
+            "root_domains": "root_domains",
+            "gafam": "gafam",
+            "countries": "countries",
+            "encryption": "encryption",
+            "dnssec": "dnssec",
+        }
+        # All 12 endpoints were fetched: the 4 overview cards plus the 8 extra sections.
+        assert len(started) == 12
+
+    def test_extraction_reads_the_extra_results_from_a_name_keyed_mapping(self):
+        """The unpacking layer indexes the results by field name, so the mapping's own order is irrelevant."""
+        results = {name: ({"data": [{"label": name, "queries": 1}]}, None) for name in reversed(self.EXTRA_SECTIONS)}
+
+        extra, err = data_mod._extract_extra_payloads(results, include_extra=True)
+
+        assert err is None
+        assert extra is not None
+        assert [getattr(extra, section)[0]["label"] for section in self.EXTRA_SECTIONS] == list(self.EXTRA_SECTIONS)
+
+        failure = {"code": "http_error", "error": "upstream said 502", "status_code": 502}
+        results["gafam"] = (None, failure)
+        assert data_mod._extract_extra_payloads(results, include_extra=True) == (None, failure)
+        assert data_mod._extract_extra_payloads({}, include_extra=False) == (None, None)
+
+
 class TestFailClosedNoneGuards:
     """Request paths fail closed on ``(None, None)`` instead of narrowing with ``assert``.
 

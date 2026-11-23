@@ -11,6 +11,7 @@ SPDX-License-Identifier: MIT
 
 import asyncio
 import time
+from collections.abc import Awaitable, Mapping
 from itertools import islice
 from typing import Any, NamedTuple
 
@@ -293,6 +294,12 @@ OVERVIEW_FANOUT_CONCURRENCY = 4
 # failed, the 404 names a profile no endpoint of this profile can resolve.
 FANOUT_STOP_STATUS_CODES = frozenset({401, 403, 404, 429})
 
+# What one overview fan-out fetch answers: the payload or the typed error. Every
+# fetch is built under a name, and that name is what the unpacking layer reads,
+# so the payload a field gets follows the key it was fetched under and never the
+# slot its answer happened to land in.
+FetchResult = tuple[dict[str, Any] | None, dict[str, Any] | None]
+
 
 class _FanoutStop:
     """The stop signal one fan-out shares: the first error that condemns every remaining wave.
@@ -318,7 +325,7 @@ async def _bounded_fetch_analytics_payload(
     endpoint: str,
     params: dict[str, Any] | None,
     stop: _FanoutStop,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+) -> FetchResult:
     """Fetch an analytics payload while bounding concurrent upstream fan-out.
 
     The check runs once the slot is won, not before it: a queued wave is woken the
@@ -364,7 +371,7 @@ def _build_extra_tasks(
     to_time: str | int,
     limit: int,
     params: dict[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, Awaitable[FetchResult]]:
     """Build bounded fetch tasks for extra dashboard sections, keyed by payload field name.
 
     The keys mirror ``ExtraDashboardPayloads`` fields so results gathered in the
@@ -389,33 +396,44 @@ def _build_extra_tasks(
     }
 
 
+async def _tagged_result(name: str, fetch: Awaitable[FetchResult]) -> tuple[str, FetchResult]:
+    """Carry a fetch's key through ``asyncio.gather`` so its answer binds by name.
+
+    ``gather`` hands results back in argument order, which is the one positional
+    coupling the fan-out must not depend on: the payload a field gets has to
+    follow the key the fetch was built under, not the slot its answer happened
+    to land in.
+    """
+    return name, await fetch
+
+
 def _extract_extra_payloads(
-    results: list[Any],
-    extra_names: list[str],
+    results: Mapping[str, FetchResult],
     include_extra: bool,
 ) -> tuple[ExtraDashboardPayloads | None, dict[str, Any] | None]:
     """Bind the extra-section results gathered in the overview stage to payload fields by name."""
     if not include_extra:
         return None, None
-    extra = dict(zip(extra_names, results[4:]))
-    err = _first_error(*(v[1] for v in extra.values()))
+    err = _first_error(*(results[name][1] for name in ExtraDashboardPayloads._fields))
     if err:
         return None, err
-    return ExtraDashboardPayloads(
-        reasons=_payload_data(extra["reasons"][0]),
-        devices=_payload_data(extra["devices"][0]),
-        ips=_payload_data(extra["ips"][0]),
-        root_domains=_payload_data(extra["root_domains"][0]),
-        gafam=_payload_data(extra["gafam"][0]),
-        countries=_payload_data(extra["countries"][0]),
-        encryption=_payload_data(extra["encryption"][0]),
-        dnssec=_payload_data(extra["dnssec"][0]),
-    ), None
+    return (
+        ExtraDashboardPayloads(
+            reasons=_payload_data(results["reasons"][0]),
+            devices=_payload_data(results["devices"][0]),
+            ips=_payload_data(results["ips"][0]),
+            root_domains=_payload_data(results["root_domains"][0]),
+            gafam=_payload_data(results["gafam"][0]),
+            countries=_payload_data(results["countries"][0]),
+            encryption=_payload_data(results["encryption"][0]),
+            dnssec=_payload_data(results["dnssec"][0]),
+        ),
+        None,
+    )
 
 
 def _unpack_overview_results(
-    results: list[Any],
-    extra_names: list[str],
+    results: Mapping[str, FetchResult],
     include_extra: bool,
 ) -> tuple[
     dict[str, Any],
@@ -425,20 +443,19 @@ def _unpack_overview_results(
     ExtraDashboardPayloads | None,
     dict[str, Any] | None,
 ]:
-    """Unpack status, series, domain payloads and any extra dashboard rows."""
-    (
-        (status_payload, status_err),
-        (series_payload, series_err),
-        (resolved_payload, resolved_err),
-        (
-            blocked_payload,
-            blocked_err,
-        ),
-    ) = results[:4]
+    """Unpack status, series, domain payloads and any extra dashboard rows.
+
+    Every payload is read by the key it was fetched under; nothing here depends
+    on how many fetches ran or in what order they were issued.
+    """
+    status_payload, status_err = results["status"]
+    series_payload, series_err = results["series"]
+    resolved_payload, resolved_err = results["resolved_domains"]
+    blocked_payload, blocked_err = results["blocked_domains"]
     err = _first_error(status_err, series_err, resolved_err, blocked_err)
     if err:
         return {}, {}, [], [], None, err
-    extra_payloads, extra_err = _extract_extra_payloads(results, extra_names, include_extra)
+    extra_payloads, extra_err = _extract_extra_payloads(results, include_extra)
     if extra_err:
         return {}, {}, [], [], None, extra_err
     return (
@@ -483,15 +500,16 @@ async def _fetch_overview_payloads(
 
     sem = asyncio.Semaphore(OVERVIEW_FANOUT_CONCURRENCY)
     stop = _FanoutStop()
-    extra_fetchers = _build_extra_tasks(sem, stop, pid, from_time, to_time, limit, params) if include_extra else {}
-    results = await asyncio.gather(
-        _bounded_fetch_analytics_payload(sem, pid, "status", params, stop),
-        _bounded_fetch_analytics_payload(sem, pid, "status;series", ser_params, stop),
-        _bounded_fetch_analytics_payload(sem, pid, "domains", dom_params, stop),
-        _bounded_fetch_analytics_payload(sem, pid, "domains", blk_params, stop),
-        *extra_fetchers.values(),
-    )
-    return _unpack_overview_results(results, list(extra_fetchers), include_extra)
+    fetchers: dict[str, Awaitable[FetchResult]] = {
+        "status": _bounded_fetch_analytics_payload(sem, pid, "status", params, stop),
+        "series": _bounded_fetch_analytics_payload(sem, pid, "status;series", ser_params, stop),
+        "resolved_domains": _bounded_fetch_analytics_payload(sem, pid, "domains", dom_params, stop),
+        "blocked_domains": _bounded_fetch_analytics_payload(sem, pid, "domains", blk_params, stop),
+    }
+    if include_extra:
+        fetchers.update(_build_extra_tasks(sem, stop, pid, from_time, to_time, limit, params))
+    results = dict(await asyncio.gather(*(_tagged_result(name, fetch) for name, fetch in fetchers.items())))
+    return _unpack_overview_results(results, include_extra)
 
 
 async def _fetch_security_payloads(
