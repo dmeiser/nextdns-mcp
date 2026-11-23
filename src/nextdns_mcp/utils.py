@@ -10,6 +10,7 @@ its failures repeat) live in ``constants`` so no module here has to import a
 transport to describe an id.
 """
 
+import math
 import re
 from typing import Any
 
@@ -233,7 +234,14 @@ def normalize_time_value(value: Any) -> Any:
       caller has nothing to correct: across three runs the model retried that
       call ~40 times, varying the interval each time. A negative absolute time
       is not a thing, so it is read as the offset it means, in the API's own
-      relative-seconds spelling (``-86400s``, verified accepted).
+      relative-seconds spelling (``-86400s``, verified accepted). Only integer
+      seconds are accepted in that spelling; a fractional offset like
+      ``-86400.5`` is truncated toward zero (``-86400s``) rather than emitted
+      as ``-86400.5s``, which the API rejects, and a sub-second offset
+      truncates to ``now``. Non-finite floats (``NaN``, ``Infinity``) survive
+      Python's JSON decoder and keep the spelling they have always been sent
+      in - ``NaN`` unchanged for the chart layer to resolve, ``-Infinity`` as
+      the offset string upstream refuses.
     - ``now-1d``, the Grafana/Prometheus spelling. Upstream answers "`from` must
       be number"; the same span in its own spelling (``-1d``) works.
 
@@ -243,8 +251,30 @@ def normalize_time_value(value: Any) -> Any:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return f"{value}s" if value < 0 else value
+        return _normalize_numeric_time(value)
     return _normalize_time_text(value)
+
+
+def _normalize_numeric_time(value: float) -> Any:
+    """The offset spelling for a negative number; the number itself otherwise."""
+    if isinstance(value, float) and not math.isfinite(value):
+        # NaN and Infinity survive Python's JSON decoder (see
+        # charts._numeric_seconds). They keep the spelling they had before this
+        # rewrite - upstream refuses them, and the chart layer resolves them -
+        # because int() on either raises inside the tool call.
+        return _non_finite_time(value)
+    if value >= 0:
+        return value
+    # The API accepts only whole-second offsets; truncate toward zero.
+    # A sub-second negative offset truncates to zero seconds, i.e. now -
+    # a signless "0s" has no verified acceptance anywhere.
+    whole = int(value)
+    return f"{whole}s" if whole else "now"
+
+
+def _non_finite_time(value: float) -> Any:
+    """A non-finite float in the spelling it has always been sent as."""
+    return f"{value}s" if value < 0 else value
 
 
 def _normalize_time_text(value: Any) -> Any:
