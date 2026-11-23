@@ -18,6 +18,7 @@ import asyncio
 import ipaddress
 import os
 import socket
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Self
@@ -466,6 +467,117 @@ class TestStreamingToDisk:
         assert payload["preview"]["truncated"] is True
         assert payload["preview"]["bytes"] <= logs_module.DOWNLOAD_PREVIEW_MAX_BYTES
         assert payload["size"] > payload["preview"]["bytes"]
+
+
+# The holding sink below still needs the real ``os.fdopen`` to build the file
+# behind it, so capture it before a test replaces the attribute.
+_REAL_FDOPEN = os.fdopen
+
+# Both sides of the held write are bounded, so a frozen loop produces an
+# assertion failure rather than a CI job that hangs until its timeout.
+_WRITE_START_SECONDS = 5.0
+_PROGRESS_SECONDS = 1.0
+_RELEASE_SECONDS = 10.0
+
+
+class _HoldingSink:
+    """Stands in for ``os.fdopen``: the real file, with its first write held open.
+
+    ``write`` blocks on a thread event, which reproduces a slow disk without a
+    slow disk: a write issued on the event loop freezes that loop for as long as
+    the watcher keeps the event clear, and a write issued elsewhere does not.
+    """
+
+    def __init__(self) -> None:
+        self._file: Any = None
+        self.write_started = threading.Event()
+        self._released = threading.Event()
+
+    def __call__(self, fd: int, *args: Any, **kwargs: Any) -> Self:
+        self._file = _REAL_FDOPEN(fd, *args, **kwargs)
+        return self
+
+    def write(self, raw: bytes) -> int:
+        if not self.write_started.is_set():
+            self.write_started.set()
+            self._released.wait(_RELEASE_SECONDS)
+        return self._file.write(raw)
+
+    def release(self) -> None:
+        self._released.set()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        if self._file is not None:
+            self._file.close()
+
+
+class _LoopStallWatcher:
+    """Whether an independent coroutine finished while a write was being held.
+
+    It has to run in its own thread: a blocked event loop never runs anything
+    scheduled on it, so a watcher written as a coroutine would be frozen along
+    with the loop it is measuring, and the check would hang rather than fail.
+    """
+
+    def __init__(self, sink: _HoldingSink, progress: threading.Event) -> None:
+        self._sink = sink
+        self._progress = progress
+        self.loop_stayed_free = False
+        self.note = ""
+
+    def run(self) -> None:
+        if not self._sink.write_started.wait(_WRITE_START_SECONDS):
+            self.note = "the download never reached a write"
+            self._sink.release()
+            return
+        self.loop_stayed_free = self._progress.wait(_PROGRESS_SECONDS)
+        if not self.loop_stayed_free:
+            self.note = f"nothing else on the loop ran for {_PROGRESS_SECONDS}s while one write was pending"
+        self._sink.release()  # the download then finishes and the failure is reported, not swallowed
+
+
+async def _second_request(progress: threading.Event) -> None:
+    """Any other call this process would serve while the download is writing."""
+    await asyncio.sleep(0)
+    progress.set()
+
+
+class TestDiskWritesDoNotStallTheLoop:
+    """A download's disk writes must not hold the event loop (issue #648).
+
+    One download is thousands of writes, so a write on the loop makes every
+    other request in the process wait for it. The file's bytes are pinned by
+    ``TestStreamingToDisk``; what is pinned here is that an unrelated coroutine
+    still finishes while a write is in flight.
+    """
+
+    async def test_a_pending_write_leaves_the_loop_free(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "download.csv")
+        chunks = ["a.com,blocked\n", "b.com,blocked\n", "c.com,blocked\n"]
+        sink = _HoldingSink()
+        monkeypatch.setattr(logs_module.os, "fdopen", sink)
+
+        progress = threading.Event()
+        watcher = _LoopStallWatcher(sink, progress)
+        thread = threading.Thread(target=watcher.run, name="loop-stall-watcher", daemon=True)
+        thread.start()
+        try:
+            download = asyncio.create_task(
+                logs_module._write_stream_to_tempfile(_FakeResponse("https://x/file.csv", chunks=chunks), path)
+            )
+            other = asyncio.create_task(_second_request(progress))
+            payload = await download
+            await other
+        finally:
+            thread.join(_WRITE_START_SECONDS + _RELEASE_SECONDS)
+
+        assert watcher.loop_stayed_free, watcher.note
+        # Offloading the write changes when bytes land, not which bytes land.
+        assert payload["row_count"] == 3
+        assert Path(path).read_text(encoding="utf-8") == "".join(chunks)
 
 
 class TestDownloadTool:
