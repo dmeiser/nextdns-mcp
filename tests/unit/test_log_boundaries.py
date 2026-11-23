@@ -18,6 +18,12 @@ from nextdns_mcp.tools.logs import retention, tool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = REPO_ROOT / "src" / "nextdns_mcp" / "tools" / "logs"
+PACKAGE_DOTTED = "nextdns_mcp.tools.logs"
+
+# The fetchers: the authenticated API client and the transport helpers that read
+# a response body. guard.py vets destinations and owns no request of its own, so
+# neither name may appear in its imports, at any import level.
+FETCHER_MODULES = ("nextdns_mcp.client", "nextdns_mcp.transport")
 
 # One concern per module, per the recorded split:
 # __init__ - the re-exported surface only.
@@ -57,15 +63,48 @@ def _module_node(module_file: Path) -> ast.Module:
     return ast.parse(module_file.read_text(encoding="utf-8"), filename=str(module_file))
 
 
-def _package_imports(module_file: Path) -> set[str]:
-    """The sibling modules one source file imports (``from . import x`` / ``from .x import``)."""
-    found = set()
+def _resolved_imports(module_file: Path) -> set[str]:
+    """Every module one source file imports, relative imports resolved to dotted names.
+
+    Level-aware on purpose: ``from ...client import …`` (level 3) is exactly how a
+    module of this package reaches ``nextdns_mcp.client``, and a check that reads
+    only ``level == 1`` cannot see it - the rule would pass whatever the module
+    imported. Resolution walks up from this package's own dotted name.
+    """
+    resolved: set[str] = set()
+    parts = PACKAGE_DOTTED.split(".")
     for node in ast.walk(_module_node(module_file)):
-        if isinstance(node, ast.ImportFrom) and node.level == 1:
-            if node.module:  # ``from .guard import ...``
-                found.add(node.module.split(".")[0])
-            else:  # ``from . import guard, stream``
-                found.update(alias.name for alias in node.names)
+        if isinstance(node, ast.Import):
+            resolved.update(alias.name for alias in node.names)
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level == 0:
+            if node.module:
+                resolved.add(node.module)
+            continue
+        base = ".".join(parts[: len(parts) - (node.level - 1)])
+        if node.module:
+            resolved.add(f"{base}.{node.module}" if base else node.module)
+        else:  # ``from . import guard`` / ``from ... import client``
+            resolved.update(f"{base}.{alias.name}" if base else alias.name for alias in node.names)
+    return resolved
+
+
+def _package_imports(module_file: Path) -> set[str]:
+    """The siblings of this package one source file imports, however it spells them.
+
+    ``from . import guard``, ``from .guard import x`` and the out-and-back
+    ``from ..logs import guard`` all resolve to the same sibling name; importing
+    the package itself counts as importing ``__init__``.
+    """
+    found: set[str] = set()
+    prefix = PACKAGE_DOTTED + "."
+    for name in _resolved_imports(module_file):
+        if name == PACKAGE_DOTTED:
+            found.add("__init__")
+        elif name.startswith(prefix):
+            found.add(name[len(prefix) :].split(".")[0])
     return found
 
 
@@ -119,21 +158,26 @@ def test_import_graph_is_acyclic():
 
 def test_preview_is_pure_text_accounting():
     """preview.py owns no I/O: no httpx, no os, no sibling imports at all."""
-    imported = set()
-    for node in ast.walk(_module_node(PACKAGE_DIR / "preview.py")):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            imported.add(node.module.split(".")[0])
-    assert "httpx" not in imported, "preview.py imports httpx"
-    assert "os" not in imported, "preview.py imports os"
+    roots = {name.split(".")[0] for name in _resolved_imports(PACKAGE_DIR / "preview.py")}
+    assert "httpx" not in roots, "preview.py imports httpx"
+    assert "os" not in roots, "preview.py imports os"
     assert _package_imports(PACKAGE_DIR / "preview.py") == set(), "preview.py imports a package sibling"
 
 
 def test_guard_fetches_nothing():
-    """guard.py vets destinations; the clients that act on the verdict live elsewhere."""
-    imported = _package_imports(PACKAGE_DIR / "guard.py")
-    assert "client" not in imported and "transport" not in imported, "guard.py imports a fetcher"
+    """guard.py vets destinations; the clients that act on the verdict live elsewhere.
+
+    Checked against the resolved module names, not the level-1 sibling set: the
+    only way this dependency could be written is ``from ... import client`` /
+    ``from ...transport import …``, which resolves outside the package, so a
+    check restricted to package siblings would pass no matter what guard.py did.
+    """
+    offending = sorted(
+        name
+        for name in _resolved_imports(PACKAGE_DIR / "guard.py")
+        if name in FETCHER_MODULES or name.startswith(tuple(f"{m}." for m in FETCHER_MODULES))
+    )
+    assert not offending, f"guard.py imports a fetcher: {offending}"
 
 
 def test_package_surface_is_a_rebind_not_a_copy():
