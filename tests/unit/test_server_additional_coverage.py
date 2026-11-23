@@ -265,22 +265,62 @@ def test_get_mcp_run_options_http(monkeypatch):
     assert opts["port"] == 9999
 
 
-def test_use_all_fixtures(
+@pytest.mark.asyncio
+async def test_fixture_values_drive_config_precedence_and_doh_gate(
+    monkeypatch,
     mock_api_key,
     mock_profile_id,
-    clean_env,
-    set_env_api_key,
     temp_api_key_file,
     mock_nextdns_base_url,
     mock_doh_response,
     mock_profiles_response,
 ):
-    # This test merely accepts all fixtures to ensure they are executed and cleaned up
-    assert mock_api_key == "test_api_key_12345"
-    assert mock_profile_id == "abc123"
-    assert temp_api_key_file.exists()
-    assert mock_doh_response.get("Status") == 0
-    assert isinstance(mock_profiles_response, dict)
+    """Every fixture here must change what the application does: the env key
+    wins over the Docker-secret file key (both sources carry distinct values,
+    so the assertion can tell which one produced the result), the file key is
+    the fallback, the read gate stops a denied lookup before any request is
+    sent, the fixture's profile ids are honored by the read gate, and a
+    fixture answer with a failing Status maps to the right DNS status
+    description."""
+
+    # Env key takes precedence over the file key — distinct values, so the
+    # assertion below can tell which source produced the result.
+    env_key = "env-wins-key-01234"
+    monkeypatch.setenv("NEXTDNS_API_KEY", env_key)
+    monkeypatch.setenv("NEXTDNS_API_KEY_FILE", str(temp_api_key_file))
+    assert config.get_api_key() == env_key
+
+    # The file key is the fallback once the env key is gone.
+    monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
+    assert config.get_api_key() == mock_api_key
+
+    # A denied profile must fail closed without sending a request.
+    class ExplodingClient:
+        async def get(self, *args, **kwargs):
+            raise AssertionError("doh_lookup sent a request for a denied profile")
+
+    monkeypatch.setattr(doh_module, "_doh_client", ExplodingClient())
+    deny = config.ProfileAccessControl(read_only=False, readable=None, writable=frozenset())
+    res = await doh_module.doh_lookup(
+        f"{mock_nextdns_base_url}/{mock_profile_id}/dns-query", "google.com", "A", mock_profile_id, deny
+    )
+    assert res["code"] == "read_access_denied"
+    assert res["profile_id"] == mock_profile_id
+    assert res["status_code"] == 403
+
+    # A fixture answer with Status 3 (NXDOMAIN) must surface through the metadata mapping.
+    deny_all_status = {**mock_doh_response, "Status": 3}
+    metadata = doh_module._build_doh_metadata(
+        mock_profile_id, "google.com", "A", mock_nextdns_base_url, deny_all_status["Status"]
+    )
+    assert metadata["status_description"] == "NXDOMAIN - Non-existent domain"
+
+    # The fixture's listed profile ids must be honored by the read gate.
+    listed_ids = {p["id"] for p in mock_profiles_response["data"]}
+    allow_listed = config.ProfileAccessControl(read_only=False, readable=frozenset(listed_ids), writable=None)
+    for listed_id in listed_ids:
+        assert allow_listed.can_read(listed_id) is True
+    assert allow_listed.can_read("not-a-listed-profile") is False
 
 
 def test_coerce_value_schema_aware_and_collections(monkeypatch):

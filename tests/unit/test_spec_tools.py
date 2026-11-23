@@ -882,6 +882,45 @@ class TestSeriesStreamCeilingWiring:
         assert payload["max_response_bytes"] == spec_tools.MAX_SERIES_RESPONSE_BYTES
         assert "response_bytes" not in payload, "a mid-stream refusal has no measured size to claim"
 
+    def test_only_the_shipped_transport_is_credited_with_measuring_the_body(self):
+        """The cap kwarg says what was asked; the callable says who was asked.
+
+        An injected transport can name ``max_response_bytes`` in its signature
+        and ignore it, so being handed the cap is not proof the body came in
+        under it. Only this package's own transport streams under the ceiling,
+        so only its answer is credited with a measurement already made.
+        """
+
+        async def injected(method, url, params=None, json_body=None, max_response_bytes=None): ...
+
+        cap = {"max_response_bytes": spec_tools.MAX_SERIES_RESPONSE_BYTES}
+        assert spec_tools._ceiling_measured_on_the_wire(spec_tools._api_request_payload, cap)
+        assert not spec_tools._ceiling_measured_on_the_wire(injected, cap)
+        assert not spec_tools._ceiling_measured_on_the_wire(spec_tools._api_request_payload, {})
+
+
+def test_a_wire_measured_series_answer_is_not_priced_again_at_the_generator_door():
+    """The two layers price different lengths, and the wire one carries its own calls.
+
+    A compact body that carries non-ASCII text is under the ceiling as the
+    transport counted it - decoded bytes, characters as sent - and over it once
+    ``json.dumps`` escapes every non-ASCII character and spaces its separators.
+    That gap predates this change; what changes is that the generator no longer
+    re-serializes an answer the transport already bounded to price a bound the
+    wire enforced, and an answer from a transport that did no measuring is
+    still priced here.
+    """
+    route = next(r for r in spec_tools.spec_routes() if r.path.endswith("/analytics/status;series"))
+    payload = {"data": [{"domain": "é" * 60 + ".example", "count": i} for i in range(3000)]}
+    wire = len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode())
+    dumped = len(json.dumps(payload, default=str))
+    assert wire <= spec_tools.MAX_SERIES_RESPONSE_BYTES < dumped
+
+    assert spec_tools._series_refusal(route, payload, ceiling_measured_on_the_wire=True) is None
+    refused = spec_tools._series_refusal(route, payload)
+    assert refused is not None
+    assert refused["response_bytes"] == dumped
+
 
 class TestSchemaProblemStreamIsBounded:
     """Violations are streamed: retention and counting stay bounded, coverage does not."""
@@ -923,7 +962,8 @@ class TestLegacyInjectedTransportCompatibility:
     until the capped ``;series`` call started passing ``max_response_bytes``.
     Binding that kwarg to a legacy signature raises TypeError before its body
     runs, so the capability must be probed - and the legacy path must still
-    have its oversized answers refused by the serialized backstop.
+    have its oversized answers refused by the serialized backstop. So must any
+    other injected callable: taking the kwarg says nothing about honouring it.
     """
 
     async def test_a_legacy_four_argument_transport_runs_and_is_still_capped(self):
@@ -941,6 +981,26 @@ class TestLegacyInjectedTransportCompatibility:
         assert payload["code"] == "invalid_argument"
         assert "series response ceiling" in payload["error"]
         assert payload["response_bytes"] > spec_tools.MAX_SERIES_RESPONSE_BYTES  # the backstop priced it
+
+    async def test_a_modern_injected_transport_that_ignores_the_cap_is_still_priced(self):
+        """A signature that accepts the cap is not a transport that honours it.
+
+        ``transport=`` is a published injection point, so the serialized
+        backstop stays in charge of every injected callable: this one takes
+        ``max_response_bytes`` and does nothing with it, and its oversized
+        answer is still refused rather than handed to the caller.
+        """
+
+        async def ignoring(method, url, params=None, json_body=None, max_response_bytes=None):
+            return {"data": [{"x": "over-cap-padding-for-a-real-refusal", "i": i} for i in range(30_000)]}
+
+        route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
+        tool = spec_tools.SpecApiTool(route, transport=ignoring)
+        payload = (await tool.run({"profile_id": "abc123", "from": "-1d"})).structured_content
+
+        assert payload["code"] == "invalid_argument"
+        assert "series response ceiling" in payload["error"]
+        assert payload["response_bytes"] > spec_tools.MAX_SERIES_RESPONSE_BYTES
 
     def test_the_probe_reads_named_and_variadic_signatures(self):
         async def legacy(method, url, params=None, json_body=None): ...

@@ -21,7 +21,7 @@ import pytest
 from fastmcp import Client
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import transport
+from nextdns_mcp import spec_tools, transport
 from nextdns_mcp.errors import NextDNSAuthError, NextDNSError, NextDNSRateLimitError, NextDNSServerError
 from nextdns_mcp.server import build_mcp_server
 from nextdns_mcp.tools import plots as plots_module
@@ -300,6 +300,61 @@ async def test_a_single_chunk_one_byte_over_the_cap_refuses_without_the_overshoo
     payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=len(body) - 1)
     assert payload["code"] == "response_too_large"
     assert payload["max_response_bytes"] == len(body) - 1
+
+
+class TestSeriesCeilingIsMeasuredOnce:
+    """The generated ``;series`` tool prices its answer once, on the wire.
+
+    The transport already refused an over-wide body while it streamed, so a
+    second full serialization of the decoded payload - the backstop written
+    for transports that were never given the cap - measured a bound that had
+    already been enforced, on every successful call. These drive the real
+    transport against the stub upstream with ``spec_tools.json`` replaced by a
+    recorder, so the assertion is about the work the call does and not only
+    about the answer it returns.
+    """
+
+    class _JsonRecorder:
+        """The json module as ``spec_tools`` sees it, recording every dumps call."""
+
+        def __init__(self) -> None:
+            self.dumped: list[Any] = []
+
+        def dumps(self, obj: Any, *args: Any, **kwargs: Any) -> str:
+            self.dumped.append(obj)
+            return json.dumps(obj, *args, **kwargs)
+
+    async def _call_series_tool(self, monkeypatch):
+        """One real generated ``;series`` call, with the serializer watched."""
+        recorder = self._JsonRecorder()
+        monkeypatch.setattr(spec_tools, "json", recorder)
+        route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
+        return recorder, await spec_tools.SpecApiTool(route).run({"profile_id": "abc123", "from": "-1d"})
+
+    @pytest.mark.asyncio
+    async def test_an_answer_inside_the_ceiling_is_returned_without_being_re_measured(
+        self, stub_nextdns_api, monkeypatch
+    ):
+        body = json.dumps({"data": [{"status": "no", "count": i} for i in range(2_000)]})
+        _serve(200, body)
+        recorder, result = await self._call_series_tool(monkeypatch)
+
+        assert result.structured_content == json.loads(body)
+        assert not result.is_error
+        assert recorder.dumped == [], "the streamed cap is the measurement; nothing re-prices the payload"
+
+    @pytest.mark.asyncio
+    async def test_an_answer_over_the_ceiling_is_refused_before_it_is_decoded(self, stub_nextdns_api, monkeypatch):
+        """The ceiling still holds without the backstop, because the wire enforces it."""
+        _serve(200, json.dumps({"data": [{"status": "no", "count": i} for i in range(30_000)]}))
+        recorder, result = await self._call_series_tool(monkeypatch)
+
+        payload = result.structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "series response ceiling" in payload["error"]
+        assert payload["max_response_bytes"] == transport.MAX_SERIES_RESPONSE_BYTES
+        assert "response_bytes" not in payload, "the refusal came from the wire, which names no size"
+        assert recorder.dumped == [], "an oversized answer is never serialized, let alone re-serialized"
 
 
 class TestSharedBufferedBodyHelpers:

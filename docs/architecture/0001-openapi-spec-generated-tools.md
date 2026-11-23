@@ -126,7 +126,9 @@ synthetic `search_tools` + `call_tool` pair so an 80-tool listing does not have 
 a context window; the generated tools stay callable, and access control is unchanged —
 disclosure hides names, it does not grant or withhold permission. `NEXTDNS_TOOL_SEARCH=off`
 publishes the full listing. The decision is independent of this ADR: turning disclosure off
-leaves exactly the surface described above.
+leaves exactly the surface described above. Why disclosure is shaped the way it is —
+the default, the fallback, and the name-aware re-rank — is recorded in
+[ADR 0003](0003-bm25-progressive-tool-disclosure.md).
 
 ## History
 
