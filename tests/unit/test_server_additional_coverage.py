@@ -255,20 +255,25 @@ async def test_fixture_values_drive_config_precedence_and_doh_gate(
     monkeypatch,
     mock_api_key,
     mock_profile_id,
-    set_env_api_key,
     temp_api_key_file,
     mock_nextdns_base_url,
     mock_doh_response,
     mock_profiles_response,
 ):
     """Every fixture here must change what the application does: the env key
-    wins over the Docker-secret file key, the file key is the fallback, the
-    read gate stops a denied lookup before any request is sent, and a fixture
-    answer with a failing Status maps to the right DNS status description."""
+    wins over the Docker-secret file key (both sources carry distinct values,
+    so the assertion can tell which one produced the result), the file key is
+    the fallback, the read gate stops a denied lookup before any request is
+    sent, the fixture's profile ids are honored by the read gate, and a
+    fixture answer with a failing Status maps to the right DNS status
+    description."""
 
-    # Env key takes precedence over the file key.
+    # Env key takes precedence over the file key — distinct values, so the
+    # assertion below can tell which source produced the result.
+    env_key = "env-wins-key-01234"
+    monkeypatch.setenv("NEXTDNS_API_KEY", env_key)
     monkeypatch.setenv("NEXTDNS_API_KEY_FILE", str(temp_api_key_file))
-    assert config.get_api_key() == mock_api_key
+    assert config.get_api_key() == env_key
 
     # The file key is the fallback once the env key is gone.
     monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
@@ -295,8 +300,12 @@ async def test_fixture_values_drive_config_precedence_and_doh_gate(
     )
     assert metadata["status_description"] == "NXDOMAIN - Non-existent domain"
 
-    # The fixture profile id is the one the profiles listing reports.
-    assert mock_profile_id in {p["id"] for p in mock_profiles_response["data"]}
+    # The fixture's listed profile ids must be honored by the read gate.
+    listed_ids = {p["id"] for p in mock_profiles_response["data"]}
+    allow_listed = config.ProfileAccessControl(read_only=False, readable=frozenset(listed_ids), writable=None)
+    for listed_id in listed_ids:
+        assert allow_listed.can_read(listed_id) is True
+    assert allow_listed.can_read("not-a-listed-profile") is False
 
 
 def test_coerce_value_schema_aware_and_collections(monkeypatch):
