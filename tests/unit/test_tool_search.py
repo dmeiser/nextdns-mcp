@@ -912,17 +912,18 @@ class TestUnknownNameReusesTheCatalogsWordData:
         """Counters on the catalog-side rebuild entry points and normalizations.
 
         Each name is patched in the module whose code actually calls it: the
-        memo helper resolves ``_catalog_words_for`` through ``tool_search``'s
-        import, the structure builders run inside ``tool_search_rank``, and
-        the normalizers run on both sides.
+        memo helper and the structure builders run inside
+        ``tool_search_rank``, and the normalizers run on the rank build and
+        on the shape-side matching.
         """
         from collections import Counter
 
         import nextdns_mcp.tool_search_rank as rank
+        import nextdns_mcp.tool_search_shape as shape
 
         counts: Counter[str] = Counter()
         for module, name in (
-            (ts, "_catalog_words_for"),
+            (rank, "_catalog_words_for"),
             (rank, "_name_words"),
             (rank, "_vocabulary_words"),
             (rank, "_shared_word_sets"),
@@ -937,7 +938,7 @@ class TestUnknownNameReusesTheCatalogsWordData:
             monkeypatch.setattr(module, name, count_rebuild)
 
         normalized: list[str] = []
-        for module in (ts, rank):
+        for module in (rank, shape):
             for name in ("_flat_key", "_words"):
                 original = getattr(module, name)
 
@@ -1046,15 +1047,17 @@ class TestUnknownNameReusesTheCatalogsWordData:
 
         from fastmcp import Client
 
+        import nextdns_mcp.tool_search_rank as rank
+
         builds = 0
-        original = ts._catalog_words_for
+        original = rank._catalog_words_for
 
         def count_build(tools):
             nonlocal builds
             builds += 1
             return original(tools)
 
-        monkeypatch.setattr(ts, "_catalog_words_for", count_build)
+        monkeypatch.setattr(rank, "_catalog_words_for", count_build)
 
         async with Client(build_mcp_server()) as client:
             for _ in range(2):
@@ -1203,6 +1206,8 @@ class TestAnswerByteBudget:
         """Skip-and-continue: breaking at the first overflow hid the small results after it."""
         from fastmcp.tools.base import Tool
 
+        import nextdns_mcp.tool_search_answer
+
         small_one = Tool.from_function(lambda: None, name="smallOne", description="a")
         huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
         small_two = Tool.from_function(lambda: None, name="smallTwo", description="b")
@@ -1211,7 +1216,7 @@ class TestAnswerByteBudget:
         cost_two = ts._compact_entry(small_two)[1]
         assert cost_huge > cost_one and cost_huge > cost_two
         # The budget fits exactly the two small results, framing comma counted.
-        monkeypatch.setattr(ts, "SEARCH_ANSWER_MAX_BYTES", cost_one + len(",") + cost_two)
+        monkeypatch.setattr(nextdns_mcp.tool_search_answer, "SEARCH_ANSWER_MAX_BYTES", cost_one + len(",") + cost_two)
         names = [result["name"] for result in ts._compact_search_results([small_one, huge, small_two])]
         assert names == ["smallOne", "smallTwo"]
 
@@ -1219,7 +1224,9 @@ class TestAnswerByteBudget:
         """An empty answer is worse than a big one: the head stays no matter its size."""
         from fastmcp.tools.base import Tool
 
-        monkeypatch.setattr(ts, "SEARCH_ANSWER_MAX_BYTES", 1)
+        import nextdns_mcp.tool_search_answer
+
+        monkeypatch.setattr(nextdns_mcp.tool_search_answer, "SEARCH_ANSWER_MAX_BYTES", 1)
         huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
         small = Tool.from_function(lambda: None, name="smallOne", description="b")
         assert [result["name"] for result in ts._compact_search_results([huge, small])] == ["hugeOne"]
@@ -1437,7 +1444,10 @@ class TestShapeRepairAnnouncesItself:
         assert "/profiles/abc123/denylist" in content, content
         assert (getattr(result, "structured_content", None) or {}).get("resolved_from") == "get_denylist"
         assert (getattr(result, "structured_content", None) or {}).get("resolved_name") == "getDenylist"
-        assert any(r.levelno == logging.WARNING and "once normalised" in r.getMessage() for r in caplog.records)
+        assert any(
+            r.name == "nextdns_mcp.tool_search" and r.levelno == logging.WARNING and "once normalised" in r.getMessage()
+            for r in caplog.records
+        )
 
     async def test_a_plain_name_carries_no_annotation_and_no_warning(self, caplog):
         import logging
@@ -1450,7 +1460,9 @@ class TestShapeRepairAnnouncesItself:
                     "call_tool", {"name": "getDenylist", "arguments": {"profile_id": "abc123"}}, raise_on_error=False
                 )
         assert "resolved_from" not in (getattr(result, "structured_content", None) or {})
-        assert not [r for r in caplog.records if r.name == "nextdns_mcp.tool_search" and r.levelno >= logging.WARNING]
+        assert not [
+            r for r in caplog.records if r.name.startswith("nextdns_mcp.tool_search") and r.levelno >= logging.WARNING
+        ]
 
     async def test_a_lifted_argument_repair_logs_at_warning(self, caplog):
         import logging
@@ -1462,7 +1474,10 @@ class TestShapeRepairAnnouncesItself:
                 await client.call_tool(
                     "call_tool", {"name": "getDenylist", "profile_id": "abc123"}, raise_on_error=False
                 )
-        assert any(r.levelno == logging.WARNING and "beside name" in r.getMessage() for r in caplog.records)
+        assert any(
+            r.name == "nextdns_mcp.tool_search" and r.levelno == logging.WARNING and "beside name" in r.getMessage()
+            for r in caplog.records
+        )
 
     async def test_a_search_answer_name_repair_logs_at_warning(self, caplog):
         import logging
@@ -1473,7 +1488,10 @@ class TestShapeRepairAnnouncesItself:
             async with Client(build_mcp_server()) as client:
                 found = await client.call_tool("search_tools", {"query": "list profiles"}, raise_on_error=False)
                 await client.call_tool("call_tool", {"name": found.data[0], "arguments": {}}, raise_on_error=False)
-        assert any(r.levelno == logging.WARNING and "top-ranked" in r.getMessage() for r in caplog.records)
+        assert any(
+            r.name == "nextdns_mcp.tool_search" and r.levelno == logging.WARNING and "top-ranked" in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_a_non_dict_payload_passes_the_annotation_through_unchanged(self):
         from types import SimpleNamespace

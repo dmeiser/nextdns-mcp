@@ -51,7 +51,7 @@ This file contains repository-specific agent rules. Agents should follow these w
 
 `create_mcp_server()` (`src/nextdns_mcp/openapi.py`) assembles a middleware chain whose order is load-bearing. FastMCP applies the chain so that **the middleware added first runs outermost**; the add order below therefore reads as the execution order, outside in.
 
-1. `CallToolShapeMiddleware` (`src/nextdns_mcp/tool_search.py`, added only under disclosure) — repairs the `call_tool` call shape: resolves a name out of a whole search answer, normalizes a mistyped name, and lifts tool parameters that were sent beside `name` back into `arguments`.
+1. `CallToolShapeMiddleware` (`src/nextdns_mcp/tool_search_shape.py`, added only under disclosure) — repairs the `call_tool` call shape: resolves a name out of a whole search answer, normalizes a mistyped name, and lifts tool parameters that were sent beside `name` back into `arguments`.
 2. `StripExtraFieldsMiddleware` (`src/nextdns_mcp/openapi.py`) — drops top-level arguments the target tool's published schema does not declare (reporting them as `ignored_arguments`) and coerces obvious string spellings of typed fields.
 3. `CallLogMiddleware` (`src/nextdns_mcp/call_log.py`, added only when `NEXTDNS_CALL_LOG` is set) — records the call that actually executed.
 

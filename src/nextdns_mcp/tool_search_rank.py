@@ -1,8 +1,9 @@
 """Name- and word-aware ranking machinery for the search transforms.
 
-Split out of ``tool_search`` so the serving side (transform overrides, answer
-budgeting, call-shape middleware) and the ranking side stay separately
-readable. Everything here is a pure function of the catalog's tool names,
+Split out of ``tool_search`` so the ranking side and the serving side stay
+separately readable: the transform overrides sit in ``tool_search``, answer
+construction in ``tool_search_answer``, call-shape handling in
+``tool_search_shape``. Everything here is a pure function of the catalog's tool names,
 descriptions, and parameter schemas: query word folding, morphological
 variants, catalog-wide shared-word discounting, and the name-overlap re-rank
 that keeps a tool whose name is literally what the caller asked for ahead of
@@ -513,6 +514,23 @@ def _catalog_words_for(tools: Sequence[Tool]) -> _CatalogWords:
         vocab_shared=vocab_shared,
         flat_names={tool.name: _flat_key(tool.name) for tool in tools},
     )
+
+
+def _catalog_words_memo(memos: dict[tuple[str, ...], _CatalogWords], tools: Sequence[Tool]) -> _CatalogWords:
+    """One catalog's word structures, shared by the search and call-shape paths.
+
+    The transform's query ranking and the middleware's unknown-name matching
+    and suggestions all read the same constants of a static catalog; both
+    memoize them keyed on the sorted tool names, and a catalog under a
+    different set of names rebuilds them. The memo table belongs to the holder
+    (the transform instance, the middleware instance), not to this module.
+    """
+    key = tuple(sorted(tool.name for tool in tools))
+    memo = memos.get(key)
+    if memo is None:
+        memo = _catalog_words_for(tools)
+        memos[key] = memo
+    return memo
 
 
 def _tool_properties(tool: Tool) -> dict[str, Any]:
