@@ -214,23 +214,6 @@ def get_mcp_server() -> FastMCP:
     return current_mcp_server_owner().get()
 
 
-def _sync_fastmcp_update_check() -> None:
-    """Mirror ``FASTMCP_CHECK_FOR_UPDATES`` into FastMCP's live settings object.
-
-    ``fastmcp/__init__.py`` builds its settings at package import time, and
-    importing this module pulls FastMCP in transitively (via ``.tools.plots``
-    and ``.openapi``). Setting the variable after that import would be
-    silently ignored, so the value is applied to the live settings too. The
-    variable is read (not hardcoded) so an operator who opted into update
-    checks keeps them, and an unset variable falls back to the same ``"off"``
-    default ``configure()`` applies, so calling this helper on its own cannot
-    raise ``KeyError`` (issue #291).
-    """
-    fastmcp_settings = getattr(sys.modules.get("fastmcp"), "settings", None)
-    if fastmcp_settings is not None:
-        fastmcp_settings.check_for_updates = os.environ.get("FASTMCP_CHECK_FOR_UPDATES", "off")
-
-
 def configure() -> FastMCP:
     """Perform this process's server side effects explicitly and return the server.
 
@@ -238,8 +221,17 @@ def configure() -> FastMCP:
     a FastMCP instance nor mutates the environment. Callers that actually
     serve traffic - the ``__main__`` entrypoint and the tests - call this to
 
-    1. disable FastMCP's automatic update check, which delays startup and can
-       hang in offline/CI environments, and
+    1. default ``FASTMCP_CHECK_FOR_UPDATES`` to ``"off"`` in this process's
+       environment, which disables FastMCP's automatic update check - a call
+       that delays startup and can hang in offline/CI environments. FastMCP
+       builds its settings object at import time and reads this variable only
+       then, so the default must be applied before ``fastmcp`` is first
+       imported to take effect: the ``python -m nextdns_mcp.server``
+       entrypoint re-executes through the package entrypoint to arrange that,
+       and ``configure()`` repeats the default here for direct callers. An
+       explicit value the operator set is always preserved, and nothing in
+       this function writes to FastMCP's live settings object (issue #643) -
+       that hidden second side channel is gone, and
     2. publish this context's owner of the shared server instance, building
        the server on purpose instead of at import time.
 
@@ -252,7 +244,6 @@ def configure() -> FastMCP:
         FastMCP: The shared, configured MCP server instance.
     """
     os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
-    _sync_fastmcp_update_check()
     try:
         owner = current_mcp_server_owner()
     except StateOwnershipError:
@@ -280,16 +271,46 @@ def _run_server() -> None:
     configure().run(**get_mcp_run_options())
 
 
+def _reexec_through_package_entrypoint() -> None:  # pragma: no cover
+    # Note: excluded from coverage because os.execvpe replaces the running
+    # process image, so this call can never return inside the process that is
+    # measuring coverage. The decision to re-exec is covered in-process (with
+    # this function stubbed) and the re-exec target is covered end-to-end in
+    # tests/unit/test_server_dotenv.py.
+    os.execvpe(sys.executable, [sys.executable, "-m", "nextdns_mcp", *sys.argv[1:]], os.environ)
+
+
+def _run_module_entrypoint() -> None:
+    """Run the server from the ``python -m nextdns_mcp.server`` entrypoint.
+
+    Importing this module pulls fastmcp in at module import time, so FastMCP's
+    settings object is already built before this function runs. When
+    ``FASTMCP_CHECK_FOR_UPDATES`` was not exported by the parent shell, a
+    value from ``.env`` (or the ``"off"`` default) cannot reach those settings
+    in this process, so re-exec through the package entrypoint, which applies
+    it before fastmcp is first imported (issue #643). A shell-exported value
+    already took effect at import time and runs here in-process.
+    """
+    from dotenv import load_dotenv
+
+    shell_exported_update_check = "FASTMCP_CHECK_FOR_UPDATES" in os.environ
+    load_dotenv()
+    if not shell_exported_update_check:
+        os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
+        _reexec_through_package_entrypoint()
+    _run_server()
+
+
 if __name__ == "__main__":  # pragma: no cover
     # Note: This block is excluded from unit test coverage because:
     # 1. It only executes when running `python -m nextdns_mcp.server` directly
     # 2. When pytest imports the module, __name__ != "__main__"
     # 3. The mcp_server.run() call starts a blocking event loop unsuitable for unit tests
-    # The options building logic IS tested via tests/unit/test_mcp_run_options.py
+    # The entrypoint logic IS tested via tests/unit/test_server_dotenv.py,
+    # which calls _run_module_entrypoint() directly and end-to-end in a
+    # subprocess; the options building logic IS tested via
+    # tests/unit/test_mcp_run_options.py
     # Load .env only for the real entrypoint (issue #177): calling load_dotenv() at
     # import time made importing server.py from any working directory walk upward and
     # load whatever .env it found into the importing process.
-    from dotenv import load_dotenv
-
-    load_dotenv()
-    _run_server()
+    _run_module_entrypoint()
