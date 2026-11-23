@@ -779,7 +779,11 @@ async def test_generate_ui_execution_timeout():
 
 
 def test_sandbox_env_strips_host_secrets(monkeypatch):
-    """Sensitive host variables (especially NEXTDNS_API_KEY) never reach the Deno subprocess."""
+    """Host variables outside the allowlist never reach the Deno subprocess.
+
+    The sanitizer is an allowlist, not a name-substring blocklist, so
+    credential-bearing variables with unmarked names are dropped too.
+    """
     from nextdns_mcp.generative_sandbox import _sandbox_env
 
     monkeypatch.setenv("NEXTDNS_API_KEY", "super-secret-key")
@@ -788,6 +792,13 @@ def test_sandbox_env_strips_host_secrets(monkeypatch):
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
     monkeypatch.setenv("SOME_PASSWORD", "hunter2")
     monkeypatch.setenv("MY_PRIVATE_KEY", "pem")
+    monkeypatch.setenv("DB_DSN", "postgres://user:pass@db/internal")
+    monkeypatch.setenv("SERVICE_ACCOUNT_JSON", '{"client_email":"svc@example.com"}')
+    monkeypatch.setenv("APP_CONFIG_JSON", '{"api_key":"leak-me"}')
+    monkeypatch.setenv("RANDOM_UNMARKED_VAR", "whatever")
+    # Credential-bearing names inside the DENO_ namespace must not pass on a prefix.
+    monkeypatch.setenv("DENO_AUTH_TOKENS", "deadbeef@deno.land")
+    monkeypatch.setenv("DENO_KV_ACCESS_TOKEN", "kv_pat_x")
     env = _sandbox_env()
     for stripped in (
         "NEXTDNS_API_KEY",
@@ -796,10 +807,23 @@ def test_sandbox_env_strips_host_secrets(monkeypatch):
         "AWS_SECRET_ACCESS_KEY",
         "SOME_PASSWORD",
         "MY_PRIVATE_KEY",
+        "DB_DSN",
+        "SERVICE_ACCOUNT_JSON",
+        "APP_CONFIG_JSON",
+        "RANDOM_UNMARKED_VAR",
+        "DENO_AUTH_TOKENS",
+        "DENO_KV_ACCESS_TOKEN",
     ):
         assert stripped not in env
-    # Non-secret variables the worker needs are preserved.
+    # Approved variables the worker needs are preserved.
     assert env.get("PATH") == os.environ.get("PATH")
+    assert env.get("HOME") == os.environ.get("HOME")
+    # Only the explicitly approved Deno runtime variables pass through.
+    monkeypatch.setenv("DENO_DIR", "/tmp/deno-cache")
+    monkeypatch.setenv("DENO_NO_UPDATE_CHECK", "1")
+    env = _sandbox_env()
+    assert env["DENO_DIR"] == "/tmp/deno-cache"
+    assert env["DENO_NO_UPDATE_CHECK"] == "1"
 
 
 def test_sandbox_env_is_a_copy(monkeypatch):
