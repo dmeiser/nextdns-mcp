@@ -474,7 +474,8 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     # os.open, not open(): 0o600 is the requested mode only at open() time, and
     # builtin open() takes the system default, so a customer CSV would land
     # group- and world-readable.
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out:
+    out = os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
+    try:
         async for raw, text in _stream_pieces(response, decoder):
             if written_bytes + len(raw) > max_total:
                 raise DownloadTooLargeError(
@@ -499,6 +500,13 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
                 dropping_record = True
             piece, dropping_record = _skip_dropped_record_tail(piece, dropping_record)
             preview_bytes = _append_preview(preview, preview_bytes, piece)
+    finally:
+        # Close belongs on the worker pool as well. A cancelled task unwinds
+        # here while a write is still in flight, and close() takes the buffered
+        # writer's lock that the in-flight write is holding; taken on the loop,
+        # that wait is the same stall, bounded by one chunk instead of the whole
+        # download. The size is read after this, so the flush still lands first.
+        await asyncio.to_thread(out.close)
     extra_rows, preview_bytes = _flush_tail(preview, preview_bytes, preview_carry, open_line, dropping_record)
     row_count += extra_rows
     size = os.path.getsize(path)
