@@ -9,7 +9,7 @@ longer accumulate on disk for the life of the container.
 
 Ownership is PER SERVER, not per process. The registry a download registers
 with is the one the current server lifespan owns (the ``_download_registry``
-context var, set by ``nextdns_mcp.openapi._server_lifespan``, or the
+context var, set by ``nextdns_mcp.lifespan.server_lifespan``, or the
 resources of the FastMCP server serving this request); there is no
 process-global fallback, so a download outside any owner fails fast (see
 ``MissingDownloadRegistryError``). The registries used to be one
@@ -88,7 +88,7 @@ class MissingDownloadRegistryError(RuntimeError):
 #
 # Ownership is PER SERVER, not per process. The registry a download registers
 # with is the one the current server lifespan owns (the ``_download_registry``
-# context var, set by ``nextdns_mcp.openapi._server_lifespan``). There is no
+# context var, set by ``nextdns_mcp.lifespan.server_lifespan``). There is no
 # process-global fallback: a download handled outside any lifespan has no
 # owner that could ever reclaim it, so registration fails fast with
 # ``MissingDownloadRegistryError`` instead of leaking the CSV for the life of

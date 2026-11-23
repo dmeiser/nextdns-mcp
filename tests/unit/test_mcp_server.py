@@ -8,7 +8,9 @@ import pytest
 from fastmcp import Client, FastMCP
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp.openapi import StripExtraFieldsMiddleware, create_mcp_server
+from nextdns_mcp.lifespan import server_lifespan
+from nextdns_mcp.openapi import create_mcp_server
+from nextdns_mcp.relaxation import StripExtraFieldsMiddleware
 from nextdns_mcp.tools import doh as doh_module
 from nextdns_mcp.tools import logs as logs_module
 from nextdns_mcp.tools.logs import redirects as logs_redirects
@@ -204,10 +206,10 @@ class TestServerLifespan:
         monkeypatch.setattr(client_module, "_raw_probe_client", None)
         monkeypatch.setattr(logs_redirects, "_redirect_client", None)
 
-        from nextdns_mcp import openapi as openapi_module
+        from nextdns_mcp import lifespan as lifespan_module
 
         server = create_mcp_server()
-        resources = openapi_module._server_resources(server)
+        resources = lifespan_module.server_resources(server)
 
         with (
             client_module.api_client_owned(resources.api_client),
@@ -244,10 +246,10 @@ class TestServerLifespan:
 
         monkeypatch.setattr(logs_redirects, "_redirect_client", None)
 
-        from nextdns_mcp import openapi as openapi_module
+        from nextdns_mcp import lifespan as lifespan_module
 
         server = create_mcp_server()
-        resources = openapi_module._server_resources(server)
+        resources = lifespan_module.server_resources(server)
 
         async with Client(server) as mcp_client:
             await mcp_client.list_tools()
@@ -269,12 +271,12 @@ class TestServerLifespan:
         """One embedded server's shutdown must not close another live server's clients."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
-        from nextdns_mcp import openapi as openapi_module
+        from nextdns_mcp import lifespan as lifespan_module
 
         server_a = create_mcp_server()
         server_b = create_mcp_server()
-        resources_a = openapi_module._server_resources(server_a)
-        resources_b = openapi_module._server_resources(server_b)
+        resources_a = lifespan_module.server_resources(server_a)
+        resources_b = lifespan_module.server_resources(server_b)
 
         async with server_a._lifespan_manager():
             a_api_client = resources_a.api_client.get()
@@ -367,21 +369,19 @@ class TestDownloadOwnershipIsPerServer:
     async def test_a_sibling_servers_shutdown_leaves_this_servers_downloads_alive(
         self, mock_api_key, monkeypatch, tmp_path
     ):
-        from nextdns_mcp import openapi as openapi_module
-
         server_a_csv = tmp_path / "a" / "download.csv"
         server_b_csv = tmp_path / "b" / "download.csv"
         for csv in (server_a_csv, server_b_csv):
             csv.parent.mkdir(parents=True)
             csv.write_text("csv")
 
-        server_a = openapi_module.create_mcp_server()
-        server_b = openapi_module.create_mcp_server()
+        server_a = create_mcp_server()
+        server_b = create_mcp_server()
 
-        async with openapi_module._server_lifespan(server_a):
+        async with server_lifespan(server_a):
             logs_module._note_successful_download(str(server_a_csv), True)
             # Server B starts and finishes WHILE server A is live:
-            async with openapi_module._server_lifespan(server_b):
+            async with server_lifespan(server_b):
                 logs_module._note_successful_download(str(server_b_csv), True)
             # B's shutdown reclaims only B's registry:
             assert not server_b_csv.exists()

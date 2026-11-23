@@ -23,7 +23,7 @@ The middleware inspects each tool's parameter schema and removes any arguments t
 #   {"ignored_arguments": ["extra", "schema_hint"], "hint": "these arguments are not parameters of this tool and were not applied …"}
 ```
 
-See `src/nextdns_mcp/openapi.py` for implementation details (class `StripExtraFieldsMiddleware`).
+See `src/nextdns_mcp/relaxation.py` for implementation details (class `StripExtraFieldsMiddleware`).
 The middleware only filters top-level tool arguments; fields nested inside an argument value are not checked.
 
 ## "NEXTDNS_API_KEY is required" or 401 errors

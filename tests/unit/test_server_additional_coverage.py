@@ -6,7 +6,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import config, openapi, server
+from nextdns_mcp import config, relaxation, server
 from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools import doh as doh_module
 
@@ -44,7 +44,7 @@ async def test_middleware_leaves_leading_zero_identifiers_alone():
 
     Through StripExtraFieldsMiddleware the value must come back still a string.
     """
-    mw = openapi.StripExtraFieldsMiddleware()
+    mw = relaxation.StripExtraFieldsMiddleware()
 
     class StringDummyTool:
         parameters: ClassVar[dict[str, object]] = {"properties": {"password": {"type": "string"}}}
@@ -124,7 +124,7 @@ async def _dummy_call_next(context):
 
 @pytest.mark.asyncio
 async def test_strip_extra_fields_middleware_basic_and_exception():
-    mw = openapi.StripExtraFieldsMiddleware()
+    mw = relaxation.StripExtraFieldsMiddleware()
 
     # Normal operation: known property 'keep' retained, unknown removed, bool coerced
     context = DummyContext("tool", {"keep": "true", "drop": "x"})
@@ -327,7 +327,7 @@ async def test_fixture_values_drive_config_precedence_and_doh_gate(
 
 
 def test_coerce_value_schema_aware_and_collections(monkeypatch):
-    mw = openapi.StripExtraFieldsMiddleware()
+    mw = relaxation.StripExtraFieldsMiddleware()
 
     # Dict and list values are recursed without schema context, so strings stay strings
     assert mw._coerce_value({"a": "true", "b": "2"}) == {"a": "true", "b": "2"}

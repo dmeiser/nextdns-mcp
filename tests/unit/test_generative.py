@@ -22,7 +22,7 @@ from fastmcp import FastMCP
 from nextdns_mcp import chart_placement as chart_placement_module
 from nextdns_mcp import generative as generative_module
 from nextdns_mcp import generative_sandbox as sandbox_module
-from nextdns_mcp import openapi as openapi_module
+from nextdns_mcp import lifespan as lifespan_module
 from nextdns_mcp.chart_placement import _validate_chart_placement
 from nextdns_mcp.generative import (
     MAX_CODE_BYTES,
@@ -523,9 +523,9 @@ async def test_lifespan_teardown_survives_a_failing_stop(caplog):
     assert "Failed to stop the Generative UI sandbox" in caplog.text
 
 
-def test_openapi_lifespan_has_no_generative_dependency():
-    """Core `openapi.py` must not reach back into the optional `generative` module."""
-    source = inspect.getsource(openapi_module)
+def test_lifespan_has_no_generative_dependency():
+    """Core `lifespan.py` must not reach back into the optional `generative` module."""
+    source = inspect.getsource(lifespan_module)
     assert "close_all_generative_ui" not in source
     assert "from .generative" not in source
     assert not hasattr(generative_module, "close_all_generative_ui")
