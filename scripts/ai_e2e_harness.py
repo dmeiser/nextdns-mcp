@@ -839,11 +839,11 @@ class ActorRun:
 def _flatten_text(res: Any) -> str:
     """Flatten a tool result into readable text (bounded).
 
-    Which block carries text is the shared MCP reader's answer
-    (``ai_e2e_common``); what is the harness's own is how the answer is used: an
-    actor event joins every text block, because the failure it reports can be
-    split across them, and anything that is not a tool result is rendered as its
-    string form.
+    Reading the text field of a block, in either shape it arrives in, is the
+    shared reader's answer (``ai_e2e_common``); what is the harness's own is
+    how the answer is used: an actor event joins every block that carries text,
+    because the failure it reports can be split across them, and anything that
+    is not a tool result is rendered as its string form.
     """
     if isinstance(res, dict) and isinstance(res.get("content"), list):
         return "".join(_content_texts(res))[:5000]

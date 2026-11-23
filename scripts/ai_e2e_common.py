@@ -524,35 +524,31 @@ def _content_blocks(result: Any) -> list[Any]:
     return list(content) if isinstance(content, (list, tuple)) else []
 
 
-def _content_block_text(block: Any) -> str | None:
-    """The text a MCP content block carries; ``None`` when the block is not a text block.
+def _content_block_text(block: Any) -> str:
+    """The text field a content block carries, in whichever shape it carries it.
 
-    ``None`` is not the empty string: an image block carries no text at all, and
-    the container runner reads that difference as "keep looking" while an empty
-    text block is an answer that said nothing.
+    A block is a plain dict in the JSON the actor harness prints and an SDK
+    object on a live tool call, so a reader has to know both shapes. Which
+    blocks count as text blocks is each caller's own admission rule and stays
+    in the caller - the container admits SDK objects by their type, the actor
+    harness admits the dict blocks its events print by their payload - so this
+    answers only the question both ask: given a block, what is its text. A
+    block that carries no text field answers the empty string.
     """
-    if isinstance(block, dict):
-        # The dict form is the actor harness's event JSON: a block that names its
-        # type is judged by that type, one that does not is judged by its payload.
-        if block.get("type") not in (None, "text"):
-            return None
-        text: Any = block.get("text")
-    elif getattr(block, "type", "") != "text":
-        return None
-    else:
-        text = getattr(block, "text", "")
+    text = block.get("text") if isinstance(block, dict) else getattr(block, "text", "")
     return "" if text is None else str(text)
 
 
 def _content_texts(result: Any) -> list[str]:
-    """The text of every text block on a tool result, in send order.
+    """The text of every content block that carries text, in send order.
 
-    Blocks that are not text blocks (an image, a resource link) contribute
-    nothing. How the texts are combined is the caller's: the actor harness
-    joins them to report an error, the container runner keeps the last one
-    because a tool that answers twice answers with its second block.
+    Blocks that carry no text - an image, a resource link, an empty answer -
+    contribute nothing. How the texts are combined is the caller's: the actor
+    harness joins them to report an error, so it reads this; the container
+    runner keeps the last block of a typed answer, so it admits blocks its own
+    way and reads each one through ``_content_block_text``.
     """
-    return [text for text in (_content_block_text(block) for block in _content_blocks(result)) if text is not None]
+    return [text for block in _content_blocks(result) if (text := _content_block_text(block))]
 
 
 # =========================================================================== #

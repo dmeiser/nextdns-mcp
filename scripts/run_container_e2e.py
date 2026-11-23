@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import ImageContent
+from mcp.types import ImageContent, TextContent
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -344,11 +344,12 @@ def _load_spec_once(path: Path) -> dict[str, Any]:
 # fallback that same unwrap uses.
 _unwrap_id = ai_e2e_common._unwrap_id
 _id_text = ai_e2e_common._id_text
-# The blocks of a tool result, and the text field of each one, are read by the
-# same implementation the actor harness uses for the payloads its actor prints:
-# a change to how a text block is recognised then lands once. What stays in this
-# script is its own response handling - the image flag and the
-# last-text-block-wins rule in ``ContainerE2ERunner._parse_response_content``.
+# The text field of a content block is read by the same implementation the
+# actor harness uses for the payloads its actor prints: a change to how a text
+# block is read then lands once. Which blocks this runner admits is its own
+# boundary and stays here - SDK objects judged by their type, the image flag,
+# and the last-text-block-wins rule in
+# ``ContainerE2ERunner._parse_response_content``.
 _content_blocks = ai_e2e_common._content_blocks
 _content_block_text = ai_e2e_common._content_block_text
 
@@ -462,6 +463,16 @@ def _parse_json_text(text: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         return text
+
+
+def _is_text_content(block: Any) -> bool:
+    """The container's SDK-object boundary: a TextContent, or a block whose type says text.
+
+    Dict-shaped blocks are not admitted — a live tool result's blocks are SDK
+    objects, and the field of an admitted block is read by the shared
+    implementation rather than by a second copy here.
+    """
+    return isinstance(block, TextContent) or getattr(block, "type", "") == "text"
 
 
 def _skips_schema_validation(spec: dict[str, Any], parsed_json: Any) -> bool:
@@ -599,13 +610,15 @@ class ContainerE2ERunner:
         response_text = ""
         has_image = False
 
-        for content_block in _content_blocks(result):
+        for content_block in getattr(result, "content", []):
             if isinstance(content_block, ImageContent) or getattr(content_block, "type", "") == "image":
                 has_image = True
                 continue
-            block_text = _content_block_text(content_block)
-            if block_text is not None:
-                response_text = block_text
+            # The SDK-object boundary is this runner's own: only a TextContent
+            # (or a block whose type says text) is admitted, and the text field
+            # of an admitted block is read by the shared implementation.
+            if _is_text_content(content_block):
+                response_text = _content_block_text(content_block)
 
         # Empty text parses to None on its own; no guard needed.
         parsed_json = _parse_json_text(response_text)

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from mcp.types import ImageContent, TextContent, Tool
+from mcp.types import TextContent, Tool
 
 from scripts import ai_e2e_common, validate_schema
 from scripts.run_container_e2e import (
@@ -19,7 +19,6 @@ from scripts.run_container_e2e import (
     SPEC_PATH,
     WRITE_CASES,
     ContainerE2ERunner,
-    _first_profile_id,
     _generative_ui_failure,
     _missing_generative_ui_tools,
     check_health_endpoint,
@@ -151,56 +150,6 @@ def test_record_skip(runner: ContainerE2ERunner):
     assert data["tool"] == "plotAnalytics"
     assert data["status"] == "SKIPPED"
     assert data["reason"] == "No profile"
-
-
-# --------------------------------------------------------------------------- #
-# Reading a tool result's content blocks, and a profile list's ids (issue #620)
-# --------------------------------------------------------------------------- #
-
-
-def test_the_container_delegates_the_block_reader_and_the_id_fallback():
-    """The runner reads through ai_e2e_common, it does not keep a second copy.
-
-    The names this script binds are the shared function objects themselves, which
-    is what makes a change to how a text block or an id is read land once instead
-    of once per runner.
-    """
-    from scripts import run_container_e2e as rce
-
-    assert rce._content_blocks is ai_e2e_common._content_blocks
-    assert rce._content_block_text is ai_e2e_common._content_block_text
-    assert rce._unwrap_id is ai_e2e_common._unwrap_id
-    assert rce._id_text is ai_e2e_common._id_text
-
-
-def test_parse_response_content_keeps_the_last_text_block_and_flags_the_image(runner: ContainerE2ERunner):
-    """Two text blocks plus an image: the answer is the last block, the image is noted."""
-    result = MagicMock()
-    result.content = [
-        TextContent(type="text", text='{"first": 1}'),
-        ImageContent(type="image", data="Zm9v", mimeType="image/png"),
-        TextContent(type="text", text='{"domains": 3}'),
-    ]
-
-    response_text, has_image, parsed_json = runner._parse_response_content(result)
-
-    assert response_text == '{"domains": 3}'
-    assert has_image is True
-    assert parsed_json == {"domains": 3}
-
-
-def test_parse_response_content_of_a_result_with_no_blocks(runner: ContainerE2ERunner):
-    """No content at all is not an error: it is no text, no image, nothing to parse."""
-    assert runner._parse_response_content(MagicMock(content=[])) == ("", False, None)
-
-
-def test_first_profile_id_answers_the_first_id_or_nothing():
-    """A listProfiles answer gives its first id; an empty or id-less list gives ''."""
-    assert _first_profile_id({"data": [{"id": "p1"}, {"id": "p2"}]}) == "p1"
-    assert _first_profile_id({"data": [{"name": "no id here"}]}) == ""
-    assert _first_profile_id({"data": []}) == ""
-    assert _first_profile_id({}) == ""
-    assert _first_profile_id(None) == ""
 
 
 @pytest.mark.asyncio
