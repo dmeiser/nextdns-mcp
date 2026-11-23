@@ -33,6 +33,7 @@ from nextdns_mcp import config
 from nextdns_mcp.client import AccessDeniedError
 from nextdns_mcp.errors import ErrorCode
 from nextdns_mcp.tools import logs as logs_module
+from nextdns_mcp.tools.logs import guard, preview, stream
 
 # example.com: an address Python's ipaddress module reports as globally routable.
 PUBLIC_IP = "93.184.216.34"
@@ -270,7 +271,7 @@ class TestRedirectRefusal:
             raise AssertionError("a pinned host must not be resolved")
 
         monkeypatch.setattr(socket, "getaddrinfo", fail)
-        monkeypatch.setattr(logs_module, "ALLOWED_DOWNLOAD_HOSTS", frozenset({"cdn.nextdns.io"}))
+        monkeypatch.setattr(guard, "ALLOWED_DOWNLOAD_HOSTS", frozenset({"cdn.nextdns.io"}))
         await logs_module._check_download_redirect_target(httpx.URL("https://cdn.nextdns.io/file.csv"))
 
     async def test_a_public_https_target_is_accepted(self):
@@ -440,7 +441,7 @@ class TestStreamingToDisk:
         The cap is what keeps a download's payload small enough to be worth sending
         to a model; a single large chunk must not be able to blow past it.
         """
-        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_LINES", 2)
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_LINES", 2)
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["l1\nl2\nl3\nl4\nl5\n"]), str(tmp_path / "d.csv")
         )
@@ -451,7 +452,7 @@ class TestStreamingToDisk:
 
     async def test_the_preview_stops_at_the_byte_cap(self, tmp_path, monkeypatch):
         """A line that would cross the byte cap is left out rather than truncated in half."""
-        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 8)
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_BYTES", 8)
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["abcdefgh\n"]), str(tmp_path / "d.csv")
         )
@@ -983,7 +984,7 @@ class TestStreamedFailureIsTyped:
             reads.append(response)
             return b""
 
-        monkeypatch.setattr(logs_module, "read_body_capped", watch_body)
+        monkeypatch.setattr(stream, "read_body_capped", watch_body)
         response = _FakeResponse("https://x/f.csv", status_code=502, chunks=["bad gateway"])
         async for _ in response.aiter_bytes():  # consume it, exactly as a completed download would
             pass
@@ -1274,7 +1275,7 @@ class TestOversizedRecordsDropWhole:
         cap; later chunks still belong to THAT record. Appending their leading
         text to the preview would show a fragment and imply a record that
         never existed."""
-        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["A" * 30, "AAAA\nreal,row\n"]), str(tmp_path / "d.csv")
         )
@@ -1283,7 +1284,7 @@ class TestOversizedRecordsDropWhole:
         assert payload["size"] == 44
 
     async def test_an_oversized_record_spanning_several_chunks_stays_dropped(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["A" * 30, "more", "tail\nx,y\n"]), str(tmp_path / "d.csv")
         )
@@ -1298,7 +1299,7 @@ class TestOversizedRecordAtEof:
         """The carry survives into EOF mid-dropped-record; _flush_tail must not
         preview it (it is the same record already excluded), while the row
         itself still counts - it exists on disk."""
-        monkeypatch.setattr(logs_module, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_BYTES", 16)
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["A" * 30, "xyz"]), str(tmp_path / "d.csv")
         )

@@ -1,0 +1,144 @@
+"""The ``downloadLogs`` entrypoint: temp-file lifecycle and typed error mapping.
+
+:func:`_download_logs_to_tempfile` is what ``spec_tools`` delegates the
+``downloadLogs`` operation to (resolved on the package at call time, so tests
+can replace it). It streams the CSV through :mod:`.redirects`, registers a
+successful download with :mod:`.retention` for lifespan reclaim, and maps
+every failure mode to the typed payload the tool returns - including removal
+of the temp file and its ``mkdtemp`` parent on every exit that is not a
+successful download.
+
+SPDX-License-Identifier: MIT
+"""
+
+import logging
+import os
+import tempfile
+from typing import Any
+
+import httpx
+
+from ... import client
+from ...errors import ErrorCode, error_payload, http_error_payload
+from ...transport import access_denied_payload_for
+from . import redirects, retention, stream
+from .guard import DownloadRedirectRefusedError
+
+logger = logging.getLogger(__name__)
+
+
+async def _download_logs_controlled(profile_id: str, path: str) -> tuple[dict[str, Any], bool]:
+    """Stream the CSV to ``path``, mapping typed failures to their payloads.
+
+    Returns a ``(payload, downloaded)`` pair; ``downloaded`` is True only when
+    the whole body was written, which is what tells the caller's cleanup guard
+    to keep the file. HTTP and unexpected errors are re-raised for the caller's
+    handlers, in the same order the single-function version caught them.
+    """
+    try:
+        payload = await redirects._stream_download_to_path(profile_id, path)
+        return payload, True
+    except DownloadRedirectRefusedError as e:
+        # A redirect to a non-public or plaintext destination is refused
+        # before any request is made to the target, so no foreign body is ever
+        # written or returned. The message carries only scheme and host: the
+        # signed part of the URL never reaches the log or the payload. The
+        # temp file and its parent are removed by the caller's finally guard,
+        # which covers every non-successful exit.
+        logger.warning(f"Refusing log download redirect: {e}")
+        return (
+            error_payload(
+                ErrorCode.HTTP_ERROR, "Refusing log download redirect to a non-public or non-https destination"
+            ),
+            False,
+        )
+    except client.AccessDeniedError as e:
+        # Raised by the ACL layer (via stream()) before any network request;
+        # kept out of the httpx.HTTPError branch so a real upstream 403 keeps
+        # its existing http_error path.
+        logger.warning(f"Access denied downloading logs: {client._log_safe_error(e)}")
+        return access_denied_payload_for(e), False
+    except stream.DownloadTooLargeError as e:
+        # Raised mid-stream when the total-size cap is exceeded; the partially
+        # written CSV and its parent are removed by the caller's guard.
+        logger.warning(f"Download aborted, size cap exceeded: {e}")
+        return error_payload(ErrorCode.DOWNLOAD_TOO_LARGE, str(e)), False
+
+
+def _download_error_details(error: Exception) -> tuple[Any, Any, Any]:
+    """Best-effort (status, scheme, host) from an httpx error, without raising."""
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    url = None
+    try:
+        request = getattr(error, "request", None)
+    except RuntimeError:
+        request = None
+    if request is not None:
+        try:
+            url = getattr(request, "url", None)
+        except Exception:  # noqa: BLE001
+            url = None
+    scheme = getattr(url, "scheme", None)
+    host = getattr(url, "host", None)
+    return status, scheme, host
+
+
+def _download_error_detail(status: Any, scheme: Any, host: Any) -> str:
+    """Render the parts of the failed request that exist, space-joined; skip the rest."""
+    return " ".join(
+        part
+        for part in (
+            str(status) if status is not None else "",
+            f"{scheme}://{host}" if scheme else "",
+        )
+        if part
+    )
+
+
+async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
+    """Stream a log CSV download to a temp file without double-buffering.
+
+    The response body is streamed directly to disk (bounded by the OS temp
+    file), a bounded preview of the first lines is kept in memory, and the
+    tool payload returns only the file path, size, row count, and preview —
+    never the full CSV text.
+
+    Every exit that is not a successful download removes the temp file and its
+    mkdtemp parent, including cancellation of the awaiting task, so an
+    abandoned download leaves neither an empty directory nor a partial CSV
+    behind.
+
+    The authenticated client is used only for the initial request to the
+    NextDNS API, and never follows redirects: if the download endpoint
+    redirects (for example to object storage), the ``Location`` is fetched with
+    an unauthenticated client so the ``X-Api-Key`` header is never sent to
+    another host. That unauthenticated fetch only visits https destinations on
+    globally routable hosts, so a hostile ``Location`` cannot turn the download
+    into a probe of an internal service.
+    """
+    path = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_"), "download.csv")
+    downloaded = False
+    try:
+        payload, downloaded = await _download_logs_controlled(profile_id, path)
+        # The file must survive until the caller has read it; the server
+        # lifespan reclaims it at shutdown (see cleanup_successful_downloads).
+        retention._note_successful_download(path, downloaded)
+        return payload
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error downloading logs: {client._log_safe_error(e)}")
+        status, scheme, host = _download_error_details(e)
+        detail = _download_error_detail(status, scheme, host)
+        return http_error_payload(
+            "HTTP error while downloading logs" + (f": {detail}" if detail else ""),
+            e,
+            fallback_code=ErrorCode.HTTP_ERROR,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Unexpected error downloading logs: {client._log_safe_error(e)}")
+        return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")
+    finally:
+        # Every exit that is not a successful download — including a cancelled
+        # task, which reaches neither handler — removes the temp file and its
+        # mkdtemp parent, so an abandoned download leaves nothing behind.
+        if not downloaded:
+            retention._unlink_temp_file(path)
