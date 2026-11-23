@@ -319,39 +319,52 @@ def _schema_declared_types(schema: dict[str, Any]) -> set[str]:
     return set()
 
 
-def _cast_or_original(cast: Callable[[str], Any], s: str) -> Any:
-    """Apply a numeric cast; a ValueError leaves the original string unchanged."""
+def _is_bool_shaped(s: str) -> bool:
+    """Whether the string spells a boolean: ``true`` or ``false``, any case."""
+    return s.lower() in ("true", "false")
+
+
+def _to_bool(s: str) -> bool:
+    """The boolean cast: only ``true`` in any capitalization reads as True."""
+    return s.lower() == "true"
+
+
+def _to_float_or_original(s: str) -> Any:
+    """Apply the number cast; a ValueError leaves the original string unchanged.
+
+    ``is_float_shaped`` is a shape test, not a parse, so an accepted string can
+    still fail ``float()``; it comes back unchanged rather than raising out of
+    the coercion layer. The integer row needs no such guard: ``is_integer_shaped``
+    already ran ``int(s)`` and rejected anything it cannot parse.
+    """
     try:
-        return cast(s)
+        return float(s)
     except ValueError:
         return s
 
 
-def _coerce_bool_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
-    """(handled, value) for a schema that explicitly expects a boolean."""
-    lowered = s.lower()
-    if "boolean" in schema_types and lowered in ("true", "false"):
-        return True, lowered == "true"
-    return False, s
+def _coerce_string_by_type(s: str, schema_types: set[str]) -> Any:
+    """Coerce a string to the scalar type the schema declares, or leave it.
 
+    One table, one row per JSON Schema scalar type: the declared type that
+    authorizes the coercion, the shape guard the string must pass, and the cast
+    to apply. The first match wins, so a schema declaring both ``integer`` and
+    ``number`` gets the int. A string no row claims is returned as written —
+    identifier-like values (profile and entry IDs) stay strings.
 
-def _coerce_int_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
-    """(handled, value) for a schema that explicitly expects an integer.
-
-    ``is_integer_shaped`` already ran ``int(s)`` and rejected anything it
-    cannot parse, so the cast here cannot fail: it returns the value directly
-    instead of re-entering the guarded-cast helper for a second parse.
+    The rows are assembled per call so the shape guards are read from this
+    module's globals each time, which keeps a test that patches
+    ``is_float_shaped`` here able to reach the guarded number cast.
     """
-    if "integer" in schema_types and is_integer_shaped(s):
-        return True, int(s)
-    return False, s
-
-
-def _coerce_float_value(s: str, schema_types: set[str]) -> tuple[bool, Any]:
-    """(handled, value) for a schema that explicitly expects a number."""
-    if "number" in schema_types and is_float_shaped(s):
-        return True, _cast_or_original(float, s)
-    return False, s
+    rows: tuple[tuple[str, Callable[[str], bool], Callable[[str], Any]], ...] = (
+        ("boolean", _is_bool_shaped, _to_bool),
+        ("integer", is_integer_shaped, int),
+        ("number", is_float_shaped, _to_float_or_original),
+    )
+    for declared_type, is_shaped, cast in rows:
+        if declared_type in schema_types and is_shaped(s):
+            return cast(s)
+    return s
 
 
 def _preserves_time_string(value: str, schema_types: set[str]) -> bool:
@@ -441,11 +454,7 @@ class StripExtraFieldsMiddleware(Middleware):
         """
         if _preserves_time_string(s, schema_types):
             return s
-        for coerce in (_coerce_bool_value, _coerce_int_value, _coerce_float_value):
-            handled, value = coerce(s, schema_types)
-            if handled:
-                return value
-        return s
+        return _coerce_string_by_type(s, schema_types)
 
     def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
         """Coerce a value using its property schema.
