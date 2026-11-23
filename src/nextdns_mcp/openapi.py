@@ -88,7 +88,12 @@ HEALTH_FAILURE_UNREACHABLE = "unreachable"
 
 
 class _HealthFailure(NamedTuple):
-    """A failed readiness probe.
+    """A failed readiness probe, kept on the operator's side of the boundary.
+
+    Both fields are reported to the server log (`_log_readiness_failure`) and
+    never over ``/health``: the HTTP transport is unauthenticated by design, so
+    the class and reason would tell any host that can reach the port whether the
+    configured API key is accepted (issue #603).
 
     Attributes:
         failure_class: ``"auth"`` or ``"unreachable"``.
@@ -736,12 +741,19 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
     ``GET /health`` is a real readiness check, not a liveness constant: it
     probes the NextDNS API with the configured API key and returns ``200 OK``
     with ``{"status": "ok"}`` only when that probe succeeds. A failing probe
-    returns ``503`` together with the failure class (``auth`` or
-    ``unreachable``) and a short reason. Results are cached for
-    ``HEALTH_CACHE_TTL`` seconds so a polling load balancer cannot hammer the
-    API. The route is registered with FastMCP's ``custom_route`` so it is served
-    alongside the ``/mcp`` streamable-HTTP endpoint; in stdio mode there is no
-    HTTP surface, so the route is simply not reachable.
+    returns ``503`` with the minimal body ``{"status": "error"}`` — no failure
+    class and no reason. The HTTP transport is unauthenticated by design
+    (``docs/safety.md``: an authenticating reverse proxy is the caller's job),
+    so anything this body says is readable by every host that can reach the
+    port. A class of ``auth`` plus a reason naming the upstream status is an
+    oracle for "is this API key accepted", which is not something a route that
+    cannot identify its caller should answer. The class and reason stay on the
+    operator's side of the boundary, in the process log
+    (``_log_readiness_failure``). Results are cached for ``HEALTH_CACHE_TTL``
+    seconds so a polling load balancer cannot hammer the API. The route is
+    registered with FastMCP's ``custom_route`` so it is served alongside the
+    ``/mcp`` streamable-HTTP endpoint; in stdio mode there is no HTTP surface,
+    so the route is simply not reachable.
 
     Args:
         mcp: The FastMCP server to attach the route to.
@@ -749,13 +761,9 @@ def _register_health_endpoint(mcp: FastMCP) -> None:
 
     async def health_check(_request: Request) -> JSONResponse:
         """Report NextDNS API readiness as measured by a live credential probe."""
-        failure = await check_nextdns_readiness()
-        if failure is None:
+        if await check_nextdns_readiness() is None:
             return JSONResponse({"status": "ok"})
-        return JSONResponse(
-            {"status": "error", "class": failure.failure_class, "reason": failure.reason},
-            status_code=503,
-        )
+        return JSONResponse({"status": "error"}, status_code=503)
 
     mcp.custom_route("/health", methods=["GET"])(health_check)
 
@@ -817,7 +825,24 @@ async def check_nextdns_readiness() -> _HealthFailure | None:
             return failure
         failure = await _run_health_probe()
         _health_probe_cache = (time.monotonic(), failure)
+        if failure is not None:
+            # One record per real probe, not per poll: the detail lives here
+            # because it cannot live in the /health body (see #603).
+            _log_readiness_failure(failure)
         return failure
+
+
+def _log_readiness_failure(failure: _HealthFailure) -> None:
+    """Report a failed probe to the operator, where the response body cannot.
+
+    The class and reason identify why the server is not ready — an auth failure
+    and an unreachable API need different fixes — so closing the body has to
+    move that detail, not drop it. Both fields are built from a status code, an
+    exception type name, and configuration state (`_HealthFailure`), never from a
+    request URL or an exception message, so this WARNING needs no redaction
+    pass (`_redacted()` in `client.py` guards those shapes).
+    """
+    logger.warning("NextDNS readiness probe failed: class=%s reason=%s", failure.failure_class, failure.reason)
 
 
 async def _run_health_probe() -> _HealthFailure | None:

@@ -15,9 +15,12 @@ SPDX-License-Identifier: MIT
 """
 
 import asyncio
+import io
 import ipaddress
 import os
 import socket
+import tempfile
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Self
@@ -468,6 +471,301 @@ class TestStreamingToDisk:
         assert payload["size"] > payload["preview"]["bytes"]
 
 
+# The holding sink below still needs the real ``os.fdopen`` to build the file
+# behind it, so capture it before a test replaces the attribute.
+_REAL_FDOPEN = os.fdopen
+
+# Both sides of the held write are bounded, so a frozen loop produces an
+# assertion failure rather than a CI job that hangs until its timeout.
+_WRITE_START_SECONDS = 5.0
+_PROGRESS_SECONDS = 1.0
+_RELEASE_SECONDS = 10.0
+
+
+class _HoldingSink:
+    """Stands in for ``os.fdopen``: the real file, with its first write held open.
+
+    ``write`` blocks on a thread event, which reproduces a slow disk without a
+    slow disk: a write issued on the event loop freezes that loop for as long as
+    the watcher keeps the event clear, and a write issued elsewhere does not.
+    """
+
+    def __init__(self) -> None:
+        self._file: Any = None
+        self.write_started = threading.Event()
+        self._released = threading.Event()
+
+    def __call__(self, fd: int, *args: Any, **kwargs: Any) -> Self:
+        self._file = _REAL_FDOPEN(fd, *args, **kwargs)
+        return self
+
+    def write(self, raw: bytes) -> int:
+        if not self.write_started.is_set():
+            self.write_started.set()
+            self._released.wait(_RELEASE_SECONDS)
+        return self._file.write(raw)
+
+    def release(self) -> None:
+        self._released.set()
+
+    def close(self) -> None:
+        # Production closes the handle on the worker pool, so the sink is closed
+        # through here rather than by leaving a ``with`` block.
+        self._file.close()
+
+
+class _LoopStallWatcher:
+    """Whether an independent coroutine finished while a write was being held.
+
+    It has to run in its own thread: a blocked event loop never runs anything
+    scheduled on it, so a watcher written as a coroutine would be frozen along
+    with the loop it is measuring, and the check would hang rather than fail.
+    """
+
+    def __init__(self, sink: _HoldingSink, progress: threading.Event) -> None:
+        self._sink = sink
+        self._progress = progress
+        self.loop_stayed_free = False
+        self.note = ""
+
+    def run(self) -> None:
+        if not self._sink.write_started.wait(_WRITE_START_SECONDS):
+            self.note = "the download never reached a write"
+            self._sink.release()
+            return
+        self.loop_stayed_free = self._progress.wait(_PROGRESS_SECONDS)
+        if not self.loop_stayed_free:
+            self.note = f"nothing else on the loop ran for {_PROGRESS_SECONDS}s while one write was pending"
+        self._sink.release()  # the download then finishes and the failure is reported, not swallowed
+
+
+async def _second_request(progress: threading.Event) -> None:
+    """Any other call this process would serve while the download is writing."""
+    await asyncio.sleep(0)
+    progress.set()
+
+
+class TestDiskWritesDoNotStallTheLoop:
+    """A download's disk writes must not hold the event loop (issue #648).
+
+    One download is thousands of writes, so a write on the loop makes every
+    other request in the process wait for it. The file's bytes are pinned by
+    ``TestStreamingToDisk``; what is pinned here is that an unrelated coroutine
+    still finishes while a write is in flight.
+    """
+
+    async def test_a_pending_write_leaves_the_loop_free(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "download.csv")
+        chunks = ["a.com,blocked\n", "b.com,blocked\n", "c.com,blocked\n"]
+        sink = _HoldingSink()
+        monkeypatch.setattr(logs_module.os, "fdopen", sink)
+
+        progress = threading.Event()
+        watcher = _LoopStallWatcher(sink, progress)
+        thread = threading.Thread(target=watcher.run, name="loop-stall-watcher", daemon=True)
+        thread.start()
+        try:
+            download = asyncio.create_task(
+                logs_module._write_stream_to_tempfile(_FakeResponse("https://x/file.csv", chunks=chunks), path)
+            )
+            other = asyncio.create_task(_second_request(progress))
+            payload = await download
+            await other
+        finally:
+            thread.join(_WRITE_START_SECONDS + _RELEASE_SECONDS)
+
+        assert watcher.loop_stayed_free, watcher.note
+        # Offloading the write changes when bytes land, not which bytes land.
+        assert payload["row_count"] == 3
+        assert Path(path).read_text(encoding="utf-8") == "".join(chunks)
+
+
+# The buffer is smaller than the first chunk on purpose: a chunk larger than the
+# buffer is written straight at the raw layer, and that is the only state in
+# which the buffered writer still owns its lock across a blocking write - the
+# state a cancellation catches it in, and the reason close() has to wait.
+_SINK_BUFFER_BYTES = 8192
+_SINK_CHUNK_BYTES = 4 * _SINK_BUFFER_BYTES
+
+
+class _BlockingRawSink(io.RawIOBase):
+    """A raw file over the real fd whose first write waits to be released.
+
+    It sits under a real ``io.BufferedWriter``, so a write in progress holds the
+    buffered writer's lock exactly as a real one does; nothing here fakes the
+    lock, it only delays the syscall underneath it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._fd: int | None = None
+        self.chunks = [b"x" * _SINK_CHUNK_BYTES, b"y" * _SINK_CHUNK_BYTES]
+        self.raw_write_started = threading.Event()
+        self._released = threading.Event()
+
+    def open_over(self, fd: int, *args: Any, **kwargs: Any) -> io.BufferedWriter:
+        self._fd = fd
+        return io.BufferedWriter(self, buffer_size=_SINK_BUFFER_BYTES)
+
+    def writable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return False
+
+    def write(self, view: memoryview) -> int:
+        if not self.raw_write_started.is_set():
+            self.raw_write_started.set()
+            self._released.wait(_RELEASE_SECONDS)
+        assert self._fd is not None
+        return os.write(self._fd, view)
+
+    def release(self) -> None:
+        self._released.set()
+
+    def close(self) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        super().close()
+
+
+class _CancellationWatcher:
+    """Asks for the cancellation off the loop, then records whether the loop survived it.
+
+    Both halves happen in a thread because a blocked loop runs nothing
+    scheduled on it: a watcher written as a coroutine would be frozen along with
+    the loop it measures, and the check would hang rather than fail.
+    """
+
+    def __init__(
+        self,
+        sink: _BlockingRawSink,
+        cancel_requested: threading.Event,
+        loop_progress: threading.Event,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._sink = sink
+        self._cancel_requested = cancel_requested
+        self._loop_progress = loop_progress
+        self._loop = loop
+        self._task: asyncio.Task[Any] | None = None
+        self.loop_stayed_free = False
+        self.note = ""
+
+    def attach(self, task: asyncio.Task[Any]) -> None:
+        self._task = task
+
+    def run(self) -> None:
+        if not self._sink.raw_write_started.wait(_WRITE_START_SECONDS):
+            self.note = "the download never reached a write below the buffer"
+            self._sink.release()
+            return
+        if self._task is not None:
+            self._loop.call_soon_threadsafe(self._task.cancel)
+        self._cancel_requested.set()
+        self.loop_stayed_free = self._loop_progress.wait(_PROGRESS_SECONDS)
+        if not self.loop_stayed_free:
+            self.note = "the loop stayed frozen from the cancel until the in-flight write was released"
+        self._sink.release()
+
+
+async def _progress_after(cancel_requested: threading.Event, done: threading.Event) -> None:
+    """The next request this server would serve, held back until the cancel is queued.
+
+    Waiting for the queueing rather than starting at the top of the download is
+    the point: a coroutine that finished before the cancellation was requested
+    says nothing about the unwinding path, and that is where the stall is.
+    """
+    while not cancel_requested.is_set():
+        await asyncio.sleep(0.01)
+    done.set()
+
+
+class TestCancellationDuringAWrite:
+    """Cancelling a download while a write is in flight must not stall the loop either.
+
+    Cancellation unwinds the file's close, and close needs the buffered writer's
+    lock that the in-flight write is holding. A close taken on the loop waits
+    for that lock there, which stops every other request for the rest of the
+    write - the same failure mode the write offload removed, arriving by a
+    different route. So the check has two halves: the loop keeps running, and
+    the cancellation still reaches the caller and removes the partial CSV and
+    its directory.
+    """
+
+    async def test_cancelling_during_a_raw_write_keeps_the_loop_running(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "download.csv")
+        sink = _BlockingRawSink()
+        monkeypatch.setattr(logs_module.os, "fdopen", sink.open_over)
+
+        loop = asyncio.get_running_loop()
+        cancel_requested = threading.Event()
+        loop_progress = threading.Event()
+        watcher = _CancellationWatcher(sink, cancel_requested, loop_progress, loop)
+        download = asyncio.create_task(
+            logs_module._write_stream_to_tempfile(_FakeResponse("https://x/f.csv", chunks=sink.chunks), path)
+        )
+        other = asyncio.create_task(_progress_after(cancel_requested, loop_progress))
+        watcher.attach(download)
+        thread = threading.Thread(target=watcher.run, name="cancellation-watcher", daemon=True)
+        thread.start()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await download
+            await other
+        finally:
+            thread.join(_WRITE_START_SECONDS + _RELEASE_SECONDS)
+
+        assert watcher.loop_stayed_free, watcher.note
+
+    async def test_a_cancelled_download_leaves_no_partial_file_and_no_directory(self, monkeypatch):
+        """The caller's cleanup guard still runs when the download is cancelled mid-write."""
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            return made
+
+        sink = _BlockingRawSink()
+        monkeypatch.setattr(logs_module.os, "fdopen", sink.open_over)
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        # ``api_client`` is a lazy attribute that refuses to resolve without a
+        # key, and replacing it reads the current value, so the key comes first.
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+        monkeypatch.setattr(
+            client_module,
+            "api_client",
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", chunks=sink.chunks)]),
+        )
+
+        loop = asyncio.get_running_loop()
+        cancel_requested = threading.Event()
+        loop_progress = threading.Event()
+        watcher = _CancellationWatcher(sink, cancel_requested, loop_progress, loop)
+        download = asyncio.create_task(logs_module._download_logs_to_tempfile("abc123"))
+        other = asyncio.create_task(_progress_after(cancel_requested, loop_progress))
+        watcher.attach(download)
+        thread = threading.Thread(target=watcher.run, name="cancellation-watcher", daemon=True)
+        thread.start()
+        try:
+            # The caller's handlers never see a cancelled task, so nothing is
+            # returned here: the task raises and its guard runs in ``finally``.
+            await download
+        except asyncio.CancelledError:
+            pass
+        finally:
+            thread.join(_WRITE_START_SECONDS + _RELEASE_SECONDS)
+            await other
+
+        assert watcher.loop_stayed_free, watcher.note
+        assert created, "no temp directory was created, so the cleanup claim is unproven"
+        assert not os.path.exists(created[0]), f"the cancelled download left {created[0]} behind"
+
+
 class TestDownloadTool:
     """``downloadLogs`` answers with a payload and leaves nothing behind on failure."""
 
@@ -476,7 +774,17 @@ class TestDownloadTool:
         monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
         monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
 
-    async def test_a_redirect_is_followed_to_a_file(self, monkeypatch, unauthenticated):
+    @pytest.fixture()
+    def owned_registry(self):
+        """Bind an owning-lifespan registry, as ``_server_lifespan`` would."""
+        owned: dict[str, None] = {}
+        token = logs_module._download_registry.set(owned)
+        try:
+            yield owned
+        finally:
+            logs_module._download_registry.reset(token)
+
+    async def test_a_redirect_is_followed_to_a_file(self, monkeypatch, unauthenticated, owned_registry):
         signed = "https://storage.example/file.csv?Signature=deadbeef"
         monkeypatch.setattr(
             client_module,
@@ -489,8 +797,10 @@ class TestDownloadTool:
         assert payload["row_count"] == 2
         assert os.path.exists(payload["file_path"])
         assert payload["preview"]["text"].startswith("host,reason")
+        logs_module.cleanup_successful_downloads()
+        assert not os.path.exists(payload["file_path"])
 
-    async def test_a_successful_download_is_reclaimed_at_shutdown(self, monkeypatch, unauthenticated):
+    async def test_a_successful_download_is_reclaimed_at_shutdown(self, monkeypatch, unauthenticated, owned_registry):
         """The kept CSV is bounded: the lifespan cleanup removes it and its dir.
 
         The file must outlive the call (the caller reads the returned path),
@@ -507,11 +817,41 @@ class TestDownloadTool:
 
         payload = await logs_module._download_logs_to_tempfile("abc123")
         assert os.path.exists(payload["file_path"])
-        assert payload["file_path"] in logs_module._SUCCESSFUL_DOWNLOADS
+        assert payload["file_path"] in owned_registry
         logs_module.cleanup_successful_downloads()
         assert not os.path.exists(payload["file_path"])
         assert not os.path.exists(os.path.dirname(payload["file_path"]))
         logs_module.cleanup_successful_downloads()  # idempotent: nothing registered, nothing to do
+
+    async def test_a_successful_download_without_a_lifespan_is_rejected_and_cleaned_up(
+        self, monkeypatch, unauthenticated
+    ):
+        """No owning lifespan means no reclaim point: the download is refused
+        with an explicit missing-registry error and the CSV is removed, rather
+        than silently registered where nothing would ever reclaim it."""
+        created: list[str] = []
+        real_mkdtemp = __import__("tempfile").mkdtemp
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            return made
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        monkeypatch.setattr(
+            client_module,
+            "api_client",
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)]),
+        )
+        unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+
+        payload = await logs_module._download_logs_to_tempfile("abc123")
+        assert payload["code"] == ErrorCode.INTERNAL_ERROR
+        assert "could not be handed out" in payload["error"]
+        assert "no server lifespan" in payload["error"].lower()
+        assert created and not os.path.exists(created[0]), "the rejected download's temp dir must be removed"
 
     async def test_an_acl_denial_is_typed_and_leaves_no_temp_file(self, monkeypatch):
         class Denied:
@@ -997,52 +1337,74 @@ class TestSuccessfulDownloadLifecycle:
         logs_module._note_successful_download(str(path), True)
         return str(path)
 
-    def test_retention_is_bounded_by_evicting_the_oldest_download(self, tmp_path, monkeypatch):
-        """A long-lived server must not keep every CSV it ever handed out."""
-        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        cap = logs_module.MAX_RETAINED_DOWNLOADS
-        paths = [self._register(tmp_path, f"dl{i}") for i in range(cap + 2)]
-        # The two oldest were evicted and unlinked; the newest `cap` stay.
-        assert not (tmp_path / "dl0" / "download.csv").exists()
-        assert not (tmp_path / "dl1" / "download.csv").exists()
-        for tag in range(2, cap + 2):
-            assert (tmp_path / f"dl{tag}" / "download.csv").exists()
-        registered = logs_module._current_registry()
-        assert set(registered) == set(paths[2:])
-        logs_module.cleanup_successful_downloads()
-        assert logs_module._current_registry() == {}
+    @staticmethod
+    def _own_lifespan_registry() -> tuple[dict[str, None], Any]:
+        """Bind an owning-lifespan registry and return it with its reset token."""
+        owned: dict[str, None] = {}
+        return owned, logs_module._download_registry.set(owned)
 
-    def test_a_failed_deletion_stays_registered_for_a_later_retry(self, tmp_path, monkeypatch, caplog):
+    def test_retention_is_bounded_by_evicting_the_oldest_download(self, tmp_path):
+        """A long-lived server must not keep every CSV it ever handed out."""
+        owned, token = self._own_lifespan_registry()
+        try:
+            cap = logs_module.MAX_RETAINED_DOWNLOADS
+            paths = [self._register(tmp_path, f"dl{i}") for i in range(cap + 2)]
+            # The two oldest were evicted and unlinked; the newest `cap` stay.
+            assert not (tmp_path / "dl0" / "download.csv").exists()
+            assert not (tmp_path / "dl1" / "download.csv").exists()
+            for tag in range(2, cap + 2):
+                assert (tmp_path / f"dl{tag}" / "download.csv").exists()
+            assert set(owned) == set(paths[2:])
+            logs_module.cleanup_successful_downloads()
+            assert owned == {}
+        finally:
+            logs_module._download_registry.reset(token)
+
+    def test_a_failed_deletion_stays_registered_for_a_later_retry(self, tmp_path, caplog):
         """The old cleanup popped each path BEFORE unlinking: one OSError and the
         CSV leaked forever with no record it had ever existed. A failed removal
         must keep the path registered so a later cleanup can retry it."""
-        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        blocker = tmp_path / "blocker"
-        blocker.mkdir()
-        blocked = str(blocker)  # a directory at the registered path: unlink fails with OSError
-        logs_module._note_successful_download(blocked, True)
-        gone = self._register(tmp_path, "gone")
+        owned, token = self._own_lifespan_registry()
+        try:
+            blocker = tmp_path / "blocker"
+            blocker.mkdir()
+            blocked = str(blocker)  # a directory at the registered path: unlink fails with OSError
+            logs_module._note_successful_download(blocked, True)
+            gone = self._register(tmp_path, "gone")
 
-        with caplog.at_level("WARNING"):
-            logs_module.cleanup_successful_downloads()
+            with caplog.at_level("WARNING"):
+                logs_module.cleanup_successful_downloads()
 
-        assert "Failed to remove temp log file" in caplog.text
-        # The removable file was unregistered; the failed one is still registered.
-        registered = logs_module._current_registry()
-        assert blocked in registered
-        assert gone not in registered
+            assert "Failed to remove temp log file" in caplog.text
+            # The removable file was unregistered; the failed one is still registered.
+            assert blocked in owned
+            assert gone not in owned
+        finally:
+            logs_module._download_registry.reset(token)
 
-    def test_registration_goes_to_the_owning_lifespan_registry(self, tmp_path, monkeypatch):
-        """Outside a lifespan the process-global registry is the fallback."""
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        owned: dict[str, None] = {}
-        token = logs_module._download_registry.set(owned)
+    def test_registration_without_a_lifespan_fails_fast_and_records_nothing(self, tmp_path):
+        """Outside a lifespan there is no owner that could ever reclaim the
+        CSV, so registration is refused with an explicit error before the path
+        is recorded - not silently kept in a process-global registry."""
+        path = tmp_path / "orphan" / "download.csv"
+        path.parent.mkdir(parents=True)
+        path.write_text("csv")
+        with pytest.raises(logs_module.MissingDownloadRegistryError):
+            logs_module._note_successful_download(str(path), True)
+        assert logs_module._download_registry.get() is None
+
+    def test_a_failed_download_is_never_registered(self, tmp_path):
+        """``downloaded=False`` records nothing and needs no owning lifespan."""
+        path = tmp_path / "nope" / "download.csv"
+        logs_module._note_successful_download(str(path), False)  # no lifespan bound: still a no-op
+        assert logs_module._download_registry.get() is None
+
+    def test_registration_goes_to_the_owning_lifespan_registry(self, tmp_path):
+        """A bound lifespan's registry receives the registration."""
+        owned, token = self._own_lifespan_registry()
         try:
             path = self._register(tmp_path, "owned")
             assert owned == {path: None}
-            assert logs_module._SUCCESSFUL_DOWNLOADS == {}
         finally:
             logs_module._download_registry.reset(token)
 
@@ -1063,15 +1425,16 @@ class TestSuccessfulDownloadLifecycle:
         assert not registered.exists()
         assert parent.exists(), "a parent another file lives in must survive"
 
-    def test_an_unevictable_oldest_download_stops_the_eviction_sweep(self, tmp_path, monkeypatch):
+    def test_an_unevictable_oldest_download_stops_the_eviction_sweep(self, tmp_path):
         """When the oldest registered path cannot be unlinked, the sweep stops
         instead of spinning; the overflow stays registered for shutdown reclaim."""
-        monkeypatch.setattr(logs_module, "_download_registry", logs_module.contextvars.ContextVar("t", default=None))
-        monkeypatch.setattr(logs_module, "_SUCCESSFUL_DOWNLOADS", {})
-        blocker = tmp_path / "blocker"
-        blocker.mkdir()  # a directory: unlink fails with OSError, cannot be evicted
-        logs_module._note_successful_download(str(blocker), True)
-        survivors = [self._register(tmp_path, f"dl{i}") for i in range(logs_module.MAX_RETAINED_DOWNLOADS + 1)]
-        registered = logs_module._current_registry()
-        assert str(blocker) in registered, "the failed eviction must stay registered"
-        assert set(survivors) <= set(registered), "an unevictable oldest must stop the sweep, not drop the rest"
+        owned, token = self._own_lifespan_registry()
+        try:
+            blocker = tmp_path / "blocker"
+            blocker.mkdir()  # a directory: unlink fails with OSError, cannot be evicted
+            logs_module._note_successful_download(str(blocker), True)
+            survivors = [self._register(tmp_path, f"dl{i}") for i in range(logs_module.MAX_RETAINED_DOWNLOADS + 1)]
+            assert str(blocker) in owned, "the failed eviction must stay registered"
+            assert set(survivors) <= set(owned), "an unevictable oldest must stop the sweep, not drop the rest"
+        finally:
+            logs_module._download_registry.reset(token)

@@ -28,7 +28,7 @@ from typing import Any
 # ``constants`` so the tool layer owns nothing that the base layer republishes.
 # The import is eager rather than lazy because ``constants`` imports nothing
 # from this package, so this edge cannot close a cycle.
-from .constants import DNS_STATUS_CODES, SAFE_PROFILE_ID_PATTERN, VALID_DNS_RECORD_TYPES  # noqa: F401
+from .constants import DNS_STATUS_CODES, SAFE_PROFILE_ID_PATTERN, VALID_DNS_RECORD_TYPES
 from .errors import ConfigurationError, MissingApiKeyError
 from .logging_config import configure_logging
 from .profile_access import _BOOL_FALSE_TOKENS as _BOOL_FALSE_TOKENS  # noqa: PLC0414
@@ -72,10 +72,13 @@ __all__ = [
     "DEFAULT_DOWNLOAD_MAX_BYTES",
     "DEFAULT_HTTP_TIMEOUT",
     "DEFAULT_TOOL_SEARCH_MODE",
+    "DNS_STATUS_CODES",
     "NEXTDNS_BASE_URL",
     "SAFE_PROFILE_ID_PATTERN",
     "TOOL_SEARCH_MODES",
+    "VALID_DNS_RECORD_TYPES",
     "Any",
+    "Collection",
     "ConfigurationError",
     "MissingApiKeyError",
     "ProfileAccessControl",

@@ -7,7 +7,7 @@ reaches it through this module. It owns exactly one thing: sending a request
 through ``client.api_client`` - the access-controlled client that enforces the
 profile read/write allowlists, read-only mode and the protected-profile
 denylist - and turning every way a request can fail into the standardized
-payload shape the server documents (``errors.py``):
+payload shape the server documents (the ``errors`` package):
 
 - an ``AccessDeniedError`` from the ACL layer becomes the typed denial payload
   (never a network request was made at that point);
@@ -110,7 +110,7 @@ async def _api_request(
     """Make an HTTP request through the access-controlled client and return JSON.
 
     Access-control denials raised by the ACL layer are reported as standardized
-    error payloads (see ``errors.py``) rather than raised exceptions, so callers
+    error payloads (see the ``errors`` package) rather than raised exceptions, so callers
     get a consistent, typed failure shape:
     ``{"error": ..., "code": "read_access_denied" | "write_access_denied" | "access_denied", "status_code": 403, ...}``.
 

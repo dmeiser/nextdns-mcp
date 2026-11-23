@@ -17,7 +17,9 @@ and takes that endpoint's own arguments, so the name says what the call does.
 - **Discovery**: By default (`NEXTDNS_TOOL_SEARCH=bm25`), `tools/list` exposes
   only `search_tools` + `call_tool`, and the model finds the operation tools
   by searching; they stay callable either way. Set `NEXTDNS_TOOL_SEARCH=off`
-  to advertise the full catalog in the listing instead.
+  to advertise the full catalog in the listing instead. Why disclosure is the
+  default and how its fallback works is recorded in
+  [ADR 0003](architecture/0003-bm25-progressive-tool-disclosure.md).
 
 ## Finding the tools
 
@@ -132,7 +134,8 @@ card's own default (a bar chart for `reasons`, a donut chart plus its table for
 Generative UI is an opt-in beta feature (disabled by default). When enabled by setting
 `NEXTDNS_GENERATIVE_UI=on` (or `true`, `1`, `yes`), the server mounts FastMCP's Generative UI provider
 (`generate_prefab_ui` and `search_prefab_components`), enabling host apps like OpenWebUI to
-dynamically author and render ad-hoc Prefab UI layouts in Pyodide.
+dynamically author and render ad-hoc Prefab UI layouts in Pyodide. Why the provider is opt-in and how
+its sandbox is bounded is recorded in [ADR 0002](architecture/0002-generative-ui-opt-in-provider.md).
 
 ### dohLookup
 `dohLookup(domain="example.com", profile_id="<profile id>", record_type="A")`

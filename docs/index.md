@@ -21,7 +21,12 @@ A Model Context Protocol (MCP) server that exposes the NextDNS API as tools for 
 - Generative UI trusted-host contract: [generative-ui.md](generative-ui.md)
 - Troubleshooting: [troubleshooting.md](troubleshooting.md)
 - FAQ: [faq.md](faq.md)
-- Architecture decision records: [architecture/0001-openapi-spec-generated-tools.md](architecture/0001-openapi-spec-generated-tools.md)
+- Architecture decision records:
+  - [ADR 0001 — OpenAPI-spec-generated tools](architecture/0001-openapi-spec-generated-tools.md)
+  - [ADR 0002 — Generative UI: an opt-in provider that runs model-written code](architecture/0002-generative-ui-opt-in-provider.md)
+  - [ADR 0003 — Progressive tool disclosure by BM25 search](architecture/0003-bm25-progressive-tool-disclosure.md)
+  - [ADR 0004 — Lazy process singletons and one shutdown point](architecture/0004-lazy-singletons-and-server-lifespan.md)
+  - [ADR 0005 — The dashboard package over neutral chart modules](architecture/0005-dashboard-package-split.md)
 
 ## Requirements
 - NextDNS API key from https://my.nextdns.io/account

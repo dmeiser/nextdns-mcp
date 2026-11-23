@@ -53,6 +53,7 @@ from fastmcp.tools.base import Tool, ToolResult
 from fastmcp.utilities.openapi import HTTPRoute, parse_openapi_to_http_routes
 from mcp.types import ToolAnnotations
 
+from . import transport as _transport
 from .charts import current_time, resolve_time_point, series_budget_error
 from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
@@ -485,18 +486,24 @@ class SpecApiTool(Tool):
         ``_series_refusal`` renders the ceiling as the typed series refusal.
         """
         request = self._transport or _api_request_payload
+        transport_kwargs = _capped_transport_kwargs(self._route, request)
         payload = await request(
             self._route.method,
             path,
             params=query or None,
             json_body=body,
-            **_capped_transport_kwargs(self._route, request),
+            **transport_kwargs,
         )
-        return self._wrap_call_result(payload)
+        return self._wrap_call_result(payload, _ceiling_measured_on_the_wire(request, transport_kwargs))
 
-    def _wrap_call_result(self, payload: Any) -> ToolResult:
-        """Turn a transport payload into a typed ToolResult."""
-        refused = _series_refusal(self._route, payload)
+    def _wrap_call_result(self, payload: Any, ceiling_measured_on_the_wire: bool = False) -> ToolResult:
+        """Turn a transport payload into a typed ToolResult.
+
+        ``ceiling_measured_on_the_wire`` says the transport already bounded the
+        ``;series`` body byte-for-byte as it arrived, which is what lets the
+        serialized backstop stay out of a successful call's way.
+        """
+        refused = _series_refusal(self._route, payload, ceiling_measured_on_the_wire)
         if refused is not None:
             return ToolResult(structured_content=refused, is_error=True)
         return ToolResult(structured_content=payload, is_error=is_error_payload(payload))
@@ -792,6 +799,23 @@ def _capped_transport_kwargs(route: HTTPRoute, request: Callable[..., Any]) -> d
 _CAP_SUPPORT_BY_REQUEST: dict[int, tuple[Callable[..., Any], bool]] = {}
 
 
+def _ceiling_measured_on_the_wire(request: Callable[..., Any], transport_kwargs: dict[str, Any]) -> bool:
+    """Whether the transport that answered already held the body under the ceiling.
+
+    Only the transport this package ships enforces the cap: it streams under
+    ``max_response_bytes`` and refuses the overshoot (see
+    ``transport._request_capped``), so the byte count of anything it hands back
+    is a fact established on the wire, and re-serializing that payload to price
+    it again measures a bound the wire already proved. A signature is not that
+    evidence - :func:`_transport_accepts_cap` decides only how the call is
+    *shaped*, and an injected callable can name ``max_response_bytes`` and
+    ignore it - so the serialized backstop in
+    :func:`_series_response_ceiling_error` stays in charge of every other
+    transport, and of this one when a test replaces it by attribute.
+    """
+    return bool(transport_kwargs) and request is _transport._api_request_payload
+
+
 def _transport_accepts_cap(request: Callable[..., Any]) -> bool:
     """Whether the resolved transport accepts a ``max_response_bytes`` keyword.
 
@@ -830,14 +854,21 @@ def _probe_transport_cap(request: Callable[..., Any]) -> bool:
     return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
-def _series_refusal(route: HTTPRoute, payload: Any) -> dict[str, Any] | None:
+def _series_refusal(
+    route: HTTPRoute, payload: Any, ceiling_measured_on_the_wire: bool = False
+) -> dict[str, Any] | None:
     """The typed ceiling refusal for a ``;series`` result, from either layer.
 
     The transport enforces the cap while streaming and answers with the typed
     ``response_too_large`` payload; that gets the series wording with no
     measured size claimed (nothing was measured - the refusal came from the
-    wire). The serialized check is the backstop for an injected transport
-    that honours no cap. The ceiling is a ``;series`` policy only: aggregate
+    wire). The serialized check is the backstop for a transport that was never
+    asked to cap the body, and ``ceiling_measured_on_the_wire`` says whether
+    this call's transport was (see
+    :func:`_ceiling_measured_on_the_wire`): a payload the shipped transport
+    streamed in under the cap needs no second measurement, because the second
+    measurement re-serializes the whole answer to price a bound the wire
+    already enforced. The ceiling is a ``;series`` policy only: aggregate
     endpoints (a wide denylist, a big profile listing) legitimately answer
     with larger documents and are not refused.
     """
@@ -845,6 +876,8 @@ def _series_refusal(route: HTTPRoute, payload: Any) -> dict[str, Any] | None:
         return None
     if payload.get("code") == ErrorCode.RESPONSE_TOO_LARGE:
         return _series_ceiling_payload(str(route.operation_id), None)
+    if ceiling_measured_on_the_wire:
+        return None
     return _series_response_ceiling_error(route, payload)
 
 
@@ -875,11 +908,18 @@ def _series_response_ceiling_error(route: HTTPRoute, payload: Any) -> dict[str, 
     """Typed refusal when a fetched ``;series`` payload is too big to hand back.
 
     The transport enforces ``MAX_SERIES_RESPONSE_BYTES`` while streaming;
-    this is the backstop for a transport that does not honour the cap (an
-    injected test double, a future custom transport): a payload whose JSON
-    is over the ceiling is refused as a typed error rather than dumped into
-    the caller's context. Only reached for ``;series`` routes, gated by
-    :func:`_series_refusal`.
+    this is the backstop for a transport that answered without being asked to
+    cap the body (a legacy injected double, a future custom transport): a
+    payload whose JSON is over the ceiling is refused as a typed error rather
+    than dumped into the caller's context. Only reached for ``;series``
+    routes, and only when :func:`_ceiling_measured_on_the_wire` says the
+    answering transport did no measuring of its own.
+
+    What it prices is the re-serialized payload, not the bytes that arrived:
+    a compact or non-ASCII body can re-dump larger than the wire it came in
+    on (``json.dumps`` escapes every non-ASCII character and spaces its
+    separators), which is why this is a backstop and the streamed cap is the
+    layer that bounds a normal call.
     """
     try:
         size = len(json.dumps(payload, default=str))
