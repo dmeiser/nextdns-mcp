@@ -24,11 +24,11 @@ from fastmcp.exceptions import ToolError
 from nextdns_mcp.call_log import (
     CALL_LOG_ENV,
     CallLogMiddleware,
-    _append_row,
     call_log_path,
     get_call_log,
     result_error,
 )
+from nextdns_mcp.call_log.store import _append_row
 from nextdns_mcp.client import is_write_operation
 from nextdns_mcp.server import build_mcp_server
 
@@ -316,7 +316,7 @@ class TestBoundedProjection:
     """
 
     def test_a_large_list_keeps_leading_entries_and_names_the_omission(self):
-        from nextdns_mcp.call_log import PROJECT_MAX_ITEMS, _project_value
+        from nextdns_mcp.call_log.projection import PROJECT_MAX_ITEMS, _project_value
 
         projected = _project_value([f"entry-{i}" for i in range(10_000)])
         assert len(projected) == PROJECT_MAX_ITEMS + 1
@@ -329,18 +329,19 @@ class TestBoundedProjection:
         The omission marker exists so a reader knows rows were dropped; adding
         it to a list that fit whole would make every small result lie.
         """
-        from nextdns_mcp.call_log import PROJECT_MAX_ITEMS, _project_value
+        from nextdns_mcp.call_log.projection import PROJECT_MAX_ITEMS, _project_value
 
         small = [f"entry-{i}" for i in range(PROJECT_MAX_ITEMS)]
         assert _project_value(small) == small
 
-        from nextdns_mcp.call_log import PROJECT_MAX_STRING_CHARS, _project_value
+        from nextdns_mcp.call_log.projection import PROJECT_MAX_STRING_CHARS, _project_value
 
         assert len(_project_value("x" * 5000)) == PROJECT_MAX_STRING_CHARS
 
     @pytest.mark.asyncio
     async def test_the_written_row_stays_inside_the_result_budget(self, tmp_path):
-        from nextdns_mcp.call_log import RESULT_CHARS, CallLogMiddleware
+        from nextdns_mcp.call_log import CallLogMiddleware
+        from nextdns_mcp.call_log.projection import RESULT_CHARS
 
         class _BigResult:
             is_error = False
@@ -363,7 +364,7 @@ class TestBoundedProjection:
 
     def test_deeply_nested_lists_are_capped_without_recursion(self):
         """List nesting deeper than ``PROJECT_MAX_DEPTH`` is dropped, not recursed into."""
-        from nextdns_mcp.call_log import PROJECT_MAX_DEPTH, _project_value
+        from nextdns_mcp.call_log.projection import PROJECT_MAX_DEPTH, _project_value
 
         value: list = []
         for _ in range(PROJECT_MAX_DEPTH + 5):
@@ -382,7 +383,7 @@ class TestBoundedProjection:
     def test_a_large_dict_consumes_only_the_key_cap(self):
         """The key cap slices lazily: it reads ``PROJECT_MAX_KEYS`` items,
         never a materialized list of the whole mapping's items."""
-        from nextdns_mcp.call_log import PROJECT_MAX_KEYS, _project_value
+        from nextdns_mcp.call_log.projection import PROJECT_MAX_KEYS, _project_value
 
         consumed: list[tuple[str, int]] = []
 
@@ -441,7 +442,7 @@ class TestLoggingCannotBreakACall:
         # A directory where the log file should open: real OSError, no mocks of
         # our own functions.
         monkeypatch.setattr(
-            "nextdns_mcp.call_log._open_log_file",
+            "nextdns_mcp.call_log.store._open_log_file",
             lambda path: (_ for _ in ()).throw(PermissionError("read-only filesystem")),
         )
         with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
@@ -555,7 +556,7 @@ def test_a_fchmod_failure_drops_the_row_rather_than_writing_permissively(tmp_pat
 
 def test_an_over_cap_result_is_a_valid_truncation_envelope():
     """The bound must never cut mid-document (the harness json.loads-es this)."""
-    from nextdns_mcp.call_log import RESULT_CHARS, _result_text
+    from nextdns_mcp.call_log.projection import RESULT_CHARS, _result_text
 
     class _Wide:
         structured_content: ClassVar[dict[str, str]] = {f"key{i}": "x" * 200 for i in range(50)}
@@ -600,7 +601,7 @@ class TestEvidenceColumn:
 
     def test_identities_survive_a_truncated_result_column(self):
         """The projection keeps five list items; evidence keeps fifty pairs."""
-        from nextdns_mcp.call_log import RESULT_CHARS, _result_text
+        from nextdns_mcp.call_log.projection import RESULT_CHARS, _result_text
 
         entries = {"data": [{"id": f"id-{i:04d}-padpadpad", "name": f"entry-{i:04d}"} for i in range(80)]}
         row = self._row("getDenylist", {"getDenylist": ("GET", "/profiles/{profile_id}/denylist")}, True, entries)
@@ -669,7 +670,7 @@ class TestEvidenceColumn:
         the walk visiting each one long after the bound was hit - the recursive
         guard rejects every append, but the pointless iteration is the cost.
         """
-        from nextdns_mcp.call_log import EVIDENCE_MAX_ITEMS, _result_evidence
+        from nextdns_mcp.call_log.evidence import EVIDENCE_MAX_ITEMS, _result_evidence
 
         consumed: list[object] = []
 
@@ -689,7 +690,7 @@ class TestEvidenceColumn:
 
     def test_the_walk_refuses_to_start_past_the_bound(self):
         """The entry guard holds for a direct caller too, not only the container loops."""
-        from nextdns_mcp.call_log import EVIDENCE_MAX_ITEMS, _walk_identities
+        from nextdns_mcp.call_log.evidence import EVIDENCE_MAX_ITEMS, _walk_identities
 
         out = [{"id": f"id-{i}"} for i in range(EVIDENCE_MAX_ITEMS)]
         _walk_identities({"id": "too-late", "name": "late-entry"}, out, set())
@@ -752,7 +753,7 @@ class TestEvidenceColumn:
         def boom(*args, **kwargs):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr("nextdns_mcp.call_log._result_evidence", boom)
+        monkeypatch.setattr("nextdns_mcp.call_log.record._result_evidence", boom)
         result = SimpleNamespace(is_error=False, structured_content={"$prefab": {"version": "0.3"}, "view": {}})
         path = tmp_path / "calls.jsonl"
         middleware = CallLogMiddleware(path=str(path), endpoints={})
