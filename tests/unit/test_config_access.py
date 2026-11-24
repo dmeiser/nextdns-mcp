@@ -9,6 +9,7 @@ from nextdns_mcp.config import (
     get_readable_profiles_set,
     get_writable_profiles,
     get_writable_profiles_set,
+    is_read_only,
 )
 
 
@@ -152,18 +153,32 @@ def test_readonly_mode_blocks_all_writes(monkeypatch):
         ("true ", True),
         ("true\n", True),
         ("yes\t", True),
+        ("1\n", True),
+        ("yes ", True),
         ("false", False),
         ("False", False),
         ("0", False),
         ("no", False),
         ("", False),
         ("anything-else", False),
+        (None, False),
     ],
 )
 def test_readonly_mode_values(monkeypatch, value, expected):
-    """Test different values for NEXTDNS_READ_ONLY."""
+    """Test different values for NEXTDNS_READ_ONLY, including padded ones.
+
+    An ``env_file`` line or a ConfigMap entry usually arrives with a trailing
+    newline or a leading space. That shape has to read the same as the bare
+    token, because the padded spelling is what a deployed stack sets when it
+    means to deny writes (WORK-310). ``None`` means the variable is unset.
+    """
     monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "profile1")
-    monkeypatch.setenv("NEXTDNS_READ_ONLY", value)
+    if value is None:
+        monkeypatch.delenv("NEXTDNS_READ_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("NEXTDNS_READ_ONLY", value)
+
+    assert is_read_only() is expected
 
     if expected:
         assert get_writable_profiles() is None
