@@ -201,12 +201,12 @@ class TestProtectedProfiles:
         from nextdns_mcp.config import load_profile_access_control
 
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
-        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "ABCDEF")
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "AB12XYZ0")
         access = load_profile_access_control()
-        assert access.can_write("abcdef") is False
+        assert access.can_write("ab12xyz0") is False
         assert access.can_write("zyuxyw") is True
         # Reads are deliberately unaffected (writes-only by design, docs/safety.md).
-        assert access.can_read("abcdef") is True
+        assert access.can_read("ab12xyz0") is True
 
     def test_a_malformed_entry_is_a_configuration_error(self, monkeypatch):
         from nextdns_mcp.config import ConfigurationError, get_protected_profiles
@@ -216,7 +216,7 @@ class TestProtectedProfiles:
             get_protected_profiles()
         message = str(raised.value)
         assert "oops!" in message
-        assert "6 or 10 lowercase alphanumeric" in message
+        assert "6 to 10 lowercase alphanumeric" in message
 
     def test_a_wrong_length_entry_is_a_configuration_error(self, monkeypatch):
         from nextdns_mcp.config import ConfigurationError, get_protected_profiles

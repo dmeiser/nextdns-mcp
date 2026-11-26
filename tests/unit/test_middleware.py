@@ -583,14 +583,14 @@ class TestIgnoredArgumentsNeverClobberTheToolHint:
     def test_an_existing_hint_survives_the_merge(self):
         from nextdns_mcp.relaxation import _report_ignored_arguments
 
-        result = ToolResult(structured_content={"data": [], "hint": "the profile id is 6 or 10 characters"})
+        result = ToolResult(structured_content={"data": [], "hint": "the profile id is 6 to 10 characters"})
         _report_ignored_arguments(result, ["privacy"], "privacy are parameters of updatePrivacySettings")
         structured = result.structured_content
         assert structured["ignored_arguments"] == ["privacy"]
         assert structured["ignored_arguments_hint"].startswith("privacy are parameters")
         assert (
             structured["hint"]
-            == "the profile id is 6 or 10 characters | privacy are parameters of updatePrivacySettings"
+            == "the profile id is 6 to 10 characters | privacy are parameters of updatePrivacySettings"
         )
 
     def test_no_prior_hint_uses_the_annotation_alone(self):
@@ -717,7 +717,7 @@ class TestIgnoredArgumentsHintBaseSurvival:
         result = ToolResult(
             structured_content={
                 "data": [],
-                "hint": "the profile id is 6 or 10 characters | from: getAnalyticsStatusSeries",
+                "hint": "the profile id is 6 to 10 characters | from: getAnalyticsStatusSeries",
                 "ignored_arguments": ["from"],
                 "ignored_arguments_hint": "from: getAnalyticsStatusSeries",
             }
@@ -728,7 +728,7 @@ class TestIgnoredArgumentsHintBaseSurvival:
             "from, to: getAnalyticsStatusSeries",
             hint_for=lambda names: "owners(" + ",".join(names) + ")",
         )
-        assert result.structured_content["hint"] == "the profile id is 6 or 10 characters | owners(from,to)"
+        assert result.structured_content["hint"] == "the profile id is 6 to 10 characters | owners(from,to)"
 
     def test_a_foreign_annotation_in_the_hint_is_not_stripped_by_re_render(self):
         result = ToolResult(

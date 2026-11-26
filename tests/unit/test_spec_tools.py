@@ -118,10 +118,8 @@ class TestGeneratedCatalog:
     def test_the_published_schema_offers_no_copyable_profile_id(self, routes):
         """An example profile id in a schema is a value a caller will send.
 
-        A NextDNS profile id is six hexadecimal characters, which is the shape of a
-        real one, so an example like ``abc123`` reads as a live profile and the call
-        404s blaming a profile that never existed — the exact loop the 404 hint
-        exists for. The pattern states the shape; the profile listing gives values.
+        An example like ``abc123`` reads as a real ID but returns a 404 if the
+        profile does not exist. The profile listing gives the caller a usable ID.
         """
         for route in routes.values():
             published = (route.flat_param_schema or {}).get("properties", {}).get("profile_id")

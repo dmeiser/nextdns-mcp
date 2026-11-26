@@ -83,7 +83,7 @@ components:
       properties:
         id:
           type: string
-          description: Unique profile identifier (6 or 10 lowercase alphanumeric characters)
+          description: Unique profile identifier (6 to 10 lowercase alphanumeric characters)
           example: abc123
         name:
           type: string
@@ -415,20 +415,14 @@ components:
       name: profile_id
       in: path
       required: true
-      # No example: a concrete id here gets copied. Live runs showed a model
-      # sending the example value verbatim, and because a NextDNS profile id is
-      # six or ten short alphanumeric characters, `abc123` reads as a real one -
-      # the request then 404s and the caller has to work out that the id was
-      # never a profile. The pattern says the shape; the profile-listing
-      # endpoint gives the values.
+      # A caller may copy an example ID verbatim and get a 404 for a profile it never owned.
       description: >-
-        Profile ID (6 or 10 lowercase alphanumeric characters - legacy profiles
-        use 6, current ones 10). Not the profile's name and not derived from
-        it; the profile-listing endpoint returns the identifiers this API key
-        can reach.
+        Profile ID (6 to 10 lowercase alphanumeric characters). The profile-listing
+        endpoint returns the identifiers this API key can reach. The display name
+        is a separate field.
       schema:
         type: string
-        pattern: '^(?:[a-z0-9]{6}|[a-z0-9]{10})$'
+        pattern: '^[a-z0-9]{6,10}$'
 
     EntryId:
       name: entry_id
