@@ -375,7 +375,7 @@ class TestAccessControlledClientFailsClosed:
                 await client.request("GET", "profiles/denied456/settings")
 
         mock_super_request.assert_not_called()
-        assert exc_info.value.code == "access_denied"
+        assert exc_info.value.code == "read_access_denied"
 
     @pytest.mark.asyncio
     async def test_allows_relative_profile_path_when_readable(

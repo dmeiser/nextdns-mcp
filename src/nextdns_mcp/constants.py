@@ -25,19 +25,12 @@ import re
 # or ``evil.localhost`` is not in here and is not treated as loopback.
 LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
 
-# Safe identifier patterns to prevent path traversal and ACL bypass.
-# Profile IDs must match what api.nextdns.io actually issues, not the stale
-# nextdns-openapi.yaml ProfileId parameter (which once claimed 6 characters).
-# The live API returns 10-character IDs for newly created profiles (observed
-# 2026-10-03 in CI run 37139687479) while legacy profiles keep 6-character IDs,
-# so both shapes are accepted and everything else still fails fast locally
-# instead of 404ing upstream.
-SAFE_PROFILE_ID_PATTERN = re.compile(r"^(?:[a-z0-9]{6}|[a-z0-9]{10})$")
+SAFE_PROFILE_ID_PATTERN = re.compile(r"^[a-z0-9]{6,10}\Z")
 
 # The hint every profile-id failure repeats: the shape, and where a real id
 # comes from. One string so the generated tools, the delegation guard and the
 # 404 diagnosis can never word the same contract differently.
-PROFILE_ID_HINT = "the profile id is 6 or 10 characters; listProfiles() returns the ids this API key can access"
+PROFILE_ID_HINT = "the profile id is 6 to 10 characters; listProfiles() returns the ids this API key can access"
 
 # HTTP methods that change server state. A tool bound to one of these wrote,
 # whatever it was named; the call log's ``write`` field is derived from this.

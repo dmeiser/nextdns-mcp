@@ -211,7 +211,7 @@ def get_protected_profiles() -> frozenset[str]:
     if invalid:
         raise ConfigurationError(
             f"NEXTDNS_PROTECTED_PROFILES contains entries that cannot match any profile id: {', '.join(invalid)}. "
-            "Profile ids are 6 or 10 lowercase alphanumeric characters."
+            "Profile ids are 6 to 10 lowercase alphanumeric characters."
         )
     return frozenset(ids)
 

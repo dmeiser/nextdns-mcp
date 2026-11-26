@@ -20,12 +20,7 @@ from .errors import ErrorCode, cap_with_marker, error_payload
 
 
 def is_safe_profile_id(value: str | int) -> bool:
-    """Return True if value is an API-shaped profile_id (6 or 10 lowercase alphanumeric chars).
-
-    The live API issues 10-character IDs for new profiles; legacy profiles
-    carry 6-character IDs. Anything else fails fast here instead of 404ing
-    upstream.
-    """
+    """Return True if value is a valid NextDNS profile ID."""
     return bool(SAFE_PROFILE_ID_PATTERN.match(str(value)))
 
 

@@ -115,9 +115,8 @@ which a `x-mcp-composite`-style declaration in the YAML would start paying for i
 
 - An edit to the document changes the published surface — including the names a caller
   sees — so document changes are breaking-change surface and get treated as such.
-- Profile-id shape is part of the published schema, and both accepted lengths (6 or 10
-  lowercase alphanumeric characters) have to be stated there; a schema that names one
-  length rejects the other at the client.
+- The published schema must accept the full profile ID range of 6 to 10 lowercase
+  alphanumeric characters or callers can reject a valid ID before sending a request.
 - The two deviations above mean a spec change to `from`/`to`/`partials` or to the
   download redirect has to be made in two places.
 - `streamLogs` cannot be exposed as a tool at all; a caller wanting live query events

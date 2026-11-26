@@ -35,7 +35,7 @@ The middleware only filters top-level tool arguments; fields nested inside an ar
 - Verify `NEXTDNS_READABLE_PROFILES`/`NEXTDNS_WRITABLE_PROFILES` (unset denies all; use `ALL` to allow all).
 - Check `NEXTDNS_PROTECTED_PROFILES`: a listed profile is unwritable even under `NEXTDNS_WRITABLE_PROFILES=ALL`, and that denial is the feature working, not a misconfiguration (see [safety.md](safety.md)).
 - Ensure the `profile_id` you call is permitted.
-- If the message is `Forbidden URL: <url>`, the access-control layer could not classify the request URL against a profile you may reach — normally an id in the URL that is not a valid profile id (6 or 10 lowercase alphanumeric characters; `listProfiles()` returns the valid ones).
+- If the message is `Forbidden URL: <url>`, the access-control layer could not classify the request URL against a profile you may reach — normally an id in the URL that is not a valid profile id (6 to 10 lowercase alphanumeric characters; `listProfiles()` returns the valid ones).
 - If the message is `Blocked request to non-NextDNS host: <host>`, the request targeted a host outside the client's destination allow-list and was refused before any request was sent. See [safety.md](safety.md).
 
 ## Only `search_tools` and `call_tool` are listed
@@ -60,4 +60,4 @@ That is the default, not a broken server. `NEXTDNS_TOOL_SEARCH` defaults to `bm2
 - `overviewDashboard`, `dohLookup`, and `plotAnalytics` accept an optional `profile_id`; if omitted, set `NEXTDNS_DEFAULT_PROFILE` or pass `profile_id` explicitly.
 - Every other profile-scoped tool — all the generated operation tools (`getProfile`, `updateDenylistEntry`, `getAnalyticsStatus`, …) — requires `profile_id` and never falls back to `NEXTDNS_DEFAULT_PROFILE`; only `overviewDashboard`, `dohLookup`, and `plotAnalytics` use the default.
 - A missing argument is named in each surface's own terms, and the codes are distinct. A generated tool answers `missing_required_argument`, listing what the endpoint still needs and where it comes from (for `profile_id` the hint reads `listProfiles()`); `overviewDashboard`, `dohLookup`, and `plotAnalytics` answer `missing_profile_id` for the same omission.
-- A malformed `profile_id` — wrong length or characters — answers `invalid_profile_id` with the rejected value quoted back, and a value that could address a different endpoint (`a/b`, `..`, a `#` fragment) is refused with the same code before the request path is built. Profile ids are 6 or 10 lowercase alphanumeric characters; `listProfiles()` returns the ones this API key can reach.
+- A malformed `profile_id` — wrong length or characters — answers `invalid_profile_id` with the rejected value quoted back, and a value that could address a different endpoint (`a/b`, `..`, a `#` fragment) is refused with the same code before the request path is built. Profile ids are 6 to 10 lowercase alphanumeric characters; `listProfiles()` returns the ones this API key can reach.

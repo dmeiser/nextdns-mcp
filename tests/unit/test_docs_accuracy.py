@@ -129,10 +129,9 @@ class TestDocsNameRealTools:
 # names it sends an operator to a value that fails startup with ConfigurationError.
 STALE_TOOL_SEARCH_MODES = ("regex",)
 
-# A NextDNS profile id is 6 OR 10 lowercase alphanumeric characters
-# (client.SAFE_PROFILE_ID_PATTERN). A doc that names one length tells a caller holding
-# a valid 10-character id that the id it was just given is invalid.
-PROFILE_ID_LENGTH_CLAIM = re.compile(r"(?i)\b(?:6|six)[ -]?characters?\b|\bsix hexadecimal\b|\bexactly (?:6|six)\b")
+PROFILE_ID_LENGTH_CLAIM = re.compile(
+    r"(?i)\b6 or 10\b|\b(?:6|six)[ -]?characters?\b|\bsix hexadecimal\b|\bexactly (?:6|six)\b"
+)
 
 # A python file named by path inside a doc, e.g. `tests/unit/test_mcp_server.py`.
 PYTHON_PATH = re.compile(r"(?:src|tests|scripts)/[A-Za-z0-9_./-]*\.py")
@@ -166,10 +165,10 @@ class TestDocumentedValuesMatchRuntime:
             found = [mode for mode in STALE_TOOL_SEARCH_MODES if mode in text]
             assert not found, f"{name} advertises a tool-search mode the runtime rejects: {found}"
 
-    def test_no_doc_claims_profile_ids_are_one_fixed_length(self):
+    def test_no_doc_restricts_profile_id_lengths(self):
         for name, text in _docs_text().items():
             found = sorted({match.group(0) for match in PROFILE_ID_LENGTH_CLAIM.finditer(text)})
-            assert not found, f"{name} states a single profile-id length: {found}; ids are 6 or 10 characters"
+            assert not found, f"{name} restricts profile-id lengths: {found}; ids are 6 to 10 characters"
 
 
 class TestDocsNameFilesThatExist:

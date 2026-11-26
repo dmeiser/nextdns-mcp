@@ -60,15 +60,10 @@ _PROFILE_ID_SITES = [
 class TestResolveProfileIdWithDefault:
     """Tests for resolve_profile_id with default fallback (allow_default=True)."""
 
-    def test_returns_explicit_valid_profile_string(self):
-        resolved, error = resolve_profile_id("abc123")
-        assert resolved == "abc123"
-        assert error is None
-
-    def test_returns_explicit_valid_10_char_profile_string(self):
-        """New profiles from the live API carry 10-character IDs (see CI run 37139687479)."""
-        resolved, error = resolve_profile_id("abc123def0")
-        assert resolved == "abc123def0"
+    @pytest.mark.parametrize("profile_id", ["abc123", "ab12xyz0", "abc123def0"])
+    def test_returns_explicit_valid_profile_string(self, profile_id):
+        resolved, error = resolve_profile_id(profile_id)
+        assert resolved == profile_id
         assert error is None
 
     def test_returns_explicit_valid_profile_int(self):
