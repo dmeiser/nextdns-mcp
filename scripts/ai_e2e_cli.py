@@ -90,6 +90,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _step_span(args: Any, step_count: int) -> str:
+    return f"{args.start_step or 1}-{args.end_step or step_count}"
+
+
+def _join_selection(selection: str, span: str) -> str:
+    return ",".join(part for part in (selection, span) if part)
+
+
+def _selection_from_args(args: Any, step_count: int) -> str:
+    selection = args.steps or ""
+    if not args.start_step and not args.end_step:
+        return selection
+    return _join_selection(selection, _step_span(args, step_count))
+
+
+def _chosen_ids(chosen: list[Any]) -> str:
+    if len(chosen) <= 12:
+        return ", ".join(step.id for _, step in chosen)
+    return f"{chosen[0][1].id} .. {chosen[-1][1].id}"
+
+
+def _report_selection(cli_steps: list[Any], selection: str) -> int | None:
+    """The selection stage of a targeted run. Returns 2 on a bad selection, else None."""
+    try:
+        chosen = harness.select_steps(cli_steps, selection)
+    except harness.StepRangeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        print(harness.render_step_catalog(cli_steps))
+        return 2
+    harness._progress(f"targeted selection: {len(chosen)} of {len(cli_steps)} steps ({_chosen_ids(chosen)})")
+    return None
+
+
 def _print_steps_or_select(args: Any, cli_steps: list[Any]) -> int | None:
     """The print-steps / selection stage. Returns an exit code, or None to continue."""
     # The step catalog needs no API key and runs no model: it is how a user
@@ -100,18 +133,9 @@ def _print_steps_or_select(args: Any, cli_steps: list[Any]) -> int | None:
     if args.print_steps:
         print(harness.render_step_catalog(cli_steps))
         return 0
-    selection = args.steps or ""
-    if args.start_step or args.end_step:
-        selection = ",".join([p for p in (selection, f"{args.start_step or 1}-{args.end_step or len(cli_steps)}") if p])
+    selection = _selection_from_args(args, len(cli_steps))
     if selection:
-        try:
-            chosen = harness.select_steps(cli_steps, selection)
-        except harness.StepRangeError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            print(harness.render_step_catalog(cli_steps))
-            return 2
-        ids = ", ".join(s.id for _, s in chosen) if len(chosen) <= 12 else f"{chosen[0][1].id} .. {chosen[-1][1].id}"
-        harness._progress(f"targeted selection: {len(chosen)} of {len(cli_steps)} steps ({ids})")
+        return _report_selection(cli_steps, selection)
     return None
 
 
@@ -125,6 +149,26 @@ def _load_dotenv_file(args: Any) -> None:
             harness._load_dotenv(args.env_file, override=True)
 
 
+# CLI arguments that override one field of the loaded config: the arg name, the
+# config attribute it lands in, and how it converts ("argv" splits a command
+# line; anything else is stored as given).
+_ARG_OVERRIDES = (
+    ("harness_cmd", "command", "argv"),
+    ("model", "model", None),
+    ("profile_name", "profile_name", None),
+    ("budget", "timeout_s", None),
+    ("step_timeout", "step_timeout_s", None),
+)
+
+
+def _apply_cli_overrides(config: Any, args: Any) -> None:
+    """Apply the CLI arguments that override a field of the loaded config."""
+    for arg_name, config_attr, kind in _ARG_OVERRIDES:
+        value = getattr(args, arg_name)
+        if value:
+            setattr(config, config_attr, harness._as_argv(value) if kind == "argv" else value)
+
+
 def _config_from_args(args: Any) -> tuple[Any, int | None]:
     """Build the HarnessConfig from the CLI args; (config, None) or (None, code)."""
     try:
@@ -135,16 +179,7 @@ def _config_from_args(args: Any) -> tuple[Any, int | None]:
         # aborts rather than running unprotected; there is nothing to run.
         print(f"error: {exc}", file=sys.stderr)
         return None, 2
-    if args.harness_cmd:
-        config.command = harness._as_argv(args.harness_cmd)
-    if args.model:
-        config.model = args.model
-    if args.profile_name:
-        config.profile_name = args.profile_name
-    if args.budget:
-        config.timeout_s = args.budget
-    if args.step_timeout:
-        config.step_timeout_s = args.step_timeout
+    _apply_cli_overrides(config, args)
     config.steps = args.steps or ""
     config.start_step = args.start_step or ""
     config.end_step = args.end_step or ""
@@ -156,14 +191,26 @@ def _config_from_args(args: Any) -> tuple[Any, int | None]:
 def _finalize(args: Any, report: Any) -> int:
     """Write the report, print it, and return the exit code."""
     harness.write_report(report, args.report, args.actor_log)
-    if args.report != "-":
-        print(f"Report written to {args.report}")
-    if not args.quiet:
-        print(harness.render_text_report(report))
+    _print_report_path(args)
+    _print_text_report(args, report)
     if args.verbose and report.actor_stderr:
         print("--- actor stderr ---")
         print(report.actor_stderr)
         print("--- end stderr ---")
+    return _verdict_exit_code(report)
+
+
+def _print_report_path(args: Any) -> None:
+    if args.report != "-":
+        print(f"Report written to {args.report}")
+
+
+def _print_text_report(args: Any, report: Any) -> None:
+    if not args.quiet:
+        print(harness.render_text_report(report))
+
+
+def _verdict_exit_code(report: Any) -> int:
     # A skipped step certifies nothing: it is neither a pass nor a failure,
     # and treating it as neither keeps "the suite is green" meaning every
     # published behaviour actually ran. (Targeted --steps runs select their
@@ -177,39 +224,36 @@ def _finalize(args: Any, report: Any) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Turn argv into a report: parse, resolve, load, run, report."""
-    args = build_parser().parse_args(argv)
-
+def _early_exit(args: Any) -> int | None:
+    """The stages that answer before any live run: summarize, and tool-search setup."""
     # Needs no API key and runs no model: it reads a report that already exists.
     if args.summarize:
         print(harness.summarize_reports(list(args.summarize)))
         return 0
-
     if args.tool_search:
         os.environ["NEXTDNS_TOOL_SEARCH"] = args.tool_search
+    return None
 
-    cli_steps = harness.build_steps(
+
+def _build_cli_steps(args: Any) -> list[Any]:
+    return harness.build_steps(
         harness.TaskTargets(
             profile_name=harness.common._resolve_profile_name(args.profile_name or None), tag=harness._random_tag()
         )
     )
-    exit_code = _print_steps_or_select(args, cli_steps)
-    if exit_code is not None:
-        return exit_code
 
-    # Load environment from a .env file if present (or the one given explicitly).
-    _load_dotenv_file(args)
 
-    api_key = os.environ.get("NEXTDNS_API_KEY")
-    if not api_key:
-        print("SKIP: NEXTDNS_API_KEY is not set — no live E2E performed.")
-        print("The harness requires a real NextDNS API key to run the actor against the live server.")
-        if args.report != "-":
-            harness.write_skip_report(args.report, "NEXTDNS_API_KEY not set")
-            print(f"Report written to {args.report}")
-        return 0
+def _report_skip(args: Any) -> int:
+    """No API key: say so, write the skip report, and call the run done."""
+    print("SKIP: NEXTDNS_API_KEY is not set — no live E2E performed.")
+    print("The harness requires a real NextDNS API key to run the actor against the live server.")
+    if args.report != "-":
+        harness.write_skip_report(args.report, "NEXTDNS_API_KEY not set")
+        print(f"Report written to {args.report}")
+    return 0
 
+
+def _run_and_finalize(args: Any, api_key: str) -> int:
     config, error_code = _config_from_args(args)
     if error_code is not None:
         return error_code
@@ -223,3 +267,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     return _finalize(args, report)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Turn argv into a report: parse, resolve, load, run, report."""
+    args = build_parser().parse_args(argv)
+
+    early = _early_exit(args)
+    if early is not None:
+        return early
+
+    cli_steps = _build_cli_steps(args)
+    exit_code = _print_steps_or_select(args, cli_steps)
+    if exit_code is not None:
+        return exit_code
+
+    # Load environment from a .env file if present (or the one given explicitly).
+    _load_dotenv_file(args)
+
+    api_key = os.environ.get("NEXTDNS_API_KEY")
+    if not api_key:
+        return _report_skip(args)
+
+    return _run_and_finalize(args, api_key)
