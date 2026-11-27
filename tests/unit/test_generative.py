@@ -178,6 +178,84 @@ def test_bare_tab_call_without_chart_is_accepted():
     _validate_chart_placement(code)  # should not raise
 
 
+def test_all_chart_types_in_tab_are_rejected():
+    """Every Recharts chart type exported by prefab_ui is rejected inside a Tab."""
+    for chart in (
+        "AreaChart",
+        "LineChart",
+        "BarChart",
+        "PieChart",
+        "DonutChart",
+        "RadarChart",
+        "RadialChart",
+        "ScatterChart",
+        "WaterfallChart",
+    ):
+        code = f"with Tab('Charts'):\n    {chart}(data=[], series=[])\n"
+        with pytest.raises(ValueError, match="Recharts chart components"):
+            _validate_chart_placement(code)
+
+
+def test_chart_parent_tab_call_is_rejected():
+    """A chart attaching to a Tab via parent= is nested even outside a with block."""
+    code = "AreaChart(data=[], series=[], parent=Tab('Charts'))\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_chart_parent_tab_binding_is_rejected():
+    """parent= referencing a name bound to a Tab call earlier is nested."""
+    code = "t = Tab('Charts')\nAreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_walrus_tab_with_scope_is_rejected():
+    """`with (t := Tab(...)):` still opens tab scope for its body."""
+    code = "with (t := Tab('Charts')):\n    AreaChart(data=[], series=[])\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_walrus_tab_binding_parent_is_rejected():
+    """A walrus-bound Tab referenced by a later parent= is nested."""
+    code = "with (t := Tab('Charts')):\n    DataTable(columns=[], rows=[])\nAreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_with_as_tab_binding_parent_is_rejected():
+    """`with Tab(...) as t` binds t, so a later parent=t is nested."""
+    code = "with Tab('Charts') as t:\n    DataTable(columns=[], rows=[])\nAreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_annotated_tab_binding_parent_is_rejected():
+    """An annotated assignment to a Tab call binds the name for parent=."""
+    code = "t: Component = Tab('Charts')\nAreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_walrus_chart_call_without_tab_is_accepted():
+    """A walrus-bound chart outside any tab stays accepted."""
+    code = "(c := AreaChart(data=[], series=[]))\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_parent_non_tab_binding_is_accepted():
+    """parent= referencing a non-Tab container stays accepted."""
+    code = "c = Card()\nAreaChart(data=[], series=[], parent=c)\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_parent_before_tab_binding_is_accepted():
+    """parent= naming a Tab bound only later stays accepted (source-order walk)."""
+    code = "AreaChart(data=[], series=[], parent=t)\nt = Tab('Charts')\n"
+    _validate_chart_placement(code)  # should not raise
+
+
 def test_nested_tabs_with_chart_is_rejected():
     """A chart in a Tab inside a Tab is still nested."""
     code = "with Tab('a'):\n    with Tab('b'):\n        AreaChart(data=[], series=[])\n"
