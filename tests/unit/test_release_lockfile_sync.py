@@ -14,7 +14,8 @@ the job that bumps and commits the version, and then execute that job the way a
 runner does, against a scratch project:
 
 1. the scratch project is a dependency-free copy of the release-relevant file
-   set, so ``uv lock`` resolves with no network access and no cache;
+   set plus the shared ``scripts/version_sync.py`` CLI, so ``uv lock`` resolves
+   with no network access and no cache;
 2. the workflow's own version-rewrite step runs there, which reproduces the
    defect: the lockfile still pins the pre-bump version and the CI command
    ``uv lock --check`` fails;
@@ -84,8 +85,13 @@ class ReleaseJob:
         return next((step for step in self.steps if matches(step)), None)
 
     def version_edit(self) -> Step | None:
-        """The step that rewrites the version in the non-lockfile files."""
-        return self.first(lambda s: bool(s.run) and "re.sub(" in s.run and "pyproject.toml" in s.run)
+        """The step that rewrites the version in the non-lockfile files.
+
+        Both release workflows delegate the rewrite to the shared
+        ``scripts/version_sync.py bump`` CLI (issue #770), so that delegation
+        is what identifies the step.
+        """
+        return self.first(lambda s: bool(s.run) and "version_sync.py" in s.run and "bump" in s.run)
 
     def lock_refresh(self) -> Step | None:
         """The first step that runs ``uv lock`` in a mode that *writes* it.
@@ -153,6 +159,10 @@ def write_scratch_project(root: Path, cache: Path, version: str) -> None:
     (root / "src" / "nextdns_mcp" / "__init__.py").write_text(_SCRATCH_INIT.format(version=version))
     for name in ("Dockerfile", "Dockerfile.alpine"):
         (root / name).write_text(_SCRATCH_DOCKERFILE.format(version=version))
+    # The bump step delegates to the shared CLI, so the scratch project needs
+    # the same copy of it the checkout would provide.
+    (root / "scripts").mkdir()
+    shutil.copy(REPO_ROOT / "scripts" / "version_sync.py", root / "scripts" / "version_sync.py")
     # The baseline the bump script reads the current version from.
     baseline = root / "main-ref"
     baseline.mkdir()

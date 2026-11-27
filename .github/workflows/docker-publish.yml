@@ -134,32 +134,7 @@ jobs:
       - name: Extract project version
         id: version
         run: |
-          VERSION=$(python3 - << 'PY'
-          import pathlib
-          import sys
-          import tomllib
-
-          path = pathlib.Path("pyproject.toml")
-          if not path.is_file():
-              print("Error: pyproject.toml not found", file=sys.stderr)
-              raise SystemExit(1)
-
-          with path.open("rb") as f:
-              data = tomllib.load(f)
-
-          try:
-              version = data["project"]["version"]
-          except KeyError:
-              print("Error: 'project.version' not found in pyproject.toml", file=sys.stderr)
-              raise SystemExit(1)
-
-          if not isinstance(version, str) or not version.strip():
-              print("Error: 'project.version' is empty or not a string", file=sys.stderr)
-              raise SystemExit(1)
-
-          print(version.strip())
-          PY
-          )
+          VERSION=$(python3 scripts/version_sync.py get)
           if [ -z "$VERSION" ]; then
             echo "Error: Could not extract version from pyproject.toml"
             exit 1
