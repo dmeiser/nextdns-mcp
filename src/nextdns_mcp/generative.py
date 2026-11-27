@@ -201,10 +201,11 @@ class PrefabGenerativeUI(Provider):
     """Generative UI provider for this server: guarded Prefab tools plus the renderer resource.
 
     Composition, not inheritance from FastMCP's ``GenerativeUI``: this class
-    builds its own tools and resource, owns its own sandbox worker, and reaps
-    that worker itself. What it uses from upstream is ``Provider``'s documented
-    extension points (``_list_tools``, ``_list_resources``, ``lifespan``) and
-    prefab-ui's public ``generative`` and ``renderer`` functions.
+    builds its own tools and resource, starts a sandbox worker per render, and
+    reaps those workers itself. What it uses from upstream is ``Provider``'s
+    documented extension points (``_list_tools``, ``_list_resources``,
+    ``lifespan``) and prefab-ui's public ``generative`` and ``renderer``
+    functions.
 
     Tool names, descriptions, annotations, the renderer resource, the size and
     placement guards, the separate cold-start and execution timeouts, and the
@@ -224,7 +225,11 @@ class PrefabGenerativeUI(Provider):
         if include_components_tool:
             self._tools.append(_build_components_tool(components_tool_name))
         self._resources: list[TextResource] = [_build_renderer_resource(_renderer_csp())]
-        self._worker: DenoPyodideSandbox | None = None
+        # Every worker a render started and has not reaped yet. Per-render
+        # ownership is the point: a shared worker let one render's cleanup stop
+        # another render's worker mid-flight (issue #746). The set is instance
+        # state, so one server's teardown still reaps only its own subprocesses.
+        self._active_workers: set[DenoPyodideSandbox] = set()
 
     async def _list_tools(self) -> Sequence[Tool]:
         return list(self._tools)
@@ -234,49 +239,57 @@ class PrefabGenerativeUI(Provider):
 
     @asynccontextmanager
     async def lifespan(self) -> AsyncIterator[None]:
-        """Own this provider's worker for exactly one server runtime.
+        """Own every worker this provider starts for exactly one server runtime.
 
         FastMCP enters each provider's lifespan inside the lifespan of the
         server it was added to, so teardown here stops only this instance's
-        subprocess - the server that is shutting down. Registering instances in
+        subprocesses - the server that is shutting down. Registering instances in
         a process-global set instead (issue #542) made one embedded server's
         shutdown kill the sandboxes of every live sibling.
         """
         try:
             yield
         finally:
-            await self._stop_worker()
+            await self._stop_workers()
 
-    def _get_worker(self) -> DenoPyodideSandbox:
-        """Lazily create the hardened, bounded Pyodide worker this provider owns."""
-        if self._worker is None:
-            self._worker = DenoPyodideSandbox()
-        return self._worker
+    def _new_worker(self) -> DenoPyodideSandbox:
+        """Create a hardened, bounded Pyodide worker owned by exactly one render.
 
-    async def _stop_worker(self) -> None:
-        """Stop the lazily-started Deno/Pyodide subprocess, off the event loop.
+        Registered in ``_active_workers`` so server shutdown still reaps a
+        render that is in flight, and dropped by that render as soon as it ends.
+        """
+        worker = DenoPyodideSandbox()
+        self._active_workers.add(worker)
+        return worker
+
+    async def _stop_workers(self) -> None:
+        """Stop every worker this provider still owns, off the event loop.
 
         ``DenoPyodideSandbox.stop`` terminates the process and waits up to 5s
         for it, which is blocking I/O: it runs in a worker thread so a slow
-        teardown cannot stall the rest of the server's shutdown.
+        teardown cannot stall the rest of the server's shutdown. It is also what
+        closes a sandbox whose cold start is still in flight, so that start
+        reclaims its own worker instead of leaving it running (#746).
         """
-        worker = self._worker
-        if worker is None:
-            return
-        try:
-            await asyncio.to_thread(worker.stop)
-        except Exception:  # teardown is best-effort: it must not abort the rest of shutdown
-            logger.warning("Failed to stop the Generative UI sandbox subprocess", exc_info=True)
-        finally:
-            self._worker = None
+        workers, self._active_workers = self._active_workers, set()
+        for worker in workers:
+            try:
+                await asyncio.to_thread(worker.stop)
+            except Exception:  # teardown is best-effort: it must not abort the rest of shutdown
+                logger.warning("Failed to stop the Generative UI sandbox subprocess", exc_info=True)
 
     async def _run_in_sandbox(self, code: str, data: dict[str, Any] | None) -> PrefabApp:
-        """Cold-start, execute, and always discard this provider's worker."""
-        worker = self._get_worker()
+        """Cold-start, execute, and discard a worker this call owns alone.
+
+        Cleanup for one render can then never stop another render's worker: the
+        worker this call stops is the only one this call has.
+        """
+        worker = self._new_worker()
         try:
             await _start_within_budget(worker)
             return await _execute_within_budget(code, data, worker)
         finally:
+            self._active_workers.discard(worker)
             # Reaping blocks for up to ~5s: never do it on the loop. This is the
             # safety net for a worker cold-started here but never executed.
             await asyncio.to_thread(worker.stop)
