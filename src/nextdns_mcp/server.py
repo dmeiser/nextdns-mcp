@@ -7,7 +7,7 @@ import inspect
 import logging
 import os
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
@@ -45,11 +45,13 @@ from .run_options import (  # noqa: F401
     get_mcp_run_options,
 )
 from .spec_tools import (
+    DelegatedHandler,
     endpoints_for_routes,
     register_spec_tools,
     spec_routes,
     spec_tool_names,
 )
+from .tools import logs as _logs
 from .tools.dashboard import overviewDashboard
 from .tools.doh import dohLookup
 from .tools.plots import plotAnalytics
@@ -75,6 +77,27 @@ class _CompositeTool(NamedTuple):
 
     tool: Callable[..., Any]
     app: bool | None
+
+
+# The operations the generated surface performs through a handler instead of an
+# endpoint call, and the handler for each. `downloadLogs` is the one: the endpoint
+# answers with a redirect to a signed URL, and the safe way to follow it - size
+# cap, per-hop public-address checks, no API key on the follow-up request - already
+# lives in `tools.logs`, so this server hands that implementation to the generated
+# tool at registration instead of making `spec_tools` import the tool layer. A
+# generated tool with no handler here calls its endpoint like any other.
+def _delegate_download_logs(profile_id: str) -> Awaitable[dict[str, Any]]:
+    """Forward to the guarded downloader, resolved on its module at call time.
+
+    The indirection is deliberate: capturing ``_download_logs_to_tempfile`` at
+    import time would freeze the original function into the registry, and the
+    tests that replace it on ``tools.logs`` would then be patching a name
+    nobody calls.
+    """
+    return _logs._download_logs_to_tempfile(profile_id)
+
+
+_DELEGATED_HANDLERS: dict[str, DelegatedHandler] = {"downloadLogs": _delegate_download_logs}
 
 
 _COMPOSITE_TOOLS = (
@@ -254,7 +277,7 @@ def build_mcp_server(config: ServerConfig | None = None) -> FastMCP:
         endpoints=endpoints_for_routes(routes),
         config=snapshot,
     )
-    register_spec_tools(server, routes)
+    register_spec_tools(server, routes, _DELEGATED_HANDLERS)
     _register_composite_renderer(server)
     for composite in _COMPOSITE_TOOLS:
         # FastMCP publishes only the first text section of a docstring as the tool

@@ -65,7 +65,7 @@ The generator is a proxy for the document, with the exceptions below recorded he
 a silent exception is what makes a generated surface impossible to trust. They are also
 recorded where they are implemented: the query normalizers and the path-segment
 guard in `spec_arguments.py`, the withheld operation in `spec_routes.py`, and
-the delegation in `spec_tools.py`.
+the delegated handlers in `server.py`.
 
 1. **Query normalizers for the analytics window** (`_QUERY_NORMALIZERS`: `from`, `to`,
    `partials`). Two spellings callers reach for fail *silently* upstream rather than

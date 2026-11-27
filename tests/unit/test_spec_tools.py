@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 
+from nextdns_mcp import server as server_module
 from nextdns_mcp import spec_arguments, spec_series, spec_tools, spec_validation, transport
 
 # Operations in nextdns-openapi.yaml, the one that is not offered, and the
@@ -187,7 +188,10 @@ class TestToolCall:
 
     def _tool(self, monkeypatch, calls, operation_id: str, payload: dict | None = None):
         monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api(payload or {"data": []}, calls))
-        return spec_tools.SpecApiTool({route.operation_id: route for route in spec_tools.spec_routes()}[operation_id])
+        return spec_tools.SpecApiTool(
+            {route.operation_id: route for route in spec_tools.spec_routes()}[operation_id],
+            delegated_handler=server_module._DELEGATED_HANDLERS.get(operation_id),
+        )
 
     async def test_a_read_sends_the_endpoint_it_declares(self, monkeypatch, calls):
         tool = self._tool(monkeypatch, calls, "getAnalyticsDomains")
@@ -375,6 +379,27 @@ class TestRegistration:
             "/profiles/{profile_id}/analytics/devices;series",
         )
         assert names == spec_tools.spec_tool_names()
+
+    async def test_registration_wires_the_supplied_handler_onto_its_own_operation_only(self, monkeypatch):
+        """The handler comes from the composer; a route without one is generated as usual."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "k")
+        probe = FastMCP("probe")
+
+        async def handler(profile_id: str) -> dict[str, Any]:
+            return {"profile_id": profile_id}
+
+        spec_tools.register_spec_tools(probe, spec_tools.spec_routes(), {"downloadLogs": handler})
+        download = await probe.get_tool("downloadLogs")
+        listing = await probe.get_tool("getLogs")
+        assert download is not None and download._delegated_handler is handler
+        assert listing is not None and listing._delegated_handler is None
+
+    async def test_a_registration_without_handlers_delegates_nothing(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "k")
+        probe = FastMCP("probe")
+        spec_tools.register_spec_tools(probe, spec_tools.spec_routes())
+        download = await probe.get_tool("downloadLogs")
+        assert download is not None and download._delegated_handler is None
 
     async def test_the_record_carries_the_endpoint_and_a_method_derived_write(self, tmp_path):
         from nextdns_mcp.call_log import CallLogMiddleware
@@ -662,7 +687,10 @@ class TestDelegationGuardsRunFirst:
             return {"ok": True}
 
         monkeypatch.setattr(logs_module, "_download_logs_to_tempfile", fake_download)
-        return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"])
+        return spec_tools.SpecApiTool(
+            {r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"],
+            delegated_handler=server_module._DELEGATED_HANDLERS["downloadLogs"],
+        )
 
     async def test_an_unsafe_profile_id_never_reaches_the_downloader(self, monkeypatch, calls):
         tool = self._downloader(monkeypatch, calls)
@@ -697,7 +725,10 @@ class TestDelegationGuardsRunFirst:
             return {"code": "http_error", "error": "HTTP error while downloading logs"}
 
         monkeypatch.setattr(logs_module, "_download_logs_to_tempfile", failing_download)
-        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"])
+        tool = spec_tools.SpecApiTool(
+            {r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"],
+            delegated_handler=server_module._DELEGATED_HANDLERS["downloadLogs"],
+        )
         result = await tool.run({"profile_id": "abc123"})
         assert result.is_error is True
         assert result.structured_content["code"] == "http_error"

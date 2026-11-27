@@ -19,9 +19,12 @@ protected-profile denylist, and answering failures with the server's typed paylo
 than an HTTP status that discards the body. FastMCP's own transport bypasses that ACL
 layer and raises on non-2xx - the reason this module exists at all.
 
-The one operation performed here is ``downloadLogs``: following its signed-URL redirect
-safely lives in ``tools.logs``, so the tool hands off. ``api_request_payload`` and
-``resolve_profile_id`` resolve from these globals, which the suite patches.
+The one operation performed through a handler rather than an endpoint call is
+``downloadLogs``: following its signed-URL redirect safely lives in
+``tools.logs``, and the server that composes this surface hands that handler to
+``register_spec_tools`` at registration, so ``spec_tools`` never imports the tool
+layer. ``api_request_payload`` and ``resolve_profile_id`` resolve from these
+globals, which the suite patches.
 """
 
 from __future__ import annotations
@@ -50,7 +53,6 @@ from .spec_series import (
     transport_capabilities,
 )
 from .spec_validation import normalized_for_validation, schema_validation_payload
-from .tools import logs as _logs
 from .transport import MAX_SERIES_RESPONSE_BYTES, api_request_payload, is_error_payload
 from .utils import resolve_profile_id
 
@@ -80,26 +82,12 @@ def _probe_target(transport: Callable[..., Any] | None) -> Callable[..., Any]:
     return transport if transport is not None else api_request_payload
 
 
-def _delegate_download_logs(profile_id: str) -> Awaitable[dict[str, Any]]:
-    """Forward to the guarded downloader, resolved on its module at call time.
-
-    The indirection is deliberate: capturing ``_download_logs_to_tempfile`` at
-    import time would freeze the original function into the registry, and the
-    tests that replace it on ``tools.logs`` would then be patching a name
-    nobody calls.
-    """
-    return _logs._download_logs_to_tempfile(profile_id)
-
-
-# The operations this server performs itself, and the handler that performs
-# each one. Mapping operation id -> handler is the whole special case: adding
-# a delegated operation means one dict entry here and a guarded implementation
-# in ``tools``, and nothing in ``SpecApiTool`` changes. The name set is derived
-# from the mapping so the two can never disagree.
-DELEGATED_HANDLERS: dict[str, Callable[[str], Awaitable[dict[str, Any]]]] = {
-    "downloadLogs": _delegate_download_logs,
-}
-DELEGATED_OPERATIONS = frozenset(DELEGATED_HANDLERS)
+# An operation this server performs itself instead of calling one API endpoint
+# for, and the handler that performs it, supplied by whoever composes the
+# surface. The mapping is the whole special case: adding a delegated operation
+# means one entry where the handlers are declared and a guarded implementation
+# in ``tools``, and nothing in ``SpecApiTool`` changes.
+DelegatedHandler = Callable[[str], Awaitable[dict[str, Any]]]
 
 
 class SpecApiTool(Tool):
@@ -109,12 +97,17 @@ class SpecApiTool(Tool):
     module global at call time, is ``api_request_payload``); it exists so a
     caller can inject a transport per tool instead of patching module state,
     while tests that do patch the module keep working.
+
+    ``delegated_handler`` replaces the endpoint call for an operation this
+    server performs itself (``downloadLogs``). It arrives from the composition
+    root that knows the tool layer, so this module never imports it.
     """
 
     def __init__(
         self,
         route: HTTPRoute,
         transport: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        delegated_handler: DelegatedHandler | None = None,
     ) -> None:
         method = str(route.method).upper()
         # readOnlyHint is derived from the HTTP method, with one override:
@@ -141,6 +134,7 @@ class SpecApiTool(Tool):
         )
         self._route = route
         self._transport = transport
+        self._delegated_handler = delegated_handler
         # A transport's capabilities belong to the callable and cannot change
         # while it lives, so they are read once here rather than on every
         # dispatch, and no process-wide table has to hold a reference to every
@@ -178,8 +172,8 @@ class SpecApiTool(Tool):
         create_refusal = self._create_profile_guard()
         if create_refusal is not None:
             return create_refusal
-        if self.name in DELEGATED_OPERATIONS:
-            return await self._run_delegated(args)
+        if self._delegated_handler is not None:
+            return await self._run_delegated(args, self._delegated_handler)
         path, query, body = split_arguments(self._route, args)
         return await self._dispatch_rendered(path, query, body, args)
 
@@ -275,7 +269,7 @@ class SpecApiTool(Tool):
             return ToolResult(structured_content=refused, is_error=True)
         return ToolResult(structured_content=payload, is_error=is_error_payload(payload))
 
-    async def _run_delegated(self, arguments: dict[str, Any]) -> ToolResult:
+    async def _run_delegated(self, arguments: dict[str, Any], handler: DelegatedHandler) -> ToolResult:
         """Serve a delegated operation with its own guarded handler.
 
         The profile id gets the same shape check the generated path gets (and
@@ -290,7 +284,7 @@ class SpecApiTool(Tool):
             return ToolResult(structured_content=self._missing_payload(["profile_id"]), is_error=True)
         if error is not None:
             return ToolResult(structured_content=error, is_error=True)
-        payload = await DELEGATED_HANDLERS[self.name](str(resolved))
+        payload = await handler(str(resolved))
         # The delegated handler (downloadLogs) answers errors as typed payloads;
         # they must surface as errors, while a successful download payload must
         # not. Detection is the same rule _wrap_call_result uses.
@@ -325,18 +319,28 @@ class SpecApiTool(Tool):
         )
 
 
-def register_spec_tools(server: FastMCP, routes: list[HTTPRoute] | None = None) -> list[str]:
+def register_spec_tools(
+    server: FastMCP,
+    routes: list[HTTPRoute] | None = None,
+    delegated_handlers: dict[str, DelegatedHandler] | None = None,
+) -> list[str]:
     """Register one tool per offerable operation and return their names.
 
     ``routes`` is the already-parsed list the server passes in; the tool
     surface, the call-log endpoint map and the published-name list are then
     three views of a single parse of the shipped document, not three parses of
     it.
+
+    ``delegated_handlers`` maps an operation id to the handler that performs it
+    when no endpoint call does (``downloadLogs``). The composition root owns
+    that mapping because it is the module allowed to know the tool layer; a
+    route with no entry here is generated against its endpoint like any other.
     """
+    handlers = delegated_handlers or {}
     names: list[str] = []
     for route in spec_routes() if routes is None else routes:
         operation_id = str(route.operation_id)
-        server.add_tool(SpecApiTool(route))
+        server.add_tool(SpecApiTool(route, delegated_handler=handlers.get(operation_id)))
         names.append(operation_id)
     logger.info("Spec tool surface: %d tools registered from %s", len(names), SPEC_PATH.name)
     return names

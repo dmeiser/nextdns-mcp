@@ -56,7 +56,9 @@ def spec_call() -> Callable[..., Any]:
     routes = {route.operation_id: route for route in spec_tools.spec_routes()}
 
     async def _call(operation_id: str, **arguments: Any) -> Any:
-        result = await spec_tools.SpecApiTool(routes[operation_id]).run(arguments)
+        result = await spec_tools.SpecApiTool(
+            routes[operation_id], delegated_handler=server._DELEGATED_HANDLERS.get(operation_id)
+        ).run(arguments)
         return result.structured_content
 
     return _call
