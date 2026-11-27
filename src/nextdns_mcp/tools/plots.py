@@ -22,6 +22,7 @@ from ..charts import (
     validate_series_payload,
 )
 from ..coercion import OptionalProfileId
+from ..constants import escape_control_chars
 from ..errors import ErrorCode, error_payload
 from ..transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ..utils import (
@@ -236,7 +237,11 @@ def _validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:
 async def _fetch_plot_series(metric: str, target_profile: str, params: dict[str, Any]) -> dict[str, Any] | ToolResult:
     """Fetch the metric's series for the profile and plot it, or return the fetch error."""
     url = f"/profiles/{target_profile}/analytics/{metric};series"
-    logger.info(f"Plotting analytics series: {metric} for profile {target_profile}")
+    logger.info(
+        "Plotting analytics series: %s for profile %s",
+        escape_control_chars(metric),
+        escape_control_chars(target_profile),
+    )
 
     payload, fetch_error = await _fetch_series_payload(url, params)
     if fetch_error:

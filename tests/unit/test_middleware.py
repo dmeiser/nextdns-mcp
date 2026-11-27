@@ -220,8 +220,11 @@ class TestStripExtraFieldsMiddleware:
             await middleware.on_call_tool(mock_context, call_next)
 
         mock_logger.exception.assert_called_once()
-        msg = mock_logger.exception.call_args.args[0]
-        assert "testTool" in msg
+        call = mock_logger.exception.call_args
+        # The tool name is an escaped format argument now, not part of the
+        # format string: assert what the handler would render (issue #767).
+        rendered = call.args[0] % call.args[1:]
+        assert "testTool" in rendered
         mock_logger.warning.assert_not_called()
 
     @pytest.mark.asyncio

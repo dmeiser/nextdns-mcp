@@ -22,7 +22,7 @@ from .config import (
     get_http_timeout,
     load_profile_access_control,
 )
-from .constants import LOOPBACK_HOSTS, SAFE_PROFILE_ID_PATTERN, is_write_operation
+from .constants import LOOPBACK_HOSTS, SAFE_PROFILE_ID_PATTERN, escape_control_chars, is_write_operation
 from .errors import ErrorCode, StateOwnershipError
 from .state import request_resources
 
@@ -115,8 +115,12 @@ def _redacted(url: str) -> str:
     Query strings can carry sensitive data (DNS search terms, device IDs, cursor
     tokens), so every log site that runs at INFO or above must use this helper
     instead of the raw URL. Use the full URL only at DEBUG.
+
+    The remaining path is escaped too: a caller can put CR/LF or an ANSI escape
+    in a profile id, and removing only the query would still let one record
+    print as several lines or move the operator's terminal (issue #767).
     """
-    return str(url).split("?", 1)[0]
+    return escape_control_chars(str(url).split("?", 1)[0])
 
 
 def _log_safe_error(error: Exception) -> str:
@@ -127,9 +131,11 @@ def _log_safe_error(error: Exception) -> str:
     wording but goes through :func:`_redacted`, because an exception raised by
     the ACL layer names the URL the caller asked for verbatim. The exception
     itself is never rewritten: the caller still receives the full text.
+    The status branch escapes the reason phrase as well: it comes from the
+    upstream response line, not from a value this server controls.
     """
     if isinstance(error, httpx.HTTPStatusError):
-        return f"{error.response.status_code} {error.response.reason_phrase}"
+        return escape_control_chars(f"{error.response.status_code} {error.response.reason_phrase}")
     return _redacted(str(error))
 
 
