@@ -14,6 +14,10 @@ from functools import wraps
 from typing import Any, NamedTuple
 
 from fastmcp import FastMCP
+from fastmcp.server.providers.prefab_synthesis import (
+    _build_resource_for_tool,
+    _walk_prefab_tools,
+)
 from fastmcp.tools.base import ToolResult
 from mcp.types import ToolAnnotations
 
@@ -205,8 +209,39 @@ def build_mcp_server() -> FastMCP:
             annotations=_COMPOSITE_ANNOTATIONS,
             app=composite.app,
         )(_with_error_flag(composite.tool))
+    _register_composite_renderer_resources(server)
     register_generative_ui_provider(server)
     return server
+
+
+def _register_composite_renderer_resources(server: FastMCP) -> None:
+    """Register the composite app tools' Prefab renderer resource explicitly.
+
+    FastMCP synthesizes the ``ui://prefab/renderer/<digest>/renderer.html``
+    resource on demand from the tools a listing returns; under ``bm25``
+    disclosure the search transform hides every real tool from that listing,
+    so the synthesized set is empty and ``resources/read`` on the URI
+    ``plotAnalytics`` and ``overviewDashboard`` advertise fails with
+    ``Resource not found`` (issue #751). Registering the resource on the
+    server keeps ``resources/list`` and ``resources/read`` working under
+    disclosure; the tools advertised under ``off`` resolve through FastMCP's
+    own synthesis to the same URI, so both modes serve one renderer. The
+    resource is built by FastMCP's own synthesis helpers over the untransformed
+    tool storage, so its URI is byte-identical to the one the tools advertise
+    on the wire.
+    """
+    seen: set[str] = set()
+    for tool in _walk_prefab_tools(server):
+        resource = _build_resource_for_tool(tool)
+        if resource is None:  # pragma: no cover - only when prefab-ui is unimportable
+            continue
+        uri = str(resource.uri)
+        if uri in seen:
+            # The app tools share one renderer configuration, so they build
+            # the same resource; registering it twice would only warn.
+            continue
+        seen.add(uri)
+        server.add_resource(resource)
 
 
 def get_mcp_server() -> FastMCP:
