@@ -14,8 +14,8 @@ The persistent client carries no credentials and no default headers, so the
 API key still never crosses to a redirect target. Its shared cookie jar is
 cleared on entry to and exit from every chain, under the lock, which is what
 keeps cookies from leaking between downloads the way a fresh client used to
-guarantee; the per-request timeout is re-read on every chain, exactly what a
-fresh client picked up at construction.
+guarantee; the per-request timeout comes from the serving server's creation-time
+configuration on every chain.
 
 SPDX-License-Identifier: MIT
 """
@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from ... import client
+from ...state import current_server_config
 from . import guard, stream
 
 # Maximum number of redirects followed when downloading logs.
@@ -38,8 +39,7 @@ _MAX_DOWNLOAD_REDIRECTS = 5
 # explicit pool bounds the client, and it carries no credentials and no
 # default headers, so the API key can never cross to a redirect target. The
 # timeout baked at construction is only the fallback: each request passes the
-# re-read ``NEXTDNS_HTTP_TIMEOUT``, exactly what a fresh per-download client
-# picked up at construction. The cookie jar IS shared, so
+# serving server's snapshot timeout. The cookie jar IS shared, so
 # _follow_redirects_to_tempfile clears it on entry to and exit from every
 # chain - under guard._PIN_FETCH_LOCK, so the clears are indivisible from
 # the chain between them and cookies still cannot leak from one download
@@ -47,12 +47,23 @@ _MAX_DOWNLOAD_REDIRECTS = 5
 _redirect_client: httpx.AsyncClient | None = None
 
 
-def _get_redirect_client() -> httpx.AsyncClient:
-    """Return the persistent redirect-chain client, creating it on first use."""
+def _current_redirect_timeout() -> float:
+    """The timeout for this call: the serving server's snapshot if one exists."""
+    config = current_server_config()
+    return client.get_http_timeout() if config is None else config.http_timeout
+
+
+def _get_redirect_client(timeout: float | None = None) -> httpx.AsyncClient:
+    """Return the persistent redirect-chain client, creating it on first use.
+
+    ``timeout`` is the creating server's snapshot value when the chain is
+    served by a server; a standalone caller leaves it unset and the process
+    environment supplies it as before.
+    """
     global _redirect_client
     if _redirect_client is None:
         _redirect_client = httpx.AsyncClient(
-            timeout=client.get_http_timeout(),
+            timeout=client.get_http_timeout() if timeout is None else timeout,
             follow_redirects=False,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
@@ -63,8 +74,8 @@ async def close_redirect_client() -> None:
     """Close the persistent redirect-chain client if one exists and reset the singleton.
 
     Called by the server lifespan at shutdown. The next download after a close
-    constructs a fresh client, picking up any updated configuration (such as
-    ``NEXTDNS_HTTP_TIMEOUT``).
+    constructs a fresh client from the serving server's snapshot (or from the
+    process environment for a standalone caller).
     """
     global _redirect_client
     if _redirect_client is not None:
@@ -97,9 +108,10 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
     shutdown already closed.
     """
     redirects = 0
-    async with asyncio.timeout(client.get_http_timeout() * (_MAX_DOWNLOAD_REDIRECTS + 1)):
+    timeout = _current_redirect_timeout()
+    async with asyncio.timeout(timeout * (_MAX_DOWNLOAD_REDIRECTS + 1)):
         async with guard._PIN_FETCH_LOCK:
-            unauthenticated = _get_redirect_client()
+            unauthenticated = _get_redirect_client(timeout)
             # A fresh client per download used to give every chain its own
             # empty cookie jar; the shared jar is cleared on entry and on exit
             # so a cookie a redirect target set cannot reach the next download
@@ -116,10 +128,10 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
                             "GET",
                             next_url,
                             headers={"Accept-Encoding": "identity"},
-                            # Re-read per chain: a fresh client picked this up at
-                            # construction, and the shared one must not freeze the
-                            # first download's timeout for every later download.
-                            timeout=client.get_http_timeout(),
+                            # The serving server's creation-time timeout: the
+                            # shared client's constructor value is only a fallback,
+                            # so this is the value each request actually uses.
+                            timeout=timeout,
                         ) as response:
                             if response.has_redirect_location:
                                 redirects += 1

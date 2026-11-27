@@ -24,7 +24,8 @@ from typing import Any
 from fastmcp import FastMCP
 
 from .client import ApiClientOwner, api_client_owner, close_raw_probe_client
-from .state import RESOURCES_LIFESPAN_KEY
+from .config import ServerConfig
+from .state import RESOURCES_LIFESPAN_KEY, server_config
 from .tools.doh import DohClientOwner, doh_client_owner
 from .tools.logs import DownloadRegistry, close_redirect_client, download_registry
 
@@ -32,18 +33,22 @@ from .tools.logs import DownloadRegistry, close_redirect_client, download_regist
 class ServerResources:
     """One server instance's explicitly owned state.
 
-    Owns the API client owner, DoH client owner, and download registry a
-    server serves: the state that used to live in process-global module
-    singletons any caller could reach. ``create_mcp_server()`` builds one per
+    Owns the immutable configuration snapshot, API client owner, DoH client
+    owner, and download registry a server serves: the state that used to live
+    in process-global module singletons any caller could reach. Every client
+    and download consumer reads the snapshot this server was created with rather
+    than the process environment. ``create_mcp_server()`` builds one per
     ``FastMCP`` instance and attaches it to the instance, so two embedded
     servers never read or reset each other's state. :meth:`aclose` closes the
     clients and reclaims the downloads - one server's shutdown cannot reach
     into a sibling server's connections or tracked CSVs.
     """
 
-    def __init__(self) -> None:
-        self.api_client = ApiClientOwner()
-        self.doh_client = DohClientOwner()
+    def __init__(self, config: ServerConfig | None = None) -> None:
+        snapshot = config if config is not None else ServerConfig.from_env()
+        self.config = snapshot
+        self.api_client = ApiClientOwner(config=snapshot)
+        self.doh_client = DohClientOwner(config=snapshot)
         self.downloads = DownloadRegistry()
 
     async def aclose(self) -> None:
@@ -94,6 +99,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     api_token = api_client_owner.set(resources.api_client)
     doh_token = doh_client_owner.set(resources.doh_client)
     registry_token = download_registry.set(resources.downloads)
+    config_token = server_config.set(resources.config)
     try:
         yield {RESOURCES_LIFESPAN_KEY: resources}
     finally:
@@ -115,3 +121,4 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             download_registry.reset(registry_token)
             doh_client_owner.reset(doh_token)
             api_client_owner.reset(api_token)
+            server_config.reset(config_token)

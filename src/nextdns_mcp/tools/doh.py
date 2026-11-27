@@ -45,6 +45,7 @@ from ..client import _log_safe_error
 from ..coercion import OptionalProfileId
 from ..config import (
     ProfileAccessControl,
+    ServerConfig,
     get_http_timeout,
     load_profile_access_control,
 )
@@ -55,6 +56,11 @@ from ..transport import access_denied_payload
 from ..utils import resolve_default_profile
 
 logger = logging.getLogger(__name__)
+
+
+def _doh_timeout(config: ServerConfig | None) -> float:
+    """Use the server snapshot timeout when one exists, otherwise the process environment."""
+    return config.http_timeout if config is not None else get_http_timeout()
 
 
 # The DoH client persists for keep-alive connection reuse, owned explicitly
@@ -72,20 +78,29 @@ class DohClientOwner:
     owns it from then on, including closing it.
     """
 
-    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        config: ServerConfig | None = None,
+    ) -> None:
+        self.config = config
         self._client = client
 
     def get(self) -> httpx.AsyncClient:
-        """Return this owner's DoH client, creating it on first use."""
+        """Return this owner's DoH client, creating it on first use.
+
+        A server-owned owner uses its creation-time config snapshot; a
+        standalone owner keeps reading the process environment.
+        """
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=get_http_timeout())
+            self._client = httpx.AsyncClient(timeout=_doh_timeout(self.config))
         return self._client
 
     async def aclose(self) -> None:
         """Close this owner's DoH client if one exists and reset it.
 
-        The next :meth:`get` constructs a fresh client, picking up any updated
-        configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+        The next :meth:`get` constructs a fresh client from this owner's
+        snapshot, or from the process environment for a standalone owner.
         """
         if self._client is not None:
             client = self._client
