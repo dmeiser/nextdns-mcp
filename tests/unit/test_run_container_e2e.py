@@ -1458,6 +1458,22 @@ def test_private_open_refuses_when_the_mode_cannot_be_established(tmp_path, monk
     assert not path.exists() or path.stat().st_size == 0
 
 
+def test_private_open_refuses_a_preplanted_symlink(tmp_path):
+    """O_NOFOLLOW: neither the append nor the tightening fchmod lands through a link."""
+    import os
+    import stat
+
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text("not an artifact\n", encoding="utf-8")
+    os.chmod(target, 0o644)
+    link = tmp_path / "report.jsonl"
+    link.symlink_to(target)
+    with pytest.raises(OSError), ai_e2e_common.private_open(link, "a"):
+        pass
+    assert target.read_text(encoding="utf-8") == "not an artifact\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
 class TestRateLimitPacingAndFullBackoff:
     """Default retries walk all RATE_LIMIT_BACKOFF entries and pace read/write bursts."""
 

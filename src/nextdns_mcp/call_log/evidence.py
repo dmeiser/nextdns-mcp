@@ -34,35 +34,46 @@ def _identity_entry(node: Any) -> tuple[str, dict[str, str]] | None:
     return identifier, entry
 
 
-def _walk_children(node: Any, out: list[dict[str, str]], seen: set[str]) -> None:
-    """Descend one container level looking for id-carrying objects.
-
-    The loop breaks once the evidence bound is reached: the recursive guard in
-    ``_walk_identities`` would stop any further append, but without the break a
-    container holding thousands of id-less siblings keeps the walk iterating
-    (and descending into each) long after the bound was hit.
-    """
-    if isinstance(node, dict):
-        children: Any = node.values()
-    elif isinstance(node, list):
-        children = node
-    else:
-        return
-    for value in children:
-        if len(out) >= EVIDENCE_MAX_ITEMS:
-            break
-        _walk_identities(value, out, seen)
-
-
-def _walk_identities(node: Any, out: list[dict[str, str]], seen: set[str]) -> None:
-    """Collect (id, name) objects from a payload, bounded, without replacement."""
-    if len(out) >= EVIDENCE_MAX_ITEMS:
-        return
-    entry = _identity_entry(node)
+def _collect_identity(current: Any, out: list[dict[str, str]], seen: set[str]) -> None:
+    """Append this node's (id, name) entry when it carries a new id."""
+    entry = _identity_entry(current)
     if entry is not None and entry[0] not in seen:
         seen.add(entry[0])
         out.append(entry[1])
-    _walk_children(node, out, seen)
+
+
+def _push_identity_children(current: Any, depth: int, stack: list[Any]) -> None:
+    """Push one container's lazy (child, depth + 1) iterator; scalars push nothing.
+
+    Lazy so the walk stops pulling siblings the moment the evidence bound is
+    reached, instead of draining a container of thousands of id-less ones.
+    """
+    if isinstance(current, dict):
+        stack.append((value, depth + 1) for value in current.values())
+    elif isinstance(current, list):
+        stack.append((value, depth + 1) for value in current)
+
+
+def _walk_identities(node: Any, out: list[dict[str, str]], seen: set[str]) -> None:
+    """Collect (id, name) objects from a payload, bounded, without replacement.
+
+    Iterative (no RecursionError on a deeply nested payload) and bounded by
+    ``COMPONENT_MAX_DEPTH``, so a hostile or degenerate tree cannot exhaust
+    the stack the way the old mutual recursion could.
+    """
+    stack: list[Any] = [iter([(node, 0)])]
+    while stack:
+        if len(out) >= EVIDENCE_MAX_ITEMS:
+            break
+        try:
+            current, depth = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
+        if depth > COMPONENT_MAX_DEPTH:
+            continue
+        _collect_identity(current, out, seen)
+        _push_identity_children(current, depth, stack)
 
 
 def _walk_component_types(node: Any, types: set[str]) -> None:

@@ -26,8 +26,10 @@ directly by file path from the unit tests.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import random
+import stat
 import string
 import time
 from dataclasses import dataclass, field
@@ -245,10 +247,17 @@ def private_open(path: Any, mode: str = "w"):
     CI host. The mode is applied through the fd so a pre-existing permissive
     file is tightened too, not only a brand-new one made private. Fail closed:
     if 0600 cannot be established the artifact is not written at all.
+
+    The descriptor is validated before the ``fchmod``: ``O_NOFOLLOW`` refuses
+    a pre-planted symlink (ELOOP) so the mode change cannot land on a file
+    the artifact path merely points at, and the ``fstat`` check refuses
+    anything that is not a regular file.
     """
-    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC) | os.O_NOFOLLOW
     fd = os.open(str(Path(path)), flags, 0o600)
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "harness artifact is not a regular file", str(path))
         os.fchmod(fd, 0o600)
     except OSError:
         os.close(fd)
