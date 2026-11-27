@@ -30,8 +30,9 @@ DASHBOARD_PACKAGE = "nextdns_mcp.tools.dashboard"
 # The sibling tool modules the dashboard must never reach into directly.
 SIBLING_TOOL_MODULES = ("plots", "logs", "doh", "metrics")
 
-# One concern per module: fetch/shape, UI, summary text, dispatch + tool wrapper.
-PACKAGE_MODULES = ("__init__.py", "data.py", "components.py", "formatters.py", "tool.py")
+# One concern per module: fetch/shape, UI, summary text, dispatch + tool wrapper,
+# and the section vocabulary apart from the render path (issue #780).
+PACKAGE_MODULES = ("__init__.py", "constants.py", "data.py", "components.py", "formatters.py", "tool.py")
 
 # The primitives the dashboard and the plotting tool share. The pure series and
 # budget helpers belong to ``nextdns_mcp.charts``; the builders that construct a
@@ -154,7 +155,8 @@ def test_dashboard_imports_no_private_name_from_a_sibling_dashboard_module():
     AGENT.md. This fails if a cited private import is restored, in any import
     form - relative or absolute (WORK-339).
     """
-    sibling_modules = {f"{DASHBOARD_PACKAGE}.{name}" for name in ("data", "components", "formatters", "tool")}
+<<<<<<< HEAD
+    sibling_modules = {f"{DASHBOARD_PACKAGE}.{name}" for name in ("constants", "data", "components", "formatters", "tool")}
     for module_file in sorted(PACKAGE_DIR.glob("*.py")):
         for module, names in _absolute_imports(module_file):
             if module not in sibling_modules:
@@ -276,6 +278,28 @@ def test_package_public_surface():
     """Callers import the tool from the package, so the package must export it."""
     assert dashboard.overviewDashboard.__module__.startswith("nextdns_mcp.tools.dashboard")
     assert "overviewDashboard" in dashboard.__all__
+
+
+def test_section_metadata_import_stays_free_of_prefab_ui():
+    """Reading the section vocabulary loads no component tree (issue #780).
+
+    The E2E sweep and the actor harness read ``DASHBOARD_SECTIONS`` from the
+    package in processes that render nothing; an eager ``tool`` import in
+    ``__init__`` put the whole Prefab UI component tree into them. The probe
+    runs in a fresh interpreter because this test module has already imported
+    the render path.
+    """
+    import subprocess
+    import sys
+
+    code = "import sys\n"
+    code += "from nextdns_mcp.tools.dashboard import DASHBOARD_SECTIONS\n"
+    code += "assert DASHBOARD_SECTIONS\n"
+    code += "assert not any(m == 'prefab_ui' or m.startswith('prefab_ui.') for m in sys.modules)\n"
+    code += "print('ok')\n"
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
 
 
 def test_overview_dashboard_delegates_once():

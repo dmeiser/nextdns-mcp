@@ -1,6 +1,12 @@
-"""The generative-UI catalog: the name partition and its gating decisions.
+"""The tool-name catalog: the composite names, the generative-UI partition, and its gating decisions.
 
 SPDX-License-Identifier: MIT
+
+The three hand-written composite operations are named here as static metadata,
+so a reader of the catalog - the initialize instructions, the schema validator,
+the container pre-flight - derives the published names without importing the
+tool modules, whose render path pulls the Prefab UI component tree into the
+process (issue #780).
 
 Generative-UI tools partitioned by what they answer with. A content tool answers with an
 interactive Prefab UI view, so no payload exists for a schema to describe and schema
@@ -20,9 +26,24 @@ from fastmcp import FastMCP
 
 from .config import is_generative_ui_enabled
 
+# The three composite operations, in registration order. ``server`` imports the
+# tool functions at the registration site and asserts the registered functions
+# still carry these names, so this copy cannot drift from what is published.
+_COMPOSITE_TOOL_NAMES = ("plotAnalytics", "dohLookup", "overviewDashboard")
+
 _GENERATIVE_UI_CONTENT_TOOLS = ("generate_prefab_ui",)
 _GENERATIVE_UI_DATA_TOOLS = ("search_prefab_components",)
 _GENERATIVE_UI_TOOLS = (*_GENERATIVE_UI_CONTENT_TOOLS, *_GENERATIVE_UI_DATA_TOOLS)
+
+
+def composite_tool_names() -> tuple[str, ...]:
+    """The composite tool names the server registers beside the spec tools.
+
+    Static metadata: reading it imports nothing from the tool layer, so
+    schema, catalog, and E2E consumers stay free of the Prefab UI component
+    tree (issue #780).
+    """
+    return _COMPOSITE_TOOL_NAMES
 
 
 def _generative_ui_enabled(enabled: bool | None) -> bool:

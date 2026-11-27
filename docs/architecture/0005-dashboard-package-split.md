@@ -92,3 +92,9 @@ needs a card in a hurry.**
 - `tests/unit/test_dashboard_boundaries.py` records the coupling this replaced —
   private-name imports across the plotting boundary — and is the line the package may
   not cross back over.
+- Issue #780: the section vocabulary (`DashboardSection`, `DASHBOARD_SECTIONS`) moved
+  out of `tool.py` into a fifth module, `constants.py`, and the package `__init__`
+  resolves `overviewDashboard` lazily, so metadata consumers (the E2E sweep, the
+  schema/catalog readers) load no Prefab UI component tree. `server.py` likewise
+  imports the composite tool functions at the registration site, publishing their
+  names as static metadata from `catalog.py`.

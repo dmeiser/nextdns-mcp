@@ -109,6 +109,27 @@ class TestProductionServerTools:
         assert await self._published_names() == set(published_tool_names())
         assert len(published_tool_names()) == len(set(published_tool_names()))
 
+    def test_reading_the_catalog_imports_no_prefab_ui(self):
+        """``published_tool_names()`` is metadata: reading it renders nothing (issue #780).
+
+        Schema validators and E2E scripts call it in processes that never serve
+        a render; the composite tool functions are imported at the registration
+        site instead, so the catalog read must not pull the Prefab UI component
+        tree in. The probe runs in a fresh interpreter because this test module
+        has already imported the server.
+        """
+        import subprocess
+        import sys
+
+        code = "import sys\n"
+        code += "from nextdns_mcp.server import published_tool_names\n"
+        code += "assert published_tool_names()\n"
+        code += "assert not any(m == 'prefab_ui' or m.startswith('prefab_ui.') for m in sys.modules)\n"
+        code += "print('ok')\n"
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "ok"
+
     @pytest.mark.asyncio
     async def test_the_api_operations_are_published_by_their_own_names(self):
         """The endpoints are what a caller is given: the spec's names, one per call."""

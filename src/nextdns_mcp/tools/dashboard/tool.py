@@ -15,10 +15,13 @@ SPDX-License-Identifier: MIT
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Literal, NamedTuple, Protocol, get_args
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, get_args
 
 from fastmcp.tools.base import ToolResult
-from prefab_ui.components import Card, Column
+from prefab_ui.components import Column
+
+if TYPE_CHECKING:
+    from prefab_ui.components import Card
 
 from ...chart_ui import bounded_app_result
 from ...charts import analytics_range_error
@@ -38,6 +41,7 @@ from .components import (
     build_reasons_card,
     build_security_card,
 )
+from .constants import DASHBOARD_SECTIONS, DashboardSection
 from .data import (
     build_analytics_params,
     calc_rate,
@@ -62,6 +66,11 @@ from .formatters import (
     overview_top_summary,
 )
 
+if TYPE_CHECKING:
+    # Annotation-only: ``Card`` types the card builders' results and nothing
+    # here constructs one, so the component library is not imported for it.
+    from prefab_ui.components import Card
+
 
 def _wrap_card_result(card: Card, summary_text: str) -> ToolResult | dict[str, Any]:
     """Wrap a single visual card into the ToolResult the MCP surface answers with."""
@@ -83,7 +92,7 @@ class _CardSpec:
     summary_title: str
     summary_noun: str
     items: Callable[[list[dict[str, Any]]], list[tuple[str, int]]]
-    build_card: Callable[[list[dict[str, Any]], str], Card]
+    build_card: Callable[[list[dict[str, Any]], str], "Card"]
     fetch_extra: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -254,24 +263,9 @@ async def _kpi_analytics_impl(
     return bounded_app_result(build_kpi_app(kpis), summary, "KPI cards")
 
 
-DashboardSection = Literal[
-    "overview",
-    "all",
-    "kpi",
-    "domains",
-    "blocked_domains",
-    "reasons",
-    "devices",
-    "ips",
-    "root_domains",
-    "countries",
-    "gafam",
-    "security",
-]
-
-# The section table the published tool accepts, read from the same Literal so the
-# E2E sweep and the actor harness cannot drift from it (#470).
-DASHBOARD_SECTIONS = get_args(DashboardSection)
+# The section table the published tool accepts lives in ``constants`` beside
+# the Literal, so the E2E sweep and the actor harness read the same names
+# without importing the render path (#470, issue #780).
 
 
 class _WidgetHandler(Protocol):
