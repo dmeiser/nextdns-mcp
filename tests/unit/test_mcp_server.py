@@ -285,15 +285,26 @@ class TestServerLifespan:
 
         monkeypatch.setattr(resources.probe_client, "aclose", boom)
 
+        ambient_redirect_owner = logs_module._redirect_client_owner.get()
         with pytest.raises(RuntimeError, match="injected probe close failure"):
             async with server._lifespan_manager():
                 api_client = resources.api_client.get()
                 doh_client = resources.doh_client.get()
                 redirect_client = resources.redirect_client.get()
+                # The lifespan published the server's owners into this context;
+                # the resets in its finally must run even though aclose raised.
+                assert client_module.api_client_owner.get() is resources.api_client
+                assert doh_module.doh_client_owner.get() is resources.doh_client
+                assert logs_module._download_registry.get() is resources.downloads
+                assert logs_module._redirect_client_owner.get() is resources.redirect_client
 
         assert api_client.is_closed, "the close before the failure must still have run"
         assert doh_client.is_closed, "a failed probe close skipped the DoH client close"
         assert redirect_client.is_closed, "a failed probe close skipped the redirect client close"
+        assert client_module.api_client_owner.get() is None
+        assert doh_module.doh_client_owner.get() is None
+        assert logs_module._download_registry.get() is None
+        assert logs_module._redirect_client_owner.get() is ambient_redirect_owner
 
     @pytest.mark.asyncio
     async def test_real_client_session_closes_http_clients_on_disconnect(self, mock_api_key, monkeypatch):
