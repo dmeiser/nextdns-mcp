@@ -106,9 +106,18 @@ def test_parse_ui_data_accepts_nesting_at_the_cap():
 
 
 def test_decode_ui_json_reports_a_decoder_stack_blowout_as_a_validation_error():
-    """The C scanner recurses per level: a document past its stack limit must not raise RecursionError."""
-    with pytest.raises(ValueError, match="maximum nesting depth"):
-        _parse_ui_data("[" * 100_000 + "]" * 100_000)
+    """A decoder stack blowout is reported as a validation error, not leaked as RecursionError.
+
+    The exact depth at which a C scanner runs out of stack depends on the
+    interpreter's stack size, so force the exception rather than tying the test
+    to a document length that only fails on some runners.
+    """
+    with (
+        patch("nextdns_mcp.generative.json.loads", side_effect=RecursionError("maximum recursion depth")),
+        pytest.raises(ValueError, match="maximum nesting depth") as raised,
+    ):
+        generative_module._decode_ui_json('{"a": 1}')
+    assert isinstance(raised.value.__cause__, RecursionError)
 
 
 def test_validate_chart_placement_rejects_charts_in_tabs():
