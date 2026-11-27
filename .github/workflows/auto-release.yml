@@ -86,7 +86,7 @@ jobs:
 
       - name: Checkout Code
         if: steps.pr.outputs.proceed == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
@@ -112,7 +112,7 @@ jobs:
 
       - name: Generate Release Notes and Create Release
         if: steps.pr.outputs.proceed == 'true'
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
