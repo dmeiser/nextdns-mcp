@@ -109,6 +109,21 @@ class TestProductionServerTools:
         assert await self._published_names() == set(published_tool_names())
         assert len(published_tool_names()) == len(set(published_tool_names()))
 
+    def test_composite_registration_drift_is_refused(self, mock_api_key, monkeypatch):
+        """A catalog that disagrees with the registered functions fails loudly.
+
+        The names in ``catalog`` drive the initialize instructions and the
+        validation scripts; a silent drift would describe tools that are not
+        registered. The guard in ``build_mcp_server`` is the one place that
+        compares the two, so exercise its failing branch directly.
+        """
+        from nextdns_mcp import server as server_module
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setattr(server_module, "composite_tool_names", lambda: ("plotAnalytics",))
+        with pytest.raises(RuntimeError, match="Composite tool registration drifted from the catalog"):
+            server_module.build_mcp_server()
+
     def test_reading_the_catalog_imports_no_prefab_ui(self):
         """``published_tool_names()`` is metadata: reading it renders nothing (issue #780).
 
