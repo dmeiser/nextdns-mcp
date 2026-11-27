@@ -62,14 +62,14 @@ def test_build_domains_card_validates_caller_color():
 
 
 def test_queries_series_failure_log_omits_exception_text(monkeypatch, caplog):
-    monkeypatch.setattr(components_module, "validate_series_payload", _raise_marker)
+    monkeypatch.setattr(components_module, "extract_series_fields", _raise_marker)
     with caplog.at_level(logging.WARNING, logger=components_module.logger.name):
         assert components_module._build_queries_series_card({}) is None
     assert MARKER not in caplog.text
 
 
 def test_plot_render_error_is_static_for_logs_and_callers(monkeypatch, caplog):
-    monkeypatch.setattr(plots_module, "validate_series_payload", _raise_marker)
+    monkeypatch.setattr(plots_module, "extract_series_fields", _raise_marker)
     with caplog.at_level(logging.ERROR, logger=plots_module.logger.name):
         result = plots_module._plot_rendered_series("status", "abc123", {})
     assert result == {"error": "Error rendering chart", "code": "internal_error"}
