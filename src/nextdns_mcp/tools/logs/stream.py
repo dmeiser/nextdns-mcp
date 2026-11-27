@@ -87,6 +87,18 @@ async def _stream_pieces(response: httpx.Response, decoder: codecs.IncrementalDe
         yield b"", tail
 
 
+def _open_private(path: str) -> Any:
+    """Open ``path`` for writing with 0o600, on the calling thread.
+
+    ``os.open``, not ``open()``: 0o600 is the requested mode only at ``open()``
+    time, and builtin ``open()`` takes the system default, so a customer CSV
+    would land group- and world-readable. It is a separate function only so the
+    caller can hand it to a worker thread: opening the file is a filesystem
+    call, and the loop must not wait for it.
+    """
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
+
+
 async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict[str, Any]:
     """Write a streaming response body to ``path`` without double-buffering.
 
@@ -120,10 +132,10 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     # record's tail - arriving in a later chunk, after the carry was dropped -
     # would be appended to the preview as if it were a new record.
     dropping_record = False
-    # os.open, not open(): 0o600 is the requested mode only at open() time, and
-    # builtin open() takes the system default, so a customer CSV would land
-    # group- and world-readable.
-    out = os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
+    # The open belongs on the worker pool with the writes that follow it: on a
+    # busy or cold temp directory the syscall holds the loop for as long as it
+    # takes, and every other request this server serves waits behind it.
+    out = await asyncio.to_thread(_open_private, path)
     try:
         async for raw, text in _stream_pieces(response, decoder):
             if written_bytes + len(raw) > max_total:
@@ -160,7 +172,10 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
         preview_lines, preview_bytes, preview_carry, open_line, dropping_record
     )
     row_count += extra_rows
-    size = os.path.getsize(path)
+    # The bytes this loop wrote, not a second filesystem round trip: the size
+    # cap is already measured on the same counter, so ``stat`` would only add a
+    # blocking call on the loop to re-derive a number we own.
+    size = written_bytes
     text_preview = "".join(preview_lines)
     return {
         "content_type": response.headers.get("content-type"),

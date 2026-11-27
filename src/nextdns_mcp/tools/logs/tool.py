@@ -11,6 +11,7 @@ successful download.
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -103,7 +104,7 @@ def _download_error_detail(status: Any, scheme: Any, host: Any) -> str:
     )
 
 
-def _register_successful_download(path: str, downloaded: bool) -> dict[str, Any] | None:
+async def _register_successful_download(path: str, downloaded: bool) -> dict[str, Any] | None:
     """Register a completed download with the owning lifespan's registry.
 
     Returns the rejection payload when the download succeeded outside any
@@ -113,7 +114,10 @@ def _register_successful_download(path: str, downloaded: bool) -> dict[str, Any]
     if not downloaded:
         return None
     try:
-        retention._note_successful_download(path, True)
+        # Registration is where past-MAX_RETAINED_DOWNLOADS eviction unlinks the
+        # oldest CSV, and that unlink is a filesystem call: it runs on a worker
+        # thread so the next request is not queued behind it.
+        await asyncio.to_thread(retention._note_successful_download, path, True)
     except retention.MissingDownloadRegistryError as e:
         logger.error(f"Downloaded logs could not be registered for reclaim: {client._log_safe_error(e)}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Downloaded logs could not be handed out: {e}")
@@ -152,7 +156,11 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     globally routable hosts, so a hostile ``Location`` cannot turn the download
     into a probe of an internal service.
     """
-    path = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_"), "download.csv")
+    # The temp directory is created by a syscall that can block - on a full or
+    # cold filesystem ``mkdtemp`` holds whatever thread calls it - so it goes to
+    # the worker pool, like the write, close and unlink that follow it.
+    temp_dir = await asyncio.to_thread(tempfile.mkdtemp, prefix="nextdns_logs_")
+    path = os.path.join(temp_dir, "download.csv")
     downloaded = False
     try:
         payload, downloaded = await _download_logs_controlled(profile_id, path)
@@ -162,7 +170,7 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
         # never be reclaimed, so a successful download is rejected there and
         # removed like any other unsuccessful download (downloaded stays False
         # for the finally below).
-        rejection = _register_successful_download(path, downloaded)
+        rejection = await _register_successful_download(path, downloaded)
         if rejection is not None:
             downloaded = False
             return rejection
@@ -178,4 +186,4 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
         # task, which reaches neither handler — removes the temp file and its
         # mkdtemp parent, so an abandoned download leaves nothing behind.
         if not downloaded:
-            retention._unlink_temp_file(path)
+            await asyncio.to_thread(retention._unlink_temp_file, path)

@@ -1850,3 +1850,138 @@ class TestSuccessfulDownloadLifecycle:
             assert all(survivor in registry for survivor in survivors), (
                 "an unevictable oldest must stop the sweep, not drop the rest"
             )
+
+
+class TestFilesystemCallsLeaveTheLoop:
+    """Creating, opening and reclaiming a CSV must not hold the event loop (issue #791).
+
+    The writes were already offloaded; the surrounding lifecycle calls were not.
+    Each probe records the thread that made the call: on the base behaviour the
+    recorded thread is the loop's own, and every other request waits behind it.
+    """
+
+    async def test_the_temp_directory_and_csv_are_created_off_the_loop(
+        self, monkeypatch, unauthenticated, owned_api_client
+    ):
+        loop_thread = threading.get_ident()
+        calls: list[tuple[str, bool]] = []
+        real_mkdtemp = tempfile.mkdtemp
+        real_open = os.open
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            if kwargs.get("prefix") == "nextdns_logs_":
+                calls.append(("mkdtemp", threading.get_ident() == loop_thread))
+            return real_mkdtemp(*args, **kwargs)
+
+        def watch_open(path: Any, *args: Any, **kwargs: Any) -> int:
+            if str(path).endswith("download.csv"):
+                calls.append(("open", threading.get_ident() == loop_thread))
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(logs_module.os, "open", watch_open)
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        with (
+            logs_module.downloads_owned(),
+            owned_api_client(
+                _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+            ),
+        ):
+            unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert {name for name, _ in calls} == {"mkdtemp", "open"}
+        assert not any(on_loop for _, on_loop in calls), calls
+        assert payload["size"] == len("host,reason\na.com,blocked\n")
+
+    async def test_a_failed_download_is_unlinked_off_the_loop(self, monkeypatch, owned_api_client):
+        loop_thread = threading.get_ident()
+        removed: list[bool] = []
+        real_unlink = os.unlink
+        real_rmdir = os.rmdir
+
+        def watch_unlink(path: Any) -> None:
+            if str(path).endswith("download.csv"):
+                removed.append(threading.get_ident() == loop_thread)
+            return real_unlink(path)
+
+        def watch_rmdir(path: Any) -> None:
+            if "nextdns_logs_" in str(path):
+                removed.append(threading.get_ident() == loop_thread)
+            return real_rmdir(path)
+
+        monkeypatch.setattr(logs_module.os, "unlink", watch_unlink)
+        monkeypatch.setattr(logs_module.os, "rmdir", watch_rmdir)
+
+        class Denied:
+            def stream(self, method, url, **kwargs):
+                raise AccessDeniedError(
+                    "Read access denied for profile: abc123",
+                    code=ErrorCode.READ_ACCESS_DENIED,
+                    profile_id="abc123",
+                )
+
+        with owned_api_client(Denied()):
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert payload["code"] == ErrorCode.READ_ACCESS_DENIED
+        assert len(removed) == 2, "both the CSV and its parent must be reclaimed"
+        assert not any(removed), removed
+
+    async def test_registration_including_eviction_runs_off_the_loop(
+        self, monkeypatch, unauthenticated, owned_api_client
+    ):
+        loop_thread = threading.get_ident()
+        notes: list[bool] = []
+
+        class RecordingRegistry(logs_module.DownloadRegistry):
+            def note(self, path: str, downloaded: bool) -> None:
+                notes.append(threading.get_ident() == loop_thread)
+                super().note(path, downloaded)
+
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        with (
+            logs_module.downloads_owned(RecordingRegistry()),
+            owned_api_client(
+                _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+            ),
+        ):
+            unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert notes == [False], "registration (and any eviction it performs) must run on a worker"
+        assert payload["row_count"] == 2
+
+    async def test_shutdown_reclaim_runs_off_the_loop(self, monkeypatch):
+        from nextdns_mcp import lifespan as lifespan_module
+
+        loop_thread = threading.get_ident()
+        threads: list[bool] = []
+
+        class RecordingRegistry(logs_module.DownloadRegistry):
+            def cleanup(self) -> None:
+                threads.append(threading.get_ident() == loop_thread)
+                super().cleanup()
+
+        class _Server:
+            _nextdns_resources: Any = None
+
+        server = _Server()
+        server._nextdns_resources = lifespan_module.ServerResources()
+        server._nextdns_resources.downloads = RecordingRegistry()
+        async with lifespan_module.server_lifespan(server):
+            pass
+        assert threads == [False], "shutdown reclaim must run on a worker"
+        await server._nextdns_resources.aclose()
+        assert threads == [False, False], "the resources-close path must offload too"
+
+    async def test_the_reported_size_never_stats_the_file(self, tmp_path, monkeypatch):
+        def refuse_stat(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError("payload size must come from the bytes written, not a second fs call")
+
+        monkeypatch.setattr(logs_module.os.path, "getsize", refuse_stat)
+        chunks = ["a.com,blocked\n", "bb.com,blocked\n"]
+        path = str(tmp_path / "download.csv")
+        payload = await logs_module._write_stream_to_tempfile(_FakeResponse("https://x/file.csv", chunks=chunks), path)
+        assert payload["size"] == sum(len(chunk) for chunk in chunks)
+        assert payload["size"] == os.stat(path).st_size
