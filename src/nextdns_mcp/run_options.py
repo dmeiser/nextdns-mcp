@@ -97,7 +97,12 @@ def get_mcp_run_options() -> dict[str, Any]:
 
     Returns:
         Dictionary of options to pass to mcp.run() via **kwargs.
-        Empty dict for stdio (default), or dict with transport/host/port for HTTP.
+        Empty dict for stdio (default), or dict with transport/host/port and
+        ``json_response=True`` for HTTP.
+
+        JSON responses are required in HTTP mode: the MCP Apps renderer is a
+        self-contained document larger than the streamable-HTTP client's 1 MiB
+        SSE event cap, and a plain JSON body has no event framing to exceed it.
 
         HTTP mode binds to 127.0.0.1 by default (loopback-only, no authentication
         is built in). Binding to any other interface is an explicit opt-in via
@@ -118,7 +123,7 @@ def get_mcp_run_options() -> dict[str, Any]:
                 "opt-in. Put a reverse proxy with authentication in front, or keep "
                 "the bind loopback-only (127.0.0.1) for local use."
             )
-        return {"transport": "http", "host": host, "port": port}
+        return {"transport": "http", "host": host, "port": port, "json_response": True}
 
     # Default: stdio transport
     logger.info("  Transport: stdio")
