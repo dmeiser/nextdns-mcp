@@ -74,7 +74,7 @@ def build_row(
     row = {
         "ts": time.time(),
         "tool": tool,
-        "profile_id": str(arguments.get("profile_id", "")),
+        "profile_id": "" if arguments.get("profile_id") is None else str(arguments["profile_id"]),
         # Enough of the arguments to match the call the harness asked for
         # (which endpoint, which entry), bounded before serialization by
         # the same projection the result uses. Serialized once, without

@@ -128,6 +128,33 @@ class TestEndpointRecord:
         assert is_write_operation("POST") and not is_write_operation("GET")
 
 
+class TestProfileIdColumn:
+    """The profile column says which profile the call ran against, or nothing.
+
+    A composite tool (plotAnalytics, the dashboard tools, dohLookup) passes
+    ``profile_id: None`` when the call needs no profile. ``str()`` of that is
+    the four-character string ``"None"``, which reads back as a real profile
+    id, so an absent profile keeps the empty string an omitted key already gives.
+    """
+
+    class _R:
+        is_error = False
+        structured_content = None
+
+    @pytest.mark.parametrize(
+        ("arguments", "expected"),
+        [
+            ({"profile_id": None}, ""),
+            ({}, ""),
+            ({"profile_id": "abc123"}, "abc123"),
+            ({"profile_id": 7}, "7"),
+        ],
+    )
+    def test_an_absent_profile_never_reads_as_the_id_None(self, arguments, expected):
+        row = CallLogMiddleware(path="")._record_row("dohLookup", arguments, True, "", self._R())
+        assert row["profile_id"] == expected
+
+
 class TestLoggingIsOffUnlessConfigured:
     """No path means no record, and no record means no file.
 
