@@ -747,7 +747,7 @@ async def test_generate_ui_accepts_utf8_result_under_cap():
     app = UnicodeApp()
     with (
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
     ):
         mock_exec.return_value = app
         assert await gen_tool.fn(code="print(1)") is app
