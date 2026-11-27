@@ -882,21 +882,26 @@ class TestSeriesStreamCeilingWiring:
         assert payload["max_response_bytes"] == spec_tools.MAX_SERIES_RESPONSE_BYTES
         assert "response_bytes" not in payload, "a mid-stream refusal has no measured size to claim"
 
-    def test_only_the_shipped_transport_is_credited_with_measuring_the_body(self):
-        """The cap kwarg says what was asked; the callable says who was asked.
+    def test_only_the_transport_that_declares_enforcement_is_credited_with_measuring_the_body(self):
+        """The cap kwarg says what was asked; the transport's claim says who measured.
 
         An injected transport can name ``max_response_bytes`` in its signature
         and ignore it, so being handed the cap is not proof the body came in
-        under it. Only this package's own transport streams under the ceiling,
-        so only its answer is credited with a measurement already made.
+        under it. Only a transport that declares the capability streams under
+        the ceiling, so only its answer is credited with a measurement made.
         """
 
         async def injected(method, url, params=None, json_body=None, max_response_bytes=None): ...
 
+        shipped = spec_series.transport_capabilities(spec_tools.api_request_payload)
+        other = spec_series.transport_capabilities(injected)
+        assert shipped == (True, True)
+        assert other == (True, False)
+
         cap = {"max_response_bytes": spec_tools.MAX_SERIES_RESPONSE_BYTES}
-        assert spec_series.ceiling_measured_on_the_wire(spec_tools.api_request_payload, cap)
-        assert not spec_series.ceiling_measured_on_the_wire(injected, cap)
-        assert not spec_series.ceiling_measured_on_the_wire(spec_tools.api_request_payload, {})
+        assert spec_series.ceiling_measured_on_the_wire(shipped, cap)
+        assert not spec_series.ceiling_measured_on_the_wire(other, cap)
+        assert not spec_series.ceiling_measured_on_the_wire(shipped, {})
 
 
 def test_a_wire_measured_series_answer_is_not_priced_again_at_the_generator_door():
@@ -1021,13 +1026,14 @@ class TestLegacyInjectedTransportCompatibility:
         assert not spec_series._transport_accepts_cap(iter)  # builtin whose signature() raises ValueError
 
 
-class TestTransportCapabilityProbeIsMemoized:
-    """One signature inspection per transport callable, whatever the dispatch count.
+class TestTransportCapabilityProbeIsPerTool:
+    """One signature inspection per tool, whatever the dispatch count.
 
     The capability probe inspected the transport's signature on every
     ``;series`` dispatch, for an answer that cannot change while the callable
     lives. These tests count the inspections themselves and check that each
-    transport still receives the arguments it received before the memo.
+    transport still receives the arguments it received before the change, and
+    that no process-wide registry holds the callables it has seen.
     """
 
     @staticmethod
@@ -1060,7 +1066,7 @@ class TestTransportCapabilityProbeIsMemoized:
         await tool.run({"profile_id": "abc123", "from": "-1d"})
         await tool.run({"profile_id": "abc123", "from": "-1d"})
 
-        assert inspections == [capped_transport], "the second dispatch reads the memo, not the signature"
+        assert inspections == [capped_transport], "the second dispatch reuses this tool's probed answer"
         assert [(call["method"], call["cap"]) for call in calls] == [("GET", spec_tools.MAX_SERIES_RESPONSE_BYTES)] * 2
 
     async def test_two_series_dispatches_inspect_a_legacy_transport_once(self, monkeypatch):
@@ -1078,19 +1084,30 @@ class TestTransportCapabilityProbeIsMemoized:
         assert inspections == [legacy_transport]
         assert len(calls) == 2, "the legacy transport keeps its old four-argument call shape every time"
 
-    def test_each_callable_keeps_its_own_answer(self, monkeypatch):
-        """No transport inherits another's capability, so the memo may not key on equality."""
+    async def test_a_transport_replaced_after_construction_is_probed_again(self, monkeypatch):
+        """The tool resolves the default transport at call time, so its answer follows that callable."""
         inspections = self._inspect_calls(monkeypatch)
+        calls: list[dict[str, Any]] = []
 
-        async def legacy_transport(method, url, params=None, json_body=None): ...
+        async def original(method, url, params=None, json_body=None, max_response_bytes=None):
+            calls.append({"transport": "original", "cap": max_response_bytes})
+            return {"data": []}
 
-        async def capped_transport(method, url, params=None, json_body=None, max_response_bytes=None): ...
+        async def replacement(method, url, params=None, json_body=None):
+            calls.append({"transport": "replacement", "cap": "not passed"})
+            return {"data": []}
 
-        assert not spec_series._transport_accepts_cap(legacy_transport)
-        assert spec_series._transport_accepts_cap(capped_transport)
-        assert not spec_series._transport_accepts_cap(legacy_transport)
-        assert spec_series._transport_accepts_cap(capped_transport)
-        assert inspections == [legacy_transport, capped_transport]
+        monkeypatch.setattr(spec_tools, "api_request_payload", original)
+        tool = spec_tools.SpecApiTool(self._series_route())
+        monkeypatch.setattr(spec_tools, "api_request_payload", replacement)
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+
+        assert calls == [{"transport": "replacement", "cap": "not passed"}]
+        assert inspections == [original, replacement], "the replacement is a different callable and must be probed"
+
+    def test_no_process_wide_capability_registry(self):
+        """A tool owns its transport answer; the module holds no callable-keyed memo."""
+        assert not hasattr(spec_series, "_CAP_SUPPORT_BY_REQUEST")
 
 
 def test_a_big_non_series_payload_is_not_refused_by_the_series_backstop():

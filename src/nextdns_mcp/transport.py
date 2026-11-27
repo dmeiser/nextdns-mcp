@@ -67,6 +67,16 @@ logger = logging.getLogger(__name__)
 # (issue review, cycle finding).
 MAX_SERIES_RESPONSE_BYTES = 512_000
 
+# The attribute a transport sets to declare that it enforces a response byte
+# ceiling itself. ``_request_capped`` streams the body and refuses the
+# overshoot, so a payload from this module's request function is a body the
+# wire already held under the ceiling, and the caller does not have to measure
+# it again. The declaration is the transport's claim, not the caller's guess:
+# a callable that merely names ``max_response_bytes`` in its signature says
+# nothing about what it does with it, and gets no credit for a measurement it
+# never made.
+RESPONSE_CAP_ENFORCEMENT_ATTRIBUTE = "enforces_response_cap"
+
 
 def access_denied_payload(code: str, message: str, profile_id: str) -> dict[str, Any]:
     """Build the standardized error payload for an access denial (issue #178).
@@ -327,6 +337,12 @@ async def api_request_payload(
         return error_payload(ErrorCode.RESPONSE_TOO_LARGE, str(e), max_response_bytes=e.max_response_bytes)
     except NextDNSError as e:
         return _note_404_on_a_profile_path(_handle_api_error(e), url)
+
+
+# This transport streams under ``max_response_bytes``, so it makes the claim its
+# name declares. Callers read it instead of comparing function objects, which
+# would tie every consumer of the ceiling to this exact callable.
+setattr(api_request_payload, RESPONSE_CAP_ENFORCEMENT_ATTRIBUTE, True)
 
 
 def is_error_payload(payload: Any) -> bool:

@@ -42,10 +42,12 @@ from .spec_arguments import PATH_PLACEHOLDER, malformed_profile_id_payload, spli
 from .spec_descriptions import DESCRIPTION_MAX_CHARS, describe, required
 from .spec_routes import SPEC_PATH, WITHHELD_OPERATIONS, endpoints_for_routes, load_spec, spec_routes, spec_tool_names
 from .spec_series import (
+    TransportCapabilities,
     capped_transport_kwargs,
     ceiling_measured_on_the_wire,
     series_budget_for_generated_call,
     series_refusal,
+    transport_capabilities,
 )
 from .spec_validation import normalized_for_validation, schema_validation_payload
 from .tools import logs as _logs
@@ -71,6 +73,11 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _probe_target(transport: Callable[..., Any] | None) -> Callable[..., Any]:
+    """The callable a tool probes at construction: the injection, or the default global."""
+    return transport if transport is not None else api_request_payload
 
 
 def _delegate_download_logs(profile_id: str) -> Awaitable[dict[str, Any]]:
@@ -134,6 +141,15 @@ class SpecApiTool(Tool):
         )
         self._route = route
         self._transport = transport
+        # A transport's capabilities belong to the callable and cannot change
+        # while it lives, so they are read once here rather than on every
+        # dispatch, and no process-wide table has to hold a reference to every
+        # transport this server ever called. The default transport stays a
+        # module global resolved at call time (tests replace it by attribute),
+        # so the probe is retaken when that resolution hands back a different
+        # callable than the one read at construction.
+        self._probed_transport: Callable[..., Any] = _probe_target(transport)
+        self._transport_capabilities: TransportCapabilities = transport_capabilities(self._probed_transport)
         # The published schema is the contract this tool accepts, so it is also
         # what the call is checked against before anything goes out; compiling
         # the validator once per route makes per-call validation cheap.
@@ -230,7 +246,8 @@ class SpecApiTool(Tool):
         ``series_refusal`` renders the ceiling as the typed series refusal.
         """
         request = self._transport or api_request_payload
-        transport_kwargs = capped_transport_kwargs(self._route, request)
+        capabilities = self._capabilities_for(request)
+        transport_kwargs = capped_transport_kwargs(self._route, capabilities)
         payload = await request(
             self._route.method,
             path,
@@ -238,7 +255,13 @@ class SpecApiTool(Tool):
             json_body=body,
             **transport_kwargs,
         )
-        return self._wrap_call_result(payload, ceiling_measured_on_the_wire(request, transport_kwargs))
+        return self._wrap_call_result(payload, ceiling_measured_on_the_wire(capabilities, transport_kwargs))
+
+    def _capabilities_for(self, request: Callable[..., Any]) -> TransportCapabilities:
+        """This tool's transport capabilities, re-read only if the transport changed under it."""
+        if request is self._probed_transport:
+            return self._transport_capabilities
+        return transport_capabilities(request)
 
     def _wrap_call_result(self, payload: Any, ceiling_measured_on_the_wire: bool = False) -> ToolResult:
         """Turn a transport payload into a typed ToolResult.
