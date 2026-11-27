@@ -192,6 +192,24 @@ class TestDashboardHelpers:
         assert ui.build_gafam_card(chart_data, table_rows, view_type="bar") is not None
         assert ui.build_gafam_card(chart_data, table_rows, view_type="table") is not None
 
+    def test_gafam_card_pie_view_renders_only_the_chart(self):
+        # view_type="pie" must render only the chart; rendering the table too
+        # was the FUNC-5 defect (WORK-324). "auto" keeps rendering both.
+        data = [{"company": "google", "queries": 100}]
+        chart_data, table_rows = data_mod.gafam_rows(data)
+        pie_card = ui.build_gafam_card(chart_data, table_rows, view_type="pie")
+        assert _find_component(pie_card, "PieChart") is not None
+        assert _find_component(pie_card, "DataTable") is None
+        auto_card = ui.build_gafam_card(chart_data, table_rows, view_type="auto")
+        assert _find_component(auto_card, "PieChart") is not None
+        assert _find_component(auto_card, "DataTable") is not None
+
+    def test_pie_chart_clamps_negative_counts(self):
+        # A negative upstream count used to raise ValidationError from the
+        # pie's aggregation check (FUNC-5 / WORK-324); it clamps to zero.
+        chart = ui._pie_chart([{"label": "a", "queries": -1}, {"label": "b", "queries": 20}])
+        assert [row["queries"] for row in chart.data] == [0, 20]
+
     def test_security_card(self):
         enc = [{"encrypted": True, "queries": 90}, {"encrypted": False, "queries": 10}]
         dnssec = [{"validated": True, "queries": 20}, {"validated": False, "queries": 80}]
@@ -780,6 +798,13 @@ class TestDashboardToolsExecution:
     def test_build_queries_series_card_exception_handling(self, monkeypatch):
         monkeypatch.setattr(ui, "validate_series_payload", MagicMock(side_effect=ValueError("bad data")))
         assert ui._build_queries_series_card({"meta": {}}) is None
+
+    def test_build_queries_series_card_unexpected_error_propagates(self, monkeypatch):
+        # Only payload-shape errors degrade to a missing card; anything else
+        # is a programming error and must surface (FUNC-5 / WORK-324).
+        monkeypatch.setattr(ui, "validate_series_payload", MagicMock(side_effect=RuntimeError("unexpected failure")))
+        with pytest.raises(RuntimeError, match="unexpected failure"):
+            ui._build_queries_series_card({"meta": {}})
 
     def test_empty_cards_rendering(self):
         # Format summary with empty items

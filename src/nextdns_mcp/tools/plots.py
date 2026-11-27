@@ -268,7 +268,7 @@ def _plot_rendered_series(metric: str, target_profile: str, payload: dict[str, A
             )
 
         return _build_series_chart(metric, times, series_data)
-    except Exception:  # noqa: BLE001
+    except (ValueError, TypeError, KeyError, AttributeError):
         logger.error("Error rendering chart")
         return error_payload(ErrorCode.INTERNAL_ERROR, "Error rendering chart")
 

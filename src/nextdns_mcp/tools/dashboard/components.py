@@ -99,7 +99,7 @@ def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
         chart_times, chart_series_data = downsample_chart_series(times, series_data)
         chart_data = build_chart_data(chart_times, chart_series_data)
         chart_series = build_chart_series(chart_series_data)
-    except Exception:  # noqa: BLE001
+    except (ValueError, TypeError, KeyError, AttributeError):
         logger.warning("Error preparing queries series data")
         return None
 
@@ -134,9 +134,15 @@ def _bar_chart(chart_data: list[dict[str, Any]], label: str, color: str = DEFAUL
 
 
 def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
-    """Build a donut pie chart with slice labels, spacing, and tooltips."""
+    """Build a donut pie chart with slice labels, spacing, and tooltips.
+
+    Upstream counts can arrive netted below zero, and the pie's aggregation
+    validation rejects negative values, so every row's count is clamped to
+    zero or above here (issue FUNC-5 / WORK-324).
+    """
+    clamped = [{**row, "queries": max(row.get("queries", 0), 0)} for row in chart_data]
     return PieChart(
-        data=chart_data,
+        data=clamped,
         dataKey="queries",
         nameKey="label",
         innerRadius=60,
@@ -333,6 +339,8 @@ def build_gafam_card(
                 _bar_chart(chart_data, "Queries", "#3b82f6")
             elif view_type == "table":
                 _gafam_table(table_rows)
+            elif view_type == "pie":
+                _pie_chart(chart_data)
             else:
                 with Column(gap=4):
                     _pie_chart(chart_data)
