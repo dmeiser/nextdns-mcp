@@ -1836,3 +1836,42 @@ class TestSanitizeLabel:
         capped = utils_mod.sanitize_label("x" * 300)  # 200 x's plus the ellipsis
         out = fmt._format_top_items([(capped, 5)])
         assert f"{capped} (5)" in out
+
+
+class TestLabelAndSeriesInjectionHardening:
+    """Upstream labels are plain data; upstream query counts are plottable numbers."""
+
+    def test_sanitize_label_strips_bidi_and_separator_controls(self):
+        label = "a\u200eb\u200fc\u202ad\u202be\u202cf\u2066g\u2067h\u2068i\u2069j\u2028k\u2029l"
+        assert utils_mod.sanitize_label(label) == "abcdefghijkl"
+
+    def test_sanitize_label_neutralizes_prefab_template_delimiters(self):
+        assert utils_mod.sanitize_label("{{ secret }}") == "{ { secret } }"
+        assert utils_mod.sanitize_label("a}}b{{c") == "a} }b{ {c"
+        assert utils_mod.sanitize_label("{ { literal } }") == "{ { literal } }"
+
+    def test_summaries_escape_bracket_delimiters(self):
+        summary = fmt.format_items_summary("Devices", "devices", [("Office [Guest]", 5), ("Lab", 2)], 7)
+        assert summary == r"[Rendered Devices (2 devices, 7 queries): Office \[Guest\] (5), Lab (2)]"
+        overview = fmt.overview_top_summary([{"domain": "Office [Guest]", "queries": 3}], [])
+        assert overview == r"Top resolved: Office \[Guest\] (3); Top blocked: none"
+
+    def test_build_chart_data_keeps_only_finite_numbers(self):
+        times = ["2024-01-01T00:00:00Z"] * 6
+        values = [5, 7.5, "5", True, float("inf"), float("nan")]
+        rows = charts_module.build_chart_data(times, [{"queries": values}])
+        assert [row["series_0"] for row in rows] == [5, 7.5, 0, 0, 0, 0]
+
+    def test_downsample_validates_counts_before_summing(self):
+        times = ["2024-01-01T00:00:00Z"] * 3
+        series_data = [{"queries": [2, "3", float("inf")]}]
+        _, out_series = charts_module.downsample_chart_series(times, series_data, max_points=1)
+        assert out_series[0]["queries"] == [2]
+
+    def test_queries_card_renders_only_finite_numbers(self):
+        times = ["2024-01-01T00:00:00Z"] * 3
+        series_data = [{"name": "blocked", "queries": [5, "5", float("inf")]}]
+        card = ui._build_queries_series_card({"meta": {"series": {"times": times}}, "data": series_data})
+        chart = _find_component(card, "AreaChart")
+        assert chart is not None
+        assert [row["series_0"] for row in chart.data] == [5, 0, 0]
