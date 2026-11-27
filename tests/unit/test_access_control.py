@@ -431,3 +431,16 @@ class TestExtractProfileIdFromUrlValidation:
     def test_returns_none_for_profile_id_with_underscore(self):
         result = extract_profile_id_from_url("/profiles/abc_def/settings")
         assert result is None
+
+    def test_returns_none_for_percent_encoded_trailing_newline(self):
+        # httpx decodes the path while parsing, so this segment is "abc123\n".
+        # ``$`` matched before that newline and handed the ACL an id no
+        # NEXTDNS_PROTECTED_PROFILES entry can equal (issue #747).
+        result = extract_profile_id_from_url("/profiles/abc123%0a/settings")
+        assert result is None
+
+    def test_returns_none_for_url_with_a_literal_control_character(self):
+        # An unparseable URL has no classifiable path: it must report no id
+        # rather than raising httpx.InvalidURL out of the access-control layer.
+        result = extract_profile_id_from_url("/profiles/abc123\n/settings")
+        assert result is None

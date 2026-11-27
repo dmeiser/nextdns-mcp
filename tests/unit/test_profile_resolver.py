@@ -115,6 +115,10 @@ class TestResolveProfileIdWithDefault:
             "abc-def",
             "abc.def",
             "abc/../def",
+            # ``$`` matched before a trailing newline, so an id with one validated
+            # and then built a URL httpx refused to parse (issue #747).
+            "abc123\n",
+            "abcdefghijkl\n",
         ],
     )
     def test_rejects_invalid_explicit_profile_format(self, invalid_id):

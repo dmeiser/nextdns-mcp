@@ -142,19 +142,40 @@ _PROFILE_PREFIX = re.compile(r"^/profiles/([^/]+)(?:/|$)", re.IGNORECASE)
 _PROFILE_ROOT = re.compile(r"^/profiles/", re.IGNORECASE)
 
 
+def _relative_request_path(url: str) -> str | None:
+    """Return the path of a relative, parseable request URL, or None.
+
+    None means the request cannot be classified against the profile ACL: an
+    absolute or authority-bearing URL ("https://host/...", "//host/...") targets
+    a different host, and a URL httpx cannot parse (a control character such as
+    a decoded "%0a", an invalid port, a broken percent-escape) has no path at
+    all. Both are the fail-closed shape in _authorize(); the parse error in
+    particular must not escape as an unhandled INTERNAL_ERROR (issue #747).
+
+    Note httpx percent-decodes the path while parsing, so the returned path is
+    what the ACL must judge: "/profiles/abc123%0a/settings" arrives here as
+    "/profiles/abc123\\n/settings".
+    """
+    try:
+        parsed = httpx.URL(str(url))
+    except httpx.InvalidURL:
+        return None
+    if parsed.is_absolute_url or parsed.scheme or parsed.host:
+        return None
+    return parsed.path
+
+
 def _normalized_request_path(url: str) -> str | None:
     """Return the request path with a guaranteed leading slash.
 
     Relative paths are resolved the same way httpx joins them against the API
     base URL: a path without a leading "/" is treated as rooted at the base
-    (e.g. "profiles/abc123" -> "/profiles/abc123"). Returns None for absolute
-    or authority-bearing URLs (e.g. "https://host/..." or "//host/..."), which
-    target a different host and must not be routed through the profile ACL.
+    (e.g. "profiles/abc123" -> "/profiles/abc123"). Returns None whenever
+    :func:`_relative_request_path` reports no classifiable path.
     """
-    parsed = httpx.URL(str(url))
-    if parsed.is_absolute_url or parsed.scheme or parsed.host:
+    path = _relative_request_path(url)
+    if path is None:
         return None
-    path = parsed.path
     if not path.startswith("/"):
         path = "/" + path
     return path
@@ -254,9 +275,16 @@ def _destination_host(base_url: Any, url: Any) -> str:
 
     Relative URLs resolve against the client's ``base_url``, exactly as
     httpx merges them, so a client built on a non-NextDNS base is caught
-    here too. A relative URL on a client with no base URL yields "".
+    here too. A relative URL on a client with no base URL yields "", and so
+    does a URL httpx cannot parse: there is no destination to allow, and the
+    access-controlled client still denies the unclassifiable request (issue
+    #747). The ACL-free probe client hands such a URL to httpx, which rejects
+    it before any I/O.
     """
-    parsed = httpx.URL(str(url))
+    try:
+        parsed = httpx.URL(str(url))
+    except httpx.InvalidURL:
+        return ""
     if parsed.is_absolute_url or parsed.scheme or parsed.host:
         return _normalized_host(parsed.host)
     return _normalized_host(httpx.URL(str(base_url)).host)
