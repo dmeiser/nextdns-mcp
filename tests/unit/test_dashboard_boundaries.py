@@ -37,7 +37,7 @@ SHARED_PRIMITIVES = (
     (charts, "downsample_chart_series"),
     (charts, "resolve_time_point"),
     (charts, "series_budget_error"),
-    (charts, "validate_series_payload"),
+    (charts, "extract_series_fields"),
     (chart_ui, "build_chart_series"),
     (chart_ui, "build_timeseries_area_chart"),
 )

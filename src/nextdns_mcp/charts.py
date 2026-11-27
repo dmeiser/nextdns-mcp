@@ -371,7 +371,7 @@ def series_budget_error(
     return _budget_exceeded_error(start, end, span, interval)
 
 
-def validate_series_payload(payload: dict[str, Any]) -> tuple[list[Any], list[Any]]:
+def extract_series_fields(payload: dict[str, Any]) -> tuple[list[Any], list[Any]]:
     """Extract the time axis and data rows from a time-series payload.
 
     Nulls are normalized with ``or`` rather than ``dict.get(key, default)``:

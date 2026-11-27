@@ -145,7 +145,7 @@ async def close_doh_client() -> None:
     await current_doh_client_owner().aclose()
 
 
-def _validate_record_type(record_type: str) -> tuple[bool, str]:
+def _normalize_and_validate_record_type(record_type: str) -> tuple[bool, str]:
     """Validate DNS record type.
 
     Returns:
@@ -251,7 +251,7 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
     if not access.can_read(target_profile):
         return _read_denied(target_profile)
 
-    is_valid, record_type_upper = _validate_record_type(record_type)
+    is_valid, record_type_upper = _normalize_and_validate_record_type(record_type)
     if not is_valid:
         logger.warning(f"Invalid DNS record type requested: {record_type}")
         return error_payload(
