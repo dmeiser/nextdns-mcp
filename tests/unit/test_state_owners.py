@@ -15,14 +15,19 @@ standalone caller). These tests pin the contract:
 import os
 
 import pytest
+from fastmcp import Client, FastMCP
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import server as server_module
 from nextdns_mcp import state as state_module
+from nextdns_mcp.client import current_api_client_owner
 from nextdns_mcp.errors import StateOwnershipError
 from nextdns_mcp.lifespan import ServerResources, server_resources
+from nextdns_mcp.openapi import create_mcp_server
 from nextdns_mcp.tools import doh as doh_module
 from nextdns_mcp.tools import logs as logs_module
+from nextdns_mcp.tools.doh import current_doh_client_owner
+from nextdns_mcp.tools.logs import current_download_registry
 
 
 class TestRequestResourcesResolution:
@@ -58,6 +63,46 @@ class TestRequestResourcesResolution:
         finally:
             fastmcp_request_ctx.reset(bound)
 
+    def test_the_active_context_takes_precedence_over_the_request_channel(self, monkeypatch):
+        """A mounted child's active Context wins over the parent's request lifespan."""
+        from fastmcp.server.dependencies import fastmcp_request_ctx
+
+        own, parent = ServerResources(), ServerResources()
+
+        class _Holder:
+            def __init__(self, lifespan_context):
+                self.lifespan_context = lifespan_context
+
+        context = _Holder({state_module.RESOURCES_LIFESPAN_KEY: own})
+        request = _Holder({state_module.RESOURCES_LIFESPAN_KEY: parent})
+
+        monkeypatch.setattr(state_module, "get_context", lambda: context)
+        token = fastmcp_request_ctx.set(request)  # type: ignore[arg-type]
+        try:
+            assert state_module.request_resources() is own
+        finally:
+            fastmcp_request_ctx.reset(token)
+
+    def test_an_active_context_without_resources_falls_back_to_the_request_channel(self, monkeypatch):
+        """A Context from another server must not hide a bound owner's resources."""
+        from fastmcp.server.dependencies import fastmcp_request_ctx
+
+        resources = ServerResources()
+
+        class _Holder:
+            def __init__(self, lifespan_context):
+                self.lifespan_context = lifespan_context
+
+        context = _Holder({})
+        request = _Holder({state_module.RESOURCES_LIFESPAN_KEY: resources})
+
+        monkeypatch.setattr(state_module, "get_context", lambda: context)
+        token = fastmcp_request_ctx.set(request)  # type: ignore[arg-type]
+        try:
+            assert state_module.request_resources() is resources
+        finally:
+            fastmcp_request_ctx.reset(token)
+
     def test_the_registry_resolver_uses_the_request_channel(self):
         """A served request registers downloads with its own server's registry."""
         resources = ServerResources()
@@ -79,6 +124,47 @@ class TestRequestResourcesResolution:
 
         with pytest.raises(RuntimeError):
             server_resources(_Bare())  # type: ignore[arg-type]
+
+
+class TestMountedServerResourceResolution:
+    """A mounted NextDNS child resolves its own state, not the parent's (issue #752)."""
+
+    @staticmethod
+    def _server_with_probe() -> FastMCP:
+        child = create_mcp_server()
+        expected = server_resources(child)
+
+        @child.tool(name="state_owner_probe")
+        def probe() -> dict[str, bool]:
+            return {
+                "api": current_api_client_owner() is expected.api_client,
+                "doh": current_doh_client_owner() is expected.doh_client,
+                "downloads": current_download_registry() is expected.downloads,
+            }
+
+        return child
+
+    async def test_a_mounted_child_resolves_all_three_owners(self, mock_api_key, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        parent = FastMCP("parent")
+        parent.mount(self._server_with_probe())
+
+        async with Client(parent) as client:
+            await client.list_tools()
+            result = await client.call_tool("state_owner_probe", {}, raise_on_error=False)
+
+        assert not result.is_error, result.data
+        assert result.data == {"api": True, "doh": True, "downloads": True}
+
+    async def test_a_standalone_server_still_resolves_all_three_owners(self, mock_api_key, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        async with Client(self._server_with_probe()) as client:
+            await client.list_tools()
+            result = await client.call_tool("state_owner_probe", {}, raise_on_error=False)
+
+        assert not result.is_error, result.data
+        assert result.data == {"api": True, "doh": True, "downloads": True}
 
 
 class TestNoProcessGlobalFallback:
