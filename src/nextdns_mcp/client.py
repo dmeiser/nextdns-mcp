@@ -824,61 +824,43 @@ def api_client_owned(owner: ApiClientOwner) -> Iterator[ApiClientOwner]:
         api_client_owner.reset(token)
 
 
-_raw_probe_client: RawProbeTransport | None = None
+class ProbeClientOwner:
+    """Owns one ACL-free probe transport for one explicit lifetime.
 
-
-def get_raw_probe_client() -> RawProbeTransport:
-    """Return the shared ACL-free probe transport, creating it on first use.
-
-    The /health readiness check uses this instead of :func:`get_api_client` so
-    the class that enforces the profile ACL exposes no bypass at all, while the
-    probe still observes the true upstream state.
+    Explicit owner for the transport state that used to live in the
+    module-global ``_raw_probe_client`` singleton (mirrors
+    :class:`ApiClientOwner`): a server lifespan owns one owner per server on
+    its ``ServerResources`` and hands it to the ``/health`` route it
+    registers, so two servers embedded in one process never share a probe
+    transport and one server's shutdown cannot close a live sibling's. The
+    transport is created lazily on first use and reused until
+    :meth:`aclose`.
     """
-    global _raw_probe_client
-    if _raw_probe_client is None:
-        _raw_probe_client = create_raw_probe_client()
-    return _raw_probe_client
 
+    def __init__(self) -> None:
+        self._client: RawProbeTransport | None = None
 
-async def close_raw_probe_client() -> None:
-    """Close the shared probe transport if one exists and reset the singleton."""
-    global _raw_probe_client
-    if _raw_probe_client is not None:
-        transport = _raw_probe_client
-        _raw_probe_client = None
-        await transport.aclose()
+    def get(self) -> RawProbeTransport:
+        """Return this owner's ACL-free probe transport, creating it on first use.
 
+        The /health readiness check uses this instead of the API client owner
+        so the class that enforces the profile ACL exposes no bypass at all,
+        while the probe still observes the true upstream state.
+        """
+        if self._client is None:
+            self._client = create_raw_probe_client()
+        return self._client
 
-# Test-support seam for the one process-global state left after issue #642 moved
-# the API client, DoH client, readiness cache and server instance onto explicit
-# owners (issue #660). Tests read and reset this global to exercise lazy creation
-# and shutdown; doing it through these two functions instead of naming
-# ``_raw_probe_client`` keeps the suite off the private attribute name, so the
-# name can change without editing tests. Production code never calls them: it
-# goes through get_raw_probe_client / close_raw_probe_client above.
-def _get_raw_probe_client_singleton_for_tests() -> RawProbeTransport | None:
-    """Return the shared probe transport without creating one (test support only).
+    async def aclose(self) -> None:
+        """Close this owner's probe transport if one exists and reset it.
 
-    Unlike :func:`get_raw_probe_client` this reads the slot as it is: no
-    transport is built and no configuration is read, so a test can capture the
-    value it is about to replace, or assert a shutdown cleared it, without the
-    read itself creating the thing it is checking for.
-    """
-    return _raw_probe_client
-
-
-def _set_raw_probe_client_singleton_for_tests(transport: RawProbeTransport | None) -> None:
-    """Install ``transport`` in the shared probe slot, or clear it (test support only).
-
-    Passing ``None`` is how a test asks for lazy creation; passing a double is how
-    it injects one. What the setter replaces is discarded, not closed: a double
-    owns no real connection, and a test that wants the real transport closed calls
-    :func:`close_raw_probe_client`. A plain call has no teardown the way
-    ``monkeypatch.setattr`` does, so conftest's ``restore_lazy_singletons`` fixture
-    writes back the value each test started with.
-    """
-    global _raw_probe_client
-    _raw_probe_client = transport
+        The next :meth:`get` constructs a fresh transport, picking up any
+        updated configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+        """
+        if self._client is not None:
+            client = self._client
+            self._client = None
+            await client.aclose()
 
 
 def get_api_client() -> AccessControlledClient:

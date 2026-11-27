@@ -392,12 +392,99 @@ class TestUnauthenticatedFollowUp:
         assert client.closed is False, "a completed download must not close the shared client"
         await logs_module.close_redirect_client()
         assert client.closed is True
-        assert redirects._redirect_client is None, "closing must reset the singleton"
+        owner = redirects.current_redirect_client_owner()
+        assert owner._client is None, "closing must reset the owner's client"
 
     async def test_close_before_any_download_is_a_noop(self):
         """The shutdown close is safe when no download ever created the client."""
         await logs_module.close_redirect_client()
-        assert redirects._redirect_client is None
+        assert redirects.current_redirect_client_owner()._client is None
+
+    async def test_close_waits_for_an_active_fetch(self):
+        """The shutdown close runs under the fetch lock (issue #774): it must wait
+        for a chain holding the lock rather than close the client mid-fetch."""
+        async with logs_module._PIN_FETCH_LOCK:  # stands in for an in-flight chain
+            close_task = asyncio.create_task(logs_module.close_redirect_client())
+            await asyncio.sleep(0.05)
+            assert not close_task.done(), "close completed while a fetch held the lock"
+        await asyncio.wait_for(close_task, timeout=5)
+
+    async def test_two_owners_never_share_a_redirect_client(self):
+        """Per-server ownership: one server's redirect client is not its sibling's."""
+        first = redirects.RedirectClientOwner()
+        second = redirects.RedirectClientOwner()
+        try:
+            assert first.get() is not second.get()
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+    def test_the_fetch_lock_contends_in_two_event_loops(self):
+        """The pinned-resolver lock is process-global, so it must contend cleanly
+        from more than one event loop (issue #774): an import-time asyncio.Lock
+        binds to the first loop and raises ``bound to a different event loop``
+        the moment a second loop contends it."""
+
+        async def contend() -> None:
+            async def hold() -> None:
+                async with logs_module._PIN_FETCH_LOCK:
+                    await asyncio.sleep(0.02)
+
+            await asyncio.gather(hold(), hold())
+
+        asyncio.run(contend())
+        asyncio.run(contend())  # a loop-bound lock raises RuntimeError here
+
+    async def test_a_cancelled_waiter_never_leaks_the_lock(self):
+        """A waiter cancelled while queued (the download's overall timeout can
+        fire while a chain waits behind another) must not leave the
+        process-global lock held forever: the orphaned acquire's release is
+        tied to its completion."""
+        async with logs_module._PIN_FETCH_LOCK:
+            waiter = asyncio.create_task(logs_module._PIN_FETCH_LOCK.__aenter__())
+            await asyncio.sleep(0.05)  # the waiter is blocked in its worker thread
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        # The orphaned acquire completes once the holder releases, and its
+        # done-callback releases it again: a fresh acquire must not hang.
+        async with asyncio.timeout(5):
+            async with logs_module._PIN_FETCH_LOCK:
+                pass
+
+    async def test_release_if_acquired_ignores_an_acquire_that_never_ran(self):
+        """A waiter cancelled before its worker thread started never acquired
+        the lock; the completion callback must not release another's hold."""
+        lock = guard._CrossLoopLock()
+        task = asyncio.create_task(asyncio.sleep(0))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        lock._release_if_acquired(task)  # without the guard this releases an unheld lock
+        async with lock:
+            pass
+
+    def test_the_fetch_lock_excludes_a_second_loop(self):
+        """Serialization is process-wide, not per loop: two loops in two threads
+        must never hold the pinned-resolver section at the same time."""
+        events: list[str] = []
+
+        def run_loop(tag: str) -> None:
+            async def work() -> None:
+                async with logs_module._PIN_FETCH_LOCK:
+                    events.append(f"{tag}-in")
+                    await asyncio.sleep(0.05)
+                    events.append(f"{tag}-out")
+
+            asyncio.run(work())
+
+        threads = [threading.Thread(target=run_loop, args=(tag,)) for tag in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(events) == 4
+        assert events[0][:-3] == events[1][:-4], f"the two loops interleaved inside the section: {events}"
 
     async def test_a_cookie_from_one_download_does_not_reach_the_next(self, tmp_path, unauthenticated):
         """The persistent client shares one cookie jar, so each chain must start from

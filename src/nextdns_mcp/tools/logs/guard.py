@@ -33,8 +33,9 @@ import asyncio
 import contextlib
 import ipaddress
 import socket
+import threading
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Self
 
 import httpx
 
@@ -103,7 +104,48 @@ async def _resolve_public_addresses(host: str) -> list[Any] | None:
 # serializing is the honest trade, and downloadLogs is a rare call (issue
 # #266 review). httpx ties body streaming to the open stream context, so the
 # body is inside the section rather than re-resolving outside it.
-_PIN_FETCH_LOCK = asyncio.Lock()
+#
+# The lock is process-global because the pin it guards is, so it must be
+# usable from every event loop that reaches it: an ``asyncio.Lock`` created
+# at import time binds to the first loop that contends it and raises
+# ``RuntimeError: ... is bound to a different event loop`` when a second
+# loop (another embedded server, another thread) contends it later.
+class _CrossLoopLock:
+    """An async lock with no event-loop affinity, safe from any loop or thread.
+
+    The critical section it guards (the pinned resolver) is process-global,
+    so the lock is built on ``threading.Lock`` - the one lock primitive whose
+    scope matches. Acquiring blocks, so the wait is offloaded to a worker
+    thread: the event loop stays responsive while another loop's fetch holds
+    the section, and two tasks on one loop cannot deadlock each other the
+    way a bare ``threading.Lock.acquire()`` on the loop would.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    async def __aenter__(self) -> Self:
+        acquiring = asyncio.ensure_future(asyncio.to_thread(self._lock.acquire))
+        try:
+            await asyncio.shield(acquiring)
+        except BaseException:
+            # Cancelled (or timed out) while waiting: the worker thread still
+            # completes the acquire, so tie the release to its completion
+            # rather than leak the lock. A task cancelled before its thread
+            # started never acquires, and has nothing to release.
+            acquiring.add_done_callback(self._release_if_acquired)
+            raise
+        return self
+
+    def _release_if_acquired(self, acquiring: "asyncio.Task[bool]") -> None:
+        if not acquiring.cancelled():
+            self._lock.release()
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self._lock.release()
+
+
+_PIN_FETCH_LOCK = _CrossLoopLock()
 
 
 @contextlib.contextmanager

@@ -118,6 +118,23 @@ class TestRequestResourcesResolution:
         finally:
             fastmcp_request_ctx.reset(bound)
 
+    def test_the_redirect_client_resolver_uses_the_request_channel(self):
+        """A served request downloads through its own server's redirect client."""
+        resources = ServerResources()
+        from fastmcp.server.dependencies import fastmcp_request_ctx
+
+        class _BoundRequest:
+            def __init__(self, lifespan_context):
+                self.lifespan_context = lifespan_context
+
+        token = logs_module._redirect_client_owner.set(None)
+        bound = fastmcp_request_ctx.set(_BoundRequest({state_module.RESOURCES_LIFESPAN_KEY: resources}))  # type: ignore[arg-type]
+        try:
+            assert logs_module.current_redirect_client_owner() is resources.redirect_client
+        finally:
+            fastmcp_request_ctx.reset(bound)
+            logs_module._redirect_client_owner.reset(token)
+
     def test_server_resources_rejects_an_instance_without_them(self):
         class _Bare:
             pass
@@ -202,6 +219,14 @@ class TestNoProcessGlobalFallback:
         finally:
             logs_module._download_registry.reset(token)
 
+    def test_redirect_client_accessor(self):
+        token = logs_module._redirect_client_owner.set(None)
+        try:
+            with pytest.raises(StateOwnershipError):
+                logs_module.current_redirect_client_owner()
+        finally:
+            logs_module._redirect_client_owner.reset(token)
+
 
 class TestDownloadRegistryOwnership:
     """Two registries in one process keep their own state."""
@@ -246,6 +271,27 @@ class TestDownloadRegistryOwnership:
         registry.cleanup()
         registry.cleanup()
         assert len(registry) == 0
+
+
+class TestRedirectClientOwnership:
+    """Two redirect owners in one process keep their own clients (issue #774)."""
+
+    def test_a_published_owner_serves_the_current_context(self):
+        owner = logs_module.RedirectClientOwner()
+        with logs_module.redirect_client_owned(owner):
+            assert logs_module.current_redirect_client_owner() is owner
+        assert logs_module.current_redirect_client_owner() is not owner
+
+    async def test_one_owners_shutdown_leaves_the_others_client_open(self):
+        owners = [logs_module.RedirectClientOwner(), logs_module.RedirectClientOwner()]
+        first, second = (owner.get() for owner in owners)
+        assert first is not second
+
+        await owners[0].aclose()
+
+        assert first.is_closed
+        assert not second.is_closed, "one owner's shutdown closed another owner's client"
+        await owners[1].aclose()
 
 
 class TestDohClientOwnership:

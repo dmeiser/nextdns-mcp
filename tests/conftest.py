@@ -67,41 +67,23 @@ def restore_nextdns_modules() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def reset_logs_redirect_client() -> Iterator[None]:
-    """Give every test a clean logs redirect-client singleton (issue #656).
+def own_redirect_client() -> Iterator[None]:
+    """Publish a per-test redirect-client owner (issue #656's client, now per-server).
 
-    The downloadLogs redirect chain reuses one persistent module-level client.
-    Tests patch ``httpx.AsyncClient`` with per-test fakes, so a client created
-    in one test must not leak into the next (or into a later real-client test).
-    The singleton global lives on the owning submodule - rebinding it on the
-    ``logs`` package would not reach ``redirects``' global (see the package
-    docstring) - so the reset goes through ``logs.redirects``.
+    The downloadLogs redirect chain resolves its persistent client through the
+    current ``RedirectClientOwner`` - a server lifespan publishes the owner its
+    ``ServerResources`` holds, and served requests resolve it from the request's
+    lifespan context (issue #774). Tests run outside any lifespan, so one owner
+    is published here for every test: a client created in one test can never
+    leak into the next (or into a later real-client test), exactly what the old
+    module-global reset guaranteed. Tests that exercise ownership itself
+    publish their own owner with ``redirect_client_owned`` inside the test.
     """
     from nextdns_mcp.tools.logs import redirects as logs_redirects
 
-    logs_redirects._redirect_client = None
+    token = logs_redirects._redirect_client_owner.set(logs_redirects.RedirectClientOwner())
     yield
-    logs_redirects._redirect_client = None
-
-
-@pytest.fixture(autouse=True)
-def restore_lazy_singletons() -> Iterator[None]:
-    """Write back the module-global lazy singleton a test touched through its seam.
-
-    Tests set and reset ``client._raw_probe_client`` (the one process-global
-    state left after #730 moved the other singletons onto explicit owners)
-    through ``nextdns_mcp.client``'s ``*_raw_probe_client_singleton_for_tests``
-    seam. Unlike ``monkeypatch.setattr`` on the private name, a plain function
-    call has no automatic teardown, so the value each test started with is
-    captured here and written back on teardown: a test that cleared the
-    singleton to exercise lazy creation cannot leave the cleared state — or a
-    live transport built with its configuration — for whichever test runs next.
-    """
-    from nextdns_mcp import client as client_module
-
-    original = client_module._get_raw_probe_client_singleton_for_tests()
-    yield
-    client_module._set_raw_probe_client_singleton_for_tests(original)
+    logs_redirects._redirect_client_owner.reset(token)
 
 
 @pytest.fixture

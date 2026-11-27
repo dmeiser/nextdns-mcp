@@ -28,8 +28,9 @@ outside the repo resolve them on this package (``spec_tools`` resolves the
 downloader here at call time on purpose, and ``openapi`` shares the registry
 context var). Monkeypatching a rebinding here would not reach the owning
 module's global; patch the owning submodule instead. The redirect client's
-singleton global lives on ``redirects`` for the same reason: only the
-functions are re-exported here, never the mutable ``_redirect_client``.
+owner global lives on ``redirects`` for the same reason: only the functions
+and the owner names are re-exported here, never a mutable client singleton -
+the client itself is per-server state on ``ServerResources`` (issue #774).
 """
 
 import contextvars
@@ -50,9 +51,13 @@ from .guard import (
 from .preview import DOWNLOAD_PREVIEW_MAX_BYTES, DOWNLOAD_PREVIEW_MAX_LINES
 from .redirects import (
     _MAX_DOWNLOAD_REDIRECTS,
+    RedirectClientOwner,
     _follow_redirects_to_tempfile,
     _get_redirect_client,
+    _redirect_client_owner,
     close_redirect_client,
+    current_redirect_client_owner,
+    redirect_client_owned,
 )
 from .retention import (
     MAX_RETAINED_DOWNLOADS,
@@ -82,6 +87,7 @@ __all__ = [
     "DownloadRegistry",
     "DownloadTooLargeError",
     "MissingDownloadRegistryError",
+    "RedirectClientOwner",
     "_check_download_redirect_target",
     "_download_error_details",
     "_download_logs_to_tempfile",
@@ -92,6 +98,7 @@ __all__ = [
     "_note_successful_download",
     "_pinned_dns",
     "_raise_for_streamed_status",
+    "_redirect_client_owner",
     "_remove_downloaded_file",
     "_unlink_temp_file",
     "_write_stream_to_tempfile",
@@ -99,10 +106,12 @@ __all__ = [
     "close_redirect_client",
     "contextvars",
     "current_download_registry",
+    "current_redirect_client_owner",
     "download_registry",
     "downloads_owned",
     "httpx",
     "os",
     "read_body_capped",
+    "redirect_client_owned",
     "tempfile",
 ]
