@@ -16,11 +16,13 @@ from scripts.run_container_e2e import (
     EXPECTED_TOOLS,
     PREFAB_UI_TOOL,
     PREFAB_VIEW_CODE,
+    SEARCH_COMPONENTS_TOOL,
     SPEC_PATH,
     WRITE_CASES,
     ContainerE2ERunner,
     _generative_ui_failure,
     _missing_generative_ui_tools,
+    _search_components_failure,
     check_health_endpoint,
     parse_args,
 )
@@ -1588,6 +1590,31 @@ def _prefab_result(payload: dict | None = None, *, is_error: bool = False, text:
     )
 
 
+def _search_result(payload: object = ..., *, is_error: bool = False) -> SimpleNamespace:
+    """A search_prefab_components answer: FastMCP's wrapped {"result": <markdown>} payload.
+
+    ``payload=None`` models a server that answered only with the bare text block
+    and no structured content, which the pin can no longer validate.
+    """
+    structured = {"result": "# Card"} if payload is ... else payload
+    return SimpleNamespace(
+        is_error=is_error,
+        structured_content=structured,
+        content=[TextContent(type="text", text="# Card")],
+    )
+
+
+def test_search_components_failure_accepts_a_wrapped_payload():
+    """The enabled-container check judges the wrapped payload, not the text block."""
+    assert _search_components_failure(_search_result()) == ""
+
+
+def test_search_components_failure_rejects_an_error_result_and_a_missing_payload():
+    """An error flag or a bare-text-only answer is a failure, not an unvalidated pass."""
+    assert "error result" in _search_components_failure(_search_result(is_error=True))
+    assert "no structured payload" in _search_components_failure(_search_result(payload=None))
+
+
 def test_generative_ui_failure_accepts_a_prefab_document():
     """A $prefab payload with no error flag is an executed UI document."""
     assert _generative_ui_failure(_prefab_result(), json.dumps({"$prefab": {"type": "view"}})) == ""
@@ -1626,14 +1653,14 @@ def _ui_runner(tmp_path: Path) -> ContainerE2ERunner:
 
 
 async def test_generative_ui_only_calls_the_tool_in_the_container(tmp_path):
-    """--generative-ui-only lists the catalog, calls generate_prefab_ui, and passes on $prefab."""
+    """--generative-ui-only lists the catalog, calls both generative-UI tools, and passes."""
     runner = _ui_runner(tmp_path)
     session = AsyncMock()
     session.list_tools.return_value = MagicMock(
-        tools=[SimpleNamespace(name=t) for t in ("listProfiles", PREFAB_UI_TOOL, "search_prefab_components")]
+        tools=[SimpleNamespace(name=t) for t in ("listProfiles", PREFAB_UI_TOOL, SEARCH_COMPONENTS_TOOL)]
     )
     text = json.dumps({"$prefab": {"type": "view"}})
-    session.call_tool.return_value = _prefab_result(text=text)
+    session.call_tool.side_effect = [_prefab_result(text=text), _search_result()]
 
     with (
         patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=True)),
@@ -1645,9 +1672,12 @@ async def test_generative_ui_only_calls_the_tool_in_the_container(tmp_path):
         exit_code = await runner.run()
 
     assert exit_code == 0
-    assert session.call_tool.await_args.args == (PREFAB_UI_TOOL,)
-    assert session.call_tool.await_args.kwargs["arguments"]["code"] == PREFAB_VIEW_CODE
-    assert runner.executed_count == 1 and runner.failed_count == 0
+    generate_call, search_call = session.call_tool.await_args_list
+    assert generate_call.args == (PREFAB_UI_TOOL,)
+    assert generate_call.kwargs["arguments"]["code"] == PREFAB_VIEW_CODE
+    assert search_call.args == (SEARCH_COMPONENTS_TOOL,)
+    assert search_call.kwargs["arguments"] == {"query": "Card", "detail": False}
+    assert runner.executed_count == 2 and runner.failed_count == 0
 
 
 async def test_generative_ui_only_fails_when_the_tool_is_not_served(tmp_path):
@@ -1678,7 +1708,7 @@ async def test_generative_ui_only_fails_when_the_sandbox_has_no_deno(tmp_path):
         tools=[SimpleNamespace(name=t) for t in (PREFAB_UI_TOOL, "search_prefab_components")]
     )
     text = '{"error": "RuntimeError: Deno is required for the Prefab sandbox"}'
-    session.call_tool.return_value = _prefab_result(payload={}, text=text)
+    session.call_tool.side_effect = [_prefab_result(payload={}, text=text), _search_result()]
 
     with (
         patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=True)),
@@ -1691,6 +1721,52 @@ async def test_generative_ui_only_fails_when_the_sandbox_has_no_deno(tmp_path):
 
     assert exit_code == 1
     assert runner.failed_count == 1
+
+
+async def test_generative_ui_only_fails_when_search_payload_is_missing(tmp_path):
+    """A wrapped-tool answer with no structured content is a failed enabled-container check."""
+    runner = _ui_runner(tmp_path)
+    session = AsyncMock()
+    session.list_tools.return_value = SimpleNamespace(
+        tools=[SimpleNamespace(name=t) for t in (PREFAB_UI_TOOL, SEARCH_COMPONENTS_TOOL)]
+    )
+    text = json.dumps({"$prefab": {"type": "view"}})
+    session.call_tool.side_effect = [_prefab_result(text=text), _search_result(payload=None)]
+
+    with (
+        patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=True)),
+        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, '503 {"status": "error"}')),
+        patch.object(runner, "_open_session") as open_session,
+    ):
+        open_session.return_value.__aenter__ = AsyncMock(return_value=session)
+        open_session.return_value.__aexit__ = AsyncMock(return_value=False)
+        exit_code = await runner.run()
+
+    assert exit_code == 1
+    assert runner.failed_count == 1 and runner.schema_errors == 0
+
+
+async def test_generative_ui_only_fails_when_search_payload_is_schema_invalid(tmp_path):
+    """A structured answer the pin rejects fails the run, even with no error flag."""
+    runner = _ui_runner(tmp_path)
+    session = AsyncMock()
+    session.list_tools.return_value = SimpleNamespace(
+        tools=[SimpleNamespace(name=t) for t in (PREFAB_UI_TOOL, SEARCH_COMPONENTS_TOOL)]
+    )
+    text = json.dumps({"$prefab": {"type": "view"}})
+    session.call_tool.side_effect = [_prefab_result(text=text), _search_result(payload={"result": 7})]
+
+    with (
+        patch.object(runner, "check_endpoint_readiness", AsyncMock(return_value=True)),
+        patch("scripts.run_container_e2e.check_health_endpoint", return_value=(True, '503 {"status": "error"}')),
+        patch.object(runner, "_open_session") as open_session,
+    ):
+        open_session.return_value.__aenter__ = AsyncMock(return_value=session)
+        open_session.return_value.__aexit__ = AsyncMock(return_value=False)
+        exit_code = await runner.run()
+
+    assert exit_code == 1
+    assert runner.failed_count == 1 and runner.schema_errors == 1
 
 
 async def test_generative_ui_only_needs_no_endpoint_and_no_credential(tmp_path):

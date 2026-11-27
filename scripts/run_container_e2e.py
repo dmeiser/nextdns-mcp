@@ -380,6 +380,13 @@ GENERATIVE_UI_TOOLS = generative_ui_tool_names()
 # The generating tool: the one exercised end to end below. It is the server's
 # only content tool, so the server is the source of this name too.
 PREFAB_UI_TOOL = GENERATIVE_UI_CONTENT_TOOLS[0]
+# The data tool: the other half of the enabled-container pair. FastMCP wraps its
+# markdown answer as {"result": <markdown>} (x-fastmcp-wrap-result), so the check
+# below reads the structured payload itself — the text block alone is the bare
+# markdown the wrap adds a result key to — and validates it against the pin in
+# validate_schema. The server is the source of this name too.
+SEARCH_COMPONENTS_TOOL = GENERATIVE_UI_DATA_TOOLS[0]
+SEARCH_COMPONENTS_QUERY = "Card"
 
 # What the sandbox prints when the image has no runnable Deno (upstream
 # RuntimeError from Prefab's sandbox bootstrap). Its presence in any answer means
@@ -440,6 +447,34 @@ def _view_rule_failure(tool_name: str, is_error: bool, result: Any, has_image: b
 def _missing_generative_ui_tools(served: set[str]) -> list[str]:
     """Generative-UI tools absent from a container started with NEXTDNS_GENERATIVE_UI=on."""
     return sorted(set(GENERATIVE_UI_TOOLS) - served)
+
+
+def _structured_payload(result: Any) -> Any:
+    """The structured content a tool result carries, under either SDK attribute name.
+
+    The MCP SDK renamed ``structuredContent`` to ``structured_content``, and a
+    container can be built on either side of that rename, so both are read here —
+    the same dual read ``_prefab_candidates`` makes.
+    """
+    payload = getattr(result, "structured_content", None)
+    if payload is not None:
+        return payload
+    return getattr(result, "structuredContent", None)
+
+
+def _search_components_failure(result: Any) -> str:
+    """Why a search_prefab_components answer fell short; '' when a structured payload arrived.
+
+    The tool is judged on the payload the schema pin describes: FastMCP wraps its
+    markdown answer as ``{"result": <markdown>}`` (``x-fastmcp-wrap-result``), so an
+    error result or a missing structured payload is a container regression. Whether
+    the payload matches the pin is the runner's ``_validate_against_schema``.
+    """
+    if getattr(result, "is_error", False):
+        return f"{SEARCH_COMPONENTS_TOOL} returned an error result"
+    if _structured_payload(result) is None:
+        return f"{SEARCH_COMPONENTS_TOOL} returned no structured payload"
+    return ""
 
 
 def _input_schema(tool: Any) -> dict[str, Any]:
@@ -1316,18 +1351,54 @@ class ContainerE2ERunner:
         return True
 
     async def _run_generative_ui_check(self, session: ClientSession) -> None:
-        """Call ``generate_prefab_ui`` in the built image and assert a $prefab document.
+        """Call the generative-UI pair in the built image and assert each half.
 
         Issue #400's enabled-container test: every other check only proved the
         server starts, so an image whose Deno runtime is missing, unpinned, off
         PATH, or built for the wrong libc published a tool that can never
-        succeed. This runs the tool itself, in the container, on this matrix
-        variant.
+        succeed. This runs both tools, in the container, on this matrix
+        variant: ``generate_prefab_ui`` must render a $prefab document, and
+        ``search_prefab_components`` must answer with a structured payload the
+        schema pin in validate_schema accepts.
         """
         log_info(f"Calling {PREFAB_UI_TOOL} end to end in the {self.variant} container...")
         ok, _result = await self.execute_call(session, PREFAB_UI_TOOL, {"code": PREFAB_VIEW_CODE})
         if ok:
             log_success(f"{PREFAB_UI_TOOL} rendered a Prefab UI document inside the {self.variant} container")
+        await self._run_search_components_check(session)
+
+    async def _run_search_components_check(self, session: ClientSession) -> None:
+        """Call ``search_prefab_components`` in the built image and validate its structured payload.
+
+        The tool needs no NextDNS credential — component search is local — so
+        the credential-free container can exercise it. The payload is read from
+        the result's structured content, not the text block, and a missing
+        payload or an INVALID verdict against the pin fails the run, not just
+        the tool.
+        """
+        args_str = f"query={SEARCH_COMPONENTS_QUERY} detail=False"
+        log_info(f"Calling {SEARCH_COMPONENTS_TOOL} end to end in the {self.variant} container...")
+        result = await session.call_tool(
+            SEARCH_COMPONENTS_TOOL, arguments={"query": SEARCH_COMPONENTS_QUERY, "detail": False}
+        )
+        failure = _search_components_failure(result)
+        schema_status = "SKIPPED"
+        if not failure:
+            schema_status, schema_error = self._validate_against_schema(
+                SEARCH_COMPONENTS_TOOL, _structured_payload(result)
+            )
+            if schema_status == "INVALID":
+                failure = f"{SEARCH_COMPONENTS_TOOL} structured payload failed schema validation: {schema_error}"
+        if failure:
+            log_error(f"{SEARCH_COMPONENTS_TOOL}: FAILED ({failure})")
+            self.record_result(SEARCH_COMPONENTS_TOOL, "FAILED", args=args_str, error_msg=failure)
+            self.failed_count += 1
+            return
+        log_success(
+            f"{SEARCH_COMPONENTS_TOOL} returned a schema-valid structured payload inside the {self.variant} container"
+        )
+        self.record_result(SEARCH_COMPONENTS_TOOL, "OK", schema_status=schema_status, args=args_str)
+        self.executed_count += 1
 
     async def _run_generative_ui_only(self) -> int:
         """Run the credential-free generative-UI check; returns the process exit code.
@@ -1534,7 +1605,7 @@ def parse_args() -> argparse.Namespace:
         "--generative-ui-only",
         action="store_true",
         default=os.environ.get("GENERATIVE_UI_ONLY", "false").lower() == "true",
-        help="Run only the enabled-container generative-UI check: tools/list plus a real generate_prefab_ui call (default: false)",
+        help="Run only the enabled-container generative-UI check: tools/list plus a real call to each generative-UI tool (default: false)",
     )
     return parser.parse_args()
 
