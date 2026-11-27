@@ -44,17 +44,18 @@ server_config: ContextVar[ServerConfig | None] = ContextVar("nextdns_server_conf
 def current_server_config() -> ServerConfig | None:
     """The config of the server serving this call, or ``None`` outside a server.
 
-    Resolution order: the context published by a server lifespan, then the
-    resources of the FastMCP server serving the current request. Standalone
-    callers get ``None`` and keep using the process-environment getters.
+    Resolution order: the resources of the FastMCP server serving the current
+    request, then the context published by a server lifespan for same-task
+    callers. A served request must win when both are present: a host can enter
+    two server lifespans in one task, and the ambient context then names the
+    last-entered server rather than the one actually serving the call.
+    Standalone callers get ``None`` and keep using the process-environment
+    getters.
     """
-    config = server_config.get()
-    if config is not None:
-        return config
     resources = request_resources()
     if resources is not None:
         return resources.config
-    return None
+    return server_config.get()
 
 
 def _resources_in(lifespan_context: Any) -> Any | None:

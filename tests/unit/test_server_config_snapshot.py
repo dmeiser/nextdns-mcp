@@ -219,23 +219,75 @@ def test_build_mcp_server_accepts_a_prepared_snapshot(monkeypatch) -> None:
     assert server_resources(mcp).config is snapshot
 
 
-def test_current_server_config_resolves_from_fastmcp_request_context(monkeypatch) -> None:
-    snapshot = ServerConfig.from_env()
-    resources = ServerResources(config=snapshot)
+def test_served_request_config_beats_the_ambient_lifespan_config(monkeypatch) -> None:
+    served = ServerConfig.from_env()
+    ambient = ServerConfig.from_env()
+    resources = ServerResources(config=served)
 
     class RequestCtx:
         lifespan_context: ClassVar[dict[str, Any]] = {state.RESOURCES_LIFESPAN_KEY: resources}
 
-    token = state.server_config.set(None)
+    token = state.server_config.set(ambient)
     monkeypatch.setattr(state, "fastmcp_request_ctx", SimpleNamespace(get=lambda: RequestCtx()))
     try:
-        assert state.current_server_config() is snapshot
+        assert state.current_server_config() is served
+    finally:
+        state.server_config.reset(token)
+
+
+def test_current_server_config_falls_back_to_ambient_lifespan() -> None:
+    ambient = ServerConfig.from_env()
+    token = state.server_config.set(ambient)
+    try:
+        assert state.current_server_config() is ambient
     finally:
         state.server_config.reset(token)
 
 
 def test_current_server_config_is_none_outside_a_server() -> None:
     assert state.current_server_config() is None
+
+
+async def test_nested_lifespan_host_serves_each_servers_snapshot(monkeypatch) -> None:
+    """Two lifespans in one task must not make both servers use the last-entered snapshot."""
+    from fastmcp import Client
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        body = {"meta": {"series": {"times": ["2026-11-27T00:00:00Z"]}}, "data": [{"queries": [1]}]}
+        return httpx.Response(200, json=body, request=request)
+
+    def recording_client(config: ServerConfig | None = None) -> client_module.AccessControlledClient:
+        return client_module.AccessControlledClient(
+            base_url="https://api.nextdns.io",
+            headers={"X-Api-Key": "dummy-key-0001"},
+            transport=httpx.MockTransport(handler),
+            follow_redirects=False,
+            configured_base="https://api.nextdns.io",
+        )
+
+    monkeypatch.setenv("NEXTDNS_API_KEY", "dummy-key-0001")
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "ALL")
+    monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "off")
+    monkeypatch.setattr(client_module, "create_nextdns_client", recording_client)
+
+    monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "aaa111")
+    server_a = build_mcp_server()
+    monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "bbb222")
+    server_b = build_mcp_server()
+    monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "ccc333")
+
+    async with server_lifespan(server_a), server_lifespan(server_b):
+        async with Client(server_a) as client_a:
+            await client_a.call_tool("plotAnalytics", {"metric": "status"}, raise_on_error=False)
+        async with Client(server_b) as client_b:
+            await client_b.call_tool("plotAnalytics", {"metric": "status"}, raise_on_error=False)
+
+    assert any("/profiles/aaa111/" in url for url in seen)
+    assert any("/profiles/bbb222/" in url for url in seen)
 
 
 def test_client_owner_uses_the_snapshot_that_created_it(monkeypatch, mock_api_key: str) -> None:

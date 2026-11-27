@@ -734,11 +734,6 @@ def create_raw_probe_client() -> RawProbeTransport:
     return RawProbeTransport(**_authenticated_client_kwargs())
 
 
-def _create_api_client(config: ServerConfig | None) -> AccessControlledClient:
-    """Build from a server snapshot, or from the process environment for standalone callers."""
-    return create_nextdns_client() if config is None else create_nextdns_client(config)
-
-
 class ApiClientOwner:
     """Owns one authenticated NextDNS API client for one explicit lifetime.
 
@@ -764,14 +759,17 @@ class ApiClientOwner:
         snapshot; a standalone owner keeps reading the environment at creation.
         """
         if self._client is None:
-            self._client = _create_api_client(self.config)
+            # Standalone owners keep the no-argument creation path so tests and
+            # scripts that substitute a zero-argument factory keep working.
+            self._client = create_nextdns_client() if self.config is None else create_nextdns_client(self.config)
         return self._client
 
     async def aclose(self) -> None:
         """Close this owner's client if one exists and reset it.
 
         The next :meth:`get` constructs a fresh client. A server-owned owner
-        rebuilds from its unchanged creation-time snapshot; a standalone owner
+        rebuilds from its unchanged creation-time snapshot (including the key
+        file path it names, which is re-read at rebuild); a standalone owner
         picks up any updated process configuration.
         """
         if self._client is not None:

@@ -331,6 +331,11 @@ class ServerConfig:
     The caller can supply the one generative-UI decision already made for the
     build; that avoids a second read of the same setting when the server
     assembles its catalog and provider.
+
+    One deliberate exception to the freeze is a key sourced from
+    ``NEXTDNS_API_KEY_FILE``: the path is frozen, but the file is re-read when
+    a client is built, so secret rotation and deletion still take effect at
+    client rebuild time.
     """
 
     _environ: Mapping[str, str]
@@ -348,6 +353,7 @@ class ServerConfig:
 
     @property
     def api_key(self) -> str | None:
+        """The snapshot's API key; a file-sourced key is read from the frozen path."""
         return get_api_key(self._environ)
 
     @property
