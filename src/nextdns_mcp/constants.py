@@ -32,7 +32,12 @@ LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
 # 2026-10-03 in CI run 37139687479) while legacy profiles keep 6-character IDs,
 # so both shapes are accepted and everything else still fails fast locally
 # instead of 404ing upstream.
-SAFE_PROFILE_ID_PATTERN = re.compile(r"^(?:[a-z0-9]{6}|[a-z0-9]{10})$")
+# The anchors are ``\A``/``\Z``, not ``^``/``$``: ``$`` also matches just before a
+# trailing newline, so ``"abc123\n"`` validated as a profile id. An upstream
+# ``/profiles/abc123%0a/settings`` decodes to exactly that, and the newline keeps
+# the id out of the ``NEXTDNS_PROTECTED_PROFILES`` denylist comparison, so the
+# request was classified against a profile the ACL never named (issue #747).
+SAFE_PROFILE_ID_PATTERN = re.compile(r"\A(?:[a-z0-9]{6}|[a-z0-9]{10})\Z")
 
 # The hint every profile-id failure repeats: the shape, and where a real id
 # comes from. One string so the generated tools, the delegation guard and the

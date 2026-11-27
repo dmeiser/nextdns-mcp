@@ -364,6 +364,62 @@ class TestAccessControlledClientFailsClosed:
         assert exc_info.value.code == "access_denied"
 
     @pytest.mark.asyncio
+    async def test_denies_encoded_newline_profile_bypassing_protected_list(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Regression for issue #747: /profiles/abc123%0a/... escaped the protected-profile denylist.
+
+        httpx decodes the path while parsing, so the segment is "abc123\\n". The
+        pattern's ``$`` matched before that trailing newline, the ACL authorized
+        the request against an id that no NEXTDNS_PROTECTED_PROFILES entry can
+        equal, and the write reached upstream.
+        """
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "abc123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("POST", "/profiles/abc123%0a/settings")
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == "access_denied"
+
+    @pytest.mark.asyncio
+    async def test_denies_profile_path_with_a_literal_newline(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """A URL httpx cannot parse is an ACL denial, not an unhandled httpx.InvalidURL.
+
+        Before the anchor fix such an id passed input validation, so this reached
+        the access-control layer as an INTERNAL_ERROR instead of a refusal.
+        """
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "/profiles/abc123\n/settings")
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == "access_denied"
+
+    @pytest.mark.asyncio
+    async def test_stream_denies_profile_path_with_a_literal_newline(
+        self, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """The same unparseable URL is refused by stream(), which shares _authorize()."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+
+        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                with pytest.raises(AccessDeniedError) as exc_info:
+                    async with client.stream("GET", "/profiles/abc123\n/settings"):
+                        pass
+
+        mock_send.assert_not_called()
+        assert exc_info.value.code == "access_denied"
+
+    @pytest.mark.asyncio
     async def test_denies_relative_profile_path_when_not_readable(
         self, mock_super_request: Any, clean_env: Callable[[str, str], None]
     ) -> None:
