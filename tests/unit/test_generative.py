@@ -29,6 +29,7 @@ from nextdns_mcp.generative import (
     MAX_CODE_BYTES,
     MAX_CONCURRENT_SANDBOXES,
     MAX_DATA_BYTES,
+    MAX_JSON_DEPTH,
     SANDBOX_PRELUDE,
     PrefabGenerativeUI,
     _build_renderer_resource,
@@ -59,6 +60,55 @@ def test_parse_ui_data_rejects_malformed_and_non_dict():
     for bad in (123, ["a"], True):
         with pytest.raises(ValueError):
             _parse_ui_data(bad)
+
+
+def _nested_containers(levels: int) -> dict[str, Any]:
+    """A document with exactly ``levels`` container levels: the root dict plus nested lists."""
+    value: Any = 1
+    for _ in range(levels - 1):
+        value = [value]
+    return {"a": value}
+
+
+def test_parse_ui_data_rejects_non_finite_numbers_in_json_text():
+    """NaN and Infinity decode in Python but fail JSON.parse in the worker (issue #764)."""
+    for payload in ('{"a": NaN}', '{"a": Infinity}', '{"a": -Infinity}'):
+        with pytest.raises(ValueError, match="not a valid JSON number"):
+            _parse_ui_data(payload)
+
+
+def test_parse_ui_data_rejects_non_finite_numbers_in_a_dict():
+    """A dict the host passed never went through a parser, so its floats are walked too."""
+    for payload in (
+        {"a": float("nan")},
+        {"a": float("inf")},
+        {"a": float("-inf")},
+        {"a": [{"b": [float("nan")]}]},
+    ):
+        with pytest.raises(ValueError, match="NaN or Infinity"):
+            _parse_ui_data(payload)
+
+
+def test_parse_ui_data_accepts_finite_numbers():
+    assert _parse_ui_data('{"a": -1.5e308, "b": 0}') == {"a": -1.5e308, "b": 0}
+    assert _parse_ui_data({"a": 1.5e-308}) == {"a": 1.5e-308}
+
+
+def test_parse_ui_data_rejects_nesting_past_the_cap():
+    with pytest.raises(ValueError, match="maximum nesting depth"):
+        _parse_ui_data(_nested_containers(MAX_JSON_DEPTH))
+    with pytest.raises(ValueError, match="maximum nesting depth"):
+        _parse_ui_data('{"a": ' + "[" * (MAX_JSON_DEPTH + 5) + "]" * (MAX_JSON_DEPTH + 5) + "}")
+
+
+def test_parse_ui_data_accepts_nesting_at_the_cap():
+    assert _parse_ui_data(_nested_containers(MAX_JSON_DEPTH - 1)) == _nested_containers(MAX_JSON_DEPTH - 1)
+
+
+def test_decode_ui_json_reports_a_decoder_stack_blowout_as_a_validation_error():
+    """The C scanner recurses per level: a document past its stack limit must not raise RecursionError."""
+    with pytest.raises(ValueError, match="maximum nesting depth"):
+        _parse_ui_data("[" * 100_000 + "]" * 100_000)
 
 
 def test_validate_chart_placement_rejects_charts_in_tabs():
@@ -922,6 +972,35 @@ async def test_generate_ui_data_size_limit():
 
 
 @pytest.mark.asyncio
+async def test_generate_ui_rejects_non_finite_data_before_the_sandbox():
+    """A NaN in either data form is a validation error; the worker never sees the frame (issue #764)."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    for payload in ('{"v": NaN}', {"v": float("nan")}):
+        with (
+            patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+            patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
+            pytest.raises(ValueError, match="NaN or Infinity|not a valid JSON number"),
+        ):
+            await gen_tool.fn(code="print('hi')", data=payload)
+        mock_exec.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_rejects_deeply_nested_data_before_the_sandbox():
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    deep = "[" * (MAX_JSON_DEPTH + 1) + "]" * (MAX_JSON_DEPTH + 1)
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
+        pytest.raises(ValueError, match="maximum nesting depth"),
+    ):
+        await gen_tool.fn(code="print('hi')", data=f'{{"v": {deep}}}')
+    mock_exec.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_generate_ui_result_size_limit():
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
@@ -1535,6 +1614,19 @@ async def test_run_defaults_data_to_an_empty_object():
     await sandbox.run("print(1)")
 
     assert proc.requests[0]["data"] == {}
+
+
+@pytest.mark.asyncio
+async def test_run_never_frames_a_non_finite_number():
+    """The request serializer refuses NaN/Infinity: the worker's JSON.parse would reject the frame (issue #764)."""
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    proc = _StubProcess()
+    sandbox._process = proc
+
+    with pytest.raises(ValueError, match="Out of range float"):
+        await sandbox.run("print(1)", data={"k": float("nan")})
+
+    assert proc.requests == []
 
 
 @pytest.mark.asyncio

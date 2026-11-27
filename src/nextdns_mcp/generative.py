@@ -13,7 +13,9 @@ SPDX-License-Identifier: MIT
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+import math
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -89,6 +91,7 @@ class DataTable(_BaseDataTable):
 
 MAX_CODE_BYTES = 32 * 1024
 MAX_DATA_BYTES = 128 * 1024
+MAX_JSON_DEPTH = 100
 # How many renders may hold a live sandbox worker at once. Every render owns
 # its own worker, so this bounds concurrent Deno subprocesses: a render paused
 # in its multi-second reap holds only its own permit, never the renders behind
@@ -113,12 +116,24 @@ GENERATE_DOC = (
 )
 
 
+def _reject_json_constant(name: str) -> float:
+    """Reject the ``NaN``/``Infinity`` spellings the default decoder accepts but ``JSON.parse`` does not."""
+    raise ValueError(f"Invalid JSON in data parameter: {name} is not a valid JSON number")
+
+
 def _decode_ui_json(data: str) -> Any:
-    """Decode a JSON string, raising a clear validation error on failure."""
+    """Decode a JSON string, raising a clear validation error on failure.
+
+    ``parse_constant`` closes the non-finite hole in the default decoder, and the
+    recursion catch reports a decoder stack blowout — the C scanner recurses once
+    per nesting level — as the same validation error the value walk reports.
+    """
     try:
-        return json.loads(data)
+        return json.loads(data, parse_constant=_reject_json_constant)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON in data parameter: {exc}") from exc
+    except RecursionError as exc:
+        raise ValueError(f"data exceeds maximum nesting depth of {MAX_JSON_DEPTH}") from exc
 
 
 def _require_ui_object(value: Any, source: str) -> dict[str, Any]:
@@ -140,13 +155,58 @@ def _parse_ui_string(data: str) -> dict[str, Any] | None:
     return _require_ui_object(value, "data parameter")
 
 
+def _json_children(node: Any) -> Iterable[Any]:
+    """The values one JSON container holds; an empty tuple for a scalar."""
+    if isinstance(node, dict):
+        return node.values()
+    if isinstance(node, list):
+        return node
+    return ()
+
+
+def _guard_json_node(node: Any, level: int) -> Iterable[Any]:
+    """Validate one document node and return its children.
+
+    A non-finite float and a container open past the depth cap are both refused
+    here, so the walk never descends into either.
+    """
+    if isinstance(node, float) and not math.isfinite(node):
+        raise ValueError("data contains a number JSON.parse cannot read: NaN or Infinity")
+    children = _json_children(node)
+    if children and level >= MAX_JSON_DEPTH:
+        raise ValueError(f"data exceeds maximum nesting depth of {MAX_JSON_DEPTH}")
+    return children
+
+
+def _check_json_limits(value: Any) -> None:
+    """Bound nesting depth and reject non-finite numbers in a decoded UI document.
+
+    The walk is iterative on purpose: a recursive guard would raise
+    ``RecursionError`` at exactly the depth it exists to report. Depth is counted
+    in container levels — the document root is level 1, and a value may sit no
+    deeper than level ``MAX_JSON_DEPTH``. Both limits protect the worker: the
+    runner parses this document with ``JSON.parse``, which rejects
+    ``NaN``/``Infinity`` outright and deepens its own parse stack with every
+    level. The string path rejects non-finite numbers at parse time; a dict the
+    host handed over never passed a parser, so the value itself is walked here.
+    """
+    pending: deque[tuple[Any, int]] = deque([(value, 1)])
+    while pending:
+        node, level = pending.popleft()
+        pending.extend((child, level + 1) for child in _guard_json_node(node, level))
+
+
 def _parse_ui_data(data: str | dict[str, Any] | None) -> dict[str, Any] | None:
     """Parse JSON string data or return dictionary."""
     if isinstance(data, str):
-        return _parse_ui_string(data)
-    if data is None or isinstance(data, dict):
-        return data
-    raise ValueError(f"data parameter must be a dict or JSON object string, got {type(data).__name__}")
+        parsed = _parse_ui_string(data)
+    elif data is None or isinstance(data, dict):
+        parsed = data
+    else:
+        raise ValueError(f"data parameter must be a dict or JSON object string, got {type(data).__name__}")
+    if parsed is not None:
+        _check_json_limits(parsed)
+    return parsed
 
 
 def _guard_string_data(data: str) -> dict[str, Any] | None:
@@ -161,7 +221,7 @@ def _guard_object_data(data: dict[str, Any] | None) -> dict[str, Any] | None:
     parsed_data = _parse_ui_data(data)
     if parsed_data is None:
         return None
-    if len(json.dumps(parsed_data).encode("utf-8")) > MAX_DATA_BYTES:
+    if len(json.dumps(parsed_data, allow_nan=False).encode("utf-8")) > MAX_DATA_BYTES:
         raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
     return parsed_data
 
