@@ -651,6 +651,24 @@ async def test_generate_ui_result_size_limit():
             await gen_tool.fn(code="print(1)")
 
 
+@pytest.mark.asyncio
+async def test_generate_ui_accepts_utf8_result_under_cap():
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+
+    class UnicodeApp:
+        def to_json(self):
+            return {"text": "é" * 50_000}
+
+    app = UnicodeApp()
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
+    ):
+        mock_exec.return_value = app
+        assert await gen_tool.fn(code="print(1)") is app
+
+
 class _ChunkedRaw:
     """Raw stream stub returning fixed-size chunks across read calls."""
 
@@ -1011,7 +1029,20 @@ async def test_result_size_bytes_model_dump_json():
     assert _result_size_bytes(DumpApp()) > MAX_RESULT_BYTES
 
 
-def test_result_size_bytes_serialization_fallback():
+def test_result_size_bytes_counts_utf8_without_ascii_escaping():
+    text = "é" * 50_000
+    expected = len(json.dumps({"text": text}, ensure_ascii=False).encode("utf-8"))
+    assert expected == 100_012
+    assert expected < MAX_RESULT_BYTES
+
+    class UnicodeApp:
+        def to_json(self):
+            return {"text": text}
+
+    assert _result_size_bytes(UnicodeApp()) == expected
+
+
+def test_result_size_bytes_serialization_failures_raise():
     class UnserializableApp:
         def to_json(self):
             raise TypeError("not serializable")
@@ -1019,7 +1050,8 @@ def test_result_size_bytes_serialization_fallback():
         def __str__(self):
             return "small"
 
-    assert _result_size_bytes(UnserializableApp()) == len(b"small")
+    with pytest.raises(ValueError, match="via to_json failed"):
+        _result_size_bytes(UnserializableApp())
 
     class BrokenDumpApp:
         def model_dump_json(self):
@@ -1028,7 +1060,8 @@ def test_result_size_bytes_serialization_fallback():
         def __str__(self):
             return "tiny"
 
-    assert _result_size_bytes(BrokenDumpApp()) == len(b"tiny")
+    with pytest.raises(ValueError, match="via model_dump_json failed"):
+        _result_size_bytes(BrokenDumpApp())
 
 
 @pytest.mark.asyncio

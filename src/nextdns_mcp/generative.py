@@ -139,19 +139,25 @@ def _validated_payload(code: str, data: str | dict[str, Any] | None) -> dict[str
 
 
 def _result_size_bytes(result: Any) -> int:
-    """Measure the serialized byte size of a sandbox result."""
+    """Measure the serialized byte size of a sandbox result.
+
+    JSON is measured as UTF-8, not as ASCII-escaped text, so multibyte output is
+    not charged six bytes per character. A serializer that fails is an error:
+    falling back to ``str(result)`` let short representations sneak an
+    otherwise unserializable result past the size guard.
+    """
     to_json = getattr(result, "to_json", None)
     if callable(to_json):
         try:
-            return len(json.dumps(to_json()).encode("utf-8"))
-        except (TypeError, ValueError):
-            pass
+            return len(json.dumps(to_json(), ensure_ascii=False).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"result serialization via to_json failed: {exc}") from exc
     dump_json = getattr(result, "model_dump_json", None)
     if callable(dump_json):
         try:
             return len(dump_json().encode("utf-8"))
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"result serialization via model_dump_json failed: {exc}") from exc
     return len(str(result).encode("utf-8"))
 
 
