@@ -7,10 +7,13 @@ ways, and both are explicit:
 
 - a caller published an owner into the current context with the owning
   module's ``*_owned()`` context manager (standalone scripts and tests), or
-- FastMCP is serving an MCP request: every request adapter binds a per-request
-  context (``fastmcp_request_ctx``) in the request's own task, carrying the
-  lifespan context the server lifespan yielded - and the lifespan yields the
-  server's ``ServerResources`` under :data:`RESOURCES_LIFESPAN_KEY`.
+- FastMCP is serving an MCP request: the active tool ``Context`` reads the
+  lifespan of the server that owns the tool, which stays the child's own
+  lifespan when the server is mounted under a parent. Outside an active
+  ``Context``, every request adapter also binds a transport-level context
+  (``fastmcp_request_ctx``) in the request's own task. Both carry a lifespan
+  context, and the lifespan yields the server's ``ServerResources`` under
+  :data:`RESOURCES_LIFESPAN_KEY`.
 
 There is deliberately no process-global fallback. The lifespan's own task does
 not propagate context variables to request tasks, so a module-level context
@@ -22,24 +25,40 @@ SPDX-License-Identifier: MIT
 
 from typing import Any
 
-from fastmcp.server.dependencies import fastmcp_request_ctx
+from fastmcp.server.context import Context
+from fastmcp.server.dependencies import fastmcp_request_ctx, get_context
 
 # Key under which the server lifespan yields its ServerResources in the
 # lifespan context FastMCP hands to every served request.
 RESOURCES_LIFESPAN_KEY = "nextdns_resources"
 
 
-def request_resources() -> Any | None:
-    """The ``ServerResources`` of the FastMCP server serving this request.
-
-    Returns:
-        The resources the current FastMCP request's server lifespan owns, or
-        ``None`` when no FastMCP request is being served in this context.
-    """
-    request_ctx = fastmcp_request_ctx.get()
-    if request_ctx is None:
-        return None
-    lifespan_context = request_ctx.lifespan_context
+def _resources_in(lifespan_context: Any) -> Any | None:
+    """The resources a lifespan context yields, if it yields ours."""
     if isinstance(lifespan_context, dict):
         return lifespan_context.get(RESOURCES_LIFESPAN_KEY)
     return None
+
+
+def request_resources() -> Any | None:
+    """The ``ServerResources`` of the FastMCP server serving this request.
+
+    The active tool ``Context`` is authoritative: its lifespan context is the
+    owning server's own result even when that server is mounted, where the
+    transport request context belongs to the parent instead. Callers outside
+    an active ``Context`` fall back to the transport request context.
+    """
+    context: Context | None = None
+    try:
+        context = get_context()
+    except RuntimeError:
+        pass
+    if context is not None:
+        resources = _resources_in(context.lifespan_context)
+        if resources is not None:
+            return resources
+
+    request_ctx = fastmcp_request_ctx.get()
+    if request_ctx is None:
+        return None
+    return _resources_in(request_ctx.lifespan_context)
