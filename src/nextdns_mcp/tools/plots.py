@@ -251,9 +251,9 @@ def _plot_rendered_series(metric: str, target_profile: str, payload: dict[str, A
             )
 
         return _build_series_chart(metric, times, series_data)
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error rendering chart for {metric}: {e}")
-        return error_payload(ErrorCode.INTERNAL_ERROR, f"Error rendering chart: {e}")
+    except Exception:  # noqa: BLE001
+        logger.error("Error rendering chart")
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Error rendering chart")
 
 
 async def plotAnalytics(

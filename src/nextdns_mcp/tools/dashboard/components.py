@@ -14,6 +14,7 @@ SPDX-License-Identifier: MIT
 """
 
 import logging
+import re
 from typing import Any
 
 from fastmcp.tools.base import ToolResult
@@ -61,6 +62,9 @@ from .data import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_BAR_COLOR = "#3b82f6"
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
 QUERIES_COLUMN = DataTableColumn(key="queries", header="Queries", sortable=True, format="number")
 SHARE_COLUMN = DataTableColumn(key="share", header="Share", sortable=True)
 
@@ -95,8 +99,8 @@ def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
         chart_times, chart_series_data = downsample_chart_series(times, series_data)
         chart_data = build_chart_data(chart_times, chart_series_data)
         chart_series = build_chart_series(chart_series_data)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Error preparing queries series data: {exc}")
+    except Exception:  # noqa: BLE001
+        logger.warning("Error preparing queries series data")
         return None
 
     with Card(css_class="w-full") as card:
@@ -108,11 +112,18 @@ def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
     return card
 
 
-def _bar_chart(chart_data: list[dict[str, Any]], label: str, color: str = "#3b82f6") -> BarChart:
+def _bar_color(color: str) -> str:
+    """Only full six-digit hex colors may reach Prefab's style injection."""
+    if isinstance(color, str) and _HEX_COLOR.fullmatch(color):
+        return color
+    return DEFAULT_BAR_COLOR
+
+
+def _bar_chart(chart_data: list[dict[str, Any]], label: str, color: str = DEFAULT_BAR_COLOR) -> BarChart:
     """Build a horizontal bar chart with rounded pill bars."""
     return BarChart(
         data=chart_data,
-        series=[ChartSeries(dataKey="queries", label=label, color=color)],
+        series=[ChartSeries(dataKey="queries", label=label, color=_bar_color(color))],
         xAxis="label",
         horizontal=True,
         barRadius=6,
@@ -186,7 +197,7 @@ def build_domains_card(
     data: list[dict[str, Any]],
     key_name: str = "domain",
     view_type: str = "table",
-    color: str = "#3b82f6",
+    color: str = DEFAULT_BAR_COLOR,
 ) -> Card:
     """Build a domain listing card with a sortable data table or bar chart."""
     return _build_analytics_card(
