@@ -761,7 +761,6 @@ async def test_generate_ui_result_size_limit():
             await gen_tool.fn(code="print(1)")
 
 
-
 @pytest.mark.asyncio
 async def test_generate_ui_accepts_utf8_result_under_cap():
     gen_ui = PrefabGenerativeUI()
@@ -778,7 +777,6 @@ async def test_generate_ui_accepts_utf8_result_under_cap():
     ):
         mock_exec.return_value = app
         assert await gen_tool.fn(code="print(1)") is app
-
 
 
 # --- Generated-tree validation (SEC-3, nextdns-mcp#749) ---
@@ -903,6 +901,37 @@ def test_validate_generated_tree_rejects_reserved_component_state_key():
 def test_validate_generated_tree_rejects_non_app_results():
     with pytest.raises(ValueError, match="expected the sandbox to return a Prefab app"):
         _validate_generated_tree("not-an-app")
+
+
+def test_validate_generated_tree_tolerates_non_string_type_fields_in_data():
+    """Passive dashboards may carry list/dict "type" fields in state or rows.
+
+    The walker visits every dict in the wire envelope, so a DNS record-type
+    filter like {"type": ["A", "AAAA"]} must not crash the set-membership
+    check with an unhashable-type TypeError.
+    """
+    wire = {
+        "view": {
+            "type": "DataTable",
+            "columns": [{"key": "domain"}, {"key": "type"}],
+            "rows": [
+                {"domain": "example.com", "type": ["A", "AAAA"]},
+                {"domain": "example.org", "type": {"kind": "MX"}},
+            ],
+        },
+        "state": {"filters": {"type": ["A", "AAAA"]}},
+    }
+    _validate_generated_tree(_wire_app(wire))  # should not raise
+
+
+def test_validate_generated_tree_ignores_crafted_non_string_component_type():
+    """A crafted {"type": ["Embed"]} node is not a renderable component type.
+
+    The renderer schema-validates node.type as a string literal, so the
+    validator's contract is to neither crash nor misclassify it.
+    """
+    wire = {"view": {"type": "Column", "children": [{"type": ["Embed"]}, {"type": {"$ref": "Embed"}}]}}
+    _validate_generated_tree(_wire_app(wire))  # should not raise
 
 
 def test_validate_generated_tree_walks_deeply_nested_trees_without_recursion():

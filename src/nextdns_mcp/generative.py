@@ -93,6 +93,10 @@ GENERATE_DOC = (
     "inside Tabs or Tab components. Tab panels initialize with 0px width, which causes Recharts "
     "to render completely blank/invisible. Always place charts in Column, Row, Grid, or Card "
     "containers outside of Tabs.\n\n"
+    "TAB COMPONENTS: Prefab's native form is a `Tabs` container whose children are `Tab` "
+    "components, and each `Tab` holds its own panel content: `with Tabs():` wrapping "
+    "`with Tab('General'):` blocks. `TabsList`, `TabsTrigger` and `TabsContent` are NOT available "
+    "and code that uses them fails.\n\n"
     "DATA TABLE: always pass `columns` and `rows` by keyword, "
     "`DataTable(columns=[...], rows=[...])`; positional arguments are not supported.\n\n"
     "GENERATED UIs ARE DISPLAY-ONLY: Embed components, external stylesheets, inline CSS, "
@@ -223,6 +227,11 @@ def _check_reserved_state_map(state: Any) -> None:
 
 def _check_component_type(node: dict[str, Any]) -> None:
     node_type = node.get("type")
+    if not isinstance(node_type, str):
+        # Data rows and state values may carry list/dict "type" fields (e.g.
+        # DNS record-type filters); only string component types are checkable,
+        # and the renderer's own schema rejects non-string component types.
+        return
     if node_type in _BLOCKED_COMPONENT_TYPES:
         _reject_tree(f"component type {node_type!r} is not allowed in generated UIs")
 
@@ -451,10 +460,10 @@ def _build_generate_tool(
     async def generate_ui(code: str, data: str | dict[str, Any] | None = None) -> PrefabApp:
         payload = _validated_payload(code, data)
         result = await run(f"{SANDBOX_PRELUDE}\n{code}", payload)
-        _validate_generated_tree(result)
         result_size = _result_size_bytes(result)
         if result_size > MAX_RESULT_BYTES:
             raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
+        _validate_generated_tree(result)
         return result
 
     return Tool.from_function(
