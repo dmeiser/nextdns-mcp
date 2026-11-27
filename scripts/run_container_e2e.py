@@ -1372,33 +1372,61 @@ class ContainerE2ERunner:
 
         The tool needs no NextDNS credential — component search is local — so
         the credential-free container can exercise it. The payload is read from
-        the result's structured content, not the text block, and a missing
-        payload or an INVALID verdict against the pin fails the run, not just
-        the tool.
+        the result's structured content, not the text block, and a call that
+        raises, a missing payload, or an INVALID verdict against the pin each
+        stays a recorded FAILED result. The sibling ``generate_prefab_ui`` call
+        gets that treatment from ``execute_call``; this call sits outside it
+        because the check grades the structured payload, which ``execute_call``
+        never sees — it validates the text block.
         """
         args_str = f"query={SEARCH_COMPONENTS_QUERY} detail=False"
         log_info(f"Calling {SEARCH_COMPONENTS_TOOL} end to end in the {self.variant} container...")
-        result = await session.call_tool(
-            SEARCH_COMPONENTS_TOOL, arguments={"query": SEARCH_COMPONENTS_QUERY, "detail": False}
-        )
-        failure = _search_components_failure(result)
-        schema_status = "SKIPPED"
-        if not failure:
-            schema_status, schema_error = self._validate_against_schema(
-                SEARCH_COMPONENTS_TOOL, _structured_payload(result)
-            )
-            if schema_status == "INVALID":
-                failure = f"{SEARCH_COMPONENTS_TOOL} structured payload failed schema validation: {schema_error}"
+        called, payload = await self._call_search_components(session)
+        schema_status, schema_error = "SKIPPED", ""
+        if not called:
+            failure = f"call failed: {payload}"
+        else:
+            failure = _search_components_failure(payload)
+            if not failure:
+                schema_status, schema_error = self._validate_against_schema(
+                    SEARCH_COMPONENTS_TOOL, _structured_payload(payload)
+                )
+                if schema_status == "INVALID":
+                    failure = f"structured payload failed schema validation: {schema_error}"
         if failure:
             log_error(f"{SEARCH_COMPONENTS_TOOL}: FAILED ({failure})")
-            self.record_result(SEARCH_COMPONENTS_TOOL, "FAILED", args=args_str, error_msg=failure)
+            self.record_result(
+                SEARCH_COMPONENTS_TOOL,
+                "FAILED",
+                schema_status=schema_status,
+                schema_error=schema_error,
+                args=args_str,
+                error_msg=failure,
+            )
             self.failed_count += 1
             return
         log_success(
-            f"{SEARCH_COMPONENTS_TOOL} returned a schema-valid structured payload inside the {self.variant} container"
+            f"{SEARCH_COMPONENTS_TOOL} returned a structured payload inside the {self.variant} container "
+            f"(schema validation: {schema_status})"
         )
         self.record_result(SEARCH_COMPONENTS_TOOL, "OK", schema_status=schema_status, args=args_str)
         self.executed_count += 1
+
+    async def _call_search_components(self, session: ClientSession) -> tuple[bool, Any]:
+        """Call the search tool once; ``(False, message)`` when the call itself raised.
+
+        Mirrors what ``_call_with_retries`` does for every other call: a
+        transport or protocol error is a recorded failure, not an exception that
+        escapes ``run()`` and takes the jsonl report and the summary with it. No
+        retry table here — this tool answers from the component catalog, so a
+        failure names the container, not an upstream rate limit.
+        """
+        try:
+            return True, await session.call_tool(
+                SEARCH_COMPONENTS_TOOL, arguments={"query": SEARCH_COMPONENTS_QUERY, "detail": False}
+            )
+        except Exception as e:  # noqa: BLE001
+            return False, str(e)
 
     async def _run_generative_ui_only(self) -> int:
         """Run the credential-free generative-UI check; returns the process exit code.
