@@ -10,14 +10,15 @@ profile read/write allowlists, read-only mode and the protected-profile
 denylist - and turning every way a request can fail into the standardized
 payload shape the server documents (the ``errors`` package):
 
-- an ``AccessDeniedError`` from the ACL layer becomes the typed denial payload
-  (never a network request was made at that point);
+- an ``AccessDeniedError`` from the ACL layer (no network request was made at
+  that point) is logged with redaction and raised like every other failure;
 - an upstream HTTP failure becomes the typed exception matching its status
-  (auth / rate-limit / server), and through ``_api_request_payload`` the
-  matching error payload;
+  (auth / rate-limit / server);
 - a 2xx that carries an error document instead of a payload is normalized into
   the same typed failure, because returning it as data would make an error
   look like a success;
+- ``_api_request_payload`` is the one place that turns those raised failures -
+  including the ACL denial - into the standardized payloads;
 - a 404 under ``/profiles/<id>`` gets the hint naming both ids it could be
   blaming, because upstream does not say which one is wrong.
 
@@ -110,12 +111,13 @@ async def _api_request(
 ) -> dict[str, Any]:
     """Make an HTTP request through the access-controlled client and return JSON.
 
-    Access-control denials raised by the ACL layer are reported as standardized
-    error payloads (see the ``errors`` package) rather than raised exceptions, so callers
-    get a consistent, typed failure shape:
+    Every failure is raised as a typed exception: an ACL denial raises the
+    original ``AccessDeniedError`` (with its denial code and profile id), and
+    all other failures raise a ``NextDNSError`` subclass with status_code and
+    response_body attributes, so callers can implement retry-with-backoff for
+    429 or circuit-breaking for 5xx. Callers that want payloads await
+    ``_api_request_payload``, where the denial becomes
     ``{"error": ..., "code": "read_access_denied" | "write_access_denied" | "access_denied", "status_code": 403, ...}``.
-
-    All other failures are raised as typed exceptions with status_code and response_body attributes, so callers can implement retry-with-backoff for 429 or circuit-breaking for 5xx.
     ``NextDNSError`` is the base exception, with subclasses ``NextDNSAuthError`` (401/403), ``NextDNSRateLimitError`` (429), and ``NextDNSServerError`` (5xx).
     For non-HTTP failures, a ``NextDNSError`` is raised with status_code=None.
     Tools that report failures as payloads should await ``_api_request_payload``,
@@ -131,11 +133,12 @@ async def _api_request(
             method, url, params=params, json_body=json_body, max_response_bytes=max_response_bytes
         )
     except AccessDeniedError as e:
-        # Raised by the ACL layer before any network request. Kept out of the
-        # httpx.HTTPError branch: a real upstream 403 (raise_for_status) must
-        # keep its existing http_error path.
+        # Raised by the ACL layer before any network request. Logged redacted
+        # here and re-raised like every other failure; a real upstream 403
+        # (raise_for_status) still takes the httpx.HTTPError branch, and the
+        # payload translation lives in _api_request_payload.
         logger.warning(f"Access denied in {method} {_redacted(url)}: {_log_safe_error(e)}")
-        return access_denied_payload_for(e)
+        raise
     except NextDNSError:
         # Already typed (including the 2xx-with-error-document case in
         # _api_request_json); re-raised so the generic branch cannot strip its
@@ -305,18 +308,21 @@ async def _api_request_payload(
     json_body: Any = None,
     max_response_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Perform an API request, reporting typed upstream failures as error payloads.
+    """Perform an API request, reporting every raised failure as an error payload.
 
-    Equivalent to awaiting ``_api_request`` and passing any raised
-    ``NextDNSError`` through ``_handle_api_error``, so every tool reports the
-    same standardized failure shape. A response that crosses
-    ``max_response_bytes`` - refused while streaming, before parsing - comes
-    back as the typed ``response_too_large`` payload.
+    Awaits ``_api_request`` and translates both of its failure surfaces: an
+    ``AccessDeniedError`` through ``access_denied_payload_for``, and the typed
+    ``NextDNSError`` hierarchy through ``_handle_api_error``. Every tool
+    therefore reports the same standardized failure shape. A response that
+    crosses ``max_response_bytes`` - refused while streaming, before parsing -
+    comes back as the typed ``response_too_large`` payload.
     """
     try:
         return await _api_request(
             method, url, params=params, json_body=json_body, max_response_bytes=max_response_bytes
         )
+    except AccessDeniedError as e:
+        return access_denied_payload_for(e)
     except NextDNSResponseTooLargeError as e:
         return error_payload(ErrorCode.RESPONSE_TOO_LARGE, str(e), max_response_bytes=e.max_response_bytes)
     except NextDNSError as e:
