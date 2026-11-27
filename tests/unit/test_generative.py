@@ -1429,6 +1429,11 @@ def test_result_size_bytes_serialization_failures_raise():
         _result_size_bytes(BrokenDumpApp())
 
 
+def test_result_size_bytes_falls_back_to_str_without_serializers():
+    """A result with neither serializer is measured by its string form."""
+    assert _result_size_bytes("fake_app") == len(b"fake_app")
+
+
 @pytest.mark.asyncio
 async def test_generate_ui_execution_timeout():
     gen_ui = PrefabGenerativeUI()
