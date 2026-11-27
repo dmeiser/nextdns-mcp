@@ -1147,7 +1147,7 @@ dependencies = [
     { name = "pyyaml" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "coverage" },
     { name = "mypy" },
@@ -1156,38 +1156,33 @@ dev = [
     { name = "pytest-cov" },
     { name = "radon" },
     { name = "ruff" },
-    { name = "types-pyyaml" },
-]
-
-[package.dev-dependencies]
-dev = [
     { name = "types-jsonschema" },
+    { name = "types-pyyaml" },
     { name = "xenon" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "coverage", marker = "extra == 'dev'" },
     { name = "fastmcp", specifier = ">=4.1.8" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jsonschema", specifier = ">=4.23" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.20.1" },
     { name = "opentelemetry-api", specifier = ">=1.45.2" },
     { name = "prefab-ui", specifier = "==0.21.1" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.2.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.1.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "radon", marker = "extra == 'dev'", specifier = ">=6.0.1" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.10" },
-    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250915" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "coverage" },
+    { name = "mypy", specifier = ">=1.20.1" },
+    { name = "pytest", specifier = ">=9.0.0" },
+    { name = "pytest-asyncio", specifier = ">=1.2.0" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "radon", specifier = ">=6.0.1" },
+    { name = "ruff", specifier = ">=0.15.10" },
     { name = "types-jsonschema", specifier = ">=4.26.0.20261006" },
+    { name = "types-pyyaml", specifier = ">=6.0.12.20250915" },
     { name = "xenon", specifier = ">=0.9.3" },
 ]
 
