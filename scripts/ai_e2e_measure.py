@@ -27,7 +27,7 @@ from ai_e2e_common import (
     _content_texts,
     _unwrap_id,
 )
-from ai_e2e_config import HarnessConfig, _expand_env_refs, _profile_list_cursor
+from ai_e2e_config import _MAX_PROFILE_PAGES, HarnessAbortError, HarnessConfig, _expand_env_refs, _profile_list_cursor
 from ai_e2e_task import TaskTargets
 
 
@@ -133,24 +133,33 @@ async def _profile_gone(m: MeasureClient, pid: str, targets: TaskTargets) -> tup
 async def _all_profile_rows(m: MeasureClient) -> list[Any] | None:
     """Every profile row on the account, following the listing cursor to its end.
 
-    ``None`` when any page failed OR the cursor repeated: one GET is only the
-    first page, and a partial listing presented as the whole account misses
-    names on later pages and reads a server-side cursor cycle as the end of
-    the list. Callers must treat ``None`` as "account state uncertain".
+    ``None`` when any page failed, the cursor repeated, the cursor was
+    malformed, or the listing did not end within ``_MAX_PROFILE_PAGES``: one
+    GET is only the first page, and a partial listing presented as the whole
+    account misses names on later pages and reads a server-side cursor cycle
+    as the end of the list. Callers must treat ``None`` as "account state
+    uncertain" — no other failure mode escapes this function.
     """
     # Same pagination contract the protection probe holds: a page-truncated
     # listing under-protects and under-deletes.
     cursor: str | None = None
     seen_cursors: set[str] = set()
     rows: list[Any] = []
-    while True:
+    for _page in range(_MAX_PROFILE_PAGES):
         page = await m.rest_get("/profiles", params={"cursor": cursor} if cursor else None)
         page_rows = common._readable_rows(page)
         if page_rows is None:
             return None
         rows.extend(page_rows)
         body = page.get("body") if isinstance(page, dict) else None
-        cursor = _profile_list_cursor(body)
+        try:
+            cursor = _profile_list_cursor(body)
+        except HarnessAbortError:
+            # A malformed cursor (present, not a non-empty string) is fatal to
+            # the startup probe but only a failed page here: mid-run it must
+            # degrade to "uncertain", not escape as a traceback that kills the
+            # run with no report.
+            return None
         if not cursor:
             return rows
         if cursor in seen_cursors:
@@ -158,6 +167,10 @@ async def _all_profile_rows(m: MeasureClient) -> list[Any] | None:
             # than return the rows gathered so far as if they were complete.
             return None
         seen_cursors.add(cursor)
+    # Fresh unique cursors forever are a runaway pagination loop, not a huge
+    # account (the probe's own cap): unbounded, quickly-answered pages would
+    # hang the run mid-step until the CI job timeout, with no report.
+    return None
 
 
 async def _all_profile_ids(m: MeasureClient) -> dict[str, str] | None:

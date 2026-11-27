@@ -1070,6 +1070,21 @@ class TestMeasureState:
         t = h.TaskTargets(profile_name="P", tag="abc")
         assert asyncio.run(h._profile_gone(_Paged(), "pid1", t)) == (False, h.PRESENT)
 
+    def test_profile_gone_is_indeterminate_on_a_malformed_cursor(self, h):
+        """The malformed-cursor raise must degrade to a verdict, not a crash."""
+        import asyncio
+
+        class _MalformedListing:
+            async def rest_get(self, path, params=None):
+                if path == "/profiles/pid1":
+                    return {"status": 404, "ok": False, "body": {}}
+                return {"status": 200, "ok": True, "body": {"data": [], "cursor": 0}}
+
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        gone, verdict = asyncio.run(h._profile_gone(_MalformedListing(), "pid1", t))
+        assert gone is False
+        assert verdict.startswith(h.INDETERMINATE)
+
     def test_find_profile_paginates_the_listing(self, h):
         """A one-page lookup missed a profile that lived on page 2."""
         import asyncio
@@ -1816,6 +1831,44 @@ class TestStraySweep:
                 return {"status": 200, "ok": True, "body": {"data": [{"id": "a1"}], "cursor": "c2"}}
 
         assert asyncio.run(h._all_profile_ids(_Cyclic())) is None
+
+    def test_all_profile_ids_is_none_on_a_malformed_cursor(self, h):
+        """A present-but-invalid cursor is a failed page, not a crash.
+
+        ``_profile_list_cursor`` raises ``HarnessAbortError`` — fatal for the
+        startup probe — but mid-run that raise used to escape the step loop
+        and kill the harness with a traceback and no report, where the
+        pre-pagination code returned a plain verdict.
+        """
+        import asyncio
+
+        class _Malformed:
+            async def rest_get(self, path, params=None):
+                return {"status": 200, "ok": True, "body": {"data": [{"id": "a1"}], "cursor": 0}}
+
+        assert asyncio.run(h._all_profile_ids(_Malformed())) is None
+
+    def test_all_profile_ids_is_none_when_the_listing_never_ends(self, h):
+        """Fresh unique cursors forever are a runaway loop, not a huge account.
+
+        Unbounded, quickly-answered pages never trip the per-request timeout
+        and the step budget is only checked between steps, so the run would
+        hang mid-step with no report. The loop is capped like the probe's.
+        """
+        import asyncio
+
+        class _Endless:
+            def __init__(self):
+                self.calls = 0
+
+            async def rest_get(self, path, params=None):
+                self.calls += 1
+                body = {"data": [{"id": f"p{self.calls}"}], "cursor": f"c{self.calls}"}
+                return {"status": 200, "ok": True, "body": body}
+
+        m = _Endless()
+        assert asyncio.run(h._all_profile_ids(m)) is None
+        assert m.calls == h._MAX_PROFILE_PAGES
 
     def test_created_ids_come_from_successful_create_receipts(self, h):
         records = [
