@@ -338,6 +338,12 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
                 cwd=str(workdir),
                 env=env,
                 start_new_session=True,
+                # The default 64 KiB StreamReader limit aborts readline() on a
+                # single long JSONL event (LimitOverrunError), and the drain
+                # gather swallows the dead task: the run then reported zero
+                # captured events with an empty error. 16 MiB covers any event
+                # the actor can plausibly emit on one line.
+                limit=16 * 1024 * 1024,
             )
         except Exception as e:  # noqa: BLE001
             run.error = f"failed to spawn actor harness: {type(e).__name__}: {e}"

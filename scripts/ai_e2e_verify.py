@@ -83,8 +83,17 @@ async def _verify_profile_steps(
             "",
             {"endpoint": "GET /profiles", "verified_renamed": ok},
         )
-    # profile_gone
-    gone, verdict = (True, common.ABSENT) if not pid else await harness._profile_gone(m, pid, targets)
+    # profile_gone. An empty pid means this run never established a profile
+    # id, and absence can only be proven FOR an id: the old ``(True, ABSENT)``
+    # shortcut turned a failed profiles.create into a verified deletion pass.
+    if not pid:
+        return (
+            "failed",
+            "no profile id was established for this run, so deletion cannot be confirmed",
+            "",
+            {"endpoint": "GET /profiles/{id}", "verified_gone": False, "verdict": common.INDETERMINATE},
+        )
+    gone, verdict = await harness._profile_gone(m, pid, targets)
     return (
         "passed" if gone else "failed",
         "" if gone else f"profile {pid} not confirmed deleted ({verdict})",

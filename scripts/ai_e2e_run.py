@@ -400,7 +400,11 @@ async def _run_one_step(state: _RunState, m: Any, i: int, step: Any) -> None:
     if time.monotonic() - state.started > state.budget:
         state.report.results.append(_skipped_result(step, f"overall time budget ({state.budget:.0f}s) exhausted"))
         return
-    if step.section != "profiles" and not state.pid:
+    # A step whose prompt names {profile_id} — profiles.delete included —
+    # cannot run without one: it used to launch the actor on a prompt with the
+    # placeholder rendered empty, and the deletion verifier then false-passed
+    # on the empty id. Skip it before the actor is ever launched.
+    if not state.pid and (step.section != "profiles" or "{profile_id}" in step.prompt):
         state.report.results.append(_skipped_result(step, "test profile was not provisioned"))
         return
 
