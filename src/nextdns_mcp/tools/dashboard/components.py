@@ -42,7 +42,7 @@ from ...chart_ui import (
 from ...charts import (
     build_chart_data,
     downsample_chart_series,
-    validate_series_payload,
+    extract_series_fields,
 )
 from .data import (
     ExtraDashboardPayloads,
@@ -89,7 +89,7 @@ def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
     ``PrefabApp`` rather than one chart result (issue #550).
     """
     try:
-        times, series_data = validate_series_payload(series_payload)
+        times, series_data = extract_series_fields(series_payload)
         if not times or not series_data:
             return None
         chart_times, chart_series_data = downsample_chart_series(times, series_data)

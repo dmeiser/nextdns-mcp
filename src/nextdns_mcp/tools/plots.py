@@ -18,8 +18,8 @@ from ..chart_ui import (
 from ..charts import (
     build_chart_data,
     downsample_chart_series,
+    extract_series_fields,
     series_budget_error,
-    validate_series_payload,
 )
 from ..coercion import OptionalProfileId
 from ..errors import ErrorCode, error_payload
@@ -183,7 +183,7 @@ async def _plot_analytics_series_impl(
     # an offset, not 1969 (see utils.normalize_time_value).
     from_time = normalize_time_value(from_time)
     to_time = normalize_time_value(to_time)
-    partials, partials_error = _validate_partials(partials)
+    partials, partials_error = _normalize_and_validate_partials(partials)
     if partials_error:
         return partials_error
 
@@ -203,7 +203,7 @@ async def _plot_analytics_series_impl(
     return await _fetch_plot_series(metric, validated.profile_id, params)
 
 
-def _validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:
+def _normalize_and_validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:
     """Map ``partials`` through normalize_partials and check the endpoint accepts it."""
     partials = normalize_partials(partials)
     if partials is not None and partials not in PARTIALS_VALUES:
@@ -240,7 +240,7 @@ def _plot_rendered_series(metric: str, target_profile: str, payload: dict[str, A
     cannot be unpacked is reported as INTERNAL_ERROR.
     """
     try:
-        times, series_data = validate_series_payload(payload)
+        times, series_data = extract_series_fields(payload)
 
         if not times or not series_data:
             return error_payload(
