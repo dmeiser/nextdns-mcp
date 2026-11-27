@@ -64,6 +64,23 @@ def _missing_profile_payload() -> dict[str, Any]:
     )
 
 
+def _profile_id_missing(value: str | int | None) -> bool:
+    """True when a profile id names nothing: ``None`` or a blank string.
+
+    "Missing" is an explicit test, not truthiness: ``profile_id=0`` is a caller
+    error that must surface as ``invalid_profile_id``, not silently select the
+    default. Whitespace-only strings carry no id and count as missing.
+    """
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _defaulted_profile(profile_id: str | int | None) -> str | int | None:
+    """The explicit profile_id, or the configured default when the caller named none."""
+    if _profile_id_missing(profile_id):
+        return get_default_profile()
+    return profile_id
+
+
 def resolve_profile_id(
     profile_id: str | int | None = None,
     *,
@@ -84,8 +101,10 @@ def resolve_profile_id(
         is a standardized error payload dict.
     """
     if allow_default:
-        target_profile: str | int | None = profile_id or get_default_profile()
-        if not target_profile:
+        target_profile: str | int | None = _defaulted_profile(profile_id)
+        # The explicit None check is for mypy's narrowing; _profile_id_missing alone
+        # covers it at runtime.
+        if target_profile is None or _profile_id_missing(target_profile):
             return None, _missing_profile_payload()
         if not is_safe_profile_id(target_profile):
             return None, error_payload(
