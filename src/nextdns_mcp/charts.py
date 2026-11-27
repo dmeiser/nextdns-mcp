@@ -101,6 +101,10 @@ def _finite_query_count(value: Any) -> int | float:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
+    # Python ints are finite even beyond the C-double range; math.isfinite
+    # would overflow them during conversion (issue #763).
+    if isinstance(value, int):
+        return value
     return value if math.isfinite(value) else 0
 
 

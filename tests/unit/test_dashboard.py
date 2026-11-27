@@ -1850,6 +1850,12 @@ class TestLabelAndSeriesInjectionHardening:
         assert utils_mod.sanitize_label("a}}b{{c") == "a} }b{ {c"
         assert utils_mod.sanitize_label("{ { literal } }") == "{ { literal } }"
 
+    def test_sanitize_label_neutralizes_brace_runs_of_any_length(self):
+        assert utils_mod.sanitize_label("{{{x}}}") == "{ { {x} } }"
+        assert utils_mod.sanitize_label("{{{{a:1}}}}") == "{ { { {a:1} } } }"
+        long_run = utils_mod.sanitize_label("{{" * 20)
+        assert "{{" not in long_run and "}}" not in long_run
+
     def test_summaries_escape_bracket_delimiters(self):
         summary = fmt.format_items_summary("Devices", "devices", [("Office [Guest]", 5), ("Lab", 2)], 7)
         assert summary == r"[Rendered Devices (2 devices, 7 queries): Office \[Guest\] (5), Lab (2)]"
@@ -1867,6 +1873,14 @@ class TestLabelAndSeriesInjectionHardening:
         series_data = [{"queries": [2, "3", float("inf")]}]
         _, out_series = charts_module.downsample_chart_series(times, series_data, max_points=1)
         assert out_series[0]["queries"] == [2]
+
+    def test_arbitrarily_large_json_integers_stay_finite(self):
+        huge = 10**400
+        times = ["2024-01-01T00:00:00Z"] * 2
+        rows = charts_module.build_chart_data(times, [{"queries": [huge, 1]}])
+        assert [row["series_0"] for row in rows] == [huge, 1]
+        _, out_series = charts_module.downsample_chart_series(times, [{"queries": [huge, 1]}], max_points=1)
+        assert out_series[0]["queries"] == [huge + 1]
 
     def test_queries_card_renders_only_finite_numbers(self):
         times = ["2024-01-01T00:00:00Z"] * 3
