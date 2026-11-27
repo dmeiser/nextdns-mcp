@@ -10,12 +10,20 @@ SPDX-License-Identifier: MIT
 """
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Mapping
 from itertools import islice
 from typing import Any, NamedTuple
 
-from ...charts import resolve_time_point, series_budget_error
+from ...charts import (
+    build_chart_data,
+    cap_chart_series,
+    downsample_chart_series,
+    extract_series_fields,
+    resolve_time_point,
+    series_budget_error,
+)
 from ...errors import ErrorCode, error_payload
 from ...transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ...utils import (
@@ -24,6 +32,8 @@ from ...utils import (
     normalize_time_value,
     sanitize_label,
 )
+
+logger = logging.getLogger(__name__)
 
 # Byte ceiling on the bounded (non-``;series``) analytics endpoints this
 # dashboard fetches. A ``;series`` answer is capped at MAX_SERIES_RESPONSE_BYTES
@@ -119,6 +129,12 @@ def reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
     }
 
 
+def reason_rows(data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Format the reasons table rows, with the share denominator computed once."""
+    total = sum(item_queries(item) for item in data)
+    return [reason_row(item, total) for item in data]
+
+
 def _device_name(item: dict[str, Any]) -> str:
     """Extract a human-readable device name."""
     dev_id = sanitize_label(item.get("id") or "-")
@@ -143,6 +159,12 @@ def device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
         "queries": q,
         "share": _format_share(q, total),
     }
+
+
+def device_rows(data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Format the devices table rows, with the share denominator computed once."""
+    total = sum(item_queries(item) for item in data)
+    return [device_row(item, total) for item in data]
 
 
 def _location_string(geo: dict[str, Any]) -> str:
@@ -184,6 +206,31 @@ def gafam_rows(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[d
     pairs = [_single_gafam_row(item, total) for item in data]
     table_rows: list[dict[str, Any]] = [p[1] for p in pairs]
     return [p[0] for p in pairs], table_rows
+
+
+def prepare_queries_series(series_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """Extract a ``status;series`` payload and shape it for the queries evolution card.
+
+    Returns the ``(chart_data, chart_series_data)`` pair the card renders from,
+    or ``None`` when the payload carries nothing plottable - the card is then
+    omitted from the page rather than rendered empty. The rendered rows are
+    downsampled through the shared chart budget: a multi-year overview answers
+    up to 1,999 intervals, and this card is one of many on the page, so
+    full-resolution rows here bloat the whole ``PrefabApp`` rather than one
+    chart result (issue #550). Payload-shape errors degrade to ``None``; any
+    other failure is a programming error and propagates (FUNC-5 / WORK-324).
+    """
+    try:
+        times, series_data = extract_series_fields(series_payload)
+        if not times or not series_data:
+            return None
+        series_data = cap_chart_series(series_data)
+        chart_times, chart_series_data = downsample_chart_series(times, series_data)
+        chart_data = build_chart_data(chart_times, chart_series_data)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        logger.warning("Error preparing queries series data")
+        return None
+    return chart_data, chart_series_data
 
 
 def _matching_queries(item: dict[str, Any], flag_key: str) -> int:
@@ -354,6 +401,41 @@ class ExtraDashboardPayloads(NamedTuple):
     countries: list[dict[str, Any]]
     encryption: list[dict[str, Any]]
     dnssec: list[dict[str, Any]]
+
+
+class PreparedExtraSections(NamedTuple):
+    """Extra dashboard sections with the aggregate math already done.
+
+    ``components.append_extra_cards`` only lays these out: the GAFAM row pairs
+    and the security rates are computed here, in the data layer, so the UI
+    module consumes prepared inputs (WORK-339).
+    """
+
+    reasons: list[dict[str, Any]]
+    devices: list[dict[str, Any]]
+    ips: list[dict[str, Any]]
+    root_domains: list[dict[str, Any]]
+    gafam_chart: list[dict[str, Any]]
+    gafam_table: list[dict[str, Any]]
+    countries: list[dict[str, Any]]
+    encryption_rate: tuple[int, int, float]
+    dnssec_rate: tuple[int, int, float]
+
+
+def prepare_extra_sections(payloads: ExtraDashboardPayloads) -> PreparedExtraSections:
+    """Compute the aggregates the extra dashboard cards render from."""
+    gafam_chart, gafam_table = gafam_rows(payloads.gafam)
+    return PreparedExtraSections(
+        reasons=payloads.reasons,
+        devices=payloads.devices,
+        ips=payloads.ips,
+        root_domains=payloads.root_domains,
+        gafam_chart=gafam_chart,
+        gafam_table=gafam_table,
+        countries=payloads.countries,
+        encryption_rate=calc_rate(payloads.encryption, "encrypted"),
+        dnssec_rate=calc_rate(payloads.dnssec, "validated"),
+    )
 
 
 def _build_extra_tasks(

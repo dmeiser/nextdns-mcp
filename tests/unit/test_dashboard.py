@@ -41,7 +41,7 @@ class TestDashboardHelpers:
         """The card is the view's direct child, and wrapping never mutates the card."""
         card = Card(title="Card title")
         snapshot = card.model_dump(exclude={"id"})
-        result = ui.wrap_card_result(card, "Summary text")
+        result = tool_mod._wrap_card_result(card, "Summary text")
         assert isinstance(result, ToolResult)
         assert result.content[0].text == "Summary text"
         view = result.structured_content["view"]
@@ -97,14 +97,15 @@ class TestDashboardHelpers:
         assert len(row.children) == 3
 
     def test_build_queries_series_card(self):
-        empty_card = ui._build_queries_series_card({})
-        assert empty_card is None
+        assert data_mod.prepare_queries_series({}) is None
 
         valid_payload = {
             "meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}},
             "data": [{"name": "blocked", "queries": [5]}],
         }
-        card = ui._build_queries_series_card(valid_payload)
+        prepared = data_mod.prepare_queries_series(valid_payload)
+        assert prepared is not None
+        card = ui._build_queries_series_card(*prepared)
         assert card is not None
 
     def test_build_queries_series_card_uses_the_shared_factory(self):
@@ -115,7 +116,9 @@ class TestDashboardHelpers:
             {"name": "blocked", "queries": [10, 20]},
             {"name": "allowed", "queries": [5, 8]},
         ]
-        card = ui._build_queries_series_card({"meta": {"series": {"times": times}}, "data": series_data})
+        prepared = data_mod.prepare_queries_series({"meta": {"series": {"times": times}}, "data": series_data})
+        assert prepared is not None
+        card = ui._build_queries_series_card(*prepared)
         chart = _find_component(card, "AreaChart")
         assert chart is not None
         assert chart.model_dump(exclude={"id"}, by_alias=True) == chart_ui_module.build_timeseries_area_chart(
@@ -130,7 +133,9 @@ class TestDashboardHelpers:
         n = 1999
         times = [f"2024-01-01T{(i // 3600) % 24:02d}:{(i // 60) % 60:02d}:{i % 60:02d}Z" for i in range(n)]
         series_data = [{"name": "blocked", "queries": [2] * n}]
-        card = ui._build_queries_series_card({"meta": {"series": {"times": times}}, "data": series_data})
+        prepared = data_mod.prepare_queries_series({"meta": {"series": {"times": times}}, "data": series_data})
+        assert prepared is not None
+        card = ui._build_queries_series_card(*prepared)
         chart = _find_component(card, "AreaChart")
         assert chart is not None
         assert len(chart.data) <= charts_module.PLOT_CHART_MAX_POINTS
@@ -350,7 +355,9 @@ class TestDashboardRenderCaps:
             "meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}},
             "data": [{"name": f"dev{i}", "queries": [i + 1]} for i in range(100)],
         }
-        chart = _find_component(ui._build_queries_series_card(payload), "AreaChart")
+        prepared = data_mod.prepare_queries_series(payload)
+        assert prepared is not None
+        chart = _find_component(ui._build_queries_series_card(*prepared), "AreaChart")
         assert chart is not None
         assert len(chart.series) == charts_module.CHART_MAX_SERIES
         assert chart.series[-1].label == charts_module.CHART_ROLLUP_LABEL
@@ -911,16 +918,18 @@ class TestDashboardToolsExecution:
             assert "2000-point series budget" in res["error"], section
             assert calls == [], section
 
-    def test_build_queries_series_card_exception_handling(self, monkeypatch):
-        monkeypatch.setattr(ui, "extract_series_fields", MagicMock(side_effect=ValueError("bad data")))
-        assert ui._build_queries_series_card({"meta": {}}) is None
+    def test_prepare_queries_series_exception_handling(self, monkeypatch):
+        monkeypatch.setattr(data_mod, "extract_series_fields", MagicMock(side_effect=ValueError("bad data")))
+        assert data_mod.prepare_queries_series({"meta": {}}) is None
 
-    def test_build_queries_series_card_unexpected_error_propagates(self, monkeypatch):
+    def test_prepare_queries_series_unexpected_error_propagates(self, monkeypatch):
         # Only payload-shape errors degrade to a missing card; anything else
         # is a programming error and must surface (FUNC-5 / WORK-324).
-        monkeypatch.setattr(ui, "extract_series_fields", MagicMock(side_effect=RuntimeError("unexpected failure")))
+        monkeypatch.setattr(
+            data_mod, "extract_series_fields", MagicMock(side_effect=RuntimeError("unexpected failure"))
+        )
         with pytest.raises(RuntimeError, match="unexpected failure"):
-            ui._build_queries_series_card({"meta": {}})
+            data_mod.prepare_queries_series({"meta": {}})
 
     def test_empty_cards_rendering(self):
         # Format summary with empty items

@@ -1,10 +1,11 @@
 """Prefab UI builders for the dashboard tools.
 
 Every function here answers "what does this card look like": cards, charts, tables,
-progress sections, and the page-level views that hold them. It reads analytics rows
-through ``data``, the shared series primitives through ``nextdns_mcp.charts`` and the
-shared chart components through ``nextdns_mcp.chart_ui``; it never calls the transport
-itself, and it never writes the summary text a model reads back - that is ``formatters``.
+progress sections, and the page-level views that hold them. It consumes data the
+caller already prepared - it reads analytics rows through ``data``, the shared chart
+components through ``nextdns_mcp.chart_ui``; it never calls the transport itself, it
+never writes the summary text a model reads back - that is ``formatters`` - and it
+never assembles the MCP ``ToolResult`` - that is ``tool`` (WORK-339).
 
 Names beginning with ``_`` are private to this module: helpers shared with
 the other dashboard modules cross under public names (issue #637), and the
@@ -13,11 +14,9 @@ package's public surface is what ``__init__`` re-exports.
 SPDX-License-Identifier: MIT
 """
 
-import logging
 import re
-from typing import Any
+from typing import Any, cast
 
-from fastmcp.tools.base import ToolResult
 from prefab_ui.app import PrefabApp
 from prefab_ui.components import (
     Card,
@@ -38,33 +37,22 @@ from prefab_ui.components.charts import BarChart, ChartSeries, PieChart
 
 from ...chart_ui import (
     DASHBOARD_THEME,
-    bounded_app_result,
     build_chart_series,
     build_timeseries_area_chart,
 )
-from ...charts import (
-    build_chart_data,
-    cap_chart_categories,
-    cap_chart_series,
-    downsample_chart_series,
-    extract_series_fields,
-)
+from ...charts import cap_chart_categories
 from .data import (
-    ExtraDashboardPayloads,
-    calc_rate,
+    PreparedExtraSections,
     destination_label,
     destination_row,
     device_label,
-    device_row,
+    device_rows,
     domain_label,
-    gafam_rows,
     ip_row,
     item_queries,
     reason_label,
-    reason_row,
+    reason_rows,
 )
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_BAR_COLOR = "#3b82f6"
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -88,12 +76,7 @@ TABLE_PAGE_SIZE = 25
 
 
 def _data_table(columns: list[DataTableColumn], rows: _TableRows) -> DataTable:
-    """Build one bounded, paginated dashboard table.
-
-    Every dashboard table is built here: the row cap, the page size and the
-    pagination flag are one decision shared by six cards, and spelling the
-    kwargs out per card is how the six would drift apart.
-    """
+    """Build one bounded, paginated dashboard table."""
     rendered = rows[:MAX_TABLE_ROWS]
     return DataTable(
         columns=columns,
@@ -118,34 +101,18 @@ def _build_kpi_row(kpis: dict[str, Any]) -> Row:
     return row
 
 
-def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
-    """Build the queries evolution chart card from a time-series payload.
+def _build_queries_series_card(chart_data: list[dict[str, Any]], chart_series_data: list[dict[str, Any]]) -> Card:
+    """Build the queries evolution chart card from prepared, downsampled series rows.
 
-    The rendered rows are downsampled through the shared chart budget: a
-    multi-year overview answers up to 1,999 intervals, and this card is one of
-    many on the page, so full-resolution rows here bloat the whole
-    ``PrefabApp`` rather than one chart result (issue #550). The series count is
-    capped by the same kind of budget before those rows are built, with the
-    omitted series rolled up into one ``Other`` series (issue #789).
+    Validation and downsampling happened upstream in ``data.prepare_queries_series``;
+    this only renders what it is handed.
     """
-    try:
-        times, series_data = extract_series_fields(series_payload)
-        if not times or not series_data:
-            return None
-        series_data = cap_chart_series(series_data)
-        chart_times, chart_series_data = downsample_chart_series(times, series_data)
-        chart_data = build_chart_data(chart_times, chart_series_data)
-        chart_series = build_chart_series(chart_series_data)
-    except (ValueError, TypeError, KeyError, AttributeError):
-        logger.warning("Error preparing queries series data")
-        return None
-
     with Card(css_class="w-full") as card:
         with CardHeader():
             CardTitle("Queries")
             CardDescription("Evolution of queries over time.")
         with CardContent():
-            build_timeseries_area_chart(chart_data, chart_series)
+            build_timeseries_area_chart(chart_data, build_chart_series(chart_series_data))
     return card
 
 
@@ -157,7 +124,7 @@ def _bar_color(color: str) -> str:
 
 
 def _bar_chart(chart_data: list[dict[str, Any]], label: str, color: str = DEFAULT_BAR_COLOR) -> BarChart:
-    """Build a horizontal bar chart with rounded pill bars, capped to the chart budget."""
+    """Build a horizontal bar chart with rounded pill bars."""
     return BarChart(
         data=cap_chart_categories(chart_data),
         series=[ChartSeries(dataKey="queries", label=label, color=_bar_color(color))],
@@ -175,9 +142,7 @@ def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
 
     Upstream counts can arrive netted below zero, and the pie's aggregation
     validation rejects negative values, so every row's count is clamped to
-    zero or above here (issue FUNC-5 / WORK-324). The clamp runs before the
-    render cap so a negative row cannot win a place in the top entries
-    (issue #789).
+    zero or above here (issue FUNC-5 / WORK-324).
     """
     clamped = [{**row, "queries": max(row.get("queries", 0), 0)} for row in chart_data]
     return PieChart(
@@ -251,9 +216,9 @@ def build_domains_card(
 
 
 def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
-    """Build reasons data table."""
-    total = sum(item_queries(item) for item in data)
-    rows: _TableRows = [reason_row(item, total) for item in data]
+    """Build reasons data table from the prepared rows."""
+    # ``reason_rows`` returns plain dicts; DataTable's row union is invariant.
+    rows: _TableRows = cast(_TableRows, reason_rows(data))
     return _data_table(
         [
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
@@ -287,9 +252,9 @@ def build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> C
 
 
 def _devices_table(data: list[dict[str, Any]]) -> DataTable:
-    """Build devices data table."""
-    total = sum(item_queries(item) for item in data)
-    rows: _TableRows = [device_row(item, total) for item in data]
+    """Build devices data table from the prepared rows."""
+    # ``device_rows`` returns plain dicts; DataTable's row union is invariant.
+    rows: _TableRows = cast(_TableRows, device_rows(data))
     return _data_table(
         [
             DataTableColumn(key="device", header="Device", sortable=True),
@@ -446,16 +411,22 @@ def build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto")
 
 def assemble_overview_layout(
     kpis: dict[str, Any],
-    series_payload: dict[str, Any],
+    series_chart: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None,
     resolved_data: list[dict[str, Any]],
     blocked_data: list[dict[str, Any]],
     domain_view: str = "table",
 ) -> Column:
-    """Build the main overview cards layout."""
+    """Build the main overview cards layout from prepared data.
+
+    ``series_chart`` is the ``(chart_data, chart_series_data)`` pair
+    ``data.prepare_queries_series`` produced, or ``None`` when the series
+    payload carried nothing plottable - the card is omitted then.
+    """
     with Column(gap=6, css_class="p-6") as view:
         Heading("NextDNS Overview Dashboard", level=1)
         _build_kpi_row(kpis)
-        _build_queries_series_card(series_payload)
+        if series_chart is not None:
+            _build_queries_series_card(*series_chart)
         with Row(gap=4):
             build_domains_card(
                 "Resolved Domains",
@@ -476,35 +447,32 @@ def assemble_overview_layout(
 
 def append_extra_cards(
     view: Column,
-    payloads: ExtraDashboardPayloads,
+    sections: PreparedExtraSections,
     domain_view: str = "table",
     view_type: str = "auto",
 ) -> None:
     """Append the reasons, devices, IPs, root-domain, GAFAM, countries and security cards.
 
-    The caller fetches; this only lays out. ``payloads`` carries one named field
-    per section, so the pairing between a fetch and the card that renders it is
-    carried by name rather than by position. Only the root-domain card is a domain
-    card, so it alone takes the already-resolved ``domain_view``; the other cards
-    take ``view_type``, which keeps ``"auto"`` and renders each card's own default
-    instead of being coerced to a table (#547).
+    The caller fetches and prepares; this only lays out. ``sections`` carries one
+    named field per section with the aggregate math already done
+    (``data.prepare_extra_sections``), so the pairing between a fetch and the card
+    that renders it is carried by name rather than by position. Only the
+    root-domain card is a domain card, so it alone takes the already-resolved
+    ``domain_view``; the other cards take ``view_type``, which keeps ``"auto"``
+    and renders each card's own default instead of being coerced to a table (#547).
     """
     with view:
         with Row(gap=4):
-            build_reasons_card(payloads.reasons, view_type=view_type)
-            build_devices_card(payloads.devices, view_type=view_type)
+            build_reasons_card(sections.reasons, view_type=view_type)
+            build_devices_card(sections.devices, view_type=view_type)
         with Row(gap=4):
-            build_domains_card("Root Domains", "Aggregate root domains.", payloads.root_domains, view_type=domain_view)
-            build_ips_card(payloads.ips)
+            build_domains_card("Root Domains", "Aggregate root domains.", sections.root_domains, view_type=domain_view)
+            build_ips_card(sections.ips)
         with Row(gap=4):
-            gafam_chart, gafam_table = gafam_rows(payloads.gafam)
-            build_gafam_card(gafam_chart, gafam_table, view_type=view_type)
-            build_destinations_card(payloads.countries, view_type=view_type)
+            build_gafam_card(sections.gafam_chart, sections.gafam_table, view_type=view_type)
+            build_destinations_card(sections.countries, view_type=view_type)
         with Row(gap=4):
-            build_security_card(
-                calc_rate(payloads.encryption, "encrypted"),
-                calc_rate(payloads.dnssec, "validated"),
-            )
+            build_security_card(sections.encryption_rate, sections.dnssec_rate)
 
 
 def build_page_app(view: Column) -> PrefabApp:
@@ -517,10 +485,3 @@ def build_kpi_app(kpis: dict[str, Any]) -> PrefabApp:
     with Column(gap=4, css_class="p-6") as view:
         _build_kpi_row(kpis)
     return build_page_app(view)
-
-
-def wrap_card_result(card: Card, summary_text: str) -> ToolResult | dict[str, Any]:
-    """Wrap a single visual card into a ToolResult, or refuse it over the result ceiling."""
-    with Column(gap=4, css_class="p-6", children=[card]) as view:
-        pass
-    return bounded_app_result(build_page_app(view), summary_text, "dashboard card")
