@@ -27,6 +27,7 @@ from ..transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ..utils import (
     PARTIALS_VALUES,
     build_series_params,
+    is_usable_integer,
     limit_range_error,
     normalize_partials,
     normalize_time_value,
@@ -76,7 +77,23 @@ def _build_series_chart(
 
 
 def _validate_interval_and_limit(interval: int, limit: int) -> dict[str, Any] | None:
-    """The two bounds a caller can overshoot the same way: interval and limit."""
+    """The two bounds a caller can overshoot the same way: interval and limit.
+
+    ``interval`` is type-checked before the band is read: ``float("nan")``
+    compares False against both 60 and 86400, and a fractional interval is not
+    a window the ``;series`` endpoint can answer, so neither survives a bare
+    range check from a direct Python caller (issue #759). The band itself is
+    unchanged and stays inclusive.
+    """
+    if not is_usable_integer(interval):
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"interval must be an integer number of seconds, got {interval}",
+            minimum_interval=60,
+            max_interval=PLOT_INTERVAL_MAX,
+            interval=interval,
+        )
+
     if interval < 60:
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,

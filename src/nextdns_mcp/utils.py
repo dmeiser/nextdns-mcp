@@ -163,22 +163,33 @@ ANALYTICS_LIMIT_MIN = 1
 ANALYTICS_LIMIT_MAX = 500
 
 
+def is_usable_integer(value: Any) -> bool:
+    """Whether ``value`` can be read as an integer argument by a range check.
+
+    ``bool`` is refused rather than read as its integer value: a caller that
+    sent a flag gets an error instead of a silent rewrite of its request.
+    A ``float`` is refused as well, and not only when it is fractional: a
+    range check cannot see either of the two ways a float escapes it.
+    ``float("nan")`` compares False against BOTH bounds (``nan < 1`` and
+    ``nan > 500``), so it passes a ``min <= value <= max`` gate without ever
+    being named, and a fractional float sits inside every integer band, so
+    ``1.5`` is answered as a request for one and a half of something. A
+    direct Python caller reaches these validators without the tool schema
+    in front of it (issue #759).
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def limit_range_error(limit: Any) -> dict[str, Any] | None:
     """The typed error for a ``limit`` outside ``1..500``, or None when it is usable.
 
-    ``bool`` is refused rather than read as its integer value: ``limit=True`` is
-    a caller that sent a flag, and answering it as ``limit=1`` silently rewrites
-    the request in a way the caller cannot see or correct. A non-numeric value
-    (e.g. a string reaching this helper from a direct Python caller, bypassing
-    the tool schema) is refused with the same typed payload instead of raising
-    ``TypeError`` on the range comparison.
+    The value must be an ``int`` in that band; see ``is_usable_integer`` for why
+    ``bool`` and ``float`` are refused before the comparison rather than read
+    through it. A non-numeric value (e.g. a string reaching this helper from a
+    direct Python caller, bypassing the tool schema) is refused with the same
+    typed payload instead of raising ``TypeError`` on the range comparison.
     """
-    if (
-        isinstance(limit, bool)
-        or not isinstance(limit, (int, float))
-        or limit < ANALYTICS_LIMIT_MIN
-        or limit > ANALYTICS_LIMIT_MAX
-    ):
+    if not is_usable_integer(limit) or limit < ANALYTICS_LIMIT_MIN or limit > ANALYTICS_LIMIT_MAX:
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,
             f"limit must be between {ANALYTICS_LIMIT_MIN} and {ANALYTICS_LIMIT_MAX}, got {limit}",
