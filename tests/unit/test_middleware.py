@@ -535,6 +535,28 @@ class TestIgnoredArgumentOwnerHint:
         assert "check the tool's parameter list" in hint
 
 
+class TestOwnPropertyNames:
+    """The alias lookup reads the called tool's cached schema; an unknown tool has none."""
+
+    async def test_an_unknown_tool_has_no_own_parameters(self):
+        from fastmcp import FastMCP
+
+        mw = StripExtraFieldsMiddleware()
+        assert await mw._own_property_names(FastMCP("bare"), "no-such-tool") == ()
+
+    async def test_a_known_tool_returns_its_declared_names(self):
+        from fastmcp import FastMCP
+        from fastmcp.tools import Tool
+
+        async def echo(domain: str, enabled: bool = True) -> str:
+            return domain
+
+        server = FastMCP("bare")
+        server.add_tool(Tool.from_function(echo))
+        mw = StripExtraFieldsMiddleware()
+        assert await mw._own_property_names(server, "echo") == ("domain", "enabled")
+
+
 class TestOwnerIndexIsTheRegisteredCatalog:
     """The owner index comes from the server's registered tools, not the spec.
 
