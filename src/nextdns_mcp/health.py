@@ -209,7 +209,7 @@ def _log_readiness_failure(failure: _HealthFailure) -> None:
     move that detail, not drop it. Both fields are built from a status code, an
     exception type name, and configuration state (`_HealthFailure`), never from a
     request URL or an exception message, so this WARNING needs no redaction
-    pass (`_redacted()` in `client.py` guards those shapes).
+    pass (`redacted()` in `client.py` guards those shapes).
     """
     logger.warning("NextDNS readiness probe failed: class=%s reason=%s", failure.failure_class, failure.reason)
 
