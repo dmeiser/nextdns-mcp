@@ -37,6 +37,7 @@ local inconsistency to rename.
 SPDX-License-Identifier: MIT
 """
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -140,7 +141,9 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         # generative-UI pair - is classified from its own readOnlyHint.
         self._endpoints: dict[str, tuple[str, str]] = dict(endpoints)
         self._word_memos = _CatalogWordMemos()
-        self._compacted_cache: dict[int, tuple[Tool, dict[str, Any], int]] = {}
+        # tool name -> (fingerprint, pins, compacted payload, byte cost); see
+        # _cached_compaction for why the key is the name and not the instance.
+        self._compacted_cache: dict[str, tuple[tuple[Any, ...], tuple[Any, ...], dict[str, Any], int]] = {}
         self._synthetic_tools: dict[str, Tool] = {}
 
     def _catalog_words(self, tools: Sequence[Tool]) -> _CatalogWords:
@@ -279,13 +282,16 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
             _fallback_answer.set(False)
 
     def _cached_compaction(self, tool: Tool) -> tuple[dict[str, Any], int]:
-        """One tool's compacted payload and byte cost, cached per Tool instance.
+        """One tool's compacted payload and byte cost, cached per tool name.
 
-        Keyed on the instance's id, with a strong reference to the Tool kept in
-        the entry so an id cannot be recycled under it. The catalog is
-        registered once at startup; a re-registered tool is a fresh instance
-        with a fresh entry, and the old entry - never hit again - lives until
-        the process does. Same static-catalog assumption as the word memo.
+        Keyed on the tool's NAME with a metadata fingerprint (see
+        _tool_fingerprint), not on the Tool instance: FastMCP hands the search
+        catalog a fresh ``model_copy`` of every app tool on every read, so an
+        instance key missed the cache on each search and leaked one entry per
+        app tool per query for the life of the server. A fingerprint hit
+        reuses the payload; a miss - a re-registered tool, a changed
+        description - rebuilds it and REPLACES the entry, so the cache holds
+        one entry per tool name however often the catalog is re-read.
 
         What an answer receives is the cached payload dict itself, handed out
         as-is. The cache is read-only by convention, not enforcement: nothing
@@ -293,12 +299,65 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         for callers is guaranteed at the wire, not inside the process (see
         _serialize_results for the boundary an in-process write crosses).
         """
-        cached = self._compacted_cache.get(id(tool))
-        if cached is None:
+        fingerprint = _tool_fingerprint(tool)
+        cached = self._compacted_cache.get(tool.name)
+        if cached is None or cached[0] != fingerprint:
             dumped, cost = _compact_entry(tool)
-            cached = (tool, dumped, cost)
-            self._compacted_cache[id(tool)] = cached
-        return cached[1], cached[2]
+            # The identity-compared fingerprint slots ride along as strong
+            # references, so an id cannot be recycled under a live entry.
+            pins = (
+                tool.parameters,
+                tool.output_schema,
+                tool.annotations,
+                tool.icons,
+                tool.execution,
+                tool.task_config,
+            )
+            cached = (fingerprint, pins, dumped, cost)
+            self._compacted_cache[tool.name] = cached
+        return cached[2], cached[3]
+
+
+def _meta_key(meta: Mapping[str, Any] | None) -> str | None:
+    """A content key for a tool's meta dict, which a per-read copy rebuilds.
+
+    The wire meta of an app tool is a fresh dict on every catalog read with
+    the same content, so identity cannot key it; the dict is small (the UI
+    wiring), so content can. ``default=str`` keeps a non-JSON value from
+    failing the render the key only guards.
+    """
+    if not meta:
+        return None
+    return json.dumps(meta, sort_keys=True, default=str)
+
+
+def _tool_fingerprint(tool: Tool) -> tuple[Any, ...]:
+    """A cheap change-detector for the metadata ``_compact_entry`` renders.
+
+    Compares by IDENTITY the structures a shallow ``model_copy`` shares with
+    the registered tool (the schemas, annotations, icons, execution and task
+    config - the heavy fields, and the reason a per-read copy of an unchanged
+    tool must hit the cache), and by CONTENT the small values a copy rebuilds
+    or the dump derives (name, version, title, description, tags, and the
+    wire meta). The entry pins the identity-compared objects, so an id cannot
+    be recycled under a live entry; a re-registered tool with new metadata
+    misses and replaces. An in-place mutation of a shared schema is not
+    detected - the instance key this replaced had the same blind spot.
+    """
+    return (
+        tool.name,
+        tool.version,
+        tool.title,
+        tool.description,
+        id(tool.parameters),
+        id(tool.output_schema),
+        id(tool.annotations),
+        id(tool.icons),
+        id(tool.execution),
+        id(tool.task_config),
+        tuple(sorted(tool.tags)),
+        _meta_key(tool.meta),
+    )
 
 
 def _partition_named(results: Sequence[Tool], named: set[str]) -> tuple[list[Tool], list[Tool]]:
