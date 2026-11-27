@@ -34,6 +34,7 @@ from .generative_sandbox import (
     MAX_RESULT_BYTES,
     SANDBOX_START_TIMEOUT,
     DenoPyodideSandbox,
+    WirePayload,
 )
 
 logger = logging.getLogger(__name__)
@@ -121,13 +122,19 @@ def _guard_string_data(data: str) -> dict[str, Any] | None:
 
 
 def _guard_object_data(data: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Validate the type before serializing so non-dict values raise ValueError, not TypeError from json.dumps."""
+    """Validate the type before serializing so non-dict values raise ValueError, not TypeError from json.dumps.
+
+    The serialization that measures ``MAX_DATA_BYTES`` is the one the request
+    frame needs, so it is handed on instead of measured and thrown away; see
+    :class:`WirePayload`.
+    """
     parsed_data = _parse_ui_data(data)
     if parsed_data is None:
         return None
-    if len(json.dumps(parsed_data).encode("utf-8")) > MAX_DATA_BYTES:
+    data_json = json.dumps(parsed_data)
+    if len(data_json.encode("utf-8")) > MAX_DATA_BYTES:
         raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
-    return parsed_data
+    return WirePayload(parsed_data, data_json)
 
 
 def _validated_payload(code: str, data: str | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -142,6 +149,12 @@ def _validated_payload(code: str, data: str | dict[str, Any] | None) -> dict[str
 
 def _result_size_bytes(result: Any) -> int:
     """Measure the serialized byte size of a sandbox result.
+
+    This cap is not the bounded stdout read's cap. That one limits the worker's
+    whole answer line, in the worker's own compact wire form, to stop the host
+    buffering a runaway view; this one limits the JSON the client is handed. The
+    two measures are not equivalent, so both stay — folding them would move a
+    user-visible cap.
 
     JSON is measured as UTF-8, not as ASCII-escaped text, so multibyte output is
     not charged six bytes per character. A serializer that fails is an error:

@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,7 +34,7 @@ from nextdns_mcp.generative import (
     _parse_ui_data,
     _result_size_bytes,
 )
-from nextdns_mcp.generative_sandbox import MAX_RESULT_BYTES
+from nextdns_mcp.generative_sandbox import MAX_RESULT_BYTES, WirePayload
 
 
 def test_parse_ui_data():
@@ -708,6 +709,19 @@ async def test_generate_ui_serializes_valid_dict_data_once():
         assert mock_exec.call_args[1]["data"] == {"a": 1}
 
 
+def test_guard_object_data_hands_on_the_buffer_it_measured():
+    """The measured serialization is the one the request frame needs, not a throwaway.
+
+    Pre-fix the guard serialized the payload, counted it, and discarded the text,
+    so the sandbox serialized the same object again for the wire frame.
+    """
+    payload = {"k": "v", "nested": {"n": [1, 2]}}
+    guarded = generative_module._validated_payload("print(1)", payload)
+    assert isinstance(guarded, WirePayload)
+    assert guarded == payload, "the payload must stay equal to the dict the tool was given"
+    assert guarded.json_text == json.dumps(payload)
+
+
 @pytest.mark.asyncio
 async def test_generate_ui_data_size_limit():
     gen_ui = PrefabGenerativeUI()
@@ -856,13 +870,16 @@ class _StubProcess:
     """A worker stand-in that speaks the sandbox wire protocol.
 
     Answers are built from the request being answered, so a test can pin the
-    request framing (id/code/data) while the answer's id still matches. The
-    lifecycle methods record what the sandbox did to the worker.
+    request framing (id/code/data) while the answer's id still matches. The raw
+    frames are kept next to the decoded ones, so a test can pin the exact bytes
+    written to the worker. The lifecycle methods record what the sandbox did to
+    the worker.
     """
 
     def __init__(self, responder: Callable[[dict[str, Any]], bytes] | None = None) -> None:
         self._responder = responder or _result_answer
         self.requests: list[dict[str, Any]] = []
+        self.frames: list[bytes] = []
         self._answered = 0
         self._pending = b""
         self.stdin = _StubStream(self)
@@ -873,6 +890,7 @@ class _StubProcess:
         self.terminate_calls = 0
 
     def add_request(self, frame: bytes) -> None:
+        self.frames.append(frame)
         self._pending += frame
         while b"\n" in self._pending:
             line, self._pending = self._pending.split(b"\n", 1)
@@ -929,6 +947,43 @@ async def test_run_frames_one_request_per_execution_and_discards_the_worker():
     # The worker is discarded after the execution: a fresh one starts next time.
     assert sandbox._process is None
     assert proc.terminated
+
+
+@pytest.mark.parametrize(
+    "data",
+    [None, {"k": "v"}, WirePayload({"k": "v"}, json.dumps({"k": "v"}))],
+)
+def test_request_frame_bytes_are_unchanged_by_the_reused_payload(data: dict[str, Any] | None) -> None:
+    """Splicing the payload's text into the frame changes the passes, not the wire bytes."""
+    request_id = "0" * 32
+    code = "print('hi')"
+    legacy = (json.dumps({"id": request_id, "code": code, "data": data or {}}) + "\n").encode()
+    assert sandbox_module._request_frame(request_id, code, data) == legacy
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_serialize_a_guarded_payload_a_second_time(monkeypatch) -> None:
+    """Oracle: the request path serializes `data` once, in the size guard.
+
+    Pre-fix, ``_exchange`` walked the payload again to build the frame, so a
+    ``json.dumps`` over the payload dict was unavoidable on every request. With the
+    guard's buffer carried on the payload, any dict serialization on this path is
+    the duplicate this ticket names.
+    """
+    real_dumps = json.dumps
+
+    def _no_dict_dumps(obj: Any, *args: Any, **kwargs: Any) -> str:
+        assert not isinstance(obj, dict), "the data payload was serialized a second time"
+        return real_dumps(obj, *args, **kwargs)
+
+    monkeypatch.setattr(sandbox_module, "json", SimpleNamespace(dumps=_no_dict_dumps, loads=json.loads))
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    proc = _StubProcess()
+    sandbox._process = proc
+
+    assert await sandbox.run("print(1)", data=WirePayload({"k": "v"}, '{"k": "v"}')) == {"view": "ok"}
+    (frame,) = proc.frames
+    assert b'", "data": {"k": "v"}}\n' in frame
 
 
 @pytest.mark.asyncio
