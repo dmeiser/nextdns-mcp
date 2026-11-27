@@ -493,7 +493,7 @@ class TestToolSearchServerWiring:
         async with Client(server) as client:
             first = await client.call_tool("search_tools", {"query": "addToDenylist"}, raise_on_error=False)
             names = [t["name"] for t in first.data]
-            cached = {id(payload) for payload, _ in (v[1:] for v in transform._compacted_cache.values())}
+            cached = {id(v[2]) for v in transform._compacted_cache.values()}
             assert names and not any(id(t) in cached for t in first.data)
             for entry in first.data:
                 entry["name"] = "mutated-through-the-answer"
@@ -1176,9 +1176,9 @@ class TestMemoizedCatalogStructures:
     The word memo keys on the catalog's tool NAMES: the ordered-names tuple is
     the hot-path key (no sort), and the sorted-names store it falls back to
     keeps one memo shared across orderings of the same catalog. The
-    compaction cache keys on the Tool instance and holds a strong reference so
-    an id cannot be recycled under it. A replaced catalog is a new name-set /
-    a new instance and rebuilds.
+    compaction cache keys on the tool NAME with a metadata fingerprint (see
+    TestCompactionCacheKeying). A replaced catalog is a new name-set and
+    rebuilds.
     """
 
     def test_catalog_words_are_memoized_by_tool_names(self):
@@ -1264,6 +1264,78 @@ class TestMemoizedCatalogStructures:
         assert transform._make_search_tool() is transform._make_search_tool()
         assert transform._make_call_tool() is transform._make_call_tool()
         assert transform._make_search_tool() is not transform._make_call_tool()
+
+
+class TestCompactionCacheKeying:
+    """The compaction cache keys on tool NAME, not Tool instance (PERF-4).
+
+    FastMCP hands the search catalog a fresh ``model_copy`` of every app tool
+    on every read, so an instance key missed the cache on each search and
+    leaked one entry per app tool per query for the life of the server. The
+    fixed cache holds one entry per tool name: a per-read copy of an
+    unchanged tool hits it, and changed metadata replaces the entry.
+    """
+
+    async def test_repeated_searches_hold_the_cache_size_steady(self, monkeypatch):
+        """The reported leak: three rounds of the two UI-tool searches.
+
+        With the instance key the cache grew 12 -> 14 -> 16 over the rounds,
+        one fresh entry per app tool per round. The fixed cache is stable
+        after the first round, and both tools are still returned every time.
+        """
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        server = build_mcp_server()
+        transform = next(t for t in server._transforms if isinstance(t, ts.FallbackBM25SearchTransform))
+        queries = ("generate analytics plot", "show me a dashboard of my account")
+        async with Client(server) as client:
+            sizes = []
+            for _ in range(3):
+                for query in queries:
+                    found = await client.call_tool("search_tools", {"query": query}, raise_on_error=False)
+                    assert found.data, f"no results for {query!r}"
+                sizes.append(len(transform._compacted_cache))
+        assert sizes[0] == sizes[1] == sizes[2], f"the cache grew across identical rounds: {sizes}"
+        assert "plotAnalytics" in transform._compacted_cache
+        assert "overviewDashboard" in transform._compacted_cache
+
+    def test_a_per_read_copy_of_an_app_tool_hits_the_same_entry(self):
+        """The app-tool shape: a shallow model_copy that rebuilds only meta.
+
+        FastMCP's per-read copy shares every structure with the registered
+        tool and rebuilds the meta dict with the same content; that copy must
+        hit the cache, not open a new entry.
+        """
+        from fastmcp.tools.base import Tool
+
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        tool = Tool.from_function(
+            lambda: None,
+            name="aTool",
+            description="does a thing",
+            meta={"ui": {"resourceUri": "ui://renderer"}},
+        )
+        first, _ = transform._cached_compaction(tool)
+        copy = tool.model_copy(update={"meta": {"ui": {"resourceUri": "ui://renderer"}}})
+        second, _ = transform._cached_compaction(copy)
+        assert second is first
+        assert len(transform._compacted_cache) == 1
+
+    def test_changed_metadata_replaces_the_entry_under_the_same_name(self):
+        """A re-registered tool with changed metadata refreshes the payload."""
+        from fastmcp.tools.base import Tool
+
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        before = Tool.from_function(lambda: None, name="aTool", description="does a thing")
+        first, _ = transform._cached_compaction(before)
+        assert len(transform._compacted_cache) == 1
+        after = Tool.from_function(lambda: None, name="aTool", description="does another thing")
+        second, _ = transform._cached_compaction(after)
+        assert second is not first
+        assert second["description"] == "does another thing"
+        assert len(transform._compacted_cache) == 1
 
 
 class TestAnswerByteBudget:
