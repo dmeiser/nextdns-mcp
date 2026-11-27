@@ -105,7 +105,7 @@ def test_multiple_tab_blocks_without_charts_are_accepted():
 
 
 def test_with_tabstrigger_chart_is_rejected():
-    """TabsTrigger is aliased to Tab in the prelude, so its charts are nested too."""
+    """A hallucinated TabsTrigger keeps its charts nested even though the prelude no longer aliases it."""
     code = "with TabsTrigger('Charts'):\n    AreaChart(data=[], series=[])\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
         _validate_chart_placement(code)
@@ -256,6 +256,63 @@ def test_deeply_nested_chart_under_tab_is_still_rejected():
         deep = f"[{deep}]"
     with pytest.raises(ValueError, match="Recharts chart components"):
         _validate_chart_placement(f"Tab(children={deep})\n")
+
+
+def _prelude_namespace() -> dict[str, Any]:
+    """A namespace holding exactly what the sandbox prelude defines."""
+    namespace: dict[str, Any] = {}
+    exec(SANDBOX_PRELUDE, namespace)  # noqa: S102
+    return namespace
+
+
+def test_prelude_defines_no_shadcn_tab_aliases():
+    """The TabsList/TabsTrigger/TabsContent shims built empty Tabs and rendered every panel at once."""
+    namespace = _prelude_namespace()
+    for alias in ("TabsList", "TabsTrigger", "TabsContent"):
+        assert alias not in namespace
+    assert namespace["Tabs"].__name__ == "Tabs"
+    assert namespace["Tab"].__name__ == "Tab"
+
+
+def test_prelude_native_tabs_nest_one_panel_per_tab():
+    """The documented Tabs/Tab form keeps each panel inside its own Tab node."""
+    namespace = _prelude_namespace()
+    exec(  # noqa: S102
+        "with PrefabApp() as app:\n"
+        "    with Tabs():\n"
+        "        with Tab('General', value='general'):\n"
+        "            Text('general panel')\n"
+        "        with Tab('Advanced', value='advanced'):\n"
+        "            Text('advanced panel')\n",
+        namespace,
+    )
+    tabs = namespace["app"].view.children[0]
+    assert tabs.type == "Tabs"
+    assert [panel.type for panel in tabs.children] == ["Tab", "Tab"]
+    assert [[child.content for child in panel.children] for panel in tabs.children] == [
+        ["general panel"],
+        ["advanced panel"],
+    ]
+
+
+def test_prelude_data_table_keeps_rows_through_an_explicit_import():
+    """An explicit DataTable import replaces the positional shim, so the docs name keyword arguments."""
+    namespace = _prelude_namespace()
+    exec(  # noqa: S102
+        "from prefab_ui.components import DataTable\n"
+        "table = DataTable(columns=[{'key': 'zone', 'header': 'Zone'}], rows=[{'zone': 'a'}])\n",
+        namespace,
+    )
+    assert namespace["table"].rows == [{"zone": "a"}]
+
+
+def test_generate_doc_names_the_native_tab_and_data_table_forms():
+    """The tool instructions carry the tab form and the keyword DataTable call the sandbox accepts."""
+    doc = generative_module.GENERATE_DOC
+    assert "CRITICAL CHART SIZING RULE" in doc
+    assert "`Tabs` container" in doc
+    assert all(alias in doc for alias in ("TabsList", "TabsTrigger", "TabsContent"))
+    assert "DataTable(columns=[...], rows=[...])" in doc
 
 
 def test_build_renderer_resource():

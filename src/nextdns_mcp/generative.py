@@ -43,10 +43,6 @@ from prefab_ui.components import *
 from prefab_ui.components.charts import *
 from prefab_ui.components.control_flow import *
 
-# Component aliases for common React / shadcn hallucinated imports
-TabsList = Div
-TabsTrigger = Tab
-TabsContent = Div
 def DonutChart(*args, **kwargs):
     kwargs.setdefault("inner_radius", 50)
     return PieChart(*args, **kwargs)
@@ -72,6 +68,12 @@ GENERATE_DOC = (
     "inside Tabs or Tab components. Tab panels initialize with 0px width, which causes Recharts "
     "to render completely blank/invisible. Always place charts in Column, Row, Grid, or Card "
     "containers outside of Tabs.\n\n"
+    "TAB COMPONENTS: Prefab's native form is a `Tabs` container whose children are `Tab` "
+    "components, and each `Tab` holds its own panel content: `with Tabs():` wrapping "
+    "`with Tab('General'):` blocks. `TabsList`, `TabsTrigger` and `TabsContent` are NOT available "
+    "and code that uses them fails.\n\n"
+    "DATA TABLE: always pass `columns` and `rows` by keyword, "
+    "`DataTable(columns=[...], rows=[...])`; positional arguments are not supported.\n\n"
 )
 
 
