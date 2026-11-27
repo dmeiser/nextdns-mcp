@@ -618,17 +618,20 @@ class TestE2EWorkflowReadinessWait:
 
 
 class TestE2EWorkflowLiveSerialization:
-    """The live suite is serialized repo-wide, not per-ref.
+    """The live suite is serialized per ref; refs never cancel each other.
 
-    The upstream quota is account-level, so a per-ref concurrency group
-    (``${{ github.ref }}``) serializes nothing across the many branches that
-    push to this repository at once; that is how runs came to answer 92-216
-    `429 Too Many Requests` while a neighbouring run held the quota. The
-    workflow holds a single constant group at workflow level so at most one E2E
-    run executes at a time across every branch/PR/event (without interleaving
-    matrix legs across runs), and it must not cancel a suite in progress: a
-    cancelled write phase never reaches its teardown, which is how test profiles
-    leaked. Non-E2E workflows stay free to run concurrently.
+    A single constant concurrency group (the previous shape) held one pending
+    run repo-wide, so ANY ref's arrival — a merge to main, another PR's push,
+    another lane's dispatch — superseded a pending run belonging to a
+    different ref. Under parallel PR load every pending run was cancelled
+    before its jobs started (``conclusion: cancelled, jobs: []``), which made
+    the required E2E contexts unattainable for every PR head (WORK-381).
+    Keying the group to ``${{ github.ref }}`` confines supersession to the
+    same ref: only a newer run for that ref replaces its pending run. The
+    account-level quota race this re-opens across refs is absorbed by the
+    suite's bounded 429 backoff, and a suite in progress must still never be
+    cancelled: a cancelled write phase never reaches its teardown, which is
+    how test profiles leaked. Non-E2E workflows stay free to run concurrently.
     """
 
     WORKFLOWS_DIR = Path(__file__).resolve().parents[2] / ".github" / "workflows"
@@ -642,11 +645,13 @@ class TestE2EWorkflowLiveSerialization:
     def _job(self) -> dict:
         return self._doc()["jobs"]["e2e"]
 
-    def test_the_workflow_queues_on_a_constant_group(self):
+    def test_the_workflow_queues_per_ref(self):
         concurrency = self._doc().get("concurrency")
-        assert concurrency is not None, "the E2E workflow has no shared concurrency group; runs overlap across refs"
-        # Constant: no ${{ github.ref }} in the key, or it is per-ref again.
-        assert "${{" not in concurrency["group"]
+        assert concurrency is not None, "the E2E workflow has no concurrency group; supersession is undefined"
+        # Per-ref: only a newer run for the SAME ref may supersede a pending
+        # run, so no run is ever cancelled by a run belonging to a different
+        # ref. A constant group is the WORK-381 regression.
+        assert concurrency["group"] == "nextdns-live-api-${{ github.ref }}"
 
     def test_the_workflow_never_cancels_a_suite_in_progress(self):
         assert self._doc()["concurrency"]["cancel-in-progress"] is False
