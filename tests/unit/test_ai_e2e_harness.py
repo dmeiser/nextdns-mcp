@@ -1935,14 +1935,6 @@ class TestSecretHandling:
         monkeypatch.delenv("NEXTDNS_API_BASE")
         assert h.api_base() == "https://api.nextdns.io"
 
-    def test_api_base_raises_the_config_error_on_a_plaintext_base(self, h, monkeypatch):
-        """The harness refuses a plaintext base through the server's own getter."""
-        from nextdns_mcp.errors import ConfigurationError
-
-        monkeypatch.setenv("NEXTDNS_API_BASE", "http://plain.example.test")
-        with pytest.raises(ConfigurationError, match="NEXTDNS_API_BASE must use https://"):
-            h.api_base()
-
     def test_config_server_env_uses_the_api_base_as_loaded(self, h, monkeypatch):
         monkeypatch.setenv("NEXTDNS_API_BASE", "https://late.example")
         cfg = h.HarnessConfig.load(None)

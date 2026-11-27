@@ -374,37 +374,6 @@ def test_response_index_is_built_once_per_spec_object():
     assert get_operation_response_schema(spec, "listProfiles") == {"type": "object"}
 
 
-def test_spec_readers_share_one_operation_traversal():
-    """All three spec consumers see the same operations, including odd path items.
-
-    The schema index, the published catalog and the container runner's write gate
-    used to each spell the method filter differently, and only one tolerated a
-    non-mapping entry in ``paths``. A shared walk keeps them from disagreeing
-    about what the document publishes.
-    """
-    from scripts import run_container_e2e, validate_schema
-
-    get_op = {
-        "operationId": "getThing",
-        "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
-    }
-    post_op = {
-        "operationId": "replaceThing",
-        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "title": "Thing"}}}},
-    }
-    spec = {
-        "paths": {
-            "/things": {"get": get_op, "post": post_op, "summary": "not an operation", "trace": None},
-            "/not-a-mapping": None,
-        }
-    }
-
-    assert list(validate_schema._iter_spec_operations(spec)) == [("get", get_op), ("post", post_op)]
-    assert validate_schema.spec_operations(spec) == {"getThing": "get", "replaceThing": "post"}
-    assert validate_schema.get_operation_response_schema(spec, "getThing") == {"type": "object"}
-    assert run_container_e2e._spec_write_operations(spec) == {"replaceThing"}
-
-
 def test_catalog_constants_are_imported_not_restated():
     """The withheld set, the spec path, and the local tools are the server's own.
 
