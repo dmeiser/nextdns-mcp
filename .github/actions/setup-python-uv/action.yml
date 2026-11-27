@@ -1,0 +1,32 @@
+name: Set up Python and uv
+description: Install uv and, when requested, a managed Python version for CI jobs.
+
+inputs:
+  python-version:
+    description: "Managed Python version to install. Leave empty to use the runner's Python."
+    required: false
+    default: ''
+  enable-cache:
+    description: "Forwarded to astral-sh/setup-uv (true, false, or auto)."
+    required: false
+    default: 'auto'
+  activate-environment:
+    description: "Forwarded to astral-sh/setup-uv to create and activate a uv venv."
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: ${{ inputs.enable-cache }}
+        activate-environment: ${{ inputs.activate-environment }}
+
+    - name: Set up Python
+      if: ${{ inputs.python-version != '' }}
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+      run: uv python install "$PYTHON_VERSION"
