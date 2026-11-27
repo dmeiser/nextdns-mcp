@@ -113,12 +113,12 @@ All code changes must meet the following quality metrics before work is consider
 
 1. Run `ruff` to check and fix lint issues:
    ```bash
-   uv run ruff check --fix src/ tests/ scripts/
+   uv run ruff check --fix src/ tests/
    ```
 
 2. Run `ruff format` to format code:
    ```bash
-   uv run ruff format src/ tests/ scripts/
+   uv run ruff format src/ tests/
    ```
 
 3. Run `mypy` for type checking:
@@ -194,8 +194,8 @@ uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/run_c
 
 Before claiming work is complete:
 
-- [ ] Run `uv run ruff check --fix src/ tests/ scripts/`
-- [ ] Run `uv run ruff format src/ tests/ scripts/`
+- [ ] Run `uv run ruff check --fix src/ tests/`
+- [ ] Run `uv run ruff format src/ tests/`
 - [ ] Run `uv run mypy src/` (0 errors)
 - [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (100% statements and branches, **ALL tests pass**)
 - [ ] Apply the deletion test in the **Comments** section below to every comment this change adds or edits
