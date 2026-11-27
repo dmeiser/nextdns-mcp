@@ -38,10 +38,35 @@ from .generative_sandbox import (
 
 logger = logging.getLogger(__name__)
 
+# Passive component allowlist exposed to generated code: every export of
+# prefab_ui.components except Embed, whose un-sandboxed srcDoc iframe is
+# active content. The prelude is ergonomics, not the security boundary —
+# model code can import anything inside the sandbox — so
+# _validate_generated_tree re-checks the returned tree server-side.
 SANDBOX_PRELUDE = """from prefab_ui.app import PrefabApp
-from prefab_ui.components import *
-from prefab_ui.components.charts import *
-from prefab_ui.components.control_flow import *
+from prefab_ui.components import (
+    ERROR, EVENT, H1, H2, H3, H4, INDEX, ITEM, RESULT, STATE,
+    Accordion, AccordionItem, Alert, AlertDescription, AlertTitle, Audio, Badge,
+    BlockQuote, Button, ButtonGroup, Calendar, Card, CardContent, CardDescription,
+    CardFooter, CardHeader, CardTitle, Carousel, Checkbox, ChoiceCard, Code, Column,
+    Combobox, ComboboxGroup, ComboboxLabel, ComboboxOption, ComboboxSeparator,
+    Component, Container, ContainerComponent, Dashboard, DashboardItem, DataTable,
+    DataTableColumn, DatePicker, Dialog, Div, Dot, DropZone, ExpandableRow, Field,
+    FieldContent, FieldDescription, FieldError, FieldTitle, Form, Grid, GridItem,
+    Heading, Histogram, HoverCard, Icon, Image, Input, Kbd, Label, Large, Lead,
+    Link, Loader, Markdown, Mermaid, Metric, Muted, P, Page, Pages, Popover,
+    Progress, Radio, RadioGroup, Ring, Row, Rx, RxStr, Select, SelectGroup,
+    SelectLabel, SelectOption, SelectSeparator, Separator, Slider, Slot, Small,
+    Span, StatefulMixin, Svg, Switch, Tab, Table, TableBody, TableCaption,
+    TableCell, TableFooter, TableHead, TableHeader, TableRow, Tabs, Text,
+    Textarea, Tooltip, Video, defer, insert,
+)
+from prefab_ui.components.charts import (
+    AreaChart, BarChart, ChartSeries, ChartValueFormat, LineChart, PieChart,
+    RadarChart, RadialChart, ScatterChart, Sparkline, SparklineCurve,
+    SparklineMode, SparklineVariant, WaterfallChart,
+)
+from prefab_ui.components.control_flow import Elif, Else, ForEach, If
 
 def DonutChart(*args, **kwargs):
     kwargs.setdefault("inner_radius", 50)
@@ -68,12 +93,11 @@ GENERATE_DOC = (
     "inside Tabs or Tab components. Tab panels initialize with 0px width, which causes Recharts "
     "to render completely blank/invisible. Always place charts in Column, Row, Grid, or Card "
     "containers outside of Tabs.\n\n"
-    "TAB COMPONENTS: Prefab's native form is a `Tabs` container whose children are `Tab` "
-    "components, and each `Tab` holds its own panel content: `with Tabs():` wrapping "
-    "`with Tab('General'):` blocks. `TabsList`, `TabsTrigger` and `TabsContent` are NOT available "
-    "and code that uses them fails.\n\n"
     "DATA TABLE: always pass `columns` and `rows` by keyword, "
     "`DataTable(columns=[...], rows=[...])`; positional arguments are not supported.\n\n"
+    "GENERATED UIs ARE DISPLAY-ONLY: Embed components, external stylesheets, inline CSS, "
+    "MCP bridge actions (CallTool, SendMessage, UpdateContext, Fetch), non-https:// links, "
+    "and state keys starting with '$' are rejected server-side.\n\n"
 )
 
 
@@ -161,6 +185,122 @@ def _result_size_bytes(result: Any) -> int:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"result serialization via model_dump_json failed: {exc}") from exc
     return len(str(result).encode("utf-8"))
+
+
+# Wire shapes a generated tree may never carry (SEC-3, nextdns-mcp#749).
+# prefab_generative.execute returns PrefabApp.from_json, which builds the app
+# with model_construct and skips every pydantic guard, so the renderer would
+# otherwise receive whatever the model-authored code produced.
+_BLOCKED_COMPONENT_TYPES = frozenset({"Embed"})
+_BLOCKED_ACTIONS = frozenset({"toolCall", "sendMessage", "updateContext", "fetch"})
+_OPEN_LINK_ACTION = "openLink"
+_LINK_COMPONENT_TYPE = "Link"
+_RESERVED_STATE_PREFIX = "$"
+
+
+def _reject_tree(reason: str) -> None:
+    raise ValueError(f"Generated UI rejected: {reason}")
+
+
+def _is_reserved_state_key(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith(_RESERVED_STATE_PREFIX)
+
+
+def _require_https_url(value: Any, context: str) -> None:
+    if not isinstance(value, str) or not value.strip().lower().startswith("https://"):
+        _reject_tree(f"{context} must be an https:// URL, got {value!r}")
+
+
+def _reject_reserved_key(value: Any, context: str) -> None:
+    if _is_reserved_state_key(value):
+        _reject_tree(f"{context} {value!r} uses the reserved '$' state-key prefix")
+
+
+def _check_reserved_state_map(state: Any) -> None:
+    if isinstance(state, dict) and any(_is_reserved_state_key(key) for key in state):
+        _reject_tree("initial state uses a reserved '$'-prefixed state key")
+
+
+def _check_component_type(node: dict[str, Any]) -> None:
+    node_type = node.get("type")
+    if node_type in _BLOCKED_COMPONENT_TYPES:
+        _reject_tree(f"component type {node_type!r} is not allowed in generated UIs")
+
+
+def _check_link_target(node: dict[str, Any]) -> None:
+    if node.get("type") == _LINK_COMPONENT_TYPE and node.get("href") is not None:
+        _require_https_url(node.get("href"), "Link href")
+
+
+def _check_action(node: dict[str, Any]) -> None:
+    action = node.get("action")
+    if not isinstance(action, str):
+        return
+    if action in _BLOCKED_ACTIONS:
+        _reject_tree(f"action {action!r} is not allowed in generated UIs")
+    if action == _OPEN_LINK_ACTION:
+        _require_https_url(node.get("url"), "openLink action url")
+    _reject_reserved_key(node.get("key"), f"{action} action state key")
+
+
+def _check_state_key_name(node: dict[str, Any]) -> None:
+    node_type = node.get("type")
+    if node_type is not None:
+        _reject_reserved_key(node.get("name"), f"{node_type} component state key")
+
+
+def _check_wire_node(node: dict[str, Any]) -> None:
+    _check_component_type(node)
+    _check_action(node)
+    _check_link_target(node)
+    _check_state_key_name(node)
+    _check_reserved_state_map(node.get("state"))
+
+
+def _walk_wire_tree(wire: dict[str, Any]) -> None:
+    """Visit every dict/list in the wire tree iteratively (no recursion)."""
+    stack: list[Any] = [wire]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            _check_wire_node(node)
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+
+
+def _wire_dict(result: Any) -> dict[str, Any]:
+    to_json = getattr(result, "to_json", None)
+    wire = to_json() if callable(to_json) else None
+    if not isinstance(wire, dict):
+        raise ValueError(  # noqa: TRY004
+            "generate_prefab_ui expected the sandbox to return a Prefab app"
+        )
+    return wire
+
+
+def _reject_app_level_assets(wire: dict[str, Any]) -> None:
+    if wire.get("stylesheets"):
+        _reject_tree("external stylesheets are not allowed in generated UIs")
+    if wire.get("css"):
+        _reject_tree("inline CSS is not allowed in generated UIs")
+
+
+def _validate_generated_tree(result: Any) -> None:
+    """Reject active or unvalidated content in a sandbox-built Prefab tree.
+
+    The sandbox hands back ``PrefabApp.from_json`` output, which is built with
+    ``model_construct`` and bypasses pydantic validation, so this gate checks
+    the serialized wire tree — iteratively, before the result leaves the
+    server — for the shapes the renderer would otherwise execute or embed:
+    MCP bridge actions (``toolCall``, ``sendMessage``, ``updateContext``,
+    ``fetch``), ``Embed`` iframes, non-HTTPS ``Link``/``openLink`` targets,
+    injected stylesheets/CSS (including theme CSS, which serializes into
+    ``css``), and reserved ``$``-prefixed state keys.
+    """
+    wire = _wire_dict(result)
+    _reject_app_level_assets(wire)
+    _walk_wire_tree(wire)
 
 
 def _renderer_csp() -> ResourceCSP:
@@ -306,11 +446,12 @@ class PrefabGenerativeUI(Provider):
 def _build_generate_tool(
     name: str, app_config: AppConfig, run: Callable[[str, dict[str, Any] | None], Awaitable[PrefabApp]]
 ) -> Tool:
-    """The generate_prefab_ui tool: size guards and placement guard, then the sandbox run."""
+    """The generate_prefab_ui tool: size and placement guards, the sandbox run, then tree validation."""
 
     async def generate_ui(code: str, data: str | dict[str, Any] | None = None) -> PrefabApp:
         payload = _validated_payload(code, data)
         result = await run(f"{SANDBOX_PRELUDE}\n{code}", payload)
+        _validate_generated_tree(result)
         result_size = _result_size_bytes(result)
         if result_size > MAX_RESULT_BYTES:
             raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
