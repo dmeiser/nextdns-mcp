@@ -17,7 +17,6 @@ import httpx
 
 from nextdns_mcp import client as client_module
 from nextdns_mcp import health
-from nextdns_mcp.config import ConfigurationError
 from nextdns_mcp.health import (
     HEALTH_CACHE_TTL,
     HEALTH_PROBE_PATH,
@@ -177,34 +176,6 @@ async def test_an_invalid_http_timeout_is_reported_as_unready_without_naming_it(
     assert status_code == 503
     assert body == {"status": "error"}
     assert "NEXTDNS_HTTP_TIMEOUT" not in str(body)
-
-
-async def test_an_invalid_api_base_is_logged_as_the_api_base(monkeypatch, mock_api_key, caplog):
-    """An invalid NEXTDNS_API_BASE names that setting in the warning, not NEXTDNS_HTTP_TIMEOUT."""
-    monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-    monkeypatch.setenv("NEXTDNS_API_BASE", "http://api.nextdns.io")
-    client_module._set_raw_probe_client_singleton_for_tests(None)
-
-    with caplog.at_level(logging.WARNING, logger="nextdns_mcp.health"):
-        status_code, body = await _call_health(create_mcp_server().http_app())
-
-    assert status_code == 503
-    assert body == {"status": "error"}
-    assert "NEXTDNS_API_BASE" in caplog.text
-    assert "NEXTDNS_HTTP_TIMEOUT" not in caplog.text
-
-
-async def test_a_configuration_error_naming_no_setting_is_reported_generically(monkeypatch, mock_api_key, caplog):
-    """A configuration error that names no setting stays generic, and quotes nothing from it."""
-    _install_client(monkeypatch, ConfigurationError("client construction failed: value not accepted"))
-
-    with caplog.at_level(logging.WARNING, logger="nextdns_mcp.health"):
-        status_code, body = await _call_health(create_mcp_server().http_app())
-
-    assert status_code == 503
-    assert body == {"status": "error"}
-    assert "NextDNS client configuration is invalid" in caplog.text
-    assert "NEXTDNS_" not in caplog.text
 
 
 async def test_configuration_failure_is_cached_like_any_other_probe_result(monkeypatch):

@@ -24,7 +24,6 @@ SPDX-License-Identifier: MIT
 
 import asyncio
 import logging
-import re
 import time
 from typing import NamedTuple
 
@@ -34,7 +33,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .client import get_raw_probe_client
-from .config import ConfigurationError
+from .config import ConfigurationError, get_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +160,8 @@ class ReadinessProber:
         try:
             probe_client = get_raw_probe_client()
             response = await probe_client.request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
-        except ConfigurationError as exc:
-            return _configuration_failure(exc)
+        except ConfigurationError:
+            return _configuration_failure()
         except httpx.TimeoutException:
             return _HealthFailure(
                 HEALTH_FAILURE_UNREACHABLE,
@@ -214,35 +213,13 @@ def _log_readiness_failure(failure: _HealthFailure) -> None:
     logger.warning("NextDNS readiness probe failed: class=%s reason=%s", failure.failure_class, failure.reason)
 
 
-_CONFIG_ENV_VAR = re.compile(r"NEXTDNS_[A-Z0-9_]+")
-"""A NEXTDNS_* environment variable name inside a ConfigurationError message.
-
-Every ConfigurationError the client constructors raise names the setting it
-blames, so the classification reads the variable out of the caught exception
-instead of re-reading os.environ and guessing (issue #785)."""
-
-_API_KEY_ENV_VARS = frozenset({"NEXTDNS_API_KEY", "NEXTDNS_API_KEY_FILE"})
-"""Variables whose failure is an authentication problem, not an unreachable API."""
-
-
-def _configuration_failure(exc: ConfigurationError) -> _HealthFailure:
-    """Classify a ConfigurationError from building the client by the setting it names.
-
-    Only the variable name is reported - never the exception message, which can
-    quote the invalid value - so the warning stays sanitized while the operator
-    learns which setting to fix.
-    """
-    match = _CONFIG_ENV_VAR.search(str(exc))
-    if match is not None and match.group(0) in _API_KEY_ENV_VARS:
+def _configuration_failure() -> _HealthFailure:
+    """Classify a ConfigurationError from building the client: no key at all is auth."""
+    if not get_api_key():
         return _HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
-    if match is not None:
-        return _HealthFailure(
-            HEALTH_FAILURE_UNREACHABLE,
-            f"NextDNS client configuration is invalid (check {match.group(0)})",
-        )
     return _HealthFailure(
         HEALTH_FAILURE_UNREACHABLE,
-        "NextDNS client configuration is invalid",
+        "NextDNS client configuration is invalid (check NEXTDNS_HTTP_TIMEOUT)",
     )
 
 

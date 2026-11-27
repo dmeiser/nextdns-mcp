@@ -1,4 +1,4 @@
-"""The FastMCP hook: one row per executed call, successful or failed.
+"""The FastMCP hook: one row per executed call, never a failed call.
 
 SPDX-License-Identifier: MIT
 

@@ -796,7 +796,7 @@ class TestDashboardToolsExecution:
             assert calls == [], section
 
     def test_build_queries_series_card_exception_handling(self, monkeypatch):
-        monkeypatch.setattr(ui, "extract_series_fields", MagicMock(side_effect=ValueError("bad data")))
+        monkeypatch.setattr(ui, "validate_series_payload", MagicMock(side_effect=ValueError("bad data")))
         assert ui._build_queries_series_card({"meta": {}}) is None
 
     def test_build_queries_series_card_unexpected_error_propagates(self, monkeypatch):
