@@ -88,8 +88,10 @@ nets make discovery survive a bad query, and disclosure never touches authorizat
   and `:134-143`).
 - The `initialize` instructions describe the catalog by name only when it is small enough
   for that to be cheaper than the search every caller would otherwise run — 12 tools or
-  fewer. Above that they point at `search_tools` and leave the names to `tools/list`
-  (`src/nextdns_mcp/usage.py:22-50`).
+  fewer. Above that they point at `search_tools`: exact names and schemas come back in a
+  search answer, while `tools/list` publishes the catalog only when
+  `NEXTDNS_TOOL_SEARCH=off` (`src/nextdns_mcp/usage.py:22-50`,
+  `src/nextdns_mcp/openapi.py:118-132`).
 - Disclosure hides names; it does not grant or withhold permission. The ACL, the
   destination allow-list, redaction, and the typed error contract live on the client every
   call path goes through, so a hidden tool is still callable and a visible tool is still
