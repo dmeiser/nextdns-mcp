@@ -802,7 +802,7 @@ class TestDashboardToolsExecution:
     def test_build_queries_series_card_unexpected_error_propagates(self, monkeypatch):
         # Only payload-shape errors degrade to a missing card; anything else
         # is a programming error and must surface (FUNC-5 / WORK-324).
-        monkeypatch.setattr(ui, "validate_series_payload", MagicMock(side_effect=RuntimeError("unexpected failure")))
+        monkeypatch.setattr(ui, "extract_series_fields", MagicMock(side_effect=RuntimeError("unexpected failure")))
         with pytest.raises(RuntimeError, match="unexpected failure"):
             ui._build_queries_series_card({"meta": {}})
 

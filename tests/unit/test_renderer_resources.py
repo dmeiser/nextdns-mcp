@@ -20,11 +20,11 @@ from fastmcp.utilities.mime import UI_MIME_TYPE
 
 from nextdns_mcp.server import build_mcp_server
 
-_RENDERER_URI = re.compile(r"ui://prefab/renderer/[0-9a-f]{64}/renderer\.html")
+_RENDERER_URI = "ui://nextdns/renderer.html"
 
 
 def _renderer_uris(uris: list[str]) -> list[str]:
-    return [uri for uri in uris if uri.startswith("ui://prefab/renderer/")]
+    return [uri for uri in uris if uri == _RENDERER_URI]
 
 
 class TestCompositeRendererResource:
@@ -49,7 +49,7 @@ class TestCompositeRendererResource:
             listed = await client.list_resources()
             renderers = _renderer_uris([str(resource.uri) for resource in listed])
             assert len(renderers) == 1, f"expected exactly one renderer resource, got {renderers}"
-            assert _RENDERER_URI.fullmatch(renderers[0])
+            assert renderers[0] == _RENDERER_URI
 
             content = await client.read_resource(renderers[0])
 
