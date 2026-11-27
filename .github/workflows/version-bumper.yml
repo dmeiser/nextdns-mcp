@@ -31,8 +31,10 @@ jobs:
           ref: main
           path: main-ref
 
+      # Resolve the action from the main baseline checkout: the workspace root
+      # holds github.head_ref, which may predate the composite action.
       - name: Set up Python and uv
-        uses: ./.github/actions/setup-python-uv
+        uses: ./main-ref/.github/actions/setup-python-uv
         with:
           python-version: '3.15'
           enable-cache: 'true'
