@@ -652,13 +652,20 @@ async def test_a_real_server_shutdown_stops_the_providers_worker():
     assert gen_ui._active_workers == set()
 
 
+def _assert_typed_generation_error(result: Any, code: str, message_part: str) -> None:
+    """The generate_prefab_ui failure contract: a flagged result with a typed payload."""
+    assert result.is_error is True
+    assert result.structured_content["code"] == code
+    assert message_part in result.structured_content["error"]
+
+
 @pytest.mark.asyncio
 async def test_generate_ui_code_size_limit():
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     oversize = "a" * (MAX_CODE_BYTES + 1)
-    with pytest.raises(ValueError, match="code exceeds maximum size"):
-        await gen_tool.fn(code=oversize)
+    result = await gen_tool.fn(code=oversize)
+    _assert_typed_generation_error(result, "invalid_argument", "code exceeds maximum size")
 
 
 @pytest.mark.asyncio
@@ -667,11 +674,9 @@ async def test_generate_ui_oversized_code_skips_ast_parsing():
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     oversize = "a" * (MAX_CODE_BYTES + 1)
-    with (
-        patch("nextdns_mcp.generative._validate_chart_placement") as mock_validate,
-        pytest.raises(ValueError, match="code exceeds maximum size"),
-    ):
-        await gen_tool.fn(code=oversize)
+    with patch("nextdns_mcp.generative._validate_chart_placement") as mock_validate:
+        result = await gen_tool.fn(code=oversize)
+    _assert_typed_generation_error(result, "invalid_argument", "code exceeds maximum size")
     mock_validate.assert_not_called()
 
 
@@ -681,11 +686,11 @@ async def test_generate_ui_rejects_invalid_data_type_before_serialization():
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     for bad in (123, ["a"], True):
-        with (
-            patch("nextdns_mcp.generative.json") as mock_json,
-            pytest.raises(ValueError, match="data parameter must be a dict or JSON object string"),
-        ):
-            await gen_tool.fn(code="print(1)", data=bad)
+        with patch("nextdns_mcp.generative.json") as mock_json:
+            result = await gen_tool.fn(code="print(1)", data=bad)
+        _assert_typed_generation_error(
+            result, "invalid_argument", "data parameter must be a dict or JSON object string"
+        )
         mock_json.dumps.assert_not_called()
 
 
@@ -695,12 +700,10 @@ async def test_generate_ui_oversized_dict_data():
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     oversized_dict = {"payload": "b" * (MAX_DATA_BYTES + 1)}
-    with (
-        patch("nextdns_mcp.generative.json") as mock_json,
-        pytest.raises(ValueError, match="data exceeds maximum size"),
-    ):
+    with patch("nextdns_mcp.generative.json") as mock_json:
         mock_json.dumps.side_effect = json.dumps
-        await gen_tool.fn(code="print(1)", data=oversized_dict)
+        result = await gen_tool.fn(code="print(1)", data=oversized_dict)
+    _assert_typed_generation_error(result, "invalid_argument", "data exceeds maximum size")
     assert mock_json.dumps.call_count == 1
 
 
@@ -737,8 +740,8 @@ async def test_generate_ui_data_size_limit():
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     oversize_data = "b" * (MAX_DATA_BYTES + 1)
-    with pytest.raises(ValueError, match="data exceeds maximum size"):
-        await gen_tool.fn(code="print(1)", data=oversize_data)
+    result = await gen_tool.fn(code="print(1)", data=oversize_data)
+    _assert_typed_generation_error(result, "invalid_argument", "data exceeds maximum size")
 
 
 @pytest.mark.asyncio
@@ -755,8 +758,97 @@ async def test_generate_ui_result_size_limit():
         patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
     ):
         mock_exec.return_value = OversizedApp()
-        with pytest.raises(ValueError, match="result exceeds maximum size"):
-            await gen_tool.fn(code="print(1)")
+        result = await gen_tool.fn(code="print(1)")
+    _assert_typed_generation_error(result, "response_too_large", "result exceeds maximum size")
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_invalid_json_data_is_a_typed_error():
+    """The typed JSON error contract (issue #778): validation failures carry error+code."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    result = await gen_tool.fn(code="print(1)", data="{")
+    _assert_typed_generation_error(result, "invalid_argument", "Invalid JSON in data parameter")
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_timeout_is_a_typed_error():
+    """A sandbox timeout answers the typed contract instead of raising out of the tool."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    with (
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
+        patch.object(generative_module, "_start_within_budget", new=AsyncMock()),
+        patch.object(
+            generative_module,
+            "_execute_within_budget",
+            new=AsyncMock(side_effect=TimeoutError("generate_prefab_ui execution exceeded 10.0s")),
+        ),
+    ):
+        result = await gen_tool.fn(code="print(1)")
+    _assert_typed_generation_error(result, "timeout", "exceeded")
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_mid_read_oversize_is_a_typed_error():
+    """The bounded-read guard's refusal maps to response_too_large, not internal_error."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    with (
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
+        patch.object(generative_module, "_start_within_budget", new=AsyncMock()),
+        patch.object(
+            generative_module,
+            "_execute_within_budget",
+            new=AsyncMock(side_effect=sandbox_module._ResultTooLarge("result exceeds maximum size of 65536 bytes")),
+        ),
+    ):
+        result = await gen_tool.fn(code="print(1)")
+    _assert_typed_generation_error(result, "response_too_large", "result exceeds maximum size")
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_runtime_failure_is_a_typed_error(caplog):
+    """A dead sandbox worker answers the typed contract instead of raising out of the tool.
+
+    The failure is also logged: returning a payload instead of raising means
+    FastMCP's own error logging no longer sees it.
+    """
+    import logging
+
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    with (
+        caplog.at_level(logging.WARNING, logger="nextdns_mcp.generative"),
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
+        patch.object(generative_module, "_start_within_budget", new=AsyncMock()),
+        patch.object(
+            generative_module,
+            "_execute_within_budget",
+            new=AsyncMock(side_effect=RuntimeError("Sandbox process died unexpectedly")),
+        ),
+    ):
+        result = await gen_tool.fn(code="print(1)")
+    _assert_typed_generation_error(result, "internal_error", "Sandbox process died unexpectedly")
+    assert any(r.name == "nextdns_mcp.generative" and "execution failed" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_spawn_oserror_is_a_typed_error():
+    """An OSError from the worker spawn maps to internal_error, not a bare raise."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    with (
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
+        patch.object(generative_module, "_start_within_budget", new=AsyncMock()),
+        patch.object(
+            generative_module,
+            "_execute_within_budget",
+            new=AsyncMock(side_effect=PermissionError(13, "Permission denied", "/usr/local/bin/deno")),
+        ),
+    ):
+        result = await gen_tool.fn(code="print(1)")
+    _assert_typed_generation_error(result, "internal_error", "Permission denied")
 
 
 @pytest.mark.asyncio
@@ -1451,8 +1543,8 @@ async def test_generate_ui_execution_timeout():
         patch.object(gen_ui, "_new_worker", return_value=worker),
     ):
         mock_exec.side_effect = never_resolves
-        with pytest.raises(TimeoutError, match="execution exceeded"):
-            await gen_tool.fn(code="print(1)")
+        result = await gen_tool.fn(code="print(1)")
+        _assert_typed_generation_error(result, "timeout", "execution exceeded")
         assert cancelled["seen"]
     worker.stop.assert_called_once()
 
@@ -2028,7 +2120,7 @@ async def test_generate_ui_cold_start_timeout_is_distinct():
         patch.object(gen_ui, "_new_worker", return_value=worker),
         patch.object(generative_module, "SANDBOX_START_TIMEOUT", 0.05),
     ):
-        with pytest.raises(TimeoutError, match="cold start exceeded"):
-            await gen_tool.fn(code="print(1)")
+        result = await gen_tool.fn(code="print(1)")
+        _assert_typed_generation_error(result, "timeout", "cold start exceeded")
         mock_exec.assert_not_called()
     worker.stop.assert_called_once()

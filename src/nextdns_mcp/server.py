@@ -15,7 +15,10 @@ from typing import Any, NamedTuple
 
 from fastmcp import FastMCP
 from fastmcp.apps.config import AppConfig, ResourceCSP
+from fastmcp.exceptions import ValidationError
+from fastmcp.server.server import app_config_to_meta_dict
 from fastmcp.tools.base import ToolResult
+from fastmcp.tools.function_tool import FunctionTool
 from fastmcp.utilities.mime import UI_MIME_TYPE
 from mcp.types import ToolAnnotations
 from prefab_ui.renderer import get_renderer_html
@@ -34,7 +37,7 @@ from .config import (
     get_http_timeout,
     validate_configuration,
 )
-from .errors import StateOwnershipError
+from .errors import ErrorCode, StateOwnershipError, error_payload
 from .openapi import create_mcp_server
 from .run_options import (  # noqa: F401
     _is_loopback_host,
@@ -111,6 +114,36 @@ def _register_composite_renderer(server: FastMCP) -> None:
     )
     def _bundled_renderer() -> str:
         return get_renderer_html(mode="bundled")
+
+
+class CompositeTool(FunctionTool):
+    """A composite tool whose argument failures keep the typed JSON error contract.
+
+    FastMCP validates a function tool's arguments with a pydantic model built
+    from the signature, so a ``Literal`` enum or type violation raises before
+    the body — and before ``_with_error_flag`` — can answer: the caller gets a
+    bare pydantic message with no structured content, and the middleware that
+    reports ``ignored_arguments``/``resolved_from`` never sees a result to
+    annotate. This subclass converts exactly that failure class — FastMCP's
+    argument ``ValidationError``, which pydantic raises before the body runs
+    (body-raised pydantic errors are tagged ``_ToolBodyError`` and pass
+    through) — into the flagged typed payload, so the refusal flows back
+    through the middleware chain like every other tool error. Validating
+    through the signature's own model (rather than the published JSON schema)
+    keeps the acceptance set unchanged: the ``BeforeValidator`` coercions the
+    signature declares — an integer ``profile_id`` becoming a string — still
+    run, and the published schema, enums included, is untouched.
+    """
+
+    async def run(self, arguments: dict[str, Any]) -> ToolResult:
+        """Run as usual, answering argument-validation failures with the typed payload."""
+        try:
+            return await super().run(arguments)
+        except ValidationError as exc:
+            return ToolResult(
+                structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, str(exc)),
+                is_error=True,
+            )
 
 
 def _with_error_flag(tool_fn: Any) -> Any:
@@ -230,11 +263,26 @@ def build_mcp_server() -> FastMCP:
         # description, so the accepted values and the worked example further down
         # would never reach a caller — and for these three tools that is exactly the
         # part a caller needs (a chart's interval range, a lookup's record types).
-        server.tool(
-            description=inspect.getdoc(composite.tool) or "",
-            annotations=_COMPOSITE_ANNOTATIONS,
-            app=AppConfig(resource_uri=_COMPOSITE_RENDERER_URI) if composite.app else None,
-        )(_with_error_flag(composite.tool))
+        #
+        # Registered as CompositeTool (not through server.tool, which builds a
+        # plain FunctionTool) so enum/type violations answer the typed error
+        # contract instead of raising out of pydantic argument validation. The
+        # app config is folded into meta["ui"] with FastMCP's own helper, so
+        # the tools advertise the renderer _register_composite_renderer above
+        # publishes, byte-identically to server.tool(app=...).
+        server.add_tool(
+            CompositeTool.from_function(
+                _with_error_flag(composite.tool),
+                name=composite.tool.__name__,
+                description=inspect.getdoc(composite.tool) or "",
+                annotations=_COMPOSITE_ANNOTATIONS,
+                meta=(
+                    {"ui": app_config_to_meta_dict(AppConfig(resource_uri=_COMPOSITE_RENDERER_URI))}
+                    if composite.app
+                    else None
+                ),
+            )
+        )
     register_generative_ui_provider(server)
     return server
 

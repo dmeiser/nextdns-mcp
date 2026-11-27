@@ -336,6 +336,135 @@ class TestCompositeErrorResultsAreFlagged:
         assert "code" in result.structured_content
 
     @pytest.mark.asyncio
+    async def test_plotAnalytics_enum_violation_is_a_typed_error_result(self, mock_api_key, monkeypatch):
+        """A bogus Literal enum must not escape as a bare pydantic error (issue #778).
+
+        FastMCP's argument model used to reject ``metric='bogus'`` before the
+        tool ran, so the caller got ``structured_content=None`` and the strip
+        middleware never annotated the extra argument it dropped. The refusal
+        now comes back as the typed ``invalid_argument`` payload with
+        ``ignored_arguments`` naming the dropped key.
+        """
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool("plotAnalytics", {"metric": "bogus", "extra": True}, raise_on_error=False)
+
+        assert result.is_error is True
+        structured = result.structured_content or {}
+        assert structured["code"] == "invalid_argument"
+        assert "metric" in structured["error"]
+        assert structured["ignored_arguments"] == ["extra"]
+
+    @pytest.mark.asyncio
+    async def test_overviewDashboard_enum_violation_is_a_typed_error_result(self, mock_api_key, monkeypatch):
+        """The same contract for overviewDashboard's view_type enum (issue #778)."""
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "overviewDashboard", {"view_type": "bogus", "extra": True}, raise_on_error=False
+            )
+
+        assert result.is_error is True
+        structured = result.structured_content or {}
+        assert structured["code"] == "invalid_argument"
+        assert "view_type" in structured["error"]
+        assert structured["ignored_arguments"] == ["extra"]
+
+    @pytest.mark.asyncio
+    async def test_call_tool_alias_keeps_the_typed_error_and_resolved_from(self, mock_api_key, monkeypatch):
+        """An alias resolved by call_tool keeps resolved_from on the typed refusal (issue #778)."""
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "call_tool",
+                {"name": "plot analytics", "arguments": {"metric": "bogus", "extra": True}},
+                raise_on_error=False,
+            )
+
+        assert result.is_error is True
+        structured = result.structured_content or {}
+        assert structured["code"] == "invalid_argument"
+        assert structured["ignored_arguments"] == ["extra"]
+        assert structured["resolved_from"] == "plot analytics"
+        assert structured["resolved_name"] == "plotAnalytics"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments"),
+        [
+            ("plotAnalytics", {"metric": "status", "profile_id": 315244}),
+            ("overviewDashboard", {"profile_id": 315244}),
+            ("dohLookup", {"domain": "example.com", "profile_id": 315244}),
+        ],
+    )
+    async def test_an_integer_profile_id_is_still_coerced_and_accepted(
+        self, mock_api_key, monkeypatch, tool_name, arguments
+    ):
+        """An all-digit profile id sent as a JSON integer must keep working (issue #778 review).
+
+        ``OptionalProfileId`` declares a ``BeforeValidator`` that coerces an
+        integer profile id to a string, and clients do send it that way. The
+        typed-error handling must not refuse what the signature accepts: the
+        call has to pass validation, coerce, and reach the access-control
+        layer — where this profile, outside the readable set, is denied. A
+        schema-level ``invalid_argument`` here is the regression this guards.
+        """
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "abc123")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abc123")
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool(tool_name, arguments, raise_on_error=False)
+
+        structured = result.structured_content or {}
+        assert structured.get("code") == "read_access_denied", (
+            f"the integer profile_id must be coerced and reach access control, got: {structured}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_composite_schemas_still_publish_their_enums(self, mock_api_key, monkeypatch):
+        """In-tool validation must not cost the published JSON Schema enums (issue #778)."""
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        server = build_mcp_server()
+        tools = {tool.name: tool for tool in await server._list_tools()}
+        assert tools["plotAnalytics"].parameters["properties"]["metric"]["enum"] == [
+            "status",
+            "devices",
+            "protocols",
+            "queryTypes",
+            "ipVersions",
+            "dnssec",
+            "encryption",
+            "reasons",
+            "ips",
+        ]
+        assert tools["overviewDashboard"].parameters["properties"]["view_type"]["enum"] == [
+            "auto",
+            "bar",
+            "table",
+            "pie",
+        ]
+
+    @pytest.mark.asyncio
     async def test_dohLookup_success_stays_a_normal_result(self, mock_api_key, monkeypatch, mock_doh_client=None):
         """The wrapper must not flag successful payloads - only typed errors."""
         from nextdns_mcp.server import build_mcp_server

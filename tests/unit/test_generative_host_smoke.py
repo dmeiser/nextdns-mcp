@@ -165,8 +165,10 @@ async def test_host_smoke_rejects_oversized_result_during_read(monkeypatch) -> N
     # The string is built at runtime in the worker so the submitted code stays
     # tiny; only the serialized result exceeds the wire cap.
     oversized = f'with PrefabApp() as app:\n    with Column(gap=4):\n        Text("x" * {MAX_WIRE_LINE_BYTES + 1})\n'
-    with pytest.raises(ValueError, match="result exceeds maximum size"):
-        await gen_tool.fn(code=oversized)
+    result = await gen_tool.fn(code=oversized)
+    assert result.is_error is True
+    assert result.structured_content["code"] == "response_too_large"
+    assert "result exceeds maximum size" in result.structured_content["error"]
 
     # The oversized wire must never have been decoded or validated — on pre-fix
     # code both lists carry a ~MAX_WIRE_LINE_BYTES+ entry and these assertions fail.

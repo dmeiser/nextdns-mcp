@@ -23,17 +23,20 @@ from fastmcp.resources.base import Resource
 from fastmcp.resources.types import TextResource
 from fastmcp.server.providers.base import Provider
 from fastmcp.tools import Tool
-from fastmcp.tools.base import ToolAnnotations
+from fastmcp.tools.base import ToolAnnotations, ToolResult
 from fastmcp.utilities.mime import UI_MIME_TYPE
 from prefab_ui.app import PrefabApp
 from prefab_ui.renderer import get_generative_renderer_html
 
 from .chart_placement import _validate_chart_placement
+from .errors import ErrorCode, error_payload
+from .typed_error_tool import TypedArgumentTool
 from .generative_sandbox import (
     EXECUTION_TIMEOUT,
     MAX_RESULT_BYTES,
     SANDBOX_START_TIMEOUT,
     DenoPyodideSandbox,
+    _ResultTooLarge,
 )
 
 logger = logging.getLogger(__name__)
@@ -459,21 +462,65 @@ class PrefabGenerativeUI(Provider):
             await asyncio.to_thread(worker.stop)
 
 
+async def _run_guarded(
+    run: Callable[[str, dict[str, Any] | None], Awaitable[PrefabApp]], code: str, payload: dict[str, Any] | None
+) -> PrefabApp | ToolResult:
+    """Execute validated code in the sandbox, mapping every failure class to the typed contract.
+
+    The sandbox surfaces a cold start or execution timeout as ``TimeoutError``,
+    an answer past the wire cap as ``_ResultTooLarge``, and a dead worker, a
+    missing Deno, a failed spawn, a serializer failure, or the generated
+    code's own failure as ``RuntimeError``/``ValueError``/``OSError`` — each
+    becomes the flagged typed payload callers branch on instead of a bare
+    exception FastMCP renders as text. The runtime classes are logged:
+    returning a payload instead of raising means FastMCP's own error logging
+    no longer sees them.
+    """
+    try:
+        result = await run(f"{SANDBOX_PRELUDE}\n{code}", payload)
+        result_size = _result_size_bytes(result)
+    except TimeoutError as exc:
+        logger.warning("generate_prefab_ui timed out: %s", exc)
+        return _generation_error(ErrorCode.TIMEOUT, str(exc))
+    except _ResultTooLarge as exc:
+        return _generation_error(ErrorCode.RESPONSE_TOO_LARGE, str(exc))
+    except (RuntimeError, ValueError, OSError) as exc:
+        logger.warning("generate_prefab_ui execution failed: %s", exc, exc_info=True)
+        return _generation_error(ErrorCode.INTERNAL_ERROR, str(exc))
+    if result_size > MAX_RESULT_BYTES:
+        return _generation_error(
+            ErrorCode.RESPONSE_TOO_LARGE, f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes"
+        )
+    return result
+
+
+def _generation_error(code: str, message: str) -> ToolResult:
+    """A generation failure as the typed, flagged error payload callers branch on.
+
+    A raised exception reaches the caller as bare text with no structured
+    content; the server's error contract is ``{"error": ..., "code": ...}``
+    with ``isError`` set, so every refusal and failure here answers that shape.
+    """
+    return ToolResult(structured_content=error_payload(code, message), is_error=True)
+
+
 def _build_generate_tool(
     name: str, app_config: AppConfig, run: Callable[[str, dict[str, Any] | None], Awaitable[PrefabApp]]
 ) -> Tool:
     """The generate_prefab_ui tool: size and placement guards, the sandbox run, then tree validation."""
 
-    async def generate_ui(code: str, data: str | dict[str, Any] | None = None) -> PrefabApp:
-        payload = _validated_payload(code, data)
-        result = await run(f"{SANDBOX_PRELUDE}\n{code}", payload)
-        result_size = _result_size_bytes(result)
-        if result_size > MAX_RESULT_BYTES:
-            raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
+    async def generate_ui(code: str, data: str | dict[str, Any] | None = None) -> PrefabApp | ToolResult:
+        try:
+            payload = _validated_payload(code, data)
+        except ValueError as exc:
+            return _generation_error(ErrorCode.INVALID_ARGUMENT, str(exc))
+        result = await _run_guarded(run, code, payload)
+        if isinstance(result, ToolResult):
+            return result
         _validate_generated_tree(result)
         return result
 
-    return Tool.from_function(
+    return TypedArgumentTool.from_function(
         generate_ui,
         name=name,
         description=GENERATE_DOC + (prefab_generative.execute.__doc__ or ""),

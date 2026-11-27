@@ -32,6 +32,7 @@ class ErrorCode:
     RESPONSE_TOO_LARGE = "response_too_large"
     INTERNAL_ERROR = "internal_error"
     NO_DATA = "no_data"
+    TIMEOUT = "timeout"
 
 
 def error_payload(code: str, message: str, **extra: Any) -> dict[str, Any]:

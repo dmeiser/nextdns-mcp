@@ -268,6 +268,15 @@ async def _await_ready(proc: subprocess.Popen[bytes]) -> None:
             break
 
 
+class _ResultTooLarge(ValueError):
+    """The worker's answer line exceeded the wire cap while it was being read.
+
+    A ``ValueError`` subclass so existing handlers keep catching it, but a
+    distinct type so the tool layer can answer ``response_too_large`` rather
+    than lumping the guard in with the generated code's own failures.
+    """
+
+
 class _BoundedStdout:
     """File-like bounding each stdout line to ``limit`` bytes during the read.
 
@@ -316,7 +325,7 @@ class _BoundedStdout:
             complete, total = self._feed(chunk, chunks, total)
         if total > self._limit:
             self._on_overflow()
-            raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
+            raise _ResultTooLarge(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
         return b"".join(chunks)
 
     def close(self) -> None:
