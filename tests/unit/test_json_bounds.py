@@ -74,11 +74,13 @@ class TestListCap:
 
 
 class TestKeyCap:
-    def test_a_dict_over_the_key_cap_keeps_the_leading_keys(self):
+    def test_a_dict_over_the_key_cap_keeps_the_leading_keys_and_flags_the_drop(self):
+        # Keys the cap drops are content the reader cannot see is missing, so
+        # the cut is flagged exactly like a dropped list item (issue #753).
         spec = BoundSpec(max_string_chars=200, max_keys=2)
         bounded, cut = bound_json({"a": 1, "b": 2, "c": 3}, spec)
         assert bounded == {"a": 1, "b": 2}
-        assert cut is False
+        assert cut is True
 
     def test_the_key_cap_slices_lazily(self):
         consumed: list[str] = []
@@ -119,6 +121,49 @@ class TestKeyBounding:
         assert bounded == {"abcd…": 1, "abcd… [duplicate 2]": 2, "abcd… [duplicate 3]": 3}
         assert cut is True
 
+    def test_collision_naming_stays_correct_at_scale(self):
+        spec = BoundSpec(max_string_chars=4, string_marker="…", bound_keys=True)
+        source = {f"abcde {index}": index for index in range(100)}
+        bounded, cut = bound_json(source, spec)
+        assert bounded["abcd…"] == 0
+        for index in range(2, 101):
+            assert bounded[f"abcd… [duplicate {index}]"] == index - 1
+        assert cut is True
+
+    def test_a_candidate_name_already_in_the_mapping_is_skipped(self):
+        # ``bound_key`` never overwrites a field the mapping under construction
+        # already holds, even a literal one spelled like a collision candidate:
+        # the search steps past it to the next free suffix.
+        from nextdns_mcp.json_bounds import bound_key
+
+        spec = BoundSpec(max_string_chars=4, string_marker="…", bound_keys=True)
+        bounded: dict = {"abcd…": "kept", "abcd… [duplicate 2]": "literal"}
+        key, cut = bound_key(bounded, "abcde one", spec, {})
+        assert key == "abcd… [duplicate 3]"
+        assert cut is True
+
+    def test_the_suffix_search_probes_each_candidate_at_most_once(self):
+        # The collision counter never moves backwards, so naming n colliding
+        # keys costs O(n) membership probes in total; restarting from
+        # [duplicate 2] on every collision cost O(n^2) (issue #753).
+        from nextdns_mcp.json_bounds import _distinct_key
+
+        class CountingDict(dict):
+            def __init__(self) -> None:
+                super().__init__()
+                self.contains_calls = 0
+
+            def __contains__(self, key):
+                self.contains_calls += 1
+                return super().__contains__(key)
+
+        bounded = CountingDict()
+        bounded["k"] = None
+        collisions: dict[str, int] = {}
+        for _ in range(200):
+            bounded[_distinct_key(bounded, "k", collisions)] = None
+        assert bounded.contains_calls == 200
+
     def test_a_non_string_key_passes_through_without_a_flag(self):
         # ``json`` never decodes a non-string key, but a caller that walks a
         # document it did not write must not fail on a key the string cap
@@ -141,16 +186,25 @@ class TestDepthCap:
         bounded, _ = bound_json([["deep"]], spec, depth=1)
         assert bounded == [None]
 
+    def test_a_depth_cut_is_flagged(self):
+        # The None left behind is indistinguishable from a null the document
+        # carried, so the cut is flagged like every other drop (issue #753).
+        spec = BoundSpec(max_string_chars=200, max_depth=1)
+        _, cut = bound_json([["deep"]], spec)
+        assert cut is True
+
 
 class TestCallerSpecs:
     def test_the_error_path_spec_matches_the_module_constants(self):
+        from nextdns_mcp.errors import body as errors_body
         from nextdns_mcp.errors.body import _BODY_BOUNDS
 
         assert _BODY_BOUNDS.max_string_chars == errors.MAX_RESPONSE_BODY_CHARS
         assert _BODY_BOUNDS.string_marker == errors.TRUNCATION_MARKER
-        assert _BODY_BOUNDS.max_items is None
-        assert _BODY_BOUNDS.max_keys is None
-        assert _BODY_BOUNDS.max_depth is None
+        assert _BODY_BOUNDS.max_items == errors_body.MAX_BODY_ITEMS
+        assert _BODY_BOUNDS.omitted_key == errors_body.BODY_OMITTED_ITEMS_KEY
+        assert _BODY_BOUNDS.max_keys == errors_body.MAX_BODY_KEYS
+        assert _BODY_BOUNDS.max_depth == errors_body.MAX_BODY_DEPTH
 
     def test_the_call_log_spec_matches_the_module_constants(self):
         from nextdns_mcp.call_log import _PROJECTION_BOUNDS
