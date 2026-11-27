@@ -113,7 +113,7 @@ def test_each_module_stays_inside_its_line_budget():
         assert lines <= budget, f"{name} is {lines} lines, over its {budget}-line budget"
     # 560 -> 595 for SEC-8 (#766): the O_NOFOLLOW + S_ISREG checked open
     # (store.py), the iterative depth-capped identity walk (evidence.py) and
-    # the bounded profile_id (record.py) cost 33 lines of real code.
+    # the bounded profile_id (record.py) cost 34 lines of real code.
     assert total <= 595, f"the package is {total} lines, over the 595-line total"
 
 
