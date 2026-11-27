@@ -20,6 +20,11 @@ EVIDENCE_MAX_ID_CHARS = 120
 # traversed so a deeply nested view cannot exhaust the stack.
 COMPONENT_MAX_DEPTH = 64
 
+# UI handlers (`onClick`, `onMount`, ...) carry action descriptors. Only the
+# view tree and the document root are scanned, never the call's data rows.
+ACTIONS_MAX_ITEMS = 20
+ACTION_MAX_CHARS = 80
+
 
 def _identity_entry(node: Any) -> tuple[str, dict[str, str]] | None:
     """(full id, bounded entry) when this object carries an id; None otherwise."""
@@ -76,22 +81,46 @@ def _walk_identities(node: Any, out: list[dict[str, str]], seen: set[str]) -> No
         _push_identity_children(current, depth, stack)
 
 
-def _walk_component_types(node: Any, types: set[str]) -> None:
-    """Collect all component `type` values in a Prefab UI view tree.
+def _is_action_key(key: Any) -> bool:
+    """Whether a component field holds UI actions (`onClick`, `actions`) not data."""
+    return isinstance(key, str) and (key.lower().startswith("on") or key == "actions")
 
-    Iterative (no RecursionError on deeply nested documents) and restricted
-    to UI child containers (``view`` / ``children``) so data rows and chart
-    datasets are never traversed. Bounded by ``COMPONENT_MAX_DEPTH``.
+
+def _action_name(descriptor: Any) -> str:
+    """The action name one handler descriptor carries, '' when it carries none."""
+    name = descriptor.get("action") if isinstance(descriptor, dict) else None
+    return name[:ACTION_MAX_CHARS] if isinstance(name, str) else ""
+
+
+def _action_names(value: Any) -> list[str]:
+    """The action names one handler value declares: one descriptor or a list."""
+    descriptors = value if isinstance(value, list) else [value]
+    return [_action_name(descriptor) for descriptor in descriptors]
+
+
+def _collect_actions(node: dict[Any, Any], actions: set[str]) -> None:
+    """Add the action names declared on one component's handler keys."""
+    for key, value in node.items():
+        if _is_action_key(key):
+            actions.update(name for name in _action_names(value) if name)
+
+
+def _walk_component_types(node: Any, types: set[str], actions: set[str]) -> None:
+    """Walk the view tree iteratively, bounded by depth, for types and actions.
+
+    Only ``view`` / ``children`` are followed, never data rows or datasets.
     """
     stack: list[tuple[Any, int]] = [(node, 0)]
     while stack:
         current, depth = stack.pop()
         if depth > COMPONENT_MAX_DEPTH:
             continue
-        _walk_component_node(current, depth, types, stack)
+        _walk_component_node(current, depth, types, actions, stack)
 
 
-def _walk_component_node(current: Any, depth: int, types: set[str], stack: list[tuple[Any, int]]) -> None:
+def _walk_component_node(
+    current: Any, depth: int, types: set[str], actions: set[str], stack: list[tuple[Any, int]]
+) -> None:
     """One node of the component walk: lists fan out, dicts name and push children."""
     if isinstance(current, list):
         for item in current:
@@ -101,6 +130,7 @@ def _walk_component_node(current: Any, depth: int, types: set[str], stack: list[
         return
     if isinstance(current.get("type"), str):
         types.add(current["type"])
+    _collect_actions(current, actions)
     _push_component_children(current, depth, stack)
 
 
@@ -120,19 +150,25 @@ def _created_id_of(data: Any) -> str:
 
 
 def _prefab_evidence(structured: dict[str, Any]) -> dict[str, Any]:
-    """Component facts lifted out of a Prefab UI document."""
+    """Component and UI-action facts lifted out of a Prefab UI document."""
     if "$prefab" not in structured:
         return {}
     types: set[str] = set()
-    _walk_component_types(structured.get("view"), types)
-    return {"components": sorted(types)} if types else {}
+    actions: set[str] = set()
+    _collect_actions(structured, actions)
+    _walk_component_types(structured.get("view"), types, actions)
+    evidence: dict[str, Any] = {}
+    if types:
+        evidence["components"] = sorted(types)
+    if actions:
+        evidence["actions"] = sorted(actions)[:ACTIONS_MAX_ITEMS]
+    return evidence
 
 
 def _result_evidence(result: Any, write: bool) -> dict[str, Any]:
     """Identity facts lifted out of the FULL result, before any bounding.
 
-    Bounded by construction, so a harness matching created-ids or id/name
-    pairs through a cut ``result`` column keeps what the projection drops.
+    Bounded by construction, so a cut ``result`` column cannot hide them.
     """
     structured = getattr(result, "structured_content", None)
     if not isinstance(structured, dict):

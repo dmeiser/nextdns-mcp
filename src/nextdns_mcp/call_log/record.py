@@ -3,12 +3,12 @@
 SPDX-License-Identifier: MIT
 
 The row's columns and their semantics live here and nowhere else: the tool,
-the endpoint it executed, whether the call changed state (from the endpoint's
-HTTP method), the bounded arguments and result, and the evidence column.
-Pure apart from ``time.time()``.
+the endpoint it executed, whether the call changed state (the endpoint's HTTP
+method, or the tool's own readOnlyHint when it has no endpoint), the bounded
+arguments and result, the digest of any submitted code, and the evidence
+column. Pure apart from ``time.time()``.
 """
 
-import json
 import logging
 import time
 from collections.abc import Mapping
@@ -16,7 +16,7 @@ from typing import Any
 
 from ..constants import is_write_operation
 from .evidence import EVIDENCE_MAX_ID_CHARS, _result_evidence
-from .projection import ARGS_CHARS, ERROR_CHARS, _project_result, _result_text
+from .projection import ERROR_CHARS, _args_text, _code_sha256, _result_text
 
 logger = logging.getLogger(__name__)
 
@@ -59,32 +59,37 @@ def _attach_derived_fields(
         row["evidence"] = evidence
 
 
+def _bounded_profile_id(arguments: Mapping[str, Any]) -> str:
+    """An unbounded profile_id must not land in the log whole (#766)."""
+    raw = arguments.get("profile_id")
+    return "" if raw is None else str(raw)[:EVIDENCE_MAX_ID_CHARS]
+
+
 def build_row(
-    tool: str, args: Any, ok: bool, error: str, result: Any, endpoints: Mapping[str, tuple[str, str]]
+    tool: str,
+    args: Any,
+    ok: bool,
+    error: str,
+    result: Any,
+    endpoints: Mapping[str, tuple[str, str]],
+    *,
+    annotation_write: bool = False,
 ) -> dict[str, Any]:
     """The one JSON row describing this call (``endpoints`` is the middleware's map)."""
     arguments = args if isinstance(args, dict) else {}
     endpoint = endpoints.get(tool)
-    # Whether the call changed state. A generated tool is bound to an
-    # endpoint, so the HTTP method decides it: `POST
-    # /profiles/{profile_id}/rewrites` changed state whatever the tool
-    # was named. The local composite operations (plotAnalytics, dashboard tools, dohLookup)
-    # have no endpoint and answer questions, so they are reads.
-    write = is_write_operation(endpoint[0]) if endpoint else False
-    # An unbounded profile_id must not land in the log whole (#766); None
-    # still answers empty (#833).
-    raw_pid = arguments.get("profile_id")
+    digest = _code_sha256(arguments)
+    # An endpoint's HTTP method is the fact of what changed upstream: `POST
+    # /profiles/{profile_id}/rewrites` changed state whatever the tool was named.
+    # A tool with no endpoint (the composites, the generative UI) is classified by
+    # its own readOnlyHint, which the middleware resolves from the live catalog.
+    write = is_write_operation(endpoint[0]) if endpoint else annotation_write
     row = {
         "ts": time.time(),
         "tool": tool,
-        "profile_id": ("" if raw_pid is None else str(raw_pid))[:EVIDENCE_MAX_ID_CHARS],
-        # Enough of the arguments to match the call the harness asked for
-        # (which endpoint, which entry), bounded before serialization by
-        # the same projection the result uses. Serialized once, without
-        # sort_keys: key order is fixed by the final row serialization in
-        # ``_append_row``, so sorting here would serialize twice for
-        # nothing (the harness matches substrings, never key order).
-        "args": json.dumps(_project_result(arguments), default=str)[:ARGS_CHARS],
+        "profile_id": _bounded_profile_id(arguments),
+        # Bounded before serialization and always valid JSON (see _args_text).
+        "args": _args_text(arguments, digest),
         "ok": ok,
         "error": error[:ERROR_CHARS],
         # What the call returned. This is what makes a READ verifiable: the
@@ -93,5 +98,9 @@ def build_row(
         "result": _result_text(result),
         "write": write,
     }
+    if digest:
+        row["code_sha256"] = digest
+    if digest:
+        row["code_sha256"] = digest
     _attach_derived_fields(row, endpoint, result, ok, write)
     return row

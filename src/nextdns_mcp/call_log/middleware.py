@@ -16,6 +16,7 @@ from typing import Any
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 
 from ..constants import SYNTHETIC_TOOL_NAMES
+from ..tool_search_shape import _annotation_says_write
 from .record import build_row, result_error
 from .store import _append_row, call_log_path
 
@@ -26,9 +27,8 @@ class CallLogMiddleware(Middleware):
     """Append one record per tool call this server executes.
 
     ``endpoints`` maps a generated tool name to the ``(method, path template)``
-    it executes; the server builds it once from the parsed routes. It is
-    middleware state, not a module registry, so importing this module never
-    depends on which other modules have been loaded or in what order.
+    it executes; the server builds it once from the parsed routes, so the log
+    is a view of that parse and not a registry this module populates.
     """
 
     def __init__(
@@ -40,11 +40,30 @@ class CallLogMiddleware(Middleware):
         self._endpoints: dict[str, tuple[str, str]] = {
             name: (method.upper(), template) for name, (method, template) in (endpoints or {}).items()
         }
+        self._write_tools: set[str] = set()
+
+    async def _note_annotation_write(self, context: MiddlewareContext, name: str) -> None:
+        """Remember tools whose own readOnlyHint says they are writes.
+
+        The route map cannot speak for local tools; the live catalog can. No
+        context, no catalog, or no match leaves the tool a read.
+        """
+        fastmcp_context = getattr(context, "fastmcp_context", None)
+        if fastmcp_context is None:
+            return
+        try:
+            tool = await fastmcp_context.fastmcp.get_tool(name)
+        except Exception:
+            logger.debug("could not read the tool catalog for the call log", exc_info=True)
+            return
+        if _annotation_says_write(tool):
+            self._write_tools.add(name)
 
     async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> Any:
         name = str(getattr(context.message, "name", ""))
         if name in SYNTHETIC_TOOL_NAMES:
             return await call_next(context)
+        await self._note_annotation_write(context, name)
         args = getattr(context.message, "arguments", None) or {}
         try:
             result = await call_next(context)
@@ -61,9 +80,8 @@ class CallLogMiddleware(Middleware):
     async def _record_failure(self, name: str, args: Any, exc: Exception) -> None:
         """Record a failed call; a recording fault never masks the original error.
 
-        The raise of the call's own exception happens in the caller, after this
-        returns: a defect in row construction surfaces as a warning, not as a
-        replacement for the error the caller must see.
+        The call's own raise happens in the caller after this returns, so a
+        defect in row construction surfaces as a warning, not a replacement.
         """
         try:
             await self._record(name, args, ok=False, error=f"{type(exc).__name__}: {exc}")
@@ -72,19 +90,18 @@ class CallLogMiddleware(Middleware):
 
     def _record_row(self, tool: str, args: Any, ok: bool, error: str, result: Any) -> dict[str, Any]:
         """Bind this middleware's endpoint map to ``record.build_row`` (row construction lives there)."""
-        return build_row(tool, args, ok, error, result, self._endpoints)
+        return build_row(tool, args, ok, error, result, self._endpoints, annotation_write=tool in self._write_tools)
 
     def _record_row_into(self, path: str, tool: str, args: Any, ok: bool, error: str, result: Any) -> None:
         """Build the row and append it; both off the event loop (``_record`` offloads here)."""
         _append_row(path, self._record_row(tool, args, ok, error, result))
 
     async def _record(self, tool: str, args: Any, ok: bool, error: str, result: Any = None) -> None:
-        """Append one row, off the event loop; a failed write never fails the call.
+        """Append one row off the event loop; a failed write never fails the call.
 
-        The whole row - projection and JSON of the arguments and the result,
-        not just the disk write - is built on the worker thread: projecting a
-        2,000-point series or a 10,000-entry allowlist is the expensive part,
-        and doing it inline made the log slow the call it merely observes.
+        The whole row is built on the worker thread: projecting a 2,000-point
+        series is the expensive part, and doing it inline made the log slow the
+        call it merely observes.
         """
         if not self._path:
             return

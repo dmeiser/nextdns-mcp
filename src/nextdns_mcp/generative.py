@@ -11,6 +11,7 @@ SPDX-License-Identifier: MIT
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -29,6 +30,7 @@ from prefab_ui.app import PrefabApp
 from prefab_ui.renderer import get_generative_renderer_html
 
 from .chart_placement import _validate_chart_placement
+from .config import is_read_only
 from .generative_sandbox import (
     EXECUTION_TIMEOUT,
     MAX_RESULT_BYTES,
@@ -115,7 +117,11 @@ def _parse_ui_data(data: str | dict[str, Any] | None) -> dict[str, Any] | None:
 
 def _guard_string_data(data: str) -> dict[str, Any] | None:
     """Measure the JSON string as sent, then parse it."""
-    if len(data.encode("utf-8")) > MAX_DATA_BYTES:
+    data_bytes = len(data.encode("utf-8"))
+    if data_bytes > MAX_DATA_BYTES:
+        logger.warning(
+            "generate_prefab_ui refused the data argument: %d bytes over the %d byte cap", data_bytes, MAX_DATA_BYTES
+        )
         raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
     return _parse_ui_data(data)
 
@@ -125,14 +131,24 @@ def _guard_object_data(data: dict[str, Any] | None) -> dict[str, Any] | None:
     parsed_data = _parse_ui_data(data)
     if parsed_data is None:
         return None
-    if len(json.dumps(parsed_data).encode("utf-8")) > MAX_DATA_BYTES:
+    serialized = json.dumps(parsed_data)
+    if len(serialized.encode("utf-8")) > MAX_DATA_BYTES:
+        logger.warning(
+            "generate_prefab_ui refused the data argument: %d bytes over the %d byte cap",
+            len(serialized.encode("utf-8")),
+            MAX_DATA_BYTES,
+        )
         raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
     return parsed_data
 
 
 def _validated_payload(code: str, data: str | dict[str, Any] | None) -> dict[str, Any] | None:
     """Apply the code and data guards and return the parsed data payload."""
-    if len(code.encode("utf-8")) > MAX_CODE_BYTES:
+    code_bytes = len(code.encode("utf-8"))
+    if code_bytes > MAX_CODE_BYTES:
+        logger.warning(
+            "generate_prefab_ui refused submitted code: %d bytes over the %d byte cap", code_bytes, MAX_CODE_BYTES
+        )
         raise ValueError(f"code exceeds maximum size of {MAX_CODE_BYTES} bytes")
     _validate_chart_placement(code)
     if isinstance(data, str):
@@ -196,6 +212,7 @@ async def _start_within_budget(worker: DenoPyodideSandbox) -> None:
     try:
         await asyncio.wait_for(worker.start(), timeout=SANDBOX_START_TIMEOUT)
     except TimeoutError:
+        logger.warning("Generative UI sandbox cold start exceeded %ss; the worker was discarded", SANDBOX_START_TIMEOUT)
         raise TimeoutError(f"Pyodide sandbox cold start exceeded {SANDBOX_START_TIMEOUT}s") from None
 
 
@@ -209,7 +226,13 @@ async def _execute_within_budget(code: str, data: dict[str, Any] | None, worker:
     except TimeoutError:
         # asyncio.wait_for cancels the inner task; DenoPyodideSandbox.run
         # discards the worker on CancelledError, so the lock is released.
+        logger.warning("generate_prefab_ui execution exceeded %ss; the worker was discarded", EXECUTION_TIMEOUT)
         raise TimeoutError(f"generate_prefab_ui execution exceeded {EXECUTION_TIMEOUT}s") from None
+
+
+def _code_digest(code: str) -> str:
+    """SHA-256 of the submitted code: an audit handle that carries no code."""
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
 
 
 class PrefabGenerativeUI(Provider):
@@ -233,10 +256,13 @@ class PrefabGenerativeUI(Provider):
         tool_name: str = "generate_prefab_ui",
         include_components_tool: bool = True,
         components_tool_name: str = "search_prefab_components",
+        include_generate_tool: bool = True,
     ) -> None:
         super().__init__()
         app_config = AppConfig(resource_uri=prefab_generative.RESOURCE_URI)
-        self._tools: list[Tool] = [_build_generate_tool(tool_name, app_config, self._run_in_sandbox)]
+        self._tools: list[Tool] = []
+        if include_generate_tool:
+            self._tools.append(_build_generate_tool(tool_name, app_config, self._run_in_sandbox))
         if include_components_tool:
             self._tools.append(_build_components_tool(components_tool_name))
         self._resources: list[TextResource] = [_build_renderer_resource(_renderer_csp())]
@@ -316,10 +342,23 @@ def _build_generate_tool(
     """The generate_prefab_ui tool: size guards and placement guard, then the sandbox run."""
 
     async def generate_ui(code: str, data: str | dict[str, Any] | None = None) -> PrefabApp:
+        if is_read_only():
+            logger.warning("generate_prefab_ui refused: read-only mode denies every operation that changes state")
+            raise ValueError("generate_prefab_ui is unavailable while NEXTDNS_READ_ONLY is enabled")
         payload = _validated_payload(code, data)
+        logger.info(
+            "generate_prefab_ui executing submitted code (sha256=%s, %d bytes)",
+            _code_digest(code),
+            len(code.encode("utf-8")),
+        )
         result = await run(f"{SANDBOX_PRELUDE}\n{code}", payload)
         result_size = _result_size_bytes(result)
         if result_size > MAX_RESULT_BYTES:
+            logger.warning(
+                "generate_prefab_ui refused its own result: %d bytes over the %d byte cap",
+                result_size,
+                MAX_RESULT_BYTES,
+            )
             raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
         return result
 

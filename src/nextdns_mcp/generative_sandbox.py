@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 import asyncio
 import atexit
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -30,6 +31,8 @@ from uuid import uuid4
 # (module constants), not behaviour, so reading them does not couple this module
 # to any upstream class body.
 from prefab_ui.sandbox._pyodide import DENO_LOCK, PREFAB_SRC, RUNNER_JS
+
+logger = logging.getLogger(__name__)
 
 MAX_RESULT_BYTES = 256 * 1024
 EXECUTION_TIMEOUT = 10.0
@@ -210,6 +213,7 @@ def _reap_process(process: subprocess.Popen[bytes]) -> None:
     try:
         process.communicate(timeout=5)
     except subprocess.TimeoutExpired:
+        logger.warning("Generative UI sandbox worker ignored terminate for 5s; it was killed")
         process.kill()
         process.communicate()
     finally:
@@ -315,6 +319,9 @@ class _BoundedStdout:
                 break
             complete, total = self._feed(chunk, chunks, total)
         if total > self._limit:
+            logger.warning(
+                "Generative UI sandbox answer exceeded the %d byte wire cap; the worker was discarded", self._limit
+            )
             self._on_overflow()
             raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
         return b"".join(chunks)
@@ -413,6 +420,9 @@ class DenoPyodideSandbox:
 
     async def _execute(self, code: str, data: dict[str, Any] | None) -> dict[str, Any]:
         request_id = uuid4().hex
+        logger.info(
+            "Generative UI sandbox running request %s (%d bytes of code)", request_id, len(code.encode("utf-8"))
+        )
         worker = await self._ensure_worker()
         return _decode_response(await self._exchange(worker, request_id, code, data), request_id)
 
