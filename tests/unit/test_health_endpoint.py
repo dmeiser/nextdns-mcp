@@ -16,7 +16,6 @@ import logging
 import httpx
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import health
 from nextdns_mcp.config import ConfigurationError
 from nextdns_mcp.health import (
     HEALTH_CACHE_TTL,
