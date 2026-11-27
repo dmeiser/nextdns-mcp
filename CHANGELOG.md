@@ -4,6 +4,97 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.1]
+
+### Fixed
+
+- Combined the nested conditionals in `scripts/validate_schema.py` into a single
+  `elif` so newer Ruff versions (SIM102) pass, and widened the PR lint steps to
+  cover `scripts/` in addition to `src` and `tests`.
+- Added the missing `requires_deno` skip marker to the host-smoke state-leak
+  test, and the weekly maintenance release gate now installs Deno so the
+  sandbox smoke tests execute there instead of silently skipping.
+
+## [4.2.0]
+
+### Security
+
+- Hardened the generative-UI sandbox end to end: the Deno release download is
+  checksum-verified and `curl`/`unzip` are removed from the runtime image,
+  sandbox stdout reads enforce `MAX_RESULT_BYTES`, code-size and data
+  validation run before AST parsing and serialization, chart-placement
+  validation is an iterative walk, the sandbox environment, V8 heap, and
+  interpreter isolation are tightened, and sandbox teardown is scoped to the
+  server lifespan.
+- `generate_prefab_ui` is annotated as non-read-only and its sandbox gained
+  timeout and size limits.
+- `x-mcp-destructive` is honored for `destructive_hint`, `open_world_hint` is
+  set explicitly on all tool annotations, and non-endpoint write tools refuse
+  loose or ambiguous name matches.
+- Upstream-controlled dashboard and chart fields, including DNS labels in
+  summaries, are sanitized consistently.
+
+### Fixed
+
+- `overviewDashboard` correctness: `section`/`view_type`/`domain_view` and
+  time ranges are validated up front; `view_type`/`domain_view` are honored
+  across all cards, with `domain_view` scoped to domain cards so
+  `view_type="auto"` survives; the countries card is included in
+  `section="all"` with `limit` forwarded; `_item_queries` is guarded against
+  malformed and infinite upstream counts; sub-request errors propagate instead
+  of being swallowed; and production asserts on request paths are replaced.
+- Empty-state cards render consistently when a section has no data.
+- `_parse_ui_data` rejects malformed and non-dict payloads.
+- The Deno/Pyodide sandbox subprocess stops on server shutdown.
+- The Prefab component walk in the call log is bounded.
+- `limit` is validated and forwarded in `overviewDashboard` and
+  `plotAnalytics`.
+- Boolean environment parsing is unified with recognized-token validation, and
+  surrounding whitespace is stripped from `NEXTDNS_READ_ONLY`.
+- The streaming-path payload cap applies only to series endpoints.
+- Chart `Column` children are passed instead of mutating the child list.
+- `is_float_shaped` rejects malformed numerics with an interior sign stripped.
+- Queued dashboard fan-out waves short-circuit on an early typed error.
+- Chart downsampling is shared between dashboard and plots, interval counts
+  are reported truthfully, and dashboard payloads are bounded.
+
+### Changed
+
+- `dashboard.py` is split into a package over a neutral charts module, with
+  dashboard sections single-sourced and a shared `build_timeseries_area_chart`
+  factory and analytics-card builder.
+- The triplicated domain-card analytics implementations are consolidated, and
+  single-card handlers, dispatch wrappers, and summary formatters are
+  deduplicated.
+- `fastmcp` moved from a `==4.1.2` pin to a `>=4.1.8` floor.
+- CI, packaging metadata, and docs are aligned on Python 3.15, and the runtime
+  image is `python:3.15-slim`.
+- CI and release hardening: Docker images are not published for `no-release`
+  merges, the docker-publish gate fails closed, the revert watchdog validates
+  `HEAD_SHA` and checks out the repo before opening auto-revert PRs, and Auto
+  Release polls the unit-tests check-run instead of racing it.
+- Live E2E suites are serialized repo-wide with backoff on upstream 429s,
+  `Retry-After` headers are surfaced, and E2E write bursts are paced.
+
+### Performance
+
+- `overviewDashboard` upstream fan-out is bounded.
+- `plotAnalytics` chart series are downsampled above 250 points.
+- Destination domain labels accumulate only to the display budget.
+- Each chart series' query list is read once per chart build.
+- Call-log intermediates are serialized once, without `sort_keys`.
+
+### Docs
+
+- Documented the `NEXTDNS_API_BASE` environment override.
+- Added the trusted-host contract for generative UI and documented the FastMCP
+  private members borrowed by `NextDNSGenerativeUI`.
+- Analytics tool docstrings state their differing default time windows.
+- Corrected stale references to hand-written tools, image-only plotting,
+  dashboard fail-closed behaviour, UI tool annotations, and the sandbox
+  inventory.
+- `AGENT.md` states the why-only comment rule.
+
 ## [4.1.0]
 
 ### Added
