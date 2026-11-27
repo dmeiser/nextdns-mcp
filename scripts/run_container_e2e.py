@@ -308,11 +308,9 @@ def _write_operation_id(method: str, op: Any) -> str | None:
 def _spec_write_operations(spec: dict[str, Any]) -> set[str]:
     """operationIds of every state-changing operation in a parsed document."""
     found: set[str] = set()
-    for item in spec.get("paths", {}).values():
-        methods = item.items() if isinstance(item, dict) else ()
-        for method, op in methods:
-            if op_id := _write_operation_id(method, op):
-                found.add(op_id)
+    for method, op in validate_schema._iter_spec_operations(spec):
+        if op_id := _write_operation_id(method, op):
+            found.add(op_id)
     return found
 
 

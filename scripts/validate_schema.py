@@ -23,7 +23,7 @@ the check enforces the whole schema (``required``, ``enum``, ``pattern``,
 
 import json
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -154,6 +154,29 @@ def _success_response_schema(operation: dict[str, Any]) -> dict[str, Any] | None
     return None
 
 
+_SPEC_OPERATION_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
+
+
+def _iter_spec_operations(spec: dict[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Yield ``(method, operation)`` for every HTTP operation in a document.
+
+    The schema index, the published-tool catalog and the container runner's
+    write-coverage gate used to each walk ``paths`` with their own copy of the
+    method filter. Entries that are not HTTP operations — including a
+    non-mapping path item, which the container runner already tolerated — are
+    not operations and contribute nothing.
+    """
+    paths = spec.get("paths", {})
+    if not isinstance(paths, dict):
+        return
+    for path_item in paths.values():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if method in _SPEC_OPERATION_METHODS and isinstance(operation, dict):
+                yield method, operation
+
+
 # operation_id -> 2xx response schema, walked once per spec object. The old
 # per-call search over every path made assert_operation_coverage() quadratic in
 # the document (~70 full walks for the published reads), and every E2E response
@@ -169,16 +192,13 @@ def _response_index(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if _response_index_memo is not None and _response_index_memo[0] is spec:
         return _response_index_memo[1]
     index: dict[str, dict[str, Any]] = {}
-    for path_item in spec.get("paths", {}).values():
-        for method, operation in path_item.items():
-            if method not in ("get", "post", "put", "patch", "delete"):
-                continue
-            operation_id = operation.get("operationId")
-            if not operation_id or operation_id in index:
-                continue
-            schema = _success_response_schema(operation)
-            if schema:
-                index[operation_id] = schema
+    for _method, operation in _iter_spec_operations(spec):
+        operation_id = operation.get("operationId")
+        if not operation_id or operation_id in index:
+            continue
+        schema = _success_response_schema(operation)
+        if schema:
+            index[operation_id] = schema
     _response_index_memo = (spec, index)
     return index
 
@@ -200,12 +220,10 @@ def spec_operations(spec: dict[str, Any]) -> dict[str, str]:
     wrong.
     """
     operations: dict[str, str] = {}
-    for path_item in spec.get("paths", {}).values():
-        for method, operation in path_item.items():
-            if method in ("get", "post", "put", "patch", "delete"):
-                operation_id = operation.get("operationId")
-                if operation_id:
-                    operations[operation_id] = method
+    for method, operation in _iter_spec_operations(spec):
+        operation_id = operation.get("operationId")
+        if operation_id:
+            operations[operation_id] = method
     return operations
 
 
@@ -230,21 +248,18 @@ def titled_non_object_bodies(spec: dict[str, Any]) -> list[str]:
     keeps it from gaining one that breaks the executor.
     """
     offenders: list[str] = []
-    for path_item in spec.get("paths", {}).values():
-        for method, operation in path_item.items():
-            if method not in ("get", "post", "put", "patch", "delete"):
-                continue
-            body_schema = _request_body_json_schema(operation)
-            if body_schema is None:
-                continue
-            # $ref'd bodies resolve to their target; only a non-object effective
-            # type mis-names the argument (an undecidable type is not "object"
-            # either, and FastMCP's namer reads the title from the raw schema).
-            resolved = _resolve_body_schema(spec, body_schema)
-            if _declared_schema_type(resolved) == "object":
-                continue
-            if resolved.get("title") and operation.get("operationId"):
-                offenders.append(str(operation["operationId"]))
+    for _method, operation in _iter_spec_operations(spec):
+        body_schema = _request_body_json_schema(operation)
+        if body_schema is None:
+            continue
+        # $ref'd bodies resolve to their target; only a non-object effective
+        # type mis-names the argument (an undecidable type is not "object"
+        # either, and FastMCP's namer reads the title from the raw schema).
+        resolved = _resolve_body_schema(spec, body_schema)
+        if _declared_schema_type(resolved) == "object":
+            continue
+        if resolved.get("title") and operation.get("operationId"):
+            offenders.append(str(operation["operationId"]))
     return sorted(set(offenders))
 
 
