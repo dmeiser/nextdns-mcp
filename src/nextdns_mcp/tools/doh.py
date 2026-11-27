@@ -19,7 +19,8 @@ transport helper rather than depending on the ACL's ``AccessDeniedError``.
 Three names, one operation, in the order a call passes through them. One of
 the three is the published tool, the other two are internal: the server
 registers a composite tool under the wrapper function's own ``__name__``
-(``server._COMPOSITE_TOOLS``), so ``dohLookup`` is what callers see and it
+(``server._composite_tools()``, with the names published by
+``catalog.composite_tool_names()``), so ``dohLookup`` is what callers see and it
 keeps the camelCase of the generated operation tools, while the wrapper itself
 exists to hold the MCP-facing signature and docstring apart from the request
 logic (AGENT.md). ``_dohLookup_impl`` is the private half that wrapper

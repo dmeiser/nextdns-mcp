@@ -14,7 +14,7 @@ holding two different kinds of UI:
 
 - `overviewDashboard` and `plotAnalytics` render component trees this project wrote. The
   server knows every component in the tree before a call happens
-  (the `_COMPOSITE_TOOLS` registry, `src/nextdns_mcp/server.py:73-78`).
+  (the registry built by `_composite_tools()` at `src/nextdns_mcp/server.py:79-95`).
 - FastMCP's `GenerativeUI` provider is the other shape: the **model** writes Python and
   the server executes it (`generate_prefab_ui(code, data)` answers with a `PrefabApp`).
   Nothing else in the catalog runs caller-authored code.
@@ -50,18 +50,18 @@ obligations down instead of assuming them.**
   only for `true`/`1`/`on`/`yes` (`src/nextdns_mcp/config.py:231-237`), and an
   unrecognized value fails startup with `ConfigurationError` rather than quietly
   disabling the feature (`validate_configuration()`'s env parse, `src/nextdns_mcp/config.py:349-355`). `build_mcp_server()` mounts
-  the provider only when the flag is true (`register_generative_ui_provider()` at `src/nextdns_mcp/server.py:208`, with the gate in
-  `src/nextdns_mcp/catalog.py:79-82`).
+  the provider only when the flag is true (`register_generative_ui_provider()` at `src/nextdns_mcp/server.py:226`, with the gate in
+  `src/nextdns_mcp/catalog.py:91-103`).
 - The catalog stays self-describing under the flag. `published_tool_names()` adds the
   provider's two names in the same conditional that registers them
-  (`published_tool_names()`, `src/nextdns_mcp/server.py:163-177`), so the `initialize` instructions, schema
+  (`published_tool_names()`, `src/nextdns_mcp/server.py:174-186`), so the `initialize` instructions, schema
   validation's completeness checks, and the container pre-flight see the pair exactly
   when the provider publishes it. No consumer hardcodes the conditional surface.
 - The two tools are partitioned by what they answer with, declared once on the module
   that registers them and exported so validation imports the split instead of restating
   it: `generate_prefab_ui` answers with UI content (so no payload exists for a schema to
   pin), `search_prefab_components` answers with plain JSON whose shape validation pins
-  (`src/nextdns_mcp/catalog.py:28-55`).
+  (`src/nextdns_mcp/catalog.py:34-36, 49-75`).
 - Code execution is annotated as code execution: `generate_prefab_ui` carries
   `read_only_hint=False, destructive_hint=False, open_world_hint=False`, while
   `search_prefab_components` is read-only (`src/nextdns_mcp/generative.py:302-318`). A
@@ -109,7 +109,7 @@ obligations down instead of assuming them.**
 
 - Two published tools are conditional, so any new consumer that pins the catalog must read
   the flag or import the server's accessors
-  (`generative_ui_tool_names()` and friends, `src/nextdns_mcp/catalog.py:28-55`); a
+  (`generative_ui_tool_names()` and friends, `src/nextdns_mcp/catalog.py:49-75`); a
   hardcoded list goes stale silently.
 - The provider used to borrow nine private FastMCP members (`_gen`, `_build_csp`,
   `_local._add_component`, `_setup_done`, `_get_sandbox`, `_sandbox`, `_tool_name`,

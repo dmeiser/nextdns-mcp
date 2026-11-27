@@ -33,20 +33,22 @@ both consumers into two neutral modules; and the boundary is enforced by a test 
 reads the source, because a split nothing defends collapses back the first time someone
 needs a card in a hurry.**
 
-- **The package** is `src/nextdns_mcp/tools/dashboard/` with four modules, one concern
+- **The package** is `src/nextdns_mcp/tools/dashboard/` with five modules, one concern
   each: `data` (transport calls, the bounded fan-out, KPI/rate math, row shapers),
   `components` (the Prefab cards, charts, tables and page views), `formatters` (the
-  summary text beside each rendered card), and `tool` (one implementation per section,
-  the `section` dispatch, and the single published wrapper). Names beginning with `_` are
+  summary text beside each rendered card), `constants` (the section vocabulary, apart
+  from the component tree so a metadata reader never imports the render path), and
+  `tool` (one implementation per section, the `section` dispatch, and the single
+  published wrapper). Names beginning with `_` are
   package-internal; the surface is imported from the package
-  (`src/nextdns_mcp/tools/dashboard/__init__.py:1-23`).
+  (`src/nextdns_mcp/tools/dashboard/__init__.py:29-47`).
 - **The shared primitives** live outside both analytics surfaces: `src/nextdns_mcp/charts.py`
   is pure — range resolution, payload shape, rows, series budgets — and imports nothing
   from the Prefab UI component library; `src/nextdns_mcp/chart_ui.py` holds the Prefab
   chart builders. Neither the dashboard package nor `tools/plots.py` owns either module,
   and both cross into them under public names only
   (`src/nextdns_mcp/charts.py:1-14`, `src/nextdns_mcp/chart_ui.py:1-14`,
-  `src/nextdns_mcp/tools/dashboard/__init__.py:12-14`).
+  `src/nextdns_mcp/tools/dashboard/__init__.py:20-22`).
 - **The boundary test** (`tests/unit/test_dashboard_boundaries.py`) pins the layout the
   split chose: the god module stays a package; no dashboard module imports a sibling tool
   module; nothing in the package imports a `_`-prefixed name from the shared modules; the
