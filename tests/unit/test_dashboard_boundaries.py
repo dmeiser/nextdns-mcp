@@ -22,6 +22,7 @@ from nextdns_mcp.tools.dashboard import data as data_module
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = REPO_ROOT / "src" / "nextdns_mcp" / "tools" / "dashboard"
+SOURCE_ROOT = REPO_ROOT / "src"
 SRC_DIR = REPO_ROOT / "src" / "nextdns_mcp"
 TOOLS_PACKAGE = "nextdns_mcp.tools"
 DASHBOARD_PACKAGE = "nextdns_mcp.tools.dashboard"
@@ -50,19 +51,24 @@ SHARED_PRIMITIVES = (
 
 
 def _module_package(module_file: Path) -> str:
-    """The dotted package one source file belongs to, derived from its path under ``src``."""
-    return ".".join(module_file.relative_to(SRC_DIR).parent.parts)
+    """The dotted package a source file belongs to, from its full path under ``src``.
+
+    Resolve against ``src``, not ``SRC_DIR`` (the ``nextdns_mcp`` root): the
+    latter drops that root, so every relative spelling lands one package short
+    and none of the guards matches it (WORK-339 send-back).
+    """
+    return ".".join(module_file.relative_to(SOURCE_ROOT).parent.parts)
 
 
-def _absolute_imports(module_file: Path) -> list[tuple[str, list[str]]]:
-    """Every import in one source file as ``(absolute module, imported names)``.
+def _normalize_imports(source: str, package: str) -> list[tuple[str, list[str]]]:
+    """Normalize every import in one source into ``(absolute module, names)``.
 
     Both AST forms resolve to the same absolute spelling - ``import a.b``,
     ``from a import b``, and the relative forms of each - so a forbidden target
     cannot hide behind an equivalent import syntax (WORK-339).
     """
-    package_parts = _module_package(module_file).split(".")
-    tree = ast.parse(module_file.read_text(encoding="utf-8"), filename=str(module_file))
+    package_parts = package.split(".")
+    tree = ast.parse(source)
     resolved: list[tuple[str, list[str]]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -77,6 +83,37 @@ def _absolute_imports(module_file: Path) -> list[tuple[str, list[str]]]:
                 base = node.module or ""
             resolved.append((base, [alias.name for alias in node.names]))
     return resolved
+
+
+def _absolute_imports(module_file: Path) -> list[tuple[str, list[str]]]:
+    """Every import in one dashboard source file as ``(absolute module, names)``."""
+    return _normalize_imports(module_file.read_text(encoding="utf-8"), _module_package(module_file))
+
+
+def test_import_guard_normalizes_relative_and_absolute_spellings():
+    """The guards' resolver must keep the package root for every spelling.
+
+    Regression for the WORK-339 send-back: resolution from ``src/nextdns_mcp``
+    dropped ``nextdns_mcp``, so relative imports never matched the absolute
+    guards and five forbidden spellings passed the boundary suite.
+    """
+    assert _module_package(PACKAGE_DIR / "components.py") == DASHBOARD_PACKAGE
+    source = """
+from .data import public_name
+from .. import plots
+from ..plots import _private_plot
+from ...charts import _private_chart
+import nextdns_mcp.tools.logs
+from nextdns_mcp.tools.dashboard.formatters import _private_formatter
+"""
+    assert _normalize_imports(source, "nextdns_mcp.tools.dashboard") == [
+        ("nextdns_mcp.tools.dashboard.data", ["public_name"]),
+        ("nextdns_mcp.tools", ["plots"]),
+        ("nextdns_mcp.tools.plots", ["_private_plot"]),
+        ("nextdns_mcp.charts", ["_private_chart"]),
+        ("nextdns_mcp.tools.logs", []),
+        ("nextdns_mcp.tools.dashboard.formatters", ["_private_formatter"]),
+    ]
 
 
 def test_dashboard_is_a_package_not_a_module():
