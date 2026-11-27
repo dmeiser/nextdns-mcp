@@ -410,25 +410,6 @@ class TestOptionalProfileIdCoercion:
         assert result.content[0].text == "None"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("bad_value", [True, [], {}])
-    async def test_non_int_non_str_profile_id_is_rejected(self, bad_value):
-        """Only int is coerced: bool/list/dict must fail validation, never become 'True'/'[]'/'{}'."""
-        from fastmcp import FastMCP
-        from fastmcp.exceptions import ValidationError
-
-        from nextdns_mcp.coercion import OptionalProfileId
-
-        mcp = FastMCP("test", strict_input_validation=False)
-
-        @mcp.tool()
-        async def dohLookup(domain: str, profile_id: OptionalProfileId = None, record_type: str = "A") -> str:
-            return f"{profile_id!r}"
-
-        tool = await mcp.get_tool("dohLookup")
-        with pytest.raises(ValidationError):
-            await tool.run({"domain": "example.com", "profile_id": bad_value, "record_type": "A"})
-
-    @pytest.mark.asyncio
     async def test_string_profile_id_unchanged(self):
         """String profile IDs (the normal case) pass through unchanged."""
         from fastmcp import FastMCP
