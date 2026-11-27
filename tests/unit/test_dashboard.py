@@ -252,6 +252,120 @@ class TestDashboardHelpers:
         assert data_mod.destination_row({"domains": [over]})["sample_domains"] == over[:60]
 
 
+class TestDashboardRenderCaps:
+    """Render caps: paginated tables, rolled-up charts, and one byte ceiling per page.
+
+    ``limit`` bounds what an analytics endpoint answers - up to 500 rows - and
+    every one of those rows used to be serialized into the returned ``PrefabApp``:
+    ``section="all"`` at ``limit=500`` embedded thousands of rows in the document
+    handed back to the model (issue #789). These tests pin the caps that keep the
+    rendered page bounded while its totals stay the caller's.
+    """
+
+    @pytest.fixture
+    def mock_fat_endpoints(self, monkeypatch):
+        """Every endpoint answers 500 rows, and the series answers 100 series x 250 points."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+
+        async def fake_fetch(pid, endpoint, params=None):
+            if endpoint == "status;series":
+                return (
+                    {
+                        "meta": {"series": {"times": [f"2024-01-01T{i:05d}" for i in range(250)]}},
+                        "data": [{"name": f"dev{i}", "queries": [1] * 250} for i in range(100)],
+                    },
+                    None,
+                )
+            return (
+                {
+                    "data": [
+                        {
+                            "domain": f"sub{i:04d}.example-domain.com",
+                            "name": f"Name {i}",
+                            "id": f"dev{i}",
+                            "model": f"Model {i}",
+                            "ip": f"10.{i // 65536 % 256}.{i // 256 % 256}.{i % 256}",
+                            "company": f"corp{i % 5}",
+                            "code": f"C{i % 50:02d}",
+                            "domains": [f"sample{i}.example.com"],
+                            "queries": 500 - (i % 400),
+                        }
+                        for i in range(500)
+                    ]
+                },
+                None,
+            )
+
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
+
+    def test_a_large_table_is_capped_and_paginated(self):
+        data = [{"domain": f"d{i:03d}.example.com", "queries": 500 - i} for i in range(500)]
+        table = _find_component(ui.build_domains_card("Resolved Domains", "desc", data), "DataTable")
+        assert table is not None
+        assert len(table.rows) == ui.MAX_TABLE_ROWS
+        assert table.paginated is True
+        assert table.page_size == ui.TABLE_PAGE_SIZE
+        # The busiest rows are the ones that survive the cap.
+        assert table.rows[0]["domain"] == "d000.example.com"
+        assert table.rows[-1]["queries"] == 500 - (ui.MAX_TABLE_ROWS - 1)
+
+    def test_a_table_inside_the_page_size_is_not_paginated(self):
+        data = [{"domain": f"d{i}.example.com", "queries": 5} for i in range(3)]
+        table = _find_component(ui.build_domains_card("Resolved Domains", "desc", data), "DataTable")
+        assert table is not None
+        assert table.paginated is False
+        assert len(table.rows) == 3
+
+    def test_bar_and_pie_charts_roll_up_their_categories(self):
+        data = [{"domain": f"d{i:03d}.example.com", "queries": 500 - i} for i in range(500)]
+        total = sum(item["queries"] for item in data)
+        for view_type, comp_type in (("bar", "BarChart"), ("pie", "PieChart")):
+            chart = _find_component(
+                ui.build_domains_card("Resolved Domains", "desc", data, view_type=view_type), comp_type
+            )
+            assert chart is not None
+            assert len(chart.data) == charts_module.CHART_MAX_CATEGORIES
+            assert chart.data[-1]["label"] == charts_module.CHART_ROLLUP_LABEL
+            # The rollup carries what the chart no longer draws, so the total holds.
+            assert sum(row["queries"] for row in chart.data) == total
+
+    def test_categories_within_the_budget_come_back_untouched(self):
+        rows = [{"label": f"c{i}", "queries": i} for i in range(charts_module.CHART_MAX_CATEGORIES)]
+        assert charts_module.cap_chart_categories(rows) is rows
+
+    def test_categories_are_ranked_and_a_null_count_prices_at_zero(self):
+        rows = [{"label": f"c{i}", "queries": 10} for i in range(charts_module.CHART_MAX_CATEGORIES)] + [
+            {"label": "null", "queries": None}
+        ]
+        capped = charts_module.cap_chart_categories(rows)
+        assert len(capped) == charts_module.CHART_MAX_CATEGORIES
+        assert capped[0]["label"] == "c0"
+        # One kept-budget row and the null row are the omitted set; null adds nothing.
+        assert capped[-1] == {"label": charts_module.CHART_ROLLUP_LABEL, "queries": 10}
+
+    def test_the_queries_card_caps_its_series(self):
+        payload = {
+            "meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}},
+            "data": [{"name": f"dev{i}", "queries": [i + 1]} for i in range(100)],
+        }
+        chart = _find_component(ui._build_queries_series_card(payload), "AreaChart")
+        assert chart is not None
+        assert len(chart.series) == charts_module.CHART_MAX_SERIES
+        assert chart.series[-1].label == charts_module.CHART_ROLLUP_LABEL
+        assert sum(row[f"series_{i}"] for row in chart.data for i in range(charts_module.CHART_MAX_SERIES)) == sum(
+            range(1, 101)
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("view_type", ["table", "bar", "pie"])
+    async def test_all_sections_at_the_maximum_limit_stay_under_the_result_ceiling(self, mock_fat_endpoints, view_type):
+        """The reported shape: ``section="all"``, ``limit=500``, 500 rows per card (issue #789)."""
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all", limit=500, view_type=view_type)
+        assert isinstance(res, ToolResult)
+        wire = json.dumps(res.structured_content, separators=(",", ":")).encode("utf-8")
+        assert len(wire) <= chart_ui_module.MAX_RESULT_BYTES
+
+
 class TestDashboardFetchAndValidation:
     """Tests for data validation and fetching error paths."""
 
@@ -860,6 +974,16 @@ class TestDashboardToolsExecution:
         assert isinstance(res, ToolResult)
         assert len(calls) == 12
         assert 1 <= max_in_flight <= data_mod.OVERVIEW_FANOUT_CONCURRENCY
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", ["overview", "all", "domains", "kpi"])
+    async def test_a_page_over_the_result_ceiling_is_refused(self, mock_all_endpoints, monkeypatch, section):
+        """Every page surface ends at the same gate: no oversized app reaches the caller."""
+        monkeypatch.setattr(chart_ui_module, "MAX_RESULT_BYTES", 1)
+        res = await dash_module.overviewDashboard(profile_id="abc123", section=section, limit=500)
+        assert res["code"] == "response_too_large"
+        assert res["max_result_bytes"] == 1
+        assert res["result_bytes"] > 1
 
 
 class TestFanoutShortCircuit:

@@ -19,6 +19,7 @@ from typing import Any, Literal, NamedTuple, Protocol, get_args
 from fastmcp.tools.base import ToolResult
 from prefab_ui.components import Card
 
+from ...chart_ui import bounded_app_result
 from ...charts import analytics_range_error
 from ...coercion import OptionalProfileId
 from ...errors import ErrorCode, error_payload
@@ -241,7 +242,7 @@ async def _kpi_analytics_impl(
     summary = (
         f"[Rendered NextDNS KPI Metrics: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%)]"
     )
-    return ToolResult(content=summary, structured_content=build_kpi_app(kpis))
+    return bounded_app_result(build_kpi_app(kpis), summary, "KPI cards")
 
 
 DashboardSection = Literal[
@@ -363,7 +364,7 @@ async def _render_overview_page(
         f"[Rendered NextDNS Dashboard: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
         f"{top_summary}]"
     )
-    return ToolResult(content=summary, structured_content=build_page_app(view))
+    return bounded_app_result(build_page_app(view), summary, "dashboard page")
 
 
 def _validate_dashboard_arg(name: str, value: Any, allowed_literal: Any) -> dict[str, Any] | None:
@@ -515,6 +516,14 @@ async def overviewDashboard(
         section: Dashboard section or widget to render (default "overview").
         view_type: Visualization format: "auto" (default: table or card default), "bar", "table", or "pie".
         domain_view: Visualization format for domain cards in overview mode: "table" (default), "bar", or "pie".
+
+    What is fetched is bounded by ``limit``; what is rendered is bounded too. A
+    table shows at most its 100 busiest rows, paginated 25 to a page, and a bar or
+    pie chart draws its 25 busiest entries with the rest rolled up into one
+    "Other" entry, so the chart's totals still account for every row it was sent.
+    A time-series chart draws at most 25 series plus that rollup. A rendered page
+    still over the 262144-byte result ceiling is refused with a
+    ``response_too_large`` payload naming its size rather than delivered trimmed.
     """
     return await _overview_dashboard_impl(
         profile_id=profile_id,

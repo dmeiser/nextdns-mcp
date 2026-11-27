@@ -412,6 +412,84 @@ class TestChartSeriesDownsampling:
         assert "6,003 total queries across 2001 intervals" in result.content[0].text
 
 
+class TestChartSeriesRenderCap:
+    """The series render cap: busiest kept, the rest rolled up, the whole answer still counted.
+
+    A ``;series`` answer carries one series per grouped value, so the series count
+    is the one dimension the range budget does not bound: chart rows are dense, and
+    100 series cost 250 x 100 point values before anything was drawn (issue #789).
+    """
+
+    def test_within_budget_the_series_come_back_untouched(self):
+        series_data = [{"name": f"s{i}", "queries": [i, i]} for i in range(charts_module.CHART_MAX_SERIES)]
+        assert charts_module.cap_chart_series(series_data) is series_data
+
+    def test_busiest_series_are_kept_and_the_rest_rolled_into_one(self):
+        series_data = [{"name": f"s{i}", "queries": [i, 1]} for i in range(100)]
+        capped = charts_module.cap_chart_series(series_data)
+
+        assert len(capped) == charts_module.CHART_MAX_SERIES
+        assert [series["name"] for series in capped[:3]] == ["s99", "s98", "s97"]
+        rollup = capped[-1]
+        assert rollup["name"] == charts_module.CHART_ROLLUP_LABEL
+        # The 76 omitted series are summed interval by interval, not dropped.
+        assert rollup["queries"] == [sum(range(76)), 76]
+        assert sum(sum(series["queries"]) for series in capped) == sum(sum(s["queries"]) for s in series_data)
+
+    def test_rollup_pads_short_series_and_prices_a_null_series_at_zero(self):
+        series_data = [{"name": f"s{i}", "queries": [10]} for i in range(charts_module.CHART_MAX_SERIES)] + [
+            {"name": "short", "queries": [1, 2]},
+            {"name": "none", "queries": None},
+        ]
+        rollup = charts_module.cap_chart_series(series_data)[-1]
+        # One kept-budget series, the short one and the null one are the omitted set.
+        assert rollup["queries"] == [11, 2]
+
+    def test_build_series_chart_caps_series_before_building_rows(self):
+        """The dense rows are built from the capped series, so 100 series cost 26 columns."""
+        times = [f"2024-01-{(i // 24) + 1:02d}T{i % 24:02d}:00:00Z" for i in range(250)]
+        data = [{"name": f"dev{i}", "queries": [i + 1] * 250} for i in range(100)]
+        result = plots_module._build_series_chart("by_qname", times, data)
+
+        assert isinstance(result, ToolResult)
+        chart = result.structured_content["view"]["children"][0]["children"][2]
+        series_keys = [key for key in chart["data"][0] if key != "time"]
+        assert len(series_keys) == charts_module.CHART_MAX_SERIES
+        assert len(chart["series"]) == charts_module.CHART_MAX_SERIES
+        assert chart["series"][-1]["label"] == charts_module.CHART_ROLLUP_LABEL
+        # Every query the answer carried is still in the chart, rollup included.
+        assert sum(sum(row[key] for key in series_keys) for row in chart["data"]) == sum(range(1, 101)) * 250
+
+        metrics = {
+            c["label"]: c["value"]
+            for c in result.structured_content["view"]["children"][0]["children"][1]["children"]
+            if c.get("type") == "Metric"
+        }
+        assert metrics["Series Count"] == str(charts_module.CHART_MAX_SERIES)
+        # The rollup does not touch the summary: it reports what upstream answered.
+        assert f"{sum(range(1, 101)) * 250:,} total queries" in result.content[0].text
+
+    def test_build_series_chart_over_the_result_ceiling_is_refused(self, monkeypatch):
+        """A chart that still breaches the byte ceiling is a typed refusal, not a trimmed chart."""
+        monkeypatch.setattr(chart_ui_module, "MAX_RESULT_BYTES", 1)
+        result = plots_module._build_series_chart(
+            "status", ["2024-01-15T10:00:00Z"], [{"name": "blocked", "queries": [10]}]
+        )
+        assert result["code"] == "response_too_large"
+        assert result["max_result_bytes"] == 1
+        assert result["result_bytes"] > 1
+
+    def test_a_full_series_answer_stays_under_the_result_ceiling(self):
+        """100 series x 250 intervals: the worst case the range budget allows, rendered."""
+        times = [f"2024-01-{(i // 24) + 1:02d}T{i % 24:02d}:00:00Z" for i in range(250)]
+        data = [{"name": f"dev{i}", "queries": list(range(i + 1, i + 251))} for i in range(100)]
+        result = plots_module._build_series_chart("devices", times, data)
+
+        assert isinstance(result, ToolResult)
+        wire = json.dumps(result.structured_content, separators=(",", ":")).encode("utf-8")
+        assert len(wire) <= chart_ui_module.MAX_RESULT_BYTES
+
+
 @pytest.fixture
 def now():
     """A fixed clock so relative from/to values resolve deterministically."""

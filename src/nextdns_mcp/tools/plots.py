@@ -12,11 +12,13 @@ from prefab_ui.components import Column, Heading, Metric, Row
 
 from ..chart_ui import (
     DASHBOARD_THEME,
+    bounded_app_result,
     build_chart_series,
     build_timeseries_area_chart,
 )
 from ..charts import (
     build_chart_data,
+    cap_chart_series,
     downsample_chart_series,
     extract_series_fields,
     series_budget_error,
@@ -51,15 +53,23 @@ def _build_series_chart(
     metric: str,
     times: list[str],
     series_data: list[dict[str, Any]],
-) -> ToolResult:
+) -> ToolResult | dict[str, Any]:
     """Build an interactive Prefab chart view and return a ToolResult with summary.
 
     The rendered rows are downsampled to the shared chart budget, but the
     reported interval count is the upstream ``len(times)``: the chart was drawn
     with fewer points, yet the series the caller asked for - and paid the range
     budget for - still carried all of them (issue #550).
+
+    The series count is capped by the sibling budget before those rows are built:
+    a ``;series`` answer carries one series per grouped value (per device, per
+    protocol), and each one costs a value in every chart row, so an uncapped M
+    materialized a dense 250 x M document before anything was drawn. The busiest
+    series are kept and the rest are summed interval by interval into one
+    ``Other`` series, so the plotted totals still match the summary (issue #789).
     """
     total_queries = sum(sum(series.get("queries") or []) for series in series_data)
+    series_data = cap_chart_series(series_data)
     chart_times, chart_series_data = downsample_chart_series(times, series_data)
     chart_data = build_chart_data(chart_times, chart_series_data)
     chart_series = build_chart_series(chart_series_data)
@@ -73,8 +83,7 @@ def _build_series_chart(
         build_timeseries_area_chart(chart_data, chart_series)
 
     summary = f"NextDNS Analytics: {metric} ({total_queries:,} total queries across {len(times)} intervals)"
-    app = PrefabApp(view=view, theme=DASHBOARD_THEME)
-    return ToolResult(content=summary, structured_content=app)
+    return bounded_app_result(PrefabApp(view=view, theme=DASHBOARD_THEME), summary, "analytics chart")
 
 
 def _validate_interval_and_limit(interval: int, limit: int) -> dict[str, Any] | None:
@@ -323,6 +332,13 @@ async def plotAnalytics(
       read as UTC), must end after it starts, and spans at most 2000 intervals
       (at most 2000 points per series), so a wide range needs a proportionally
       larger ``interval``.
+
+    What is plotted is bounded independently of what is fetched: the chart draws
+    at most 250 downsampled intervals and at most 25 series - the busiest ones,
+    with every omitted series summed interval by interval into one ``Other``
+    series, so the chart still accounts for the query totals the summary reports.
+    A rendered chart over the 262144-byte result ceiling is refused with a
+    ``response_too_large`` payload naming its size rather than delivered trimmed.
 
     Examples:
         - ``plotAnalytics(metric="status", profile_id="<profile id>", from_time="-1d")``
