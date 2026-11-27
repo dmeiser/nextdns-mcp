@@ -439,6 +439,11 @@ class AccessControlledClient:
         Collection endpoints such as POST /profiles create resources that belong to a
         profile, so they must respect read-only mode and the writable-profile set even
         though the URL carries no profile_id.
+
+        The writable set is checked against the protected denylist here rather than at
+        the tool door: a write the ACL layer would refuse must stay refused on the one
+        path every request takes, and the caller still gets the typed denial payload
+        rather than a request that cannot land.
         """
         if access.read_only:
             error_msg = "Write operation denied: server is in read-only mode"
@@ -447,6 +452,11 @@ class AccessControlledClient:
 
         if not access.any_writable:
             error_msg = "Write access denied: no profiles are writable"
+            logger.warning(error_msg)
+            raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
+
+        if access.writable and access.writable.issubset(access.protected):
+            error_msg = "Write access denied: every writable profile is protected (NEXTDNS_PROTECTED_PROFILES)"
             logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 

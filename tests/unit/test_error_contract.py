@@ -508,6 +508,22 @@ class TestAccessControlErrorContract:
         assert "Write access denied for profile: abc123" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_create_profile_denial_names_the_protected_writable_set(self, monkeypatch, spec_call):
+        """A collection write with nowhere to land is refused by the ACL layer.
+
+        ``createProfile`` carries no profile_id, so the writable set and the
+        protected denylist are compared on the request path: the caller gets
+        the typed denial and no request leaves the process.
+        """
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abc123")
+        monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "abc123")
+        result = await spec_call("createProfile", name="new profile")
+        _assert_error_contract(result)
+        assert result["code"] == ErrorCode.WRITE_ACCESS_DENIED
+        assert result["status_code"] == 403
+        assert "every writable profile is protected" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_upstream_403_is_http_error_not_acl_denial(self, mock_api_client, spec_call):
         """A genuine upstream 403 (raise_for_status) must NOT be mapped to an
         ACL denial: it keeps the existing http_error path (issue #178)."""

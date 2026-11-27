@@ -9,15 +9,19 @@ named and described from the spec itself. Tuning what a caller sees means editin
 
 This module is the composition: ``SpecApiTool`` is the only thing that knows the pieces,
 so the order their refusals fire in is readable in one place - path safety and a malformed
-id, the ``createProfile`` guard, delegation, the argument split, the schema check, the
-series budget, the empty-write refusal, dispatch. The pieces are ``spec_routes``,
-``spec_descriptions``, ``spec_arguments``, ``spec_validation`` and ``spec_series``.
+id, delegation, the argument split, the schema check, the series budget, the empty-write
+refusal, dispatch. Whether a write is permitted at all is not one of them: that decision
+belongs to ``AccessControlledClient``, which every request takes. The pieces are
+``spec_routes``, ``spec_descriptions``, ``spec_arguments``, ``spec_validation`` and
+``spec_series``.
 
 Only the transport is ours: calls go through ``transport.api_request_payload``, the
 access-controlled client enforcing the profile allowlists, read-only mode and the
-protected-profile denylist, and answering failures with the server's typed payload rather
-than an HTTP status that discards the body. FastMCP's own transport bypasses that ACL
-layer and raises on non-2xx - the reason this module exists at all.
+protected-profile denylist - including the decision that a collection write has
+nowhere to land when every writable profile is also protected - and answering
+failures with the server's typed payload rather than an HTTP status that discards
+the body. FastMCP's own transport bypasses that ACL layer and raises on non-2xx -
+the reason this module exists at all.
 
 The one operation performed through a handler rather than an endpoint call is
 ``downloadLogs``: following its signed-URL redirect safely lives in
@@ -163,15 +167,17 @@ class SpecApiTool(Tool):
         still needs or rejects (an unfilled placeholder, arguments that
         violate the published schema, a series request beyond the point
         budget) is checked on the generated path, after the call is split.
+
+        Whether the write may happen at all is not among them: that is the
+        access-controlled client's decision, taken from one snapshot per
+        request on every path a write can take, so this method never reads
+        the ACL environment for itself.
         """
         args = arguments or {}
         refused = self._request_refusal(args)
         if refused is not None:
             # Path-safety and malformed-id refusals are errors, not results.
             return ToolResult(structured_content=refused, is_error=True)
-        create_refusal = self._create_profile_guard()
-        if create_refusal is not None:
-            return create_refusal
         if self._delegated_handler is not None:
             return await self._run_delegated(args, self._delegated_handler)
         path, query, body = split_arguments(self._route, args)
@@ -183,24 +189,6 @@ class SpecApiTool(Tool):
         if unsafe:
             return self._unsafe_path_payload(unsafe)
         return malformed_profile_id_payload(self._route, args)
-
-    def _create_profile_guard(self) -> ToolResult | None:
-        """Refuse createProfile when every writable profile is also protected."""
-        if self.name != "createProfile":
-            return None
-        from . import config as _config
-
-        # One snapshot per invocation: the writable set and the protected
-        # denylist must come from the same read of the environment, and the
-        # snapshot loader already calls get_protected_profiles().
-        access = _config.load_profile_access_control()
-        writable = access.writable
-        if writable is not None and writable and writable.issubset(access.protected):
-            return ToolResult(
-                structured_content=error_payload(ErrorCode.INVALID_ARGUMENT, "no writable profile available"),
-                is_error=True,
-            )
-        return None
 
     async def _dispatch_rendered(self, path: str, query: dict[str, Any], body: Any, args: dict[str, Any]) -> ToolResult:
         unfilled = PATH_PLACEHOLDER.findall(path)

@@ -1190,80 +1190,6 @@ def test_empty_write_refusal_branches():
     assert tool._empty_write_refusal("GET", None) is None
 
 
-def test_create_profile_guard_all_protected(monkeypatch):
-
-    from nextdns_mcp import config, spec_tools
-
-    monkeypatch.setattr(
-        config,
-        "load_profile_access_control",
-        lambda: config.ProfileAccessControl(
-            read_only=False, readable=frozenset({"p1"}), writable=frozenset({"p1"}), protected=frozenset({"p1"})
-        ),
-    )
-    from types import SimpleNamespace
-
-    route = SimpleNamespace(
-        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
-    )
-    tool = spec_tools.SpecApiTool(route=route)
-    res = tool._create_profile_guard()
-    assert res is not None and res.is_error
-
-
-def test_create_profile_guard_not_all_protected(monkeypatch):
-
-    from nextdns_mcp import config, spec_tools
-
-    monkeypatch.setattr(
-        config,
-        "load_profile_access_control",
-        lambda: config.ProfileAccessControl(
-            read_only=False,
-            readable=frozenset({"p1", "p2"}),
-            writable=frozenset({"p1", "p2"}),
-            protected=frozenset({"p1"}),
-        ),
-    )
-    from types import SimpleNamespace
-
-    route = SimpleNamespace(
-        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
-    )
-    tool = spec_tools.SpecApiTool(route=route)
-    assert tool._create_profile_guard() is None
-
-
-def test_create_profile_guard_reads_protected_profiles_once(monkeypatch):
-    """One guard invocation takes a single snapshot: the denylist is read once."""
-
-    from nextdns_mcp import profile_access, spec_tools
-
-    monkeypatch.setenv("NEXTDNS_READ_ONLY", "")
-    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "")
-    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abcdef,fedcba")
-    monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "abcdef")
-
-    calls = 0
-    real_get_protected_profiles = profile_access.get_protected_profiles
-
-    def counting_get_protected_profiles() -> frozenset[str]:
-        nonlocal calls
-        calls += 1
-        return real_get_protected_profiles()
-
-    monkeypatch.setattr(profile_access, "get_protected_profiles", counting_get_protected_profiles)
-
-    from types import SimpleNamespace
-
-    route = SimpleNamespace(
-        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
-    )
-    tool = spec_tools.SpecApiTool(route=route)
-    assert tool._create_profile_guard() is None
-    assert calls == 1
-
-
 import asyncio
 
 
@@ -1275,34 +1201,6 @@ def test_split_body_drops_none():
     body = spec_arguments._split_body_arguments(located, args)
     # should be None (no body props)
     assert body is None
-
-
-def test_create_profile_guard_run_path(monkeypatch):
-    from types import SimpleNamespace
-
-    from nextdns_mcp import spec_tools
-    from nextdns_mcp.tools import logs as _logs  # noqa
-
-    route = SimpleNamespace(
-        method="POST",
-        operation_id="createProfile",
-        description="",
-        path="/profiles",
-        flat_param_schema={"type": "object", "properties": {}},
-        summary="",
-        parameter_map={},
-    )
-    tool = spec_tools.SpecApiTool(route=route)
-    tool._request_refusal = lambda args: None
-    tool._create_profile_guard = lambda: spec_tools.ToolResult(
-        structured_content={"code": "invalid_argument", "error": "x"}, is_error=True
-    )
-
-    async def main():
-        res = await tool.run({})
-        assert res.is_error
-
-    asyncio.run(main())
 
 
 def test_empty_write_run_path():
@@ -1321,7 +1219,6 @@ def test_empty_write_run_path():
     )
     tool = spec_tools.SpecApiTool(route=route)
     tool._request_refusal = lambda args: None
-    tool._create_profile_guard = lambda: None
 
     async def main():
         res = await tool.run({})
