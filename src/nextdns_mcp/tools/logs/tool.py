@@ -63,6 +63,14 @@ async def _download_logs_controlled(profile_id: str, path: str) -> tuple[dict[st
         # written CSV and its parent are removed by the caller's guard.
         logger.warning(f"Download aborted, size cap exceeded: {e}")
         return error_payload(ErrorCode.DOWNLOAD_TOO_LARGE, str(e)), False
+    except TimeoutError:
+        # The chain deadline in redirects._follow_redirects_to_tempfile is an
+        # asyncio.timeout, which raises the builtin TimeoutError - not an
+        # httpx error - so without this branch it escaped to the caller's
+        # generic handler and a download timeout was reported as
+        # internal_error with an empty message (issue #760).
+        logger.error("Timed out while downloading logs")
+        return error_payload(ErrorCode.HTTP_ERROR, "Timed out while downloading logs"), False
 
 
 def _download_error_details(error: Exception) -> tuple[Any, Any, Any]:
@@ -159,14 +167,6 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
             downloaded = False
             return rejection
         return payload
-    except TimeoutError:
-        # The chain deadline in redirects._follow_redirects_to_tempfile is an
-        # asyncio.timeout, which raises the builtin TimeoutError - not an
-        # httpx error - so without this handler it fell through to the
-        # generic branch and a download timeout was reported as
-        # internal_error (issue #760).
-        logger.error("Timed out while downloading logs")
-        return error_payload(ErrorCode.HTTP_ERROR, "Timed out while downloading logs")
     except httpx.HTTPError as e:
         logger.error(f"HTTP error downloading logs: {client._log_safe_error(e)}")
         return _http_error_payload(e)
