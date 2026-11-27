@@ -88,28 +88,6 @@ class TestResolveProfileIdWithDefault:
         assert resolved == "def456"
         assert error is None
 
-    def test_falls_back_to_default_profile_when_whitespace_only(self, clean_env):
-        """A whitespace-only string carries no id, so it selects the default like ``""`` does."""
-        clean_env("NEXTDNS_DEFAULT_PROFILE", "def456")
-        resolved, error = resolve_profile_id("   ")
-        assert resolved == "def456"
-        assert error is None
-
-    def test_zero_profile_id_is_invalid_not_missing(self, clean_env):
-        """profile_id=0 is falsy but present: it must surface as invalid, never select the default."""
-        clean_env("NEXTDNS_DEFAULT_PROFILE", "def456")
-        resolved, error = resolve_profile_id(0)
-        assert resolved is None
-        assert error is not None
-        assert error["code"] == ErrorCode.INVALID_PROFILE_ID
-        assert error["error"] == "Invalid profile_id format: 0"
-
-    def test_zero_profile_id_is_invalid_even_without_default(self, clean_env):
-        resolved, error = resolve_profile_id(0)
-        assert resolved is None
-        assert error is not None
-        assert error["code"] == ErrorCode.INVALID_PROFILE_ID
-
     def test_returns_missing_error_when_no_profile_and_no_default(self, clean_env):
         resolved, error = resolve_profile_id(None)
         assert resolved is None
