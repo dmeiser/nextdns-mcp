@@ -335,11 +335,19 @@ def test_generative_code_touches_no_upstream_private():
     assert classes["DenoPyodideSandbox"] == []
 
 
-def test_get_worker_returns_one_owned_worker():
+def test_new_worker_is_fresh_per_render_and_registered_for_teardown():
+    """Each render gets its own worker, and the provider keeps it until that render ends.
+
+    The shared lazily-created worker was the bug (#746): two renders held the
+    same object, so the first render's cleanup stopped the second one's worker.
+    """
     gen_ui = PrefabGenerativeUI()
-    worker = gen_ui._get_worker()
-    assert isinstance(worker, sandbox_module.DenoPyodideSandbox)
-    assert gen_ui._get_worker() is worker
+    first = gen_ui._new_worker()
+    second = gen_ui._new_worker()
+
+    assert isinstance(first, sandbox_module.DenoPyodideSandbox)
+    assert first is not second
+    assert gen_ui._active_workers == {first, second}
 
 
 async def _tool_map(gen_ui: PrefabGenerativeUI) -> dict[str, Any]:
@@ -373,7 +381,7 @@ async def test_prefab_generative_ui_publishes_its_tools():
     worker = _stub_worker()
     with (
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_worker", return_value=worker),
+        patch.object(gen_ui, "_new_worker", return_value=worker),
     ):
         mock_exec.return_value = "fake_app"
         res = await gen_tool.fn(code="print('hi')", data='{"a": 1}')
@@ -417,7 +425,7 @@ async def test_prefab_generative_ui_registers_renderer_resource():
 
 @pytest.mark.asyncio
 async def test_lifespan_teardown_stops_only_the_provider_it_was_entered_on():
-    """One server's shutdown stops only its own worker (issue #542).
+    """One server's shutdown stops only its own workers (issue #542).
 
     The process-global registry this replaces emptied `_ACTIVE_GENERATIVE_UI`,
     so server B starting and finishing while server A was live killed A's
@@ -427,8 +435,8 @@ async def test_lifespan_teardown_stops_only_the_provider_it_was_entered_on():
     host_b = PrefabGenerativeUI()
     worker_a = MagicMock(name="worker-a")
     worker_b = MagicMock(name="worker-b")
-    host_a._worker = worker_a
-    host_b._worker = worker_b
+    host_a._active_workers = {worker_a}
+    host_b._active_workers = {worker_b}
 
     async with host_a.lifespan():
         # Server B starts and finishes WHILE server A is live:
@@ -436,8 +444,8 @@ async def test_lifespan_teardown_stops_only_the_provider_it_was_entered_on():
             pass
         worker_b.stop.assert_called_once()
         worker_a.stop.assert_not_called()
-        assert host_b._worker is None
-        assert host_a._worker is worker_a
+        assert host_b._active_workers == set()
+        assert host_a._active_workers == {worker_a}
 
     # A's own shutdown reclaims its own subprocess:
     worker_a.stop.assert_called_once()
@@ -465,13 +473,32 @@ async def test_lifespan_publishes_tools_while_it_runs():
 async def test_lifespan_stops_its_own_worker_on_exit():
     gen_ui = PrefabGenerativeUI()
     worker = MagicMock(name="worker")
-    gen_ui._worker = worker
+    gen_ui._active_workers = {worker}
 
     async with gen_ui.lifespan():
         pass
 
     worker.stop.assert_called_once()
-    assert gen_ui._worker is None
+    assert gen_ui._active_workers == set()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_stops_every_worker_in_flight():
+    """Shutdown reaps all of this provider's renders, not only the last one (#746).
+
+    With one shared worker, teardown could only reap that one; per-render
+    workers are only reclaimed if the provider tracks the whole set.
+    """
+    gen_ui = PrefabGenerativeUI()
+    workers = [MagicMock(name=f"worker-{index}") for index in range(3)]
+    gen_ui._active_workers = set(workers)
+
+    async with gen_ui.lifespan():
+        pass
+
+    for worker in workers:
+        worker.stop.assert_called_once()
+    assert gen_ui._active_workers == set()
 
 
 @pytest.mark.asyncio
@@ -481,7 +508,7 @@ async def test_lifespan_is_a_noop_when_no_worker_was_started():
     async with gen_ui.lifespan():
         pass
 
-    assert gen_ui._worker is None
+    assert gen_ui._active_workers == set()
 
 
 @pytest.mark.asyncio
@@ -495,7 +522,7 @@ async def test_lifespan_stops_the_worker_off_the_event_loop():
     gen_ui = PrefabGenerativeUI()
     worker = MagicMock(name="worker")
     worker.stop.side_effect = blocking_stop
-    gen_ui._worker = worker
+    gen_ui._active_workers = {worker}
 
     async with gen_ui.lifespan():
         pass
@@ -514,12 +541,12 @@ async def test_lifespan_teardown_survives_a_failing_stop(caplog):
     gen_ui = PrefabGenerativeUI()
     worker = MagicMock(name="worker")
     worker.stop.side_effect = exploding_stop
-    gen_ui._worker = worker
+    gen_ui._active_workers = {worker}
 
     async with gen_ui.lifespan():
         pass
 
-    assert gen_ui._worker is None
+    assert gen_ui._active_workers == set()
     assert "Failed to stop the Generative UI sandbox" in caplog.text
 
 
@@ -542,13 +569,13 @@ async def test_a_real_server_shutdown_stops_the_providers_worker():
     gen_ui = PrefabGenerativeUI()
     server.add_provider(gen_ui)
     worker = MagicMock(name="worker")
-    gen_ui._worker = worker
+    gen_ui._active_workers = {worker}
 
     async with server._lifespan_manager():
         pass
 
     worker.stop.assert_called_once()
-    assert gen_ui._worker is None
+    assert gen_ui._active_workers == set()
 
 
 @pytest.mark.asyncio
@@ -613,7 +640,7 @@ async def test_generate_ui_serializes_valid_dict_data_once():
 
     with (
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
         patch("nextdns_mcp.generative.json") as mock_json,
     ):
         mock_json.dumps.side_effect = real_json.dumps
@@ -644,7 +671,7 @@ async def test_generate_ui_result_size_limit():
 
     with (
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
     ):
         mock_exec.return_value = OversizedApp()
         with pytest.raises(ValueError, match="result exceeds maximum size"):
@@ -768,6 +795,7 @@ class _StubProcess:
         self.stderr = _StubStream(self)
         self.terminated = False
         self.killed = False
+        self.terminate_calls = 0
 
     def add_request(self, frame: bytes) -> None:
         self._pending += frame
@@ -785,6 +813,7 @@ class _StubProcess:
 
     def terminate(self) -> None:
         self.terminated = True
+        self.terminate_calls += 1
 
     def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
         return b"", b""
@@ -1003,6 +1032,62 @@ async def test_start_cold_starts_only_when_no_live_worker_runs(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_renders_own_their_own_worker(monkeypatch):
+    """Cleanup for one render leaves a render still in flight able to finish (#746).
+
+    Ran through the real ``DenoPyodideSandbox`` with stubbed worker processes:
+    the first render reaps only the process it started, and the second render's
+    process is still un-terminated — and still registered for shutdown — while
+    that render executes.
+    """
+    procs: list[_StubProcess] = []
+
+    def fake_spawn(env: dict[str, str]) -> asyncio.Future:
+        future = asyncio.get_running_loop().create_future()
+        proc = _StubProcess()
+        procs.append(proc)
+        future.set_result(proc)
+        return future
+
+    monkeypatch.setattr(sandbox_module, "_spawn_deno", fake_spawn)
+    monkeypatch.setattr(sandbox_module, "_await_ready", AsyncMock())
+
+    gen_ui = PrefabGenerativeUI()
+    seen: list[sandbox_module.DenoPyodideSandbox] = []
+    entered = asyncio.Event()
+    released = [asyncio.Event(), asyncio.Event()]
+
+    async def fake_execute(code: str, *, data: dict[str, Any] | None = None, sandbox: Any = None) -> str:
+        index = len(seen)
+        seen.append(sandbox)
+        if index == 1:
+            entered.set()
+        await released[index].wait()
+        return f"app-{index + 1}"
+
+    monkeypatch.setattr(generative_module.prefab_generative, "execute", fake_execute)
+
+    first = asyncio.create_task(gen_ui._run_in_sandbox("print(1)", None))
+    second = asyncio.create_task(gen_ui._run_in_sandbox("print(2)", None))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+
+    assert seen[0] is not seen[1], "both renders shared one worker"
+    assert gen_ui._active_workers == {seen[0], seen[1]}
+    assert not procs[0].terminated and not procs[1].terminated
+
+    released[0].set()
+    assert await first == "app-1"  # the first render's cleanup runs here
+    assert procs[0].terminated, "the first render did not reap its own worker"
+    assert not procs[1].terminated, "the first render's cleanup reached the other render's worker"
+    assert gen_ui._active_workers == {seen[1]}
+
+    released[1].set()
+    assert await second == "app-2"
+    assert procs[1].terminated
+    assert gen_ui._active_workers == set()
+
+
+@pytest.mark.asyncio
 async def test_result_size_bytes_model_dump_json():
     class DumpApp:
         def model_dump_json(self):
@@ -1047,7 +1132,7 @@ async def test_generate_ui_execution_timeout():
 
     with (
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_worker", return_value=worker),
+        patch.object(gen_ui, "_new_worker", return_value=worker),
     ):
         mock_exec.side_effect = never_resolves
         with pytest.raises(TimeoutError, match="execution exceeded"):
@@ -1195,6 +1280,81 @@ async def test_start_cancellation_registers_reclaim(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert pending.recorded_callbacks  # worker will be reclaimed if it appears
+
+
+@pytest.mark.asyncio
+async def test_stop_during_cold_start_reaps_the_worker_that_boots_after_it(monkeypatch):
+    """A worker that finishes booting after shutdown must not leak (issue #746).
+
+    ``stop()`` used to swap the process slot with no coordination with the cold
+    start, so ``_start`` published a subprocess afterwards that nothing owned:
+    a Deno/Pyodide process surviving the server that spawned it.
+    """
+    proc = _StubProcess()
+    booted = asyncio.Event()
+    release_boot = asyncio.Event()
+
+    def fake_spawn(env: dict[str, str]) -> asyncio.Future:
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(proc)
+        return future
+
+    async def slow_ready(process: Any) -> None:
+        booted.set()
+        await release_boot.wait()
+
+    monkeypatch.setattr(sandbox_module, "_spawn_deno", fake_spawn)
+    monkeypatch.setattr(sandbox_module, "_await_ready", slow_ready)
+
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    task = asyncio.ensure_future(sandbox._start())
+    await booted.wait()
+    sandbox.stop()  # teardown lands mid-cold-start, on the shutdown's worker thread
+    release_boot.set()
+
+    with pytest.raises(RuntimeError, match="Sandbox is shut down"):
+        await task
+    assert proc.terminated
+    assert sandbox._process is None
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_sandbox_starts_no_new_worker(monkeypatch):
+    """After teardown the sandbox is closed: a late render fails instead of spawning."""
+    spawned: list[dict[str, str]] = []
+
+    def fake_spawn(env: dict[str, str]) -> asyncio.Future:
+        spawned.append(env)
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(_StubProcess())
+        return future
+
+    monkeypatch.setattr(sandbox_module, "_spawn_deno", fake_spawn)
+    monkeypatch.setattr(sandbox_module, "_await_ready", AsyncMock())
+
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    sandbox.stop()
+
+    with pytest.raises(RuntimeError, match="Sandbox is shut down"):
+        await sandbox.start()
+    with pytest.raises(RuntimeError, match="Sandbox is shut down"):
+        await sandbox.run("print(1)")
+    assert spawned == []
+
+
+def test_stop_is_locked_and_idempotent():
+    """Two stops (the render's finally plus lifespan) reap the worker exactly once."""
+    proc = _StubProcess()
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    sandbox._process = proc
+
+    sandbox.stop()
+    sandbox.stop()
+
+    assert proc.terminated
+    assert proc.terminate_calls == 1
+    assert sandbox._process is None
+    assert sandbox._closed
 
 
 def _reap_mock(**poll_return: Any) -> MagicMock:
@@ -1549,7 +1709,7 @@ async def test_generate_ui_cold_start_timeout_is_distinct():
     worker = MagicMock(start=AsyncMock(side_effect=never_started))
     with (
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_worker", return_value=worker),
+        patch.object(gen_ui, "_new_worker", return_value=worker),
         patch.object(generative_module, "SANDBOX_START_TIMEOUT", 0.05),
     ):
         with pytest.raises(TimeoutError, match="cold start exceeded"):
