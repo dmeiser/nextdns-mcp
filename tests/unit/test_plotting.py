@@ -873,7 +873,7 @@ class TestPlotRenderedSeriesErrorHandling:
     """The render catch is narrowed to payload-shape errors (FUNC-5 / WORK-324)."""
 
     def test_payload_shape_error_returns_internal_error(self, monkeypatch):
-        monkeypatch.setattr(plots_module, "validate_series_payload", MagicMock(side_effect=ValueError("bad series")))
+        monkeypatch.setattr(plots_module, "extract_series_fields", MagicMock(side_effect=ValueError("bad series")))
         result = plots_module._plot_rendered_series("status", "abc123", {"meta": {}, "data": []})
         assert result["code"] == "internal_error"
         assert "Error rendering chart" in result["error"]
@@ -882,7 +882,7 @@ class TestPlotRenderedSeriesErrorHandling:
         # A RuntimeError is a programming error, not a payload-shape problem;
         # it must not hide behind the typed internal_error fallback.
         monkeypatch.setattr(
-            plots_module, "validate_series_payload", MagicMock(side_effect=RuntimeError("unexpected failure"))
+            plots_module, "extract_series_fields", MagicMock(side_effect=RuntimeError("unexpected failure"))
         )
         with pytest.raises(RuntimeError, match="unexpected failure"):
             plots_module._plot_rendered_series("status", "abc123", {"meta": {}, "data": []})
