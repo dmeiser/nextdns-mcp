@@ -1,0 +1,7 @@
+{
+  "name": "nextdns-mcp-openapi-lint",
+  "private": true,
+  "devDependencies": {
+    "@stoplight/spectral": "6.5.0"
+  }
+}

@@ -18,15 +18,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
 
-      - name: Install Spectral
-        run: npm install --no-save --no-audit --no-fund @stoplight/spectral@6
+      - name: Install Spectral from the committed lockfile
+        run: npm ci --no-audit --no-fund
 
       - name: Lint OpenAPI spec
         run: npx @stoplight/spectral lint -r spectral.yaml src/nextdns_mcp/nextdns-openapi.yaml

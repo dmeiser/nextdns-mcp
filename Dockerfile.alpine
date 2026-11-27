@@ -42,8 +42,10 @@ COPY --from=builder /install /install
 COPY src/ /app/src/
 
 # Deno runtime required by Prefab's sandbox when NEXTDNS_GENERATIVE_UI=on.
-# Use the musl build shipped by Alpine to stay compatible with its libc.
-RUN apk add --no-cache deno
+# Use the musl build shipped by Alpine to stay compatible with its libc. The
+# APK version is pinned (available for amd64 and arm64) so an unchanged build
+# cannot silently pick up a newer Deno from the community repository.
+RUN apk add --no-cache deno=2.7.4-r2
 
 # OCI labels for container metadata
 LABEL org.opencontainers.image.title="NextDNS MCP Server (Alpine)"

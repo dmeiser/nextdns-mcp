@@ -33,3 +33,14 @@ updates:
     labels:
       - dependencies
       - no-release
+  # --- GitHub Actions ---
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps(actions)"
+      include: "scope"
+    labels:
+      - dependencies
+      - no-release
