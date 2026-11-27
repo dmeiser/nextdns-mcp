@@ -1083,6 +1083,43 @@ class TestDownloadTool:
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert payload["status_code"] is None
 
+    async def test_a_chain_deadline_expiry_reports_http_error_not_internal(self, monkeypatch, owned_api_client):
+        """The redirect-chain deadline surfaces as http_error, not internal_error (WORK-326).
+
+        The chain deadline in ``redirects._follow_redirects_to_tempfile`` is an
+        ``asyncio.timeout``, which raises the *builtin* ``TimeoutError`` - not
+        an httpx error - so it used to fall through to the generic handler and
+        a download timeout was reported as ``internal_error`` with an empty
+        message (issue #760). A zero deadline expires the real ``asyncio.timeout``
+        while the chain waits on the pinned-fetch lock, with no network at all.
+        """
+        created: list[str] = []
+        real_mkdtemp = __import__("tempfile").mkdtemp
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            return made
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(client_module, "get_http_timeout", lambda: 0.0)
+        # A fresh lock for this test: making the download *block* on the
+        # module-level lock would bind it to this test's event loop and break
+        # the contended-lock tests that run in later loops.
+        pin_lock = asyncio.Lock()
+        monkeypatch.setattr(guard, "_PIN_FETCH_LOCK", pin_lock)
+
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        with owned_api_client(
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+        ):
+            # Holding the lock in this task makes the chain's acquisition wait,
+            # which is where the zero deadline expires.
+            async with pin_lock:
+                payload = await logs_module._download_logs_to_tempfile("abc123")
+        assert payload == {"error": "Timed out while downloading logs", "code": ErrorCode.HTTP_ERROR}
+        assert created and not os.path.exists(created[0]), "a timed-out download must leave no temp directory"
+
     async def test_the_temp_file_and_its_directory_are_removed_on_failure(self, monkeypatch, owned_api_client):
         """A failed download leaves neither a partial CSV nor an empty directory."""
         created: list[str] = []
