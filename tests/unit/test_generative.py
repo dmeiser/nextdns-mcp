@@ -321,15 +321,13 @@ def test_build_renderer_resource():
     assert resource.mime_type == "text/html;profile=mcp-app"
 
 
-def test_renderer_csp_follows_the_renderer_declaration():
-    """The advertised CSP domains come from the renderer's own declaration, not a copied literal."""
+def test_renderer_csp_admits_no_external_origins():
+    """The bundled renderer needs no CDN: generated Python runs in the server sandbox."""
     csp = generative_module._renderer_csp()
-    assert csp.resource_domains == ["https://cdn.jsdelivr.net"]
-    assert csp.connect_domains == [
-        "https://cdn.jsdelivr.net",
-        "https://pypi.org",
-        "https://files.pythonhosted.org",
-    ]
+    assert csp.resource_domains == []
+    assert csp.connect_domains == []
+    assert csp.frame_domains == []
+    assert csp.base_uri_domains == []
 
 
 def _touched_names(module: Any) -> set[str]:
