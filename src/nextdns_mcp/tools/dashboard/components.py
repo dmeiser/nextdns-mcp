@@ -27,6 +27,7 @@ from prefab_ui.components import (
     Column,
     DataTable,
     DataTableColumn,
+    ExpandableRow,
     Heading,
     Progress,
     Row,
@@ -63,6 +64,11 @@ logger = logging.getLogger(__name__)
 
 QUERIES_COLUMN = DataTableColumn(key="queries", header="Queries", sortable=True, format="number")
 SHARE_COLUMN = DataTableColumn(key="share", header="Share", sortable=True)
+
+# ``DataTable.rows`` is invariant in its element type: a plain ``list[dict[str, Any]]``
+# is not accepted where ``list[dict[str, Any] | ExpandableRow]`` is expected. Build
+# row collections with the component's own element type instead of suppressing mypy.
+_TableRows = list[dict[str, Any] | ExpandableRow]
 
 
 def _build_kpi_row(kpis: dict[str, Any]) -> Row:
@@ -138,15 +144,13 @@ def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
 
 def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     """Build domain data table."""
-    rows: list[dict[str, Any]] = [
-        {"domain": domain_label(item, key_name), "queries": item_queries(item)} for item in data
-    ]
+    rows: _TableRows = [{"domain": domain_label(item, key_name), "queries": item_queries(item)} for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="domain", header="Domain", sortable=True),
             QUERIES_COLUMN,
         ],
-        rows=rows,  # type: ignore[arg-type]
+        rows=rows,
     )
 
 
@@ -199,14 +203,14 @@ def build_domains_card(
 def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     """Build reasons data table."""
     total = sum(item_queries(item) for item in data)
-    rows: list[dict[str, Any]] = [reason_row(item, total) for item in data]
+    rows: _TableRows = [reason_row(item, total) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
             QUERIES_COLUMN,
             SHARE_COLUMN,
         ],
-        rows=rows,  # type: ignore[arg-type]
+        rows=rows,
     )
 
 
@@ -235,7 +239,7 @@ def build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> C
 def _devices_table(data: list[dict[str, Any]]) -> DataTable:
     """Build devices data table."""
     total = sum(item_queries(item) for item in data)
-    rows: list[dict[str, Any]] = [device_row(item, total) for item in data]
+    rows: _TableRows = [device_row(item, total) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="device", header="Device", sortable=True),
@@ -243,7 +247,7 @@ def _devices_table(data: list[dict[str, Any]]) -> DataTable:
             QUERIES_COLUMN,
             SHARE_COLUMN,
         ],
-        rows=rows,  # type: ignore[arg-type]
+        rows=rows,
     )
 
 
@@ -268,8 +272,8 @@ def build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> C
 
 
 def build_ips_card(data: list[dict[str, Any]]) -> Card:
-    """Build the IP addresses card."""
-    rows: list[dict[str, Any]] = [ip_row(item) for item in data]
+    """Build the IP addresses card; this fixed-format card is always a table."""
+    rows: _TableRows = [ip_row(item) for item in data]
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle("IPs")
@@ -285,20 +289,21 @@ def build_ips_card(data: list[dict[str, Any]]) -> Card:
                         DataTableColumn(key="location", header="Location", sortable=True),
                         QUERIES_COLUMN,
                     ],
-                    rows=rows,  # type: ignore[arg-type]
+                    rows=rows,
                 )
     return card
 
 
 def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
     """Build GAFAM table."""
+    rows: _TableRows = [*table_rows]
     return DataTable(
         columns=[
             DataTableColumn(key="company", header="Company", sortable=True),
             QUERIES_COLUMN,
             SHARE_COLUMN,
         ],
-        rows=table_rows,  # type: ignore[arg-type]
+        rows=rows,
     )
 
 
@@ -355,7 +360,7 @@ def build_security_card(encryption_rate: tuple[int, int, float], dnssec_rate: tu
 
 def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
     """Build destinations table."""
-    rows: list[dict[str, Any]] = [destination_row(item) for item in data]
+    rows: _TableRows = [destination_row(item) for item in data]
     return DataTable(
         columns=[
             DataTableColumn(key="country", header="Country", sortable=True),
@@ -363,7 +368,7 @@ def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
             QUERIES_COLUMN,
             DataTableColumn(key="sample_domains", header="Sample Domains"),
         ],
-        rows=rows,  # type: ignore[arg-type]
+        rows=rows,
     )
 
 

@@ -1455,6 +1455,17 @@ class TestViewTypeScope:
         assert counts["BarChart"] == 7
         assert "PieChart" not in counts
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("view_type", ["auto", "table", "bar", "pie"])
+    async def test_ips_is_fixed_format_and_ignores_view_type(self, rows, view_type):
+        """The documented table-only card stays table-only for every format value."""
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="ips", view_type=view_type)
+        assert isinstance(res, ToolResult)
+        counts = self._counts(res)
+        assert counts["DataTable"] == 1
+        assert "BarChart" not in counts
+        assert "PieChart" not in counts
+
 
 class TestSubRequestErrorPropagation:
     """Failure-injection for every gathered sub-request (WORK-102)."""

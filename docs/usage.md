@@ -125,10 +125,15 @@ Use `section` to select what to display:
 - `section="security"`: Encrypted DNS and DNSSEC validation rates.
 
 Supports `view_type="auto" | "table" | "bar" | "pie"` and `domain_view="table" | "bar" | "pie"`.
-`view_type` formats the card the section renders, and `view_type="auto"` keeps each
-card's own default (a bar chart for `reasons`, a donut chart plus its table for
-`gafam`). `domain_view` formats only the domain cards in `section="overview"` and
-`section="all"`, and an explicit `view_type` overrides it there.
+`view_type` sets the format for cards that support it: domains, `reasons`, devices,
+`countries` and `gafam` honor explicit `"table"`, `"bar"` and `"pie"` values. With
+`view_type="auto"`, each card keeps its own default (a table for domains, devices and
+countries, a bar chart for `reasons`, and a donut chart plus its table for `gafam`).
+`section="ips"` is fixed-format: it always renders a table and ignores `view_type`,
+as do the fixed metric cards in `section="kpi"` and `section="security"`. `domain_view`
+formats only the domain cards in `section="overview"` and `section="all"`, and an
+explicit `view_type` overrides it there; the other cards appended by `section="all"`
+follow `view_type` and keep their defaults when it is `"auto"`.
 
 ### Generative UI (Beta)
 Generative UI is an opt-in beta feature (disabled by default). When enabled by setting
