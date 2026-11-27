@@ -89,6 +89,11 @@ class DataTable(_BaseDataTable):
 
 MAX_CODE_BYTES = 32 * 1024
 MAX_DATA_BYTES = 128 * 1024
+# How many renders may hold a live sandbox worker at once. Every render owns
+# its own worker, so this bounds concurrent Deno subprocesses: a render paused
+# in its multi-second reap holds only its own permit, never the renders behind
+# it (issue #793).
+MAX_CONCURRENT_SANDBOXES = 2
 
 GENERATE_DOC = (
     "Execute Prefab Python code in a sandbox and render the result.\n\n"
@@ -397,6 +402,7 @@ class PrefabGenerativeUI(Provider):
         # another render's worker mid-flight (issue #746). The set is instance
         # state, so one server's teardown still reaps only its own subprocesses.
         self._active_workers: set[DenoPyodideSandbox] = set()
+        self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_SANDBOXES)
 
     async def _list_tools(self) -> Sequence[Tool]:
         return list(self._tools)
@@ -449,17 +455,20 @@ class PrefabGenerativeUI(Provider):
         """Cold-start, execute, and discard a worker this call owns alone.
 
         Cleanup for one render can then never stop another render's worker: the
-        worker this call stops is the only one this call has.
+        worker this call stops is the only one this call has. The semaphore is
+        held through the reap, which bounds the live subprocess count while
+        rendering itself stays concurrent (issue #793).
         """
-        worker = self._new_worker()
-        try:
-            await _start_within_budget(worker)
-            return await _execute_within_budget(code, data, worker)
-        finally:
-            self._active_workers.discard(worker)
-            # Reaping blocks for up to ~5s: never do it on the loop. This is the
-            # safety net for a worker cold-started here but never executed.
-            await asyncio.to_thread(worker.stop)
+        async with self._semaphore:
+            worker = self._new_worker()
+            try:
+                await _start_within_budget(worker)
+                return await _execute_within_budget(code, data, worker)
+            finally:
+                self._active_workers.discard(worker)
+                # Reaping blocks for up to ~5s: never do it on the loop. This is
+                # the safety net for a worker cold-started but never executed.
+                await asyncio.to_thread(worker.stop)
 
 
 async def _run_guarded(
