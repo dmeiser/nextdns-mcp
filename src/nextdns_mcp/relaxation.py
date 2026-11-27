@@ -31,7 +31,7 @@ SPDX-License-Identifier: MIT
 
 import logging
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from typing import Any
 
 import mcp.types
@@ -109,7 +109,37 @@ def _render_owner_hint(base: str, grouped: dict[str, list[str]], unowned: list[s
     return f"{base}. {where}{tail}"
 
 
-def _owner_hint(ignored: list[str], tool_name: str, index: dict[str, tuple[str, ...]]) -> str:
+def _split_time_aliases(ignored: list[str], own_params: Collection[str]) -> tuple[dict[str, str], list[str]]:
+    """Split dropped args the called tool spells with a ``_time`` suffix from the rest.
+
+    ``from`` and ``to`` belong to the generated series tools, so the owner
+    index cannot name one owner for them; the UI tools declare the same window
+    as ``from_time``/``to_time``. That is the correction a caller needs, and no
+    cross-tool guess can produce it.
+    """
+    aliases: dict[str, str] = {}
+    rest: list[str] = []
+    for arg in ignored:
+        alias = f"{arg}_time"
+        if alias in own_params:
+            aliases[arg] = alias
+        else:
+            rest.append(arg)
+    return aliases, rest
+
+
+def _render_time_alias_note(aliases: dict[str, str]) -> str:
+    """Say which dropped argument the called tool spells with a ``_time`` suffix."""
+    named = "; ".join(f"{arg} is this tool's `{alias}` parameter" for arg, alias in sorted(aliases.items()))
+    return f"{named} — resend under that name"
+
+
+def _owner_hint(
+    ignored: list[str],
+    tool_name: str,
+    index: dict[str, tuple[str, ...]],
+    own_params: Collection[str] = (),
+) -> str:
     """Name the tool that actually declares each dropped argument.
 
     'check the parameter list' left the caller to rediscover what it had
@@ -118,10 +148,17 @@ def _owner_hint(ignored: list[str], tool_name: str, index: dict[str, tuple[str, 
     the wrong endpoint changed (live, target-model run). Naming the owning
     tool turns the ignored-arguments annotation into a correction the caller
     can act on; arguments no single other tool declares stay a generic note.
+    A dropped ``from``/``to`` that this tool declares as ``from_time``/``to_time``
+    is an alias of its own window, not another tool's argument.
     """
-    grouped, unowned = _group_owners(ignored, tool_name, index)
+    aliases, rest = _split_time_aliases(ignored, own_params)
+    grouped, unowned = _group_owners(rest, tool_name, index)
     base = "these arguments are not parameters of this tool and were not applied"
+    if aliases:
+        base += "; " + _render_time_alias_note(aliases)
     if not grouped:
+        if aliases and not unowned:
+            return base
         return base + "; check the tool's parameter list before assuming the change happened"
     return _render_owner_hint(base, grouped, unowned)
 
@@ -536,9 +573,17 @@ class StripExtraFieldsMiddleware(Middleware):
         """
         server = context.fastmcp_context.fastmcp if context.fastmcp_context else None
         index = await self._owner_index(server) if server is not None else {}
+        own_params = await self._own_property_names(server, context.message.name) if server is not None else ()
         _report_ignored_arguments(
             result,
             ignored,
-            _owner_hint(ignored, context.message.name, index),
-            hint_for=lambda names: _owner_hint(names, context.message.name, index),
+            _owner_hint(ignored, context.message.name, index, own_params),
+            hint_for=lambda names: _owner_hint(names, context.message.name, index, own_params),
         )
+
+    async def _own_property_names(self, server: FastMCP, tool_name: str) -> tuple[str, ...]:
+        """The called tool's own parameter names, read from its cached schema."""
+        parameters = await self._tool_parameters(server, tool_name)
+        if not parameters:
+            return ()
+        return tuple((parameters.get("properties") or {}).keys())

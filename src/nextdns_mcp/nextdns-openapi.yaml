@@ -553,7 +553,7 @@ components:
       name: interval
       in: query
       # The same 60-86400 band the plot path validates (PLOT_INTERVAL_MAX and
-      # the minimum in _validate_interval_and_limit); publishing it lets
+      # the minimum in _validate_interval); publishing it lets
       # schema-aware callers, and this server's own schema check, refuse an
       # out-of-band window before a request goes out.
       description: Time-series window size in seconds (60-86400)

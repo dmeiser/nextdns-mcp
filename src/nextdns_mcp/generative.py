@@ -102,8 +102,19 @@ MAX_CONCURRENT_SANDBOXES = 2
 _CHART_NAMES = ", ".join(CHART_COMPONENT_NAMES)
 _CHART_PLACEMENT_NOTE = f"\n\nNote: Place charts ({_CHART_NAMES}) outside Tabs so their container width is measurable."
 
+# Server-owned docs: upstream's execute() docstring names a ``components`` tool and
+# a caller-supplied ``sandbox`` that this published tool does not take. Callers see
+# this text, so it describes the two parameters the server actually exposes.
 GENERATE_DOC = (
     "Execute Prefab Python code in a sandbox and render the result.\n\n"
+    "Arguments:\n"
+    "- `code`: Python code that builds a Prefab component tree. It runs in a Pyodide "
+    "WASM sandbox; import everything you use, and use PrefabApp as the outermost "
+    "context manager so the UI streams as the code builds it.\n"
+    "- `data`: optional dict, or a JSON object string, of values injected as global "
+    "variables in the sandbox namespace.\n\n"
+    "Use the `search_prefab_components` tool to look up available components, their "
+    "import paths, argument names, and examples before writing code.\n\n"
     f"CRITICAL CHART SIZING RULE: NEVER place charts ({_CHART_NAMES}) "
     "inside Tabs or Tab components. Tab panels initialize with 0px width, which causes Recharts "
     "to render completely blank/invisible. Always place charts in Column, Row, Grid, or Card "
@@ -117,6 +128,15 @@ GENERATE_DOC = (
     "GENERATED UIs ARE DISPLAY-ONLY: Embed components, external stylesheets, inline CSS, "
     "MCP bridge actions (CallTool, SendMessage, UpdateContext, Fetch), non-https:// links, "
     "and state keys starting with '$' are rejected server-side.\n\n"
+    "Charts live in `prefab_ui.components.charts`. Import and build them with their own "
+    "`data` and `series` arguments, e.g. `BarChart(data=[...], "
+    'series=[ChartSeries(data_key="rev", label="Revenue")], x_axis="month")`.\n\n'
+    "For interactive UIs, pass initial state in `data` and use `.rx` on stateful "
+    'components for reactive bindings: `Text(f"{slider.rx}")` renders a client-side '
+    "`{{ threshold }}` expression.\n\n"
+    "Layout: prefer `Grid(columns=N, gap=4)` for equal-width panels; `Row` and `Column` "
+    "accept `gap`, `align`, and `justify` props; Card sub-components (CardHeader, "
+    "CardContent, CardFooter) carry their own padding.\n\n"
 )
 
 
@@ -629,17 +649,28 @@ def _build_generate_tool(
     return TypedArgumentTool.from_function(
         generate_ui,
         name=name,
-        description=GENERATE_DOC + (prefab_generative.execute.__doc__ or ""),
+        description=GENERATE_DOC,
         annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False),
         meta={"ui": app_config_to_meta_dict(app_config)},
     )
 
 
 def _build_components_tool(name: str) -> Tool:
-    """The search_prefab_components tool."""
+    """The search_prefab_components tool.
+
+    A server-owned wrapper publishes only the caller's three parameters:
+    upstream's ``components`` argument is test dependency injection, and a
+    client that supplied a registry would never reach the sandbox the search
+    actually runs in.
+    """
+
+    def search_prefab_components(query: str = "", detail: bool | None = None, limit: int | None = None) -> str:
+        """Search the Prefab component library (see the tool description)."""
+        return prefab_generative.search_components(query, detail=detail, limit=limit)
+
     doc = (prefab_generative.search_components.__doc__ or "") + _CHART_PLACEMENT_NOTE
     return Tool.from_function(
-        prefab_generative.search_components,
+        search_prefab_components,
         name=name,
         description=doc,
         annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False),

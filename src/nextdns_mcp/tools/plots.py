@@ -31,7 +31,6 @@ from ..utils import (
     PARTIALS_VALUES,
     build_series_params,
     is_usable_integer,
-    limit_range_error,
     normalize_partials,
     normalize_time_value,
     resolve_default_profile,
@@ -86,8 +85,8 @@ def _build_series_chart(
     return bounded_app_result(PrefabApp(view=view, theme=DASHBOARD_THEME), summary, "analytics chart")
 
 
-def _validate_interval_and_limit(interval: int, limit: int) -> dict[str, Any] | None:
-    """The two bounds a caller can overshoot the same way: interval and limit.
+def _validate_interval(interval: int) -> dict[str, Any] | None:
+    """The bound on the window size before a series request is built.
 
     ``interval`` is type-checked before the band is read: ``float("nan")``
     compares False against both 60 and 86400, and a fractional interval is not
@@ -119,7 +118,7 @@ def _validate_interval_and_limit(interval: int, limit: int) -> dict[str, Any] | 
             interval=interval,
         )
 
-    return limit_range_error(limit)
+    return None
 
 
 class _PlotParams(NamedTuple):
@@ -146,9 +145,8 @@ def _validate_plot_params(
     profile_id: OptionalProfileId,
     from_time: str | int = "-1d",
     to_time: str | int = "now",
-    limit: int = 10,
 ) -> _PlotParams | _PlotParamsError:
-    """Validate metric, interval, limit, range, and profile ID parameters for plotting."""
+    """Validate metric, interval, range, and profile ID parameters for plotting."""
     if metric not in PLOT_METRICS:
         return _PlotParamsError(
             error_payload(
@@ -158,7 +156,7 @@ def _validate_plot_params(
             )
         )
 
-    bounds_error = _validate_interval_and_limit(interval, limit)
+    bounds_error = _validate_interval(interval)
     if bounds_error:
         return _PlotParamsError(bounds_error)
 
@@ -202,19 +200,18 @@ async def _plot_analytics_series_impl(
     interval: int = 3600,
     alignment: str = "end",
     timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
+    partials: str | bool = "none",
 ) -> dict[str, Any] | ToolResult:
     """Generate an interactive chart from a NextDNS analytics time-series endpoint."""
     # Read the caller's range before bounding it: a bare negative number means
     # an offset, not 1969 (see utils.normalize_time_value).
     from_time = normalize_time_value(from_time)
     to_time = normalize_time_value(to_time)
-    partials, partials_error = _normalize_and_validate_partials(partials)
+    normalized_partials, partials_error = _normalize_and_validate_partials(partials)
     if partials_error:
         return partials_error
 
-    validated = _validate_plot_params(metric, interval, profile_id, from_time, to_time, limit)
+    validated = _validate_plot_params(metric, interval, profile_id, from_time, to_time)
     if isinstance(validated, _PlotParamsError):
         return validated.error
 
@@ -224,13 +221,13 @@ async def _plot_analytics_series_impl(
         interval=interval,
         alignment=alignment,
         timezone=timezone,
-        partials=partials,
+        partials=normalized_partials,
     )
 
     return await _fetch_plot_series(metric, validated.profile_id, params)
 
 
-def _normalize_and_validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:
+def _normalize_and_validate_partials(partials: str | bool) -> tuple[Any, dict[str, Any] | None]:
     """Map ``partials`` through normalize_partials and check the endpoint accepts it."""
     partials = normalize_partials(partials)
     if partials is not None and partials not in PARTIALS_VALUES:
@@ -295,8 +292,7 @@ async def plotAnalytics(
     interval: int = 3600,
     alignment: str = "end",
     timezone: str = "GMT",
-    partials: str = "none",
-    limit: int = 10,
+    partials: str | bool = "none",
 ) -> dict[str, Any] | ToolResult:
     """Generate an interactive area chart for a NextDNS analytics time-series metric.
 
@@ -317,15 +313,16 @@ async def plotAnalytics(
 
     Default window: ``from_time="-1d"`` to ``to_time="now"`` (1 day).
 
-    The ``;series`` endpoint takes no ``limit`` parameter: ``limit`` is part of
-    this tool's published surface, is rejected outside ``1..500`` rather than
-    clamped, and is never forwarded, so the requested range is the only thing
-    that bounds the response. Three server-side limits are enforced before the
-    request is built, and each is rejected with an ``invalid_argument`` error
-    naming the limit rather than silently adjusted:
+    ``partials`` accepts the endpoint's ``none``/``all`` spellings or a boolean
+    (``false`` means ``none``, ``true`` means ``all``).
+
+    The ``;series`` endpoint takes no ``limit`` parameter, so this tool
+    publishes none: the requested range is the only thing that bounds the
+    response. Two server-side limits are enforced before the request is built,
+    and each is rejected with an ``invalid_argument`` error naming the limit
+    rather than silently adjusted:
 
     - ``interval`` must be between 60 and 86400 seconds.
-    - ``limit`` must be between 1 and 500.
     - The range must be interpretable (a Unix timestamp, an ISO 8601
       timestamp, ``now``, or a relative offset such as ``-7d``; a relative
       unit letter is read case-sensitively and a timestamp with no timezone is
@@ -357,5 +354,4 @@ async def plotAnalytics(
         alignment=alignment,
         timezone=timezone,
         partials=partials,
-        limit=limit,
     )

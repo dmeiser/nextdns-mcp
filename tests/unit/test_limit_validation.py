@@ -1,9 +1,10 @@
-"""Limit validation and forwarding for overviewDashboard and plotAnalytics (issue #415).
+"""Limit validation and forwarding for overviewDashboard (issue #415).
 
-``limit`` is bounded to 1..500 everywhere: the dashboard rejects anything
-outside that window before any upstream request, ``plotAnalytics`` rejects
-non-positive values as well as over-cap ones, and the GAFAM paths forward the
-caller's limit instead of silently dropping it.
+``limit`` is bounded to 1..500 on the dashboard, which rejects anything outside
+that window before any upstream request, and the GAFAM paths forward the
+caller's limit instead of silently dropping it. ``plotAnalytics`` publishes no
+``limit`` at all: the ``;series`` endpoints consume none, so the plot tool has
+no limit to validate (its bounds live in test_plotting.py).
 """
 
 import json
@@ -13,7 +14,6 @@ import httpx
 import pytest
 from fastmcp.tools.base import ToolResult
 
-from nextdns_mcp import charts as charts_module
 from nextdns_mcp import client as client_module
 from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools import dashboard as dash_module
@@ -170,58 +170,19 @@ class TestOverviewDashboardLimitValidation:
         assert gafam_calls[0]["params"]["limit"] == 50
 
 
-class TestPlotAnalyticsLimitLowerBound:
-    """``plotAnalytics`` rejects non-positive limits (issue #415)."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("limit", [0, -1, -100, True])
-    async def test_non_positive_limit_rejected(self, mock_api_client, monkeypatch, limit):
-        """``True`` is refused with the lower bound, not answered as ``limit=1``."""
-        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
-        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
-
-        result = await plots_module._plot_analytics_series_impl("status", limit=limit)
-
-        assert result["code"] == "invalid_argument"
-        assert result["min_limit"] == 1
-        assert result["limit"] == limit
-        assert not mock_api_client.stream_calls
-
-    @pytest.mark.asyncio
-    async def test_limit_of_one_accepted(self, mock_api_client, monkeypatch):
-        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
-        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
-
-        await plots_module._plot_analytics_series_impl("status", from_time="-1d", interval=3600, limit=1)
-
-        assert mock_api_client.stream_calls != []
-
-    def test_validate_interval_and_limit_lower_bound(self):
-        err = plots_module._validate_interval_and_limit(3600, 0)
-        assert err is not None
-        assert err["code"] == "invalid_argument"
-        assert err["min_limit"] == 1
-        assert plots_module._validate_interval_and_limit(3600, 1) is None
+class TestPlotIntervalValidation:
+    """The interval band and type are checked before a series request is built (issue #759)."""
 
     @pytest.mark.parametrize("interval", [float("nan"), float("inf"), 60.0, 3600.5])
-    def test_validate_interval_and_limit_rejects_non_integer_interval(self, interval):
+    def test_rejects_non_integer_interval(self, interval):
         """``nan`` fails both interval bounds and a fractional window is unanswerable (issue #759)."""
-        err = plots_module._validate_interval_and_limit(interval, 1)
+        err = plots_module._validate_interval(interval)
         assert err is not None
         assert err["code"] == "invalid_argument"
         assert err["minimum_interval"] == 60
         assert err["max_interval"] == plots_module.PLOT_INTERVAL_MAX
 
     @pytest.mark.parametrize("interval", [60, 3600, plots_module.PLOT_INTERVAL_MAX])
-    def test_validate_interval_and_limit_accepts_integer_band(self, interval):
+    def test_accepts_integer_band(self, interval):
         """The inclusive integer bounds are unchanged."""
-        assert plots_module._validate_interval_and_limit(interval, 1) is None
-
-    @pytest.mark.parametrize("limit", [float("nan"), 10.5])
-    def test_validate_interval_and_limit_rejects_float_limit(self, limit):
-        err = plots_module._validate_interval_and_limit(3600, limit)
-        assert err is not None
-        assert err["code"] == "invalid_argument"
-        assert err["min_limit"] == 1
+        assert plots_module._validate_interval(interval) is None

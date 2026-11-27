@@ -240,3 +240,32 @@ class TestTheToolsSaySoThemselves:
         payload = await self._call("plotAnalytics", {"metric": "ips", "profile_id": "aa11aa", "partials": "sometimes"})
         error = str(payload.get("error", ""))
         assert "partials must be one of: none, all" in error
+
+    @pytest.mark.asyncio
+    async def test_plot_analytics_publishes_no_limit_and_a_boolean_partials(self):
+        """The schema says what the code does: no dead ``limit``, and ``partials`` takes a bool."""
+        async with Client(build_mcp_server()) as client:
+            tools = {tool.name: tool for tool in await client.list_tools()}
+        properties = tools["plotAnalytics"].input_schema["properties"]
+        assert "limit" not in properties
+        partials_types = {branch.get("type") for branch in properties["partials"].get("anyOf", [])}
+        assert {"string", "boolean"} <= partials_types
+
+    @pytest.mark.asyncio
+    async def test_from_and_to_on_the_plot_tool_name_the_time_spellings(self):
+        """``from``/``to`` are stripped, and the hint says this tool spells them ``from_time``/``to_time``.
+
+        The generated series tools own ``from``/``to``, so the cross-tool owner
+        index can only give generic advice; the alias is the correction the
+        caller needs (issue #787). ``interval=30`` keeps the call off the
+        network: the tool refuses it before any request.
+        """
+        payload = await self._call(
+            "plotAnalytics",
+            {"metric": "status", "profile_id": "aa11aa", "interval": 30, "from": "-1d", "to": "now"},
+        )
+        assert payload.get("code") == "invalid_argument"
+        assert payload.get("ignored_arguments") == ["from", "to"]
+        hint = payload.get("ignored_arguments_hint", "")
+        assert "from_time" in hint
+        assert "to_time" in hint

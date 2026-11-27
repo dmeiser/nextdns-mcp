@@ -766,6 +766,45 @@ async def test_prefab_generative_ui_publishes_its_tools():
 
 
 @pytest.mark.asyncio
+async def test_the_components_tool_schema_exposes_only_the_callers_parameters():
+    """Upstream's ``components`` argument is test DI and never reaches the schema (issue #787)."""
+    gen_ui = PrefabGenerativeUI()
+
+    tools = await _tool_map(gen_ui)
+    properties = tools["search_prefab_components"].parameters["properties"]
+    assert set(properties) == {"query", "detail", "limit"}
+
+
+@pytest.mark.asyncio
+async def test_the_components_tool_forwards_to_upstream():
+    gen_ui = PrefabGenerativeUI()
+
+    tools = await _tool_map(gen_ui)
+    with patch.object(generative_module.prefab_generative, "search_components") as upstream:
+        upstream.return_value = "found"
+        result = tools["search_prefab_components"].fn("chart", detail=True, limit=3)
+    assert result == "found"
+    upstream.assert_called_once_with("chart", detail=True, limit=3)
+
+
+@pytest.mark.asyncio
+async def test_the_generate_tool_doc_describes_this_servers_parameters():
+    """The published description is server-owned: it names the real lookup tool and
+    documents only the parameters this tool takes (issue #787)."""
+    gen_ui = PrefabGenerativeUI()
+
+    tools = await _tool_map(gen_ui)
+    description = tools["generate_prefab_ui"].description or ""
+    assert "search_prefab_components" in description
+    # Upstream's execute() doc documents a caller-supplied sandbox and a tool
+    # called ``components``; neither exists on this server's surface.
+    assert "sandbox:" not in description
+    assert "`components` tool" not in description
+    properties = tools["generate_prefab_ui"].parameters["properties"]
+    assert set(properties) == {"code", "data"}
+
+
+@pytest.mark.asyncio
 async def test_prefab_generative_ui_tool_lookup():
     """Compatibility: registered tools are retrievable via the provider lookup."""
     gen_ui = PrefabGenerativeUI()
