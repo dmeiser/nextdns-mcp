@@ -159,13 +159,16 @@ def write_scratch_project(root: Path, cache: Path, version: str) -> None:
     (root / "src" / "nextdns_mcp" / "__init__.py").write_text(_SCRATCH_INIT.format(version=version))
     for name in ("Dockerfile", "Dockerfile.alpine"):
         (root / name).write_text(_SCRATCH_DOCKERFILE.format(version=version))
-    # The bump step delegates to the shared CLI, so the scratch project needs
-    # the same copy of it the checkout would provide.
+    # The bump step delegates to the shared CLI: weekly-maintenance runs the
+    # checkout's copy, version-bumper runs the main-ref baseline's copy, so the
+    # scratch project needs both.
     (root / "scripts").mkdir()
     shutil.copy(REPO_ROOT / "scripts" / "version_sync.py", root / "scripts" / "version_sync.py")
     # The baseline the bump script reads the current version from.
     baseline = root / "main-ref"
     baseline.mkdir()
+    (baseline / "scripts").mkdir()
+    shutil.copy(REPO_ROOT / "scripts" / "version_sync.py", baseline / "scripts" / "version_sync.py")
     (baseline / "pyproject.toml").write_text(_SCRATCH_PYPROJECT.format(name=PROJECT_NAME, version=version))
     locked = _uv(root, cache, "lock")
     assert locked.returncode == 0, f"could not seed a scratch lockfile:\n{locked.stdout}\n{locked.stderr}"

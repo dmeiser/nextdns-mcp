@@ -69,7 +69,10 @@ def read_pyproject_version(root: Path) -> str:
     if not path.is_file():
         raise VersionError(f"pyproject.toml not found at {path}")
     with path.open("rb") as handle:
-        data = tomllib.load(handle)
+        try:
+            data = tomllib.load(handle)
+        except tomllib.TOMLDecodeError as exc:
+            raise VersionError(f"invalid TOML in {path}: {exc}") from exc
     try:
         version = data["project"]["version"]
     except KeyError:
@@ -108,7 +111,7 @@ def apply_version(root: Path, version: str) -> None:
         path = root / version_file.path
         old = path.read_text()
         replacement = version_file.template.format(version=version)
-        new = version_file.pattern.sub(lambda _, text=replacement: text, old)
+        new = version_file.pattern.sub(replacement, old)
         if old != new:
             path.write_text(new)
             print(f"✅ Updated {version_file.path}", file=sys.stderr)
@@ -156,21 +159,27 @@ def cmd_check(args: argparse.Namespace) -> int:
     baseline = Path(args.baseline)
     try:
         baseline_version = read_pyproject_version(baseline)
-        versions = {version_file.path: read_file_version(root, version_file) for version_file in VERSION_FILES}
+        # tomllib, not the regex, so `check` reads the same [project] version `get` does.
+        project_version = read_pyproject_version(root)
+        versions = {
+            version_file.path: read_file_version(root, version_file)
+            for version_file in VERSION_FILES
+            if version_file.path != "pyproject.toml"
+        }
     except (OSError, VersionError) as exc:
         print(f"❌ Error extracting versions: {exc}")
         return 1
 
     print(f"Baseline Version: {baseline_version}")
+    print(f"PR pyproject.toml: {project_version}")
     for path, version in versions.items():
         print(f"PR {path}: {version}")
 
-    project_version = versions["pyproject.toml"]
     errors: list[str] = []
-    if project_version is None or not is_greater(project_version, baseline_version):
+    if not is_greater(project_version, baseline_version):
         errors.append(f"Version in pyproject.toml ({project_version}) must be greater than main ({baseline_version}).")
     for path, version in versions.items():
-        if path != "pyproject.toml" and version != project_version:
+        if version != project_version:
             errors.append(f"Mismatch: pyproject.toml ({project_version}) != {path} ({version})")
 
     if errors:

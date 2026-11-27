@@ -45,9 +45,11 @@ jobs:
           BUMP_LABEL: ${{ github.event.label.name }}
         run: |
           set -euo pipefail
-          # Bump from the main baseline, not the PR head, so a stale branch
-          # cannot re-apply an already-released version.
-          NEXT_V=$(python3 scripts/version_sync.py bump --label "$BUMP_LABEL" --baseline main-ref)
+          # Run the baseline's copy: post-merge main always has the CLI while
+          # stale PR branches may not, and the PR must not supply code that
+          # runs with a contents: write token. Still bump from main's version,
+          # not the PR head's, so a stale branch cannot re-apply a release.
+          NEXT_V=$(python3 main-ref/scripts/version_sync.py bump --root . --label "$BUMP_LABEL" --baseline main-ref)
           echo "next_version=$NEXT_V" >> "$GITHUB_OUTPUT"
 
       # uv.lock pins this package's own version, so it must be re-locked after

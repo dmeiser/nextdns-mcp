@@ -90,6 +90,9 @@ jobs:
         run: |
           set -euo pipefail
           echo "### 🔍 Extracting and Validating Versions..."
-          # Run the baseline's copy of the CLI so a PR cannot weaken the guard
-          # by editing its own scripts/version_sync.py.
-          python3 main/scripts/version_sync.py check --root pr --baseline main
+          # Prefer the baseline's copy so a PR cannot weaken the guard by
+          # editing its own scripts/version_sync.py; fall back to the PR's copy
+          # until this change lands on main (bootstrap window).
+          SCRIPT="main/scripts/version_sync.py"
+          [ -f "$SCRIPT" ] || SCRIPT="pr/scripts/version_sync.py"
+          python3 "$SCRIPT" check --root pr --baseline main
