@@ -72,7 +72,7 @@ These are the FastMCP internals this server leans on. `fastmcp` carries a `>=4.1
 | `BM25SearchTransform._make_search_tool` / `_make_call_tool` | overridden to re-describe the synthetic pair | The synthetic `search_tools` + `call_tool` pair is still built through these hooks |
 | `BaseSearchTransform._max_results` | read by our `_search` (declared on the subclass, set by the base `__init__`) | The attribute still exists when a search runs |
 | `BaseSearchTransform.get_tool_catalog` | the shape middleware's view of the callable catalog, through `MiddlewareContext.fastmcp_context` | The catalog the proxy dispatches against is the one this returns |
-| `search_result_serializer` | our `_compact_search_results` bounds one search answer | The hook is still consulted for every answer |
+| `search_result_serializer` | passed through to the base constructor; search answers are rendered by our `_render_results` → `_serialize_results`, using cached compaction and the mode's byte budget (`src/nextdns_mcp/tool_search.py:120-136`, `:251-279`) | The base still accepts the argument, and every answer this transform renders goes through our serialize path |
 | Middleware list | first-added runs outermost; order is fixed in `create_mcp_server` | See "Middleware order invariants" above |
 | `ctx.fastmcp.call_tool` | the synthetic proxy's dispatch, which re-enters the whole chain | One dispatch per executed call, so one call-log row and no double relaxation |
 | `Tool.run` | `SpecApiTool` subclasses `Tool` and overrides `run` entirely (`src/nextdns_mcp/spec_tools.py`) | `run(arguments)` returns a `ToolResult` and never raises for an expected failure |
