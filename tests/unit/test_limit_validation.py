@@ -84,9 +84,22 @@ class TestValidateDashboardLimit:
         assert err["max_limit"] == 500
         assert err["limit"] == limit
 
-    @pytest.mark.parametrize("limit", [1, 10, 500, 1.0, 500.0, 42.5])
+    @pytest.mark.parametrize("limit", [1, 10, 500])
     def test_boundary_limits_accepted(self, limit):
         assert utils_module.limit_range_error(limit) is None
+
+    @pytest.mark.parametrize("limit", [float("nan"), float("inf"), float("-inf"), 1.0, 42.5, 500.0])
+    def test_float_limits_rejected(self, limit):
+        """A float never survives the range check (issue #759).
+
+        ``nan`` compares False against both bounds, so a bare ``<``/``>`` gate
+        accepts it, and ``42.5`` is inside the band but is not a count.
+        """
+        err = utils_module.limit_range_error(limit)
+        assert err is not None
+        assert err["code"] == "invalid_argument"
+        assert err["min_limit"] == 1
+        assert err["max_limit"] == 500
 
 
 class TestOverviewDashboardLimitValidation:
@@ -191,3 +204,24 @@ class TestPlotAnalyticsLimitLowerBound:
         assert err["code"] == "invalid_argument"
         assert err["min_limit"] == 1
         assert plots_module._validate_interval_and_limit(3600, 1) is None
+
+    @pytest.mark.parametrize("interval", [float("nan"), float("inf"), 60.0, 3600.5])
+    def test_validate_interval_and_limit_rejects_non_integer_interval(self, interval):
+        """``nan`` fails both interval bounds and a fractional window is unanswerable (issue #759)."""
+        err = plots_module._validate_interval_and_limit(interval, 1)
+        assert err is not None
+        assert err["code"] == "invalid_argument"
+        assert err["minimum_interval"] == 60
+        assert err["max_interval"] == plots_module.PLOT_INTERVAL_MAX
+
+    @pytest.mark.parametrize("interval", [60, 3600, plots_module.PLOT_INTERVAL_MAX])
+    def test_validate_interval_and_limit_accepts_integer_band(self, interval):
+        """The inclusive integer bounds are unchanged."""
+        assert plots_module._validate_interval_and_limit(interval, 1) is None
+
+    @pytest.mark.parametrize("limit", [float("nan"), 10.5])
+    def test_validate_interval_and_limit_rejects_float_limit(self, limit):
+        err = plots_module._validate_interval_and_limit(3600, limit)
+        assert err is not None
+        assert err["code"] == "invalid_argument"
+        assert err["min_limit"] == 1
