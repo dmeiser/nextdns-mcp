@@ -77,7 +77,7 @@ def _describe_schema_errors(kept: list[Any], extra: int) -> str:
     return "; ".join(named) + (f"; and {extra} more" if extra > 0 else "")
 
 
-def _normalized_for_validation(route: HTTPRoute, arguments: dict[str, Any]) -> dict[str, Any]:
+def normalized_for_validation(route: HTTPRoute, arguments: dict[str, Any]) -> dict[str, Any]:
     """Arguments with the query normalizers applied, for schema validation.
 
     The published schema describes what the API accepts; the normalizers
@@ -96,7 +96,7 @@ def _normalized_for_validation(route: HTTPRoute, arguments: dict[str, Any]) -> d
     return merged
 
 
-def _schema_validation_payload(
+def schema_validation_payload(
     validator: jsonschema.Draft202012Validator, tool_name: str, arguments: dict[str, Any]
 ) -> dict[str, Any] | None:
     """Refuse arguments that do not match the published schema; None when they do.

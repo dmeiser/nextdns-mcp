@@ -64,6 +64,7 @@ from .retention import (
     _unlink_temp_file,
     cleanup_successful_downloads,
     current_download_registry,
+    download_registry,
     downloads_owned,
 )
 from .stream import DownloadTooLargeError, _raise_for_streamed_status, _write_stream_to_tempfile, read_body_capped
@@ -98,6 +99,7 @@ __all__ = [
     "close_redirect_client",
     "contextvars",
     "current_download_registry",
+    "download_registry",
     "downloads_owned",
     "httpx",
     "os",

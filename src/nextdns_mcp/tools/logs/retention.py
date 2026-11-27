@@ -8,7 +8,7 @@ removes everything in its registry at shutdown, so successful downloads no
 longer accumulate on disk for the life of the container.
 
 Ownership is PER SERVER, not per process. The registry a download registers
-with is the one the current server lifespan owns (the ``_download_registry``
+with is the one the current server lifespan owns (the ``download_registry``
 context var, set by ``nextdns_mcp.lifespan.server_lifespan``, or the
 resources of the FastMCP server serving this request); there is no
 process-global fallback, so a download outside any owner fails fast (see
@@ -87,7 +87,7 @@ class MissingDownloadRegistryError(RuntimeError):
 # accumulate on disk for the life of the container.
 #
 # Ownership is PER SERVER, not per process. The registry a download registers
-# with is the one the current server lifespan owns (the ``_download_registry``
+# with is the one the current server lifespan owns (the ``download_registry``
 # context var, set by ``nextdns_mcp.lifespan.server_lifespan``). There is no
 # process-global fallback: a download handled outside any lifespan has no
 # owner that could ever reclaim it, so registration fails fast with
@@ -145,9 +145,13 @@ class DownloadRegistry:
         return len(self._paths)
 
 
-_download_registry: contextvars.ContextVar[DownloadRegistry | None] = contextvars.ContextVar(
+download_registry: contextvars.ContextVar[DownloadRegistry | None] = contextvars.ContextVar(
     "nextdns_download_registry", default=None
 )
+
+# Pre-rename private name, kept bound for the package's compatibility
+# re-export and its callers; lifespan takes the public name (issue #783).
+_download_registry = download_registry
 
 # A long-lived server would otherwise keep every CSV it ever handed out until
 # shutdown - and shutdown never runs at all under SIGKILL. Retaining at most
@@ -170,7 +174,7 @@ def current_download_registry() -> DownloadRegistry:
             the caller is told instead of the path joining an unowned
             registry.
     """
-    owned = _download_registry.get()
+    owned = download_registry.get()
     if owned is None:
         resources = request_resources()
         if resources is not None:
@@ -192,11 +196,11 @@ def downloads_owned(registry: DownloadRegistry | None = None) -> Iterator[Downlo
     caller's explicit decision via ``registry.cleanup()``.
     """
     owner = registry if registry is not None else DownloadRegistry()
-    token = _download_registry.set(owner)
+    token = download_registry.set(owner)
     try:
         yield owner
     finally:
-        _download_registry.reset(token)
+        download_registry.reset(token)
 
 
 def _remove_downloaded_file(path: str) -> bool:

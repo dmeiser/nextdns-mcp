@@ -14,7 +14,7 @@ import math
 import re
 from typing import Any
 
-from .config import _BOOL_FALSE_TOKENS, _BOOL_TRUE_TOKENS, get_default_profile
+from .config import BOOL_FALSE_TOKENS, BOOL_TRUE_TOKENS, get_default_profile
 from .constants import CONTROL_CHARS_PATTERN, PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
 from .errors import ErrorCode, cap_with_marker, error_payload
 
@@ -346,8 +346,8 @@ PARTIALS_VALUES = ("none", "all")
 # ``""`` is a false token for env flags but is not a ``partials`` spelling, so it
 # is excluded here rather than mapped onto "none".
 _PARTIALS_ALIASES = {
-    **{token: "none" for token in sorted(_BOOL_FALSE_TOKENS - {""})},
-    **{token: "all" for token in sorted(_BOOL_TRUE_TOKENS)},
+    **{token: "none" for token in sorted(BOOL_FALSE_TOKENS - {""})},
+    **{token: "all" for token in sorted(BOOL_TRUE_TOKENS)},
 }
 
 

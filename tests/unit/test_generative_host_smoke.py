@@ -20,7 +20,7 @@ import shutil
 import pytest
 
 from nextdns_mcp import generative_sandbox as sandbox_module
-from nextdns_mcp.chart_placement import _validate_chart_placement
+from nextdns_mcp.chart_placement import validate_chart_placement
 from nextdns_mcp.generative import PrefabGenerativeUI, _build_renderer_resource, _renderer_csp
 from nextdns_mcp.generative_sandbox import MAX_RESULT_BYTES, MAX_WIRE_LINE_BYTES
 
@@ -80,7 +80,7 @@ async def test_host_smoke_renderer_resource_advertises_csp() -> None:
 def test_host_smoke_chart_sizing_guard_rejects_charts_in_tabs() -> None:
     """Charts nested in tabs are rejected so they never render at 0px width."""
     with pytest.raises(ValueError, match="cannot be placed"):
-        _validate_chart_placement("with Tabs():\n    with Tab('Charts'):\n        BarChart(data=[], series=[])")
+        validate_chart_placement("with Tabs():\n    with Tab('Charts'):\n        BarChart(data=[], series=[])")
 
 
 @requires_deno

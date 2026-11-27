@@ -36,7 +36,7 @@ SEARCH_ANSWER_MAX_BYTES = 8000
 # the per-result cut, the whole-catalog answer is ~100 KB, so the fallback
 # gets its own ceiling well above that rather than sharing the ranked 8 KB.
 # (FastMCP also sends the answer twice, text + structured, so the wire size is
-# ~2x the content size on every path - see _compact_entry.)
+# ~2x the content size on every path - see compact_entry.)
 SEARCH_FALLBACK_MAX_BYTES = 131_072
 
 # Whether the search currently being rendered took the full-catalog fallback,
@@ -45,7 +45,7 @@ SEARCH_FALLBACK_MAX_BYTES = 131_072
 # it is a context var, not an instance attribute: concurrent searches in one
 # process must not see each other's mode, and asyncio copies the context per
 # task.
-_fallback_answer: contextvars.ContextVar[bool] = contextvars.ContextVar("nextdns_fallback_answer", default=False)
+fallback_answer: contextvars.ContextVar[bool] = contextvars.ContextVar("nextdns_fallback_answer", default=False)
 
 
 def _truncate_description(dumped: dict[str, Any]) -> None:
@@ -63,7 +63,7 @@ def _truncate_description(dumped: dict[str, Any]) -> None:
     dumped["description"] = _truncate_at_boundary(description, SEARCH_DESCRIPTION_CHARS) + "\n[description truncated]"
 
 
-def _compact_entry(tool: Tool) -> tuple[dict[str, Any], int]:
+def compact_entry(tool: Tool) -> tuple[dict[str, Any], int]:
     """FastMCP's dump of one tool, description cut, with its whole-answer byte cost.
 
     The cost is measured on UTF-8 BYTES, not characters: the budget bounds the
@@ -77,7 +77,7 @@ def _compact_entry(tool: Tool) -> tuple[dict[str, Any], int]:
     return dumped, len(json.dumps(dumped, sort_keys=True, ensure_ascii=False).encode("utf-8"))
 
 
-def _budget_results(entries: Sequence[tuple[dict[str, Any], int]], budget: int | None = None) -> list[dict[str, Any]]:
+def budget_results(entries: Sequence[tuple[dict[str, Any], int]], budget: int | None = None) -> list[dict[str, Any]]:
     """Assemble a search answer under ``budget`` bytes of answer content.
 
     The accounting is skip-and-continue, not break: a result that does not fit
@@ -99,7 +99,7 @@ def _budget_results(entries: Sequence[tuple[dict[str, Any], int]], budget: int |
 
 
 def _fit_under_budget(entries: Sequence[tuple[dict[str, Any], int]], budget: int) -> list[dict[str, Any]]:
-    """The skip-and-continue scan itself (see _budget_results for the contract)."""
+    """The skip-and-continue scan itself (see budget_results for the contract)."""
     results: list[dict[str, Any]] = []
     spent = 0
     for dumped, cost in entries:
@@ -125,4 +125,4 @@ def _compact_search_results(tools: Sequence[Tool]) -> list[dict[str, Any]]:
     never cut. The transform's cached serializer is the mounted one; this module-level
     form is the uncached reference version.
     """
-    return _budget_results([_compact_entry(tool) for tool in tools])
+    return budget_results([compact_entry(tool) for tool in tools])

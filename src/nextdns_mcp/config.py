@@ -49,6 +49,8 @@ from .profile_access import (
     parse_profile_list,
 )
 from .profile_access import _BOOL_TRUE_TOKENS as _BOOL_TRUE_TOKENS  # noqa: PLC0414
+from .profile_access import BOOL_FALSE_TOKENS as BOOL_FALSE_TOKENS  # noqa: PLC0414
+from .profile_access import BOOL_TRUE_TOKENS as BOOL_TRUE_TOKENS  # noqa: PLC0414
 from .profile_access import _combine_readable as _combine_readable  # noqa: PLC0414
 from .profile_access import _combine_set_readable as _combine_set_readable  # noqa: PLC0414
 from .profile_access import _is_allow_all as _is_allow_all  # noqa: PLC0414

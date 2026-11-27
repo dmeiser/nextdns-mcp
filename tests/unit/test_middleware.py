@@ -656,7 +656,7 @@ class TestOwnerIndexUnderDisclosure:
             calls.append({"method": method, "url": url})
             return {"data": []}
 
-        monkeypatch.setattr(spec_tools, "_api_request_payload", fake_request)
+        monkeypatch.setattr(spec_tools, "api_request_payload", fake_request)
         server = build_mcp_server()
         async with Client(server) as client:
             found = await client.call_tool(

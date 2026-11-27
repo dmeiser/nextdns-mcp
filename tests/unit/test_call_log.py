@@ -215,12 +215,12 @@ class TestALocalOperationHasNoEndpoint:
 
         # An empty series: the fetch is not what this test is about, and the tool
         # returns a typed no-data payload without rendering anything. The
-        # signature mirrors transport._api_request_payload, including the series
+        # signature mirrors transport.api_request_payload, including the series
         # cap the plot fetch passes.
         async def empty_series(method, url, params=None, json_body=None, max_response_bytes=None):
             return {"meta": {"series": {"times": []}}, "data": []}
 
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", empty_series)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", empty_series)
 
         async with Client(build_mcp_server()) as client:
             await client.call_tool("plotAnalytics", {"metric": "status", "profile_id": "abc123"}, raise_on_error=False)
@@ -278,7 +278,7 @@ class TestCallLogMiddleware:
         async def crash(method: str, url: str, params=None, json_body=None):
             raise RuntimeError("transport blew up")
 
-        monkeypatch.setattr(spec_tools, "_api_request_payload", crash)
+        monkeypatch.setattr(spec_tools, "api_request_payload", crash)
         async with Client(build_mcp_server()) as client:
             with pytest.raises(ToolError):
                 await client.call_tool("getDenylist", {"profile_id": "abc123"})
@@ -693,12 +693,12 @@ class TestProfileIdIsBounded:
 
 def test_an_over_cap_result_is_a_valid_truncation_envelope():
     """The bound must never cut mid-document (the harness json.loads-es this)."""
-    from nextdns_mcp.call_log.projection import RESULT_CHARS, _result_text
+    from nextdns_mcp.call_log.projection import RESULT_CHARS, result_text
 
     class _Wide:
         structured_content: ClassVar[dict[str, str]] = {f"key{i}": "x" * 200 for i in range(50)}
 
-    text = _result_text(_Wide())
+    text = result_text(_Wide())
     assert len(text) <= RESULT_CHARS
     parsed = json.loads(text)
     assert parsed["truncated"] is True
@@ -738,7 +738,7 @@ class TestEvidenceColumn:
 
     def test_identities_survive_a_truncated_result_column(self):
         """The projection keeps five list items; evidence keeps fifty pairs."""
-        from nextdns_mcp.call_log.projection import RESULT_CHARS, _result_text
+        from nextdns_mcp.call_log.projection import RESULT_CHARS, result_text
 
         entries = {"data": [{"id": f"id-{i:04d}-padpadpad", "name": f"entry-{i:04d}"} for i in range(80)]}
         row = self._row("getDenylist", {"getDenylist": ("GET", "/profiles/{profile_id}/denylist")}, True, entries)
@@ -747,7 +747,7 @@ class TestEvidenceColumn:
         # The result column, by contrast, is lossy for this payload: the
         # projection keeps five list items, so a reader matching identity #7
         # through it alone would be reading a truth the row never recorded.
-        projected = json.loads(_result_text(self._R(entries)))["data"]
+        projected = json.loads(result_text(self._R(entries)))["data"]
         assert len(projected) == 6  # PROJECT_MAX_ITEMS + the omission marker
         assert all("entry-0007" not in json.dumps(item) for item in projected)
         assert len(json.dumps(row["evidence"])) < RESULT_CHARS * 3  # bounded by construction
@@ -807,7 +807,7 @@ class TestEvidenceColumn:
         the walk visiting each one long after the bound was hit - the recursive
         guard rejects every append, but the pointless iteration is the cost.
         """
-        from nextdns_mcp.call_log.evidence import EVIDENCE_MAX_ITEMS, _result_evidence
+        from nextdns_mcp.call_log.evidence import EVIDENCE_MAX_ITEMS, result_evidence
 
         consumed: list[object] = []
 
@@ -818,7 +818,7 @@ class TestEvidenceColumn:
                     yield value
 
         container = CountingDict({f"key-{i}": {"id": f"id-{i}", "name": f"entry-{i}"} for i in range(200)})
-        evidence = _result_evidence(self._R({"data": [container]}), write=False)
+        evidence = result_evidence(self._R({"data": [container]}), write=False)
         assert len(evidence["ids"]) == EVIDENCE_MAX_ITEMS
         # The loop stopped at the bound (one item past it, the value pulled
         # before the body's break check) instead of draining all 200 siblings.
@@ -927,7 +927,7 @@ class TestEvidenceColumn:
         def boom(*args, **kwargs):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr("nextdns_mcp.call_log.record._result_evidence", boom)
+        monkeypatch.setattr("nextdns_mcp.call_log.record.result_evidence", boom)
         result = SimpleNamespace(is_error=False, structured_content={"$prefab": {"version": "0.3"}, "view": {}})
         path = tmp_path / "calls.jsonl"
         middleware = CallLogMiddleware(path=str(path), endpoints={})

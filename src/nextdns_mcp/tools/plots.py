@@ -170,7 +170,7 @@ async def _fetch_series_payload(
     """Fetch a time-series payload through the shared payload wrapper.
 
     Goes through ``transport.fetch_analytics_payload``, which awaits
-    ``transport._api_request_payload`` - the one place that turns raised
+    ``transport.api_request_payload`` - the one place that turns raised
     ``NextDNSError`` into standardized error payloads, returns the ACL layer's
     denial payload, and adds the profile/entry hint to a 404 (issue #183).
     Plotting keeping its own raise/except wrapper around the raw

@@ -34,7 +34,7 @@ WHOLE_BODY_ARG = "body"
 # A path parameter the caller did not fill in leaves its placeholder behind.
 # The one pattern for a placeholder: substitution and the leftover check are
 # the same question ("what occupies {name} in this path now").
-_PATH_PLACEHOLDER = re.compile(r"\{(\w+)\}")
+PATH_PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
 
 # The analytics/log window arguments are rewritten on the way out rather than sent
@@ -120,7 +120,7 @@ def _rendered_path(template: str, located: list[tuple[str, str, str]], arguments
         value = values.get(match.group(1))
         return match.group(0) if not _path_value_present(value) else str(value)
 
-    return _PATH_PLACEHOLDER.sub(substitute, template)
+    return PATH_PLACEHOLDER.sub(substitute, template)
 
 
 def _path_value_present(value: Any) -> bool:
@@ -210,7 +210,7 @@ def _path_argument_names(route: HTTPRoute, arguments: dict[str, Any]) -> list[tu
     return list(filter(None, pairs))
 
 
-def _unsafe_path_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> list[str]:
+def unsafe_path_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> list[str]:
     """Path arguments whose value could address something other than this tool's endpoint.
 
     A blank or null value is not listed here: it is not unsafe, it is missing.
@@ -227,7 +227,7 @@ def _unsafe_path_arguments(route: HTTPRoute, arguments: dict[str, Any]) -> list[
     ]
 
 
-def _malformed_profile_id_payload(route: HTTPRoute, arguments: dict[str, Any]) -> dict[str, Any] | None:
+def malformed_profile_id_payload(route: HTTPRoute, arguments: dict[str, Any]) -> dict[str, Any] | None:
     """A typed refusal when a sent ``profile_id`` cannot be a NextDNS profile id.
 
     A printable-but-impossible id (13 characters, uppercase, punctuation) used

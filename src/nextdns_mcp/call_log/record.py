@@ -15,8 +15,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..constants import is_write_operation
-from .evidence import EVIDENCE_MAX_ID_CHARS, _result_evidence
-from .projection import ARGS_CHARS, ERROR_CHARS, _project_result, _result_text
+from .evidence import EVIDENCE_MAX_ID_CHARS, result_evidence
+from .projection import ARGS_CHARS, ERROR_CHARS, project_result, result_text
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def _attach_derived_fields(
     evidence = {}
     if ok:
         try:
-            evidence = _result_evidence(result, write)
+            evidence = result_evidence(result, write)
         except (
             RuntimeError,
             TypeError,
@@ -84,13 +84,13 @@ def build_row(
         # sort_keys: key order is fixed by the final row serialization in
         # ``_append_row``, so sorting here would serialize twice for
         # nothing (the harness matches substrings, never key order).
-        "args": json.dumps(_project_result(arguments), default=str)[:ARGS_CHARS],
+        "args": json.dumps(project_result(arguments), default=str)[:ARGS_CHARS],
         "ok": ok,
         "error": error[:ERROR_CHARS],
         # What the call returned. This is what makes a READ verifiable: the
         # API cannot show that a read happened, but it can show that this
         # read answered with data.
-        "result": _result_text(result),
+        "result": result_text(result),
         "write": write,
     }
     _attach_derived_fields(row, endpoint, result, ok, write)

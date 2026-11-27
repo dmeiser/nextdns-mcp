@@ -70,7 +70,7 @@ class TestTheTwoIdsAProfilePathCanMiss:
             raise error
 
         monkeypatch.setattr(transport, "_api_request", boom)
-        payload = await transport._api_request_payload("POST", "/profiles/abc123/rewrites")
+        payload = await transport.api_request_payload("POST", "/profiles/abc123/rewrites")
         assert payload["upstream_code"] == "notFound"
         assert "profile id or the entry id" in str(payload.get("hint", ""))
 

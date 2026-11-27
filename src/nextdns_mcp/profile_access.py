@@ -31,9 +31,14 @@ logger = logging.getLogger(__name__)
 # Constants for profile access control
 ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
 
-_BOOL_TRUE_TOKENS = frozenset(("true", "1", "yes", "on"))
-_BOOL_FALSE_TOKENS = frozenset(("false", "0", "no", "off", ""))
-_BOOL_TOKENS = _BOOL_TRUE_TOKENS | _BOOL_FALSE_TOKENS
+BOOL_TRUE_TOKENS = frozenset(("true", "1", "yes", "on"))
+BOOL_FALSE_TOKENS = frozenset(("false", "0", "no", "off", ""))
+_BOOL_TOKENS = BOOL_TRUE_TOKENS | BOOL_FALSE_TOKENS
+
+# Pre-rename private names, kept bound for config's compatibility re-export
+# block; cross-module consumers take the public names (issue #783).
+_BOOL_TRUE_TOKENS = BOOL_TRUE_TOKENS
+_BOOL_FALSE_TOKENS = BOOL_FALSE_TOKENS
 
 
 def _parse_bool_env(value: str) -> bool | None:
@@ -43,9 +48,9 @@ def _parse_bool_env(value: str) -> bool | None:
     unrecognized value, so callers can distinguish "off" from a typo.
     """
     normalized = value.strip().lower()
-    if normalized in _BOOL_TRUE_TOKENS:
+    if normalized in BOOL_TRUE_TOKENS:
         return True
-    if normalized in _BOOL_FALSE_TOKENS:
+    if normalized in BOOL_FALSE_TOKENS:
         return False
     return None
 

@@ -186,7 +186,7 @@ class TestToolCall:
         return []
 
     def _tool(self, monkeypatch, calls, operation_id: str, payload: dict | None = None):
-        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api(payload or {"data": []}, calls))
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api(payload or {"data": []}, calls))
         return spec_tools.SpecApiTool({route.operation_id: route for route in spec_tools.spec_routes()}[operation_id])
 
     async def test_a_read_sends_the_endpoint_it_declares(self, monkeypatch, calls):
@@ -335,7 +335,7 @@ class TestTypedErrorClassification:
         ],
     )
     async def test_a_malformed_or_partial_payload_is_a_result_not_an_error(self, monkeypatch, calls, payload: Any):
-        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api(payload, calls))
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api(payload, calls))
         tool = spec_tools.SpecApiTool(
             {route.operation_id: route for route in spec_tools.spec_routes()}["getAnalyticsDomains"]
         )
@@ -347,7 +347,7 @@ class TestTypedErrorClassification:
         """The consolidation must not weaken the flag for real error payloads."""
         monkeypatch.setattr(
             spec_tools,
-            "_api_request_payload",
+            "api_request_payload",
             _fake_api({"code": "http_error", "error": "upstream unavailable", "status_code": 503}, calls),
         )
         tool = spec_tools.SpecApiTool(
@@ -447,7 +447,7 @@ class TestRegistration:
         monkeypatch.setenv("NEXTDNS_API_KEY", "k")
 
         calls: list[dict[str, Any]] = []
-        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
@@ -463,7 +463,7 @@ class TestRegistration:
         async def fake_payload(method, url, params=None, json_body=None):
             return {"data": [{"id": "zip"}]}
 
-        monkeypatch.setattr(spec_tools, "_api_request_payload", fake_payload)
+        monkeypatch.setattr(spec_tools, "api_request_payload", fake_payload)
         from nextdns_mcp.server import build_mcp_server
 
         async with Client(build_mcp_server()) as client:
@@ -498,7 +498,7 @@ class TestRefusalsBeforeTransport:
         return []
 
     def _tool(self, monkeypatch, calls, operation_id: str):
-        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
         return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}[operation_id])
 
     async def test_a_value_beyond_the_published_bound_is_refused_locally(self, monkeypatch, calls):
@@ -730,7 +730,7 @@ class TestSchemaErrorTextIsBounded:
         return []
 
     async def test_a_giant_invalid_value_is_described_within_a_cap(self, monkeypatch, calls):
-        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
         tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
         payload = (await tool.run({"profile_id": "abc123", "from": "-1d", "partials": "x" * 5000})).structured_content
         assert payload["code"] == "invalid_argument"
@@ -753,7 +753,7 @@ class TestGeneratedSeriesBudget:
         return []
 
     def _tool(self, monkeypatch, calls):
-        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
         return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
 
     async def test_a_generated_series_range_beyond_the_budget_is_refused(self, monkeypatch, calls):
@@ -815,7 +815,7 @@ class TestGeneratedSeriesBudget:
             calls.append((args, kwargs))
             return {"data": [{"name": f"row{i}", "hits": ["x"] * 60} for i in range(2000)]}
 
-        monkeypatch.setattr(spec_tools, "_api_request_payload", fat_api)
+        monkeypatch.setattr(spec_tools, "api_request_payload", fat_api)
         tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
         payload = (await tool.run({"profile_id": "abc123", "from": "-30d", "interval": 86400})).structured_content
         assert payload["code"] == "invalid_argument"
@@ -839,13 +839,13 @@ class TestSeriesBudgetHelperEdges:
 
     def test_a_call_naming_no_from_is_not_priced_here(self):
         """The required SeriesFrom makes this defensive; the helper still says so."""
-        assert spec_series._series_budget_for_generated_call(self._route(), {}) is None
+        assert spec_series.series_budget_for_generated_call(self._route(), {}) is None
 
     def test_an_unresolvable_range_without_an_interval_is_left_to_the_endpoint(self):
         """No interval means no local budget arithmetic; a garbage range is
         the endpoint's 400 to give, not this helper's guess."""
         query = {"from": "not-a-time", "to": "also-not-a-time"}
-        assert spec_series._series_budget_for_generated_call(self._route(), query) is None
+        assert spec_series.series_budget_for_generated_call(self._route(), query) is None
 
 
 class TestSeriesStreamCeilingWiring:
@@ -856,7 +856,7 @@ class TestSeriesStreamCeilingWiring:
         return []
 
     def _series_tool(self, monkeypatch, calls):
-        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
         return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
 
     async def test_a_generated_series_call_passes_the_cap_to_the_transport(self, monkeypatch, calls):
@@ -865,7 +865,7 @@ class TestSeriesStreamCeilingWiring:
         assert calls[0]["max_response_bytes"] == spec_tools.MAX_SERIES_RESPONSE_BYTES
 
     async def test_a_non_series_call_carries_no_cap(self, monkeypatch, calls):
-        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
         tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getDenylist"])
         await tool.run({"profile_id": "abc123"})
         assert "max_response_bytes" not in calls[0]
@@ -875,7 +875,7 @@ class TestSeriesStreamCeilingWiring:
             return {"code": "response_too_large", "error": "exceeded the ceiling", "max_response_bytes": 1}
 
         tool = self._series_tool(monkeypatch, calls)
-        monkeypatch.setattr(spec_tools, "_api_request_payload", capped_transport)
+        monkeypatch.setattr(spec_tools, "api_request_payload", capped_transport)
         payload = (await tool.run({"profile_id": "abc123", "from": "-1d"})).structured_content
         assert payload["code"] == "invalid_argument"
         assert "series response ceiling" in payload["error"]
@@ -894,9 +894,9 @@ class TestSeriesStreamCeilingWiring:
         async def injected(method, url, params=None, json_body=None, max_response_bytes=None): ...
 
         cap = {"max_response_bytes": spec_tools.MAX_SERIES_RESPONSE_BYTES}
-        assert spec_series._ceiling_measured_on_the_wire(spec_tools._api_request_payload, cap)
-        assert not spec_series._ceiling_measured_on_the_wire(injected, cap)
-        assert not spec_series._ceiling_measured_on_the_wire(spec_tools._api_request_payload, {})
+        assert spec_series.ceiling_measured_on_the_wire(spec_tools.api_request_payload, cap)
+        assert not spec_series.ceiling_measured_on_the_wire(injected, cap)
+        assert not spec_series.ceiling_measured_on_the_wire(spec_tools.api_request_payload, {})
 
 
 def test_a_wire_measured_series_answer_is_not_priced_again_at_the_generator_door():
@@ -916,8 +916,8 @@ def test_a_wire_measured_series_answer_is_not_priced_again_at_the_generator_door
     dumped = len(json.dumps(payload, default=str))
     assert wire <= spec_tools.MAX_SERIES_RESPONSE_BYTES < dumped
 
-    assert spec_series._series_refusal(route, payload, ceiling_measured_on_the_wire=True) is None
-    refused = spec_series._series_refusal(route, payload)
+    assert spec_series.series_refusal(route, payload, ceiling_measured_on_the_wire=True) is None
+    refused = spec_series.series_refusal(route, payload)
     assert refused is not None
     assert refused["response_bytes"] == dumped
 
@@ -939,7 +939,7 @@ class TestSchemaProblemStreamIsBounded:
         assert extra == spec_validation._SCHEMA_ERROR_COUNT_CAP  # counting stopped at the cap
 
     async def test_an_over_cap_violation_tail_says_at_least(self, monkeypatch, calls):
-        monkeypatch.setattr(spec_tools, "_api_request_payload", _fake_api({"data": []}, calls))
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
         tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["replaceDenylist"])
         body = [{"wrong": i} for i in range(spec_validation._SCHEMA_ERROR_COUNT_CAP + 100)]
         payload = (await tool.run({"profile_id": "abc123", "body": body})).structured_content
@@ -951,7 +951,7 @@ class TestSchemaProblemStreamIsBounded:
 def test_series_refusal_ignores_a_non_mapping_answer():
     """A transport that answers with a bare list gets no annotation, no crash."""
     route = next(r for r in spec_tools.spec_routes() if r.path.endswith("/analytics/status;series"))
-    assert spec_series._series_refusal(route, ["data", "rows"]) is None
+    assert spec_series.series_refusal(route, ["data", "rows"]) is None
 
 
 class TestLegacyInjectedTransportCompatibility:
@@ -1014,7 +1014,7 @@ class TestLegacyInjectedTransportCompatibility:
         assert spec_series._transport_accepts_cap(star)
 
     def test_the_default_transport_supports_the_cap(self):
-        assert spec_series._transport_accepts_cap(spec_tools._api_request_payload)
+        assert spec_series._transport_accepts_cap(spec_tools.api_request_payload)
 
     def test_a_callable_without_an_introspectable_signature_is_treated_as_legacy(self):
         """The unpriced path still enforces the ceiling, so the guess is safe the only way."""
@@ -1097,7 +1097,7 @@ def test_a_big_non_series_payload_is_not_refused_by_the_series_backstop():
     """The ceiling is a ;series policy: a wide aggregate answer is data, not an overrun."""
     route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getDenylist")
     big = {"data": [{"id": f"entry-{i}", "name": "x" * 40} for i in range(30_000)]}
-    assert spec_series._series_refusal(route, big) is None
+    assert spec_series.series_refusal(route, big) is None
 
 
 def test_truncate_description_no_boundary():

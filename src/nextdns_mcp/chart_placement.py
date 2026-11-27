@@ -254,7 +254,7 @@ def _chart_in_tab(root: ast.AST) -> bool:
     return False
 
 
-def _validate_chart_placement(code: str) -> None:
+def validate_chart_placement(code: str) -> None:
     """Reject nesting charts in tabs to avoid 0px container collapse."""
     try:
         tree = ast.parse(code)
