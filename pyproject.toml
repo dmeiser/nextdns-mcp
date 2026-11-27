@@ -25,6 +25,18 @@ dependencies = [
     "prefab-ui==0.21.1",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.2.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.10",
+    "mypy>=1.20.1",
+    "types-pyyaml>=6.0.12.20250915",
+    "radon>=6.0.1",
+    "coverage",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -69,12 +81,4 @@ exclude-newer = "1 week"
 dev = [
     "types-jsonschema>=4.26.0.20261006",
     "xenon>=0.9.3",
-    "pytest>=9.0.0",
-    "pytest-asyncio>=1.2.0",
-    "pytest-cov>=7.1.0",
-    "ruff>=0.15.10",
-    "mypy>=1.20.1",
-    "types-pyyaml>=6.0.12.20250915",
-    "radon>=6.0.1",
-    "coverage",
 ]
