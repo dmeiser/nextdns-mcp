@@ -433,6 +433,8 @@ def _rank_by_name_overlap(
     names: dict[str, set[str]] | None = None,
     vocabulary: dict[str, set[str]] | None = None,
     shared: tuple[set[str], set[str]] | None = None,
+    leading: Mapping[str, str] | None = None,
+    generic: set[str] | frozenset[str] | None = None,
 ) -> list[Tool]:
     """Order matched tools by how much of the query their own words account for.
 
@@ -451,15 +453,18 @@ def _rank_by_name_overlap(
     to the underlying rank: the shared-word discount made "delete profile" score
     equal for deleteProfile and deleteRewrite (both match on the verb "delete",
     "profile" is discounted), and only the raw name overlap says the caller also
-    spelled deleteProfile itself. `names`/`vocabulary`/`shared` let the transform
-    hand in its memoized catalog structures instead of rebuilding them.
+    spelled deleteProfile itself. `names`/`vocabulary`/`shared`/`leading`/`generic`
+    let the transform hand in its memoized catalog structures instead of
+    rebuilding them: without the last two, every warm rank re-derived each
+    name's leading word and the catalog's generic verbs - 162 regex splits at
+    the shipped 81-tool catalog, on every query.
     """
     names = _name_words(tools) if names is None else names
     vocabulary = _vocabulary_words(tools) if vocabulary is None else vocabulary
     query_words = _words(query)
     if not query_words:
         return list(tools)
-    scorer = _word_scorer(query_words, names, vocabulary, shared)
+    scorer = _word_scorer(query_words, names, vocabulary, shared, leading, generic)
 
     def _key(pair: tuple[int, Tool]) -> tuple[int, int, int]:
         index, tool = pair

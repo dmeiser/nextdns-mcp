@@ -401,16 +401,19 @@ class StripExtraFieldsMiddleware(Middleware):
     def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
         """Coerce a value using its property schema.
 
-        Top-level values are coerced according to the declared schema. Nested
-        dict/list values are recursed without schema context to avoid coercing
-        identifier-like strings inside opaque objects.
+        A value with no schema comes back as it went in: there is nothing to
+        coerce against, and rebuilding its nested dicts/lists allocated deep
+        copies of containers the caller already held. Top-level values are
+        coerced according to the declared schema. A dict is returned
+        untouched - nested values carry no schema context, so identifier-like
+        strings inside opaque objects were never coerced anyway.
         """
+        if prop_schema is None:
+            return value
         if isinstance(value, str):
             return self._coerce_string_value(value, self._get_schema_property_types(prop_schema))
         if isinstance(value, list):
             return self._coerce_list_value(value, prop_schema)
-        if isinstance(value, dict):
-            return {k: self._coerce_value(v, None) for k, v in value.items()}
         return value
 
     def _coerce_list_value(self, value: list[Any], prop_schema: dict[str, Any] | None) -> list[Any]:

@@ -287,13 +287,6 @@ async def fetch_card_data(
 
 OVERVIEW_FANOUT_CONCURRENCY = 4
 
-# Upstream answers that reject the request itself rather than this one endpoint.
-# Every queued wave of the fan-out sends the same profile id on the same API key,
-# so a wave that has not started yet can only repeat the failure: the 429 spends
-# quota that was already refused, the 401/403 re-proves a credential that just
-# failed, the 404 names a profile no endpoint of this profile can resolve.
-FANOUT_STOP_STATUS_CODES = frozenset({401, 403, 404, 429})
-
 # What one overview fan-out fetch answers: the payload or the typed error. Every
 # fetch is built under a name, and that name is what the unpacking layer reads,
 # so the payload a field gets follows the key it was fetched under and never the
@@ -302,20 +295,20 @@ FetchResult = tuple[dict[str, Any] | None, dict[str, Any] | None]
 
 
 class _FanoutStop:
-    """The stop signal one fan-out shares: the first error that condemns every remaining wave.
+    """The stop signal one fan-out shares: the first error condemns every remaining wave.
 
-    A per-request 5xx or an over-large series body says nothing about the other
-    endpoints, so only ``FANOUT_STOP_STATUS_CODES`` latch here.
+    The unpacking layer answers the overview with the first error it is handed
+    and discards every payload beside it, so once any fetch has failed the
+    waves still queued can only spend quota and latency on results that will
+    never be read - a 5xx, a timeout or an over-large body included.
     """
 
     def __init__(self) -> None:
         self.error: dict[str, Any] | None = None
 
     def observe(self, err: dict[str, Any] | None) -> None:
-        """Latch the first request-fatal error; later failures keep the first one's payload."""
-        if self.error is not None or err is None:
-            return
-        if err.get("status_code") in FANOUT_STOP_STATUS_CODES:
+        """Latch the first error; later failures keep the first one's payload."""
+        if self.error is None and err is not None:
             self.error = err
 
 

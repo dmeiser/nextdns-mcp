@@ -218,7 +218,15 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
             fell_back = False
         merged = _merge_named_results(results, tools, named)
         shared = (catalog.name_shared, catalog.vocab_shared)
-        ranked = _rank_by_name_overlap(merged, stripped, catalog.names, catalog.vocabulary, shared)
+        ranked = _rank_by_name_overlap(
+            merged,
+            stripped,
+            catalog.names,
+            catalog.vocabulary,
+            shared,
+            leading=catalog.leading,
+            generic=catalog.generic_verbs,
+        )
         _fallback_answer.set(fell_back)
         return ranked if fell_back else ranked[: self._max_results]
 

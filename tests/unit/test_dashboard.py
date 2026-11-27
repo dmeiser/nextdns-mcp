@@ -838,12 +838,13 @@ class TestDashboardToolsExecution:
 
 
 class TestFanoutShortCircuit:
-    """A queued fan-out wave is skipped once upstream has rejected the request itself.
+    """A queued fan-out wave is skipped once any fetch of the fan-out has failed.
 
     ``overviewDashboard(section='all')`` dispatches 12 endpoints under a semaphore of
-    4, so two thirds of the fan-out is still queued when the first wave answers. A 429,
-    401, 403 or 404 rejects the credential, the profile or the quota — not one endpoint —
-    so the queued waves can only repeat it while spending quota and latency (issue #549).
+    4, so two thirds of the fan-out is still queued when the first wave answers. The
+    unpacking layer answers the overview with the first error and discards every
+    payload beside it, so once any fetch has failed the queued waves can only spend
+    quota and latency on results that are never read (issues #549, #792).
     """
 
     EXTRA_ENDPOINTS = ("reasons", "devices", "ips", "encryption", "dnssec")
@@ -879,33 +880,38 @@ class TestFanoutShortCircuit:
         assert started == ["status", "status;series", "domains", "domains"]
 
     @pytest.mark.asyncio
-    async def test_per_endpoint_failure_still_dispatches_every_wave(self, monkeypatch):
-        """A 5xx says nothing about the other endpoints, so the fan-out must not stop."""
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            {"code": "http_error", "error": "upstream said 502", "status_code": 502},
+            {"code": "http_error", "error": "request timed out"},
+            {"code": "response_too_large", "error": "response crossed the byte budget", "max_response_bytes": 65536},
+        ],
+        ids=["http_502", "timeout", "response_too_large"],
+    )
+    async def test_a_first_wave_failure_stops_the_queued_waves(self, monkeypatch, failure):
+        """Any first-wave error condemns the fan-out: its result would be discarded anyway."""
         started: list[str] = []
-        gateway = {"code": "http_error", "error": "upstream said 502", "status_code": 502}
         monkeypatch.setattr(
-            data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("status", gateway), "status")
+            data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("status", failure), "status")
         )
 
         _, _, _, _, extra, err = await data_mod.fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
 
-        assert err == gateway
-        assert len(started) == 12
+        assert err == failure
         assert extra is None
+        assert started == ["status", "status;series", "domains", "domains"]
 
-    def test_stop_signal_latches_only_a_request_fatal_error(self):
-        """The first fatal error is the one reported, and a success or a 5xx never latches."""
+    def test_stop_signal_latches_the_first_error_and_only_errors(self):
+        """A success never latches; the first error is the one reported."""
         stop = data_mod._FanoutStop()
         stop.observe(None)
         assert stop.error is None
         gateway = {"code": "http_error", "error": "upstream said 502", "status_code": 502}
         stop.observe(gateway)
-        assert stop.error is None
-        rate_limited = {"code": "http_error", "error": "upstream said 429", "status_code": 429}
-        stop.observe(rate_limited)
         stop.observe({"code": "http_error", "error": "upstream said 401", "status_code": 401})
         stop.observe(None)
-        assert stop.error is rate_limited
+        assert stop.error is gateway
 
 
 class TestExtraSectionBinding:

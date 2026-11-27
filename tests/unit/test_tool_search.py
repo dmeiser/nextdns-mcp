@@ -149,6 +149,43 @@ class TestNameAwareRanking:
         assert "dohLookup" in [tool.get("name") for tool in found.data]
 
 
+class TestWarmRankReusesTheCatalogsLeadingWords:
+    """A warm search must not recompute the catalog's per-name leading words.
+
+    ``_rank_by_name_overlap`` derived every name's leading word and the
+    catalog's generic verbs on each call; measured at intake, a second
+    'add to denylist' search against the 81-tool catalog ran 162 regex
+    splits the word memo already held. The transform now hands its memoized
+    ``catalog.leading`` and ``catalog.generic_verbs`` down, so the warm rank
+    derives nothing and the answer comes out unchanged.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_second_search_derives_no_leading_words(self, monkeypatch):
+        from fastmcp import Client
+
+        import nextdns_mcp.tool_search_rank as rank
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            first = await client.call_tool("search_tools", {"query": "add to denylist"}, raise_on_error=False)
+
+            calls = 0
+            original = rank._leading_word
+
+            def counting(name):
+                nonlocal calls
+                calls += 1
+                return original(name)
+
+            monkeypatch.setattr(rank, "_leading_word", counting)
+            second = await client.call_tool("search_tools", {"query": "add to denylist"}, raise_on_error=False)
+
+        assert calls == 0
+        assert [t.get("name") for t in second.data] == [t.get("name") for t in first.data]
+        assert second.data[0].get("name") == "addToDenylist"
+
+
 class TestMorphologicalQueryExpansion:
     """Lexical search has to bridge plurals: live gemma 12b queries failed on them.
 

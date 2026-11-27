@@ -360,3 +360,22 @@ def test_coerce_value_schema_aware_and_collections(monkeypatch):
 
     # Non-string non-dict/list returns unchanged
     assert mw._coerce_value(10) == 10
+
+
+def test_coerce_value_without_a_schema_reuses_the_input_object():
+    """No schema means nothing to coerce: the input comes back as it went in.
+
+    The schema-less path used to rebuild every nested dict and list, a deep
+    copy of containers the caller already held, with no value ever changing.
+    """
+    mw = relaxation.StripExtraFieldsMiddleware()
+
+    value = {"entries": [{"id": "007", "enabled": "true"}]}
+    coerced = mw._coerce_value(value, None)
+    assert coerced is value
+    # The literal strings inside are preserved, not coerced.
+    assert coerced["entries"][0]["id"] == "007"
+    assert coerced["entries"][0]["enabled"] == "true"
+
+    # A declared integer array still coerces its items.
+    assert mw._coerce_value(["7"], {"type": "array", "items": {"type": "integer"}}) == [7]
