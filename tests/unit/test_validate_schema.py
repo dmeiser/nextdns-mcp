@@ -710,4 +710,27 @@ def test_search_prefab_components_not_content_tool():
 
     assert "search_prefab_components" not in validate_schema.CONTENT_TOOLS
     assert "search_prefab_components" in validate_schema.TOOL_RESPONSE_SCHEMAS
-    assert validate_schema.TOOL_RESPONSE_SCHEMAS["search_prefab_components"] == {"type": "string"}
+    assert validate_schema.TOOL_RESPONSE_SCHEMAS["search_prefab_components"] == {
+        "type": "object",
+        "required": ["result"],
+        "properties": {"result": {"type": "string"}},
+    }
+
+
+def test_search_prefab_components_pin_describes_the_wrapped_payload():
+    """The pin matches FastMCP's x-fastmcp-wrap-result shape, not the bare markdown.
+
+    The tool returns a markdown string; FastMCP wraps a scalar return as
+    {"result": <string>} on the wire (structured_content = {"result": ...},
+    x-fastmcp-wrap-result: True), so the wrapped object validates while the bare
+    string, a missing result key, or a non-string result are all rejected.
+    """
+    from scripts.validate_schema import load_openapi_spec
+
+    spec = load_openapi_spec(str(REAL_SPEC_PATH))
+    status, errors = validate_tool_response("search_prefab_components", {"result": "# Card"}, spec)
+    assert status == "VALID", errors
+    for payload in ("# Card", {}, {"result": 7}):
+        status, errors = validate_tool_response("search_prefab_components", payload, spec)
+        assert status == "INVALID", payload
+        assert errors

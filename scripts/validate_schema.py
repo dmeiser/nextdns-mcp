@@ -119,10 +119,15 @@ TOOL_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
-    # The generative-UI data tools answer with a JSON string no endpoint returns, so their
+    # The generative-UI data tools answer with data no endpoint returns, so their
     # shape is pinned here; the names come from the server's content/data partition,
-    # so a rename moves the pin with it and cannot silently orphan it.
-    **{name: {"type": "string"} for name in generative_ui_data_tool_names()},
+    # so a rename moves the pin with it and cannot silently orphan it. FastMCP wraps a
+    # scalar tool return as {"result": <value>} (x-fastmcp-wrap-result), so the pin
+    # describes that wrapped object, not the bare markdown the tool produces.
+    **{
+        name: {"type": "object", "required": ["result"], "properties": {"result": {"type": "string"}}}
+        for name in generative_ui_data_tool_names()
+    },
 }
 
 
