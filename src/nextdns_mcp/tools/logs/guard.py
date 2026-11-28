@@ -90,11 +90,6 @@ async def _resolve_public_addresses(host: str) -> list[Any] | None:
     return list(infos)
 
 
-async def _host_resolves_to_public_address(host: str) -> bool:
-    """Whether ``host`` resolves only to globally routable addresses."""
-    return await _resolve_public_addresses(host) is not None
-
-
 # The pinned-resolver swap is process-global (httpcore reaches the resolver
 # only through the ``socket`` module attribute), so two downloads running
 # their check/fetch windows at the same moment could restore each other's

@@ -49,10 +49,7 @@ def _actor_read_the_instrument(run: ActorRun, call_log: str | os.PathLike[str]) 
     sent = path.lower()
     name = os.path.basename(path).lower()
     for call in run.tool_calls:
-        try:
-            blob = json.dumps(call.args, default=str).lower()
-        except (TypeError, ValueError):  # pragma: no cover - defensive
-            blob = str(call.args).lower()
+        blob = json.dumps(call.args, default=str).lower()
         if sent in blob or (name and name in blob):
             return True
     return False

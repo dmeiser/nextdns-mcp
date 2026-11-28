@@ -44,7 +44,6 @@ from .guard import (
     ALLOWED_DOWNLOAD_HOSTS,
     DownloadRedirectRefusedError,
     _check_download_redirect_target,
-    _host_resolves_to_public_address,
     _is_public_address,
     _pinned_dns,
 )
@@ -88,7 +87,6 @@ __all__ = [
     "_download_registry",
     "_follow_redirects_to_tempfile",
     "_get_redirect_client",
-    "_host_resolves_to_public_address",
     "_is_public_address",
     "_note_successful_download",
     "_pinned_dns",

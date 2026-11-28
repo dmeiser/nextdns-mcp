@@ -245,7 +245,7 @@ class TestAddressVetting:
             ]
 
         monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-        assert await logs_module._host_resolves_to_public_address("mixed.example") is False
+        assert await guard._resolve_public_addresses("mixed.example") is None
 
     async def test_an_unresolvable_host_is_refused(self, monkeypatch):
         """Name-resolution failure fails the vetting closed (issue #266 review).
@@ -261,7 +261,7 @@ class TestAddressVetting:
             raise socket.gaierror("no such host")
 
         monkeypatch.setattr(socket, "getaddrinfo", fail)
-        assert await logs_module._host_resolves_to_public_address("gone.example") is False
+        assert await guard._resolve_public_addresses("gone.example") is None
 
     async def test_an_empty_resolution_is_refused(self, monkeypatch):
         """An empty address list proves nothing either - same closed default."""
@@ -270,7 +270,7 @@ class TestAddressVetting:
             return []
 
         monkeypatch.setattr(socket, "getaddrinfo", none)
-        assert await logs_module._host_resolves_to_public_address("ghost.example") is False
+        assert await guard._resolve_public_addresses("ghost.example") is None
 
 
 class TestRedirectRefusal:
