@@ -2365,6 +2365,18 @@ def test_bounded_stderr_caps_bytes_across_lines_but_still_detects_ready():
     assert bounded.ready is True
 
 
+def test_bounded_stderr_treats_discarded_line_as_a_line_not_eof():
+    raw = _ChunkedRaw(b"x" * 30 + b"\ndiagnostic\npyodide:ready\n", chunk_size=16)
+    bounded = sandbox_module._BoundedStderr(raw, limit=20)
+
+    assert len(bounded.readline()) == 20
+    assert bounded.readline() == sandbox_module._DISCARDED_STDERR_LINE
+    assert bounded.ready is False
+
+    assert bounded.readline() == b"pyodide:ready"
+    assert bounded.ready is True
+
+
 def test_bounded_stderr_detects_ready_split_across_chunks():
     raw = _ChunkedRaw(b"pyodide:rea" + b"dy\n", chunk_size=7)
     bounded = sandbox_module._BoundedStderr(raw)
@@ -2411,6 +2423,15 @@ async def test_read_startup_line_replaces_bytes_cut_mid_character():
 
 
 @pytest.mark.asyncio
+async def test_read_startup_line_skips_a_fully_discarded_diagnostic():
+    bounded = sandbox_module._BoundedStderr(_ChunkedRaw(b"diagnostic\n", chunk_size=16), limit=0)
+    lines: list[str] = []
+
+    assert await sandbox_module._read_startup_line(bounded, lines) == ""
+    assert lines == []
+
+
+@pytest.mark.asyncio
 async def test_await_ready_consumes_lines_until_ready():
     proc = _FakeProc([b"boot log\n", b"pyodide:ready\n"])
     await sandbox_module._await_ready(proc)  # returns once readiness is signalled
@@ -2420,6 +2441,21 @@ async def test_await_ready_consumes_lines_until_ready():
 async def test_await_ready_reaches_signal_past_oversized_stderr():
     """A noisy boot log cannot exhaust memory or hide the readiness handshake."""
     proc = _FakeProc([b"boot log\n", b"x" * 100_000 + b"\n", b"pyodide:ready\n"])
+    await sandbox_module._await_ready(proc)
+    assert proc.stderr.reads == 3
+
+
+@pytest.mark.asyncio
+async def test_await_ready_consumes_diagnostic_after_stderr_cap():
+    """A discarded line after the cap is startup noise, not the pipe reaching EOF."""
+    proc = _FakeProc(
+        [
+            b"x" * (sandbox_module.MAX_STARTUP_STDERR_BYTES + 1) + b"\n",
+            b"ordinary diagnostic\n",
+            b"pyodide:ready\n",
+        ]
+    )
+
     await sandbox_module._await_ready(proc)
     assert proc.stderr.reads == 3
 

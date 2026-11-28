@@ -46,6 +46,8 @@ def test_api_url_rejects_non_https(patch_env):
     "base_url",
     [
         "https://user:pass@api.nextdns.io",
+        "https://@api.nextdns.io",
+        "https://:@api.nextdns.io",
         "https://api.nextdns.io?token=secret",
         "https://api.nextdns.io?",
         "https://api.nextdns.io#fragment",
@@ -62,6 +64,14 @@ def test_api_url_rejects_unsafe_components(patch_env, base_url):
     patch_env("NEXTDNS_API_BASE", base_url)
     with pytest.raises(config.ConfigurationError, match="NEXTDNS_API_BASE must use https://"):
         config.get_api_base()
+
+
+def test_api_url_accepts_at_in_path(patch_env):
+    """An ``@`` in the path is not userinfo and remains accepted."""
+    from nextdns_mcp import config
+
+    patch_env("NEXTDNS_API_BASE", "https://api.nextdns.io/v1@resource")
+    assert config.get_api_base() == "https://api.nextdns.io/v1@resource"
 
 
 def test_api_url_accepts_host_port_and_path(patch_env):

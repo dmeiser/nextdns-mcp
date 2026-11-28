@@ -137,13 +137,23 @@ def _parse_api_base(base_url: str) -> URL:
         raise ConfigurationError(_INVALID_API_BASE_MESSAGE) from None
 
 
+def _authority_has_userinfo(base_url: str) -> bool:
+    """Return whether the raw URL authority carries an ``@`` userinfo delimiter."""
+    authority = base_url.partition("://")[2]
+    for delimiter in ("/", "?", "#"):
+        authority = authority.partition(delimiter)[0]
+    return "@" in authority
+
+
 def _validate_api_base_parts(base_url: str, parsed: URL) -> None:
     """Reject URL components that could leak credentials or change the request target.
 
     ``httpx.URL`` reports an absent and an empty query or fragment alike, so the
-    raw value is checked for the delimiters as well.
+    raw value is checked for the delimiters as well. The same applies to an empty
+    userinfo component: HTTPX normalizes an explicit ``@`` to the same value as
+    absent userinfo, so the authority is inspected directly.
     """
-    if parsed.userinfo:
+    if parsed.userinfo or _authority_has_userinfo(base_url):
         raise ConfigurationError(_INVALID_API_BASE_MESSAGE)
     if "?" in base_url:
         raise ConfigurationError(_INVALID_API_BASE_MESSAGE)

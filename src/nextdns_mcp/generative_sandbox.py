@@ -53,6 +53,7 @@ _READ_CHUNK_SIZE = 65536
 # Startup stderr is diagnostic only. Bound the bytes retained across every line
 # while the worker boots: a noisy Pyodide failure must not grow without limit.
 MAX_STARTUP_STDERR_BYTES = 4096
+_DISCARDED_STDERR_LINE = b"\n"
 _READY_SIGNAL_TEXT = "pyodide:ready"
 _READY_SIGNAL = _READY_SIGNAL_TEXT.encode()
 
@@ -278,38 +279,43 @@ class _BoundedStderr:
             self.ready = True
         self._tail = scanned[-(len(_READY_SIGNAL) - 1) :]
 
-    def _next_piece(self) -> tuple[bytes, bool]:
+    def _next_piece(self) -> tuple[bytes, bool, bool]:
         chunk = self._next_chunk()
         if not chunk:
-            return b"", True
+            return b"", True, True
         newline = chunk.find(b"\n")
         if newline == -1:
-            piece, complete = chunk, False
+            piece, complete, eof = chunk, False, False
         else:
             self._pending = chunk[newline + 1 :]
-            piece, complete = chunk[: newline + 1], True
+            piece, complete, eof = chunk[: newline + 1], True, False
         self._observe(piece)
-        return piece, complete
+        return piece, complete, eof
 
-    def _diagnostic_line(self, retained: list[bytes]) -> bytes:
+    def _diagnostic_line(self, retained: list[bytes], eof: bool) -> bytes:
         result = b"".join(retained)
-        # A spent budget must not swallow the signal and turn a successful boot
-        # into a spurious EOF failure.
-        if self.ready and not result:
+        if result:
+            return result
+        # A spent retention budget must not swallow the signal or a later
+        # diagnostic and turn either into a spurious EOF failure.
+        if self.ready:
             return _READY_SIGNAL
-        return result
+        if not eof:
+            return _DISCARDED_STDERR_LINE
+        return b""
 
     def readline(self) -> bytes:
         retained: list[bytes] = []
+        eof = False
         while True:
-            piece, complete = self._next_piece()
+            piece, complete, eof = self._next_piece()
             if self._remaining:
                 kept = piece[: self._remaining]
                 retained.append(kept)
                 self._remaining -= len(kept)
             if complete:
                 break
-        return self._diagnostic_line(retained)
+        return self._diagnostic_line(retained, eof)
 
 
 async def _read_startup_line(proc_stderr: Any, stderr_lines: list[str]) -> str:
@@ -328,7 +334,8 @@ async def _read_startup_line(proc_stderr: Any, stderr_lines: list[str]) -> str:
     # A byte cap can end in the middle of a multi-byte character; keep the
     # diagnostics instead of failing startup on a decode error.
     decoded = line.decode(errors="replace").rstrip()
-    stderr_lines.append(decoded)
+    if line != _DISCARDED_STDERR_LINE:
+        stderr_lines.append(decoded)
     return decoded
 
 
