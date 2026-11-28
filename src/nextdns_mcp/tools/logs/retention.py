@@ -29,7 +29,7 @@ import logging
 import os
 from collections.abc import Iterator
 
-from ...state import request_resources
+from ...state import publish_owner, resolve_owner
 
 logger = logging.getLogger(__name__)
 
@@ -174,17 +174,15 @@ def current_download_registry() -> DownloadRegistry:
             the caller is told instead of the path joining an unowned
             registry.
     """
-    owned = download_registry.get()
-    if owned is None:
-        resources = request_resources()
-        if resources is not None:
-            owned = resources.downloads
-    if owned is None:
-        raise MissingDownloadRegistryError(
+    owned = resolve_owner(
+        download_registry,
+        "downloads",
+        MissingDownloadRegistryError(
             "No server lifespan owns this call: the downloaded CSV has no registry to be "
             "reclaimed from. Server code runs inside a server lifespan, which publishes one; "
             "standalone callers must wrap the work in `downloads_owned()`."
-        )
+        ),
+    )
     return owned
 
 
@@ -196,11 +194,8 @@ def downloads_owned(registry: DownloadRegistry | None = None) -> Iterator[Downlo
     caller's explicit decision via ``registry.cleanup()``.
     """
     owner = registry if registry is not None else DownloadRegistry()
-    token = download_registry.set(owner)
-    try:
-        yield owner
-    finally:
-        download_registry.reset(token)
+    with publish_owner(download_registry, owner) as published:
+        yield published
 
 
 def _remove_downloaded_file(path: str) -> bool:

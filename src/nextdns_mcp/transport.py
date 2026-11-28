@@ -329,6 +329,25 @@ async def api_request_payload(
         return _note_404_on_a_profile_path(_handle_api_error(e), url)
 
 
+def has_error_field(payload: Any) -> bool:
+    """True when ``payload`` is a dict carrying an ``error`` key.
+
+    The one ``error``-field inspection behind the error-payload predicates
+    (issue #804): the call log's row builder, the E2E harness and the
+    container runner each used to test the key themselves. A caller that must
+    tell a missing key from an empty value uses this; ``error_field_text``
+    reports only a payload that actually carries error text.
+    """
+    return isinstance(payload, dict) and "error" in payload
+
+
+def error_field_text(payload: Any) -> str | None:
+    """The text of a dict payload's non-empty ``error`` field, else None."""
+    if has_error_field(payload) and payload["error"]:
+        return str(payload["error"])
+    return None
+
+
 def is_error_payload(payload: Any) -> bool:
     """Say whether a payload from ``api_request_payload`` is a typed failure.
 
@@ -339,7 +358,7 @@ def is_error_payload(payload: Any) -> bool:
     wrapper that produces those payloads, so the analytics fetchers cannot each
     keep their own copy of the contract and drift apart on it.
     """
-    return isinstance(payload, dict) and "code" in payload and "error" in payload and "data" not in payload
+    return has_error_field(payload) and "code" in payload and "data" not in payload
 
 
 async def fetch_analytics_payload(

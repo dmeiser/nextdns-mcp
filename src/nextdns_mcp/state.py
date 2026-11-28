@@ -23,6 +23,8 @@ context is the channel FastMCP itself provides for exactly this.
 SPDX-License-Identifier: MIT
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
@@ -50,7 +52,10 @@ def current_server_config() -> ServerConfig | None:
     two server lifespans in one task, and the ambient context then names the
     last-entered server rather than the one actually serving the call.
     Standalone callers get ``None`` and keep using the process-environment
-    getters.
+    getters. This deliberately does not use :func:`resolve_owner`: that helper
+    gives a published owner priority over the served request and raises when
+    neither exists, while a config snapshot must prefer the served server and
+    stay optional for standalone callers.
     """
     resources = request_resources()
     if resources is not None:
@@ -87,3 +92,32 @@ def request_resources() -> Any | None:
     if request_ctx is None:
         return None
     return _resources_in(request_ctx.lifespan_context)
+
+
+def resolve_owner[OwnerT](var: ContextVar[OwnerT | None], resources_attr: str, error: Exception) -> OwnerT:
+    """The explicitly owned state holder for the current context (issue #804).
+
+    The one resolution every state holder shares: an owner published into
+    ``var`` by the owning module's ``*_owned()`` context manager takes
+    precedence, then the ``resources_attr`` of the FastMCP server serving this
+    request. An absent owner raises ``error`` - the caller's own exception
+    instance, so each holder keeps its exact failure type and message.
+    """
+    owned = var.get()
+    if owned is None:
+        resources = request_resources()
+        if resources is not None:
+            owned = getattr(resources, resources_attr)
+    if owned is None:
+        raise error
+    return owned
+
+
+@contextmanager
+def publish_owner[OwnerT](var: ContextVar[OwnerT | None], owner: OwnerT) -> Iterator[OwnerT]:
+    """Publish ``owner`` into ``var`` for the block, restoring the previous owner on exit."""
+    token = var.set(owner)
+    try:
+        yield owner
+    finally:
+        var.reset(token)

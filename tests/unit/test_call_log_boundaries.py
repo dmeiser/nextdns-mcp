@@ -53,8 +53,9 @@ PUBLIC_SURFACE = (
 # hook that only has to observe a call.
 ROW_COLUMNS = ('"ts":', '"tool":', '"profile_id":', '"args":', '"ok":', '"error":', '"result":', '"write":')
 
-# Reading or writing the log file. `store.py` owns the ``0600`` fail-closed open
-# and the lock that keeps concurrent records whole; a second module holding an
+# Reading or writing the log file. `store.py` owns the lock that keeps
+# concurrent records whole and opens the log through the shared fail-closed
+# opener (`utils.open_private_file`, issue #804); a second module holding an
 # `open()` is a second writer free to skip both.
 DISK_MARKERS = ("open(", "os.open", "os.fdopen", "os.fchmod", "threading", "_write_lock")
 
@@ -134,9 +135,25 @@ def test_middleware_is_the_only_module_that_knows_fastmcp():
 
 
 def test_store_is_the_only_module_that_touches_the_log_file():
-    """One module owns the ``0600`` open, the mode check, and the write lock."""
-    for marker in ("os.open", "os.fchmod", "_write_lock"):
-        assert marker in _source("store.py"), f"store.py no longer holds {marker}"
+    """One module owns the log file: the write lock and the shared fail-closed open.
+
+    The ``0600`` open itself lives in ``utils.open_private_file`` since issue
+    #804, shared with the E2E harness; store.py keeps the write lock and the
+    delegation, and no package module re-inlines the mode enforcement.
+    """
+    store = _source("store.py")
+    assert "_write_lock" in store, "store.py no longer holds the write lock"
+    assert "open_private_file" in store, "store.py must open the log through the shared fail-closed opener"
+    utils_source = (REPO_ROOT / "src" / "nextdns_mcp" / "utils.py").read_text(encoding="utf-8")
+    # store.py keeps _checked_fd for the read path (issue #332); only the
+    # private WRITE path must not re-inline the shared open.
+    tree = ast.parse(store)
+    writer = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_open_log_file"), None)
+    assert writer is not None, "store.py lost _open_log_file"
+    writer_body = ast.get_source_segment(store, writer) or ""
+    for marker in ("os.open", "os.fchmod"):
+        assert marker in utils_source, f"utils.py lost the shared private open: {marker}"
+        assert marker not in writer_body, f"the log writer re-inlined the private open: {marker}"
     for name in PACKAGE_MODULES:
         if name == "store.py":
             continue

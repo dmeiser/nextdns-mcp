@@ -51,7 +51,7 @@ from ..config import (
 )
 from ..constants import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES, escape_control_chars
 from ..errors import ErrorCode, StateOwnershipError, error_payload, http_error_payload
-from ..state import request_resources
+from ..state import publish_owner, resolve_owner
 from ..transport import access_denied_payload
 from ..utils import resolve_default_profile
 
@@ -127,28 +127,23 @@ def current_doh_client_owner() -> DohClientOwner:
         StateOwnershipError: When no owner is active. Code reached outside a
             server lifespan must publish one with :func:`doh_client_owned`.
     """
-    owner = doh_client_owner.get()
-    if owner is None:
-        resources = request_resources()
-        if resources is not None:
-            owner = resources.doh_client
-    if owner is None:
-        raise StateOwnershipError(
+    owner = resolve_owner(
+        doh_client_owner,
+        "doh_client",
+        StateOwnershipError(
             "No DoH client owner is active in this context. Server code runs inside a server "
             "lifespan, which publishes one; standalone callers must wrap the work in "
             "`with doh_module.doh_client_owned(doh_module.DohClientOwner()):`."
-        )
+        ),
+    )
     return owner
 
 
 @contextmanager
 def doh_client_owned(owner: DohClientOwner) -> Iterator[DohClientOwner]:
     """Publish ``owner`` as the current context's DoH client owner for the block."""
-    token = doh_client_owner.set(owner)
-    try:
-        yield owner
-    finally:
-        doh_client_owner.reset(token)
+    with publish_owner(doh_client_owner, owner) as published:
+        yield published
 
 
 async def close_doh_client() -> None:

@@ -84,11 +84,16 @@ def _gate_script() -> str:
     return script
 
 
-def _meta_tags(step_id: str) -> list[str]:
-    """Every docker/metadata-action raw tag line of the given meta step."""
-    step = next((s for s in _publish_job()["steps"] if s.get("id") == step_id), None)
-    assert step is not None, f"the docker-publish job lost its {step_id} metadata step"
-    tags = (step.get("with") or {}).get("tags", "")
+def _meta_step() -> dict:
+    """The one docker/metadata-action step both variants share (issue #804)."""
+    step = next((s for s in _publish_job()["steps"] if s.get("id") == "meta"), None)
+    assert step is not None, "the docker-publish job lost its meta metadata step"
+    return step
+
+
+def _meta_tags() -> list[str]:
+    """Every docker/metadata-action raw tag line of the shared meta step."""
+    tags = (_meta_step().get("with") or {}).get("tags", "")
     return [line.strip() for line in tags.splitlines() if line.strip().startswith("type=raw,")]
 
 
@@ -144,37 +149,43 @@ def test_workflow_run_guards_require_push_from_own_repo():
         assert guard in publish_if, f"the docker-publish job condition lost the guard {guard!r}"
 
 
+def test_one_meta_step_serves_both_variants():
+    """WORK-370: slim and alpine share one metadata configuration; the variant's
+    tag names and suffix come from the step env, so the two variants cannot drift."""
+    ids = [s.get("id") for s in _publish_job()["steps"]]
+    assert "meta-slim" not in ids and "meta-alpine" not in ids, (
+        "the per-variant metadata steps are back; slim and alpine share the one meta step"
+    )
+    env = _meta_step().get("env") or {}
+    assert env.get("FLOATING_TAG") == "${{ matrix.variant == 'alpine' && 'alpine' || 'latest' }}"
+    assert env.get("NIGHTLY_TAG") == "${{ matrix.variant == 'alpine' && 'nightly-alpine' || 'nightly' }}"
+    assert env.get("TAG_SUFFIX") == "${{ matrix.variant == 'alpine' && '-alpine' || '' }}"
+
+
 def test_floating_and_short_sha_tags_are_gated_on_is_release():
     """The exact defect: these tag lines were unconditional for every merge."""
-    for step_id, markers in (
-        ("meta-slim", ("value=latest", "steps.sha.outputs.short ")),
-        ("meta-alpine", ("value=alpine", "steps.sha.outputs.short }}-alpine")),
-    ):
-        seen = 0
-        for line in _meta_tags(step_id):
-            if not any(marker in line for marker in markers):
-                continue
-            seen += 1
-            assert RELEASE_GATE in line, (
-                f"{step_id} tag line publishes for every workflow_run merge without the gate: {line!r}"
-            )
-        assert seen == 2, f"{step_id}: expected latest/short-SHA and (alpine) tag lines, matched {seen}"
+    seen = 0
+    for line in _meta_tags():
+        if "env.FLOATING_TAG" not in line and "steps.sha.outputs.short" not in line:
+            continue
+        seen += 1
+        assert RELEASE_GATE in line, f"meta tag line publishes for every workflow_run merge without the gate: {line!r}"
+    assert seen == 2, f"expected the floating-tag and short-SHA tag lines, matched {seen}"
 
 
 def test_dispatch_version_tags_require_the_main_ref():
     """A manual rebuild off a feature branch must not overwrite immutable version tags."""
-    for step_id in ("meta-slim", "meta-alpine"):
-        seen = 0
-        for line in _meta_tags(step_id):
-            if "steps.version.outputs" not in line:
-                continue
-            seen += 1
-            assert "github.event_name == 'workflow_dispatch'" in line, f"version tag lost dispatch enable: {line!r}"
-            assert MAIN_REF in line, (
-                f"workflow_dispatch version tags must be restricted to main or a branch rebuild overwrites "
-                f"an immutable tag: {line!r}"
-            )
-        assert seen == 3, f"{step_id}: expected three version-tag lines (full/major/major.minor), matched {seen}"
+    seen = 0
+    for line in _meta_tags():
+        if "steps.version.outputs" not in line:
+            continue
+        seen += 1
+        assert "github.event_name == 'workflow_dispatch'" in line, f"version tag lost dispatch enable: {line!r}"
+        assert MAIN_REF in line, (
+            f"workflow_dispatch version tags must be restricted to main or a branch rebuild overwrites "
+            f"an immutable tag: {line!r}"
+        )
+    assert seen == 3, f"expected three version-tag lines (full/major/major.minor), matched {seen}"
 
 
 # Recorded listPullRequestsAssociatedWithCommit payloads (gh api

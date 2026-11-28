@@ -16,6 +16,8 @@ import stat
 import threading
 from typing import Any
 
+from ..utils import open_private_file
+
 logger = logging.getLogger(__name__)
 
 CALL_LOG_ENV = "NEXTDNS_CALL_LOG"
@@ -103,21 +105,11 @@ def _open_log_file(path: str) -> Any:
 
     The rows carry profile ids, entry names and bounded result content -
     account data - so the file must not be group- or world-readable from the
-    moment it exists. ``open(..., "a")`` applies the process umask (often
-    ``0022``) at creation; ``os.open`` with an explicit mode does not.
-
-    Fail closed: the tightening ``fchmod`` covers a log that already exists
-    (a reused path, or an older run's file made under a permissive umask).
-    If it fails - an alien-owned file, a filesystem without chmod - this code
-    cannot know who can read the file, so it does not append to it at all;
-    ``_append_row``'s except path drops the row and warns, which is the
-    correct cost for a log that cannot be made private. ``_checked_fd``
-    refuses a symlink or non-regular file before the ``fchmod`` runs.
+    moment it exists. The fail-closed open itself is the shared
+    ``utils.open_private_file`` (issue #804) - including the symlink/FIFO and
+    regular-file guard - ; this name stays because tests patch it here.
+    A failure to enforce the mode propagates to
+    ``_append_row``'s except path, which drops the row and warns - the
+    correct cost for a log that cannot be made private.
     """
-    fd = _checked_fd(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
-    try:
-        os.fchmod(fd, 0o600)
-    except OSError:
-        os.close(fd)
-        raise
-    return os.fdopen(fd, "a", encoding="utf-8")
+    return open_private_file(path, "a")

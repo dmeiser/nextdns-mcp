@@ -3,21 +3,59 @@
 SPDX-License-Identifier: MIT
 
 This module validates and normalizes values - profile ids, time ranges,
-``partials`` spellings, query-param shapes - and nothing else. It imports no
+``partials`` spellings, query-param shapes - and holds the one fail-closed
+private-file open (``open_private_file``) the call log and the E2E harness
+share (issue #804). It imports no
 network layer: the request path lives in ``transport``, the access control in
 ``client``, and the names those layers share (the profile-id shape, the hint
 its failures repeat) live in ``constants`` so no module here has to import a
 transport to describe an id.
 """
 
+import errno
 import math
+import os
 import re
-from typing import Any
+import stat
+from typing import Any, TextIO, cast
 
 from .config import BOOL_FALSE_TOKENS, BOOL_TRUE_TOKENS, get_default_profile
 from .constants import CONTROL_CHARS_PATTERN, PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
 from .errors import ErrorCode, cap_with_marker, error_payload
 from .state import current_server_config
+
+
+def open_private_file(path: str | os.PathLike[str], mode: str = "w") -> TextIO:
+    """Open ``path`` for writing with its permissions guaranteed 0600, or raise.
+
+    Shared by the call log (``call_log.store``) and the E2E harness artifacts
+    (``scripts.ai_e2e_common``), which both hold account data (issue #804):
+    the file must not be group- or world-readable from the moment it exists.
+    ``open(..., "w")`` applies the process umask (often ``0022``) at creation;
+    ``os.open`` with an explicit mode does not, and the tightening ``fchmod``
+    covers a pre-existing permissive file. Fail closed: if 0600 cannot be
+    established, the descriptor is closed and the error propagates - an
+    artifact that cannot be made private is not written at all.
+
+    The descriptor is validated before the ``fchmod`` (issue #332):
+    ``O_NOFOLLOW`` refuses a symlink (ELOOP), ``O_NONBLOCK`` refuses a FIFO
+    with no reader before the open can hang, and ``fstat`` refuses anything
+    not regular. Both callers get the same guard from this one open.
+
+    ``mode`` is the text mode handed to ``os.fdopen``; append is chosen at
+    the ``os.open`` flag level so the mode and the flags cannot disagree.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+    fd = os.open(os.fspath(path), flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "private file is not a regular file", os.fspath(path))
+        os.fchmod(fd, 0o600)
+    except OSError:
+        os.close(fd)
+        raise
+    # os.fdopen is typed IO[Any]; the text mode chosen above makes it text.
+    return cast(TextIO, os.fdopen(fd, mode, encoding="utf-8"))
 
 
 def is_safe_profile_id(value: str | int) -> bool:
@@ -88,6 +126,20 @@ def _defaulted_profile(profile_id: str | int | None) -> str | int | None:
     return profile_id
 
 
+def _invalid_profile_id_payload(profile_id: str | int) -> dict[str, Any]:
+    """The typed error for a profile id that fails the API-shape check.
+
+    Both resolution paths report a bad format through this one payload (issue
+    #804) so the message and hint cannot drift between the defaulted and the
+    required path.
+    """
+    return error_payload(
+        ErrorCode.INVALID_PROFILE_ID,
+        f"Invalid profile_id format: {profile_id}",
+        hint=PROFILE_ID_HINT,
+    )
+
+
 def resolve_profile_id(
     profile_id: str | int | None = None,
     *,
@@ -114,11 +166,7 @@ def resolve_profile_id(
         if target_profile is None or _profile_id_missing(target_profile):
             return None, _missing_profile_payload()
         if not is_safe_profile_id(target_profile):
-            return None, error_payload(
-                ErrorCode.INVALID_PROFILE_ID,
-                f"Invalid profile_id format: {target_profile}",
-                hint=PROFILE_ID_HINT,
-            )
+            return None, _invalid_profile_id_payload(target_profile)
         return str(target_profile), None
 
     return _resolve_required_profile_id(profile_id)
@@ -132,11 +180,7 @@ def _resolve_required_profile_id(profile_id: str | int | None) -> tuple[str | No
             "profile_id is required for this tool; NEXTDNS_DEFAULT_PROFILE is not used by this operation",
         )
     if not is_safe_profile_id(profile_id):
-        return None, error_payload(
-            ErrorCode.INVALID_PROFILE_ID,
-            f"Invalid profile_id format: {profile_id}",
-            hint=PROFILE_ID_HINT,
-        )
+        return None, _invalid_profile_id_payload(profile_id)
     return str(profile_id), None
 
 
