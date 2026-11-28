@@ -1167,7 +1167,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "opentelemetry-api", specifier = ">=1.45.2" },
-    { name = "prefab-ui", specifier = "==0.21.1" },
+    { name = "prefab-ui", specifier = ">=0.21.1,<0.22" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
 ]
