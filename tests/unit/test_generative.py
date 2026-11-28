@@ -1029,7 +1029,6 @@ async def test_generate_ui_rejects_non_finite_data_before_the_sandbox():
     for payload in ('{"v": NaN}', {"v": float("nan")}):
         with (
             patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-            patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
             pytest.raises(ValueError, match="NaN or Infinity|not a valid JSON number"),
         ):
             await gen_tool.fn(code="print('hi')", data=payload)
@@ -1043,7 +1042,6 @@ async def test_generate_ui_rejects_deeply_nested_data_before_the_sandbox():
     deep = "[" * (MAX_JSON_DEPTH + 1) + "]" * (MAX_JSON_DEPTH + 1)
     with (
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
         pytest.raises(ValueError, match="maximum nesting depth"),
     ):
         await gen_tool.fn(code="print('hi')", data=f'{{"v": {deep}}}')
@@ -1060,7 +1058,6 @@ async def test_generate_ui_rejects_deep_tuples_in_dict_data_before_the_sandbox()
         value = (value,)
     with (
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-        patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
         pytest.raises(ValueError, match="maximum nesting depth"),
     ):
         await gen_tool.fn(code="print('hi')", data={"v": value})
