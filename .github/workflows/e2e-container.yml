@@ -24,27 +24,41 @@ on:
 permissions:
   contents: read
 
-# One live suite at a time, repo-wide, across every branch, PR, tag, and event.
+# One live suite at a time per ref; refs never cancel each other.
 #
-# The upstream quota is account-level, so every PR push and every main push
-# draws from the same budget with the same API key; a per-ref group
-# (e.g. ${{ github.ref }}) serializes nothing across open PRs. Holding a single
-# constant group at the workflow level ensures at most one E2E Container run
-# executes at a time across the entire repo (with slim and alpine serialized by
-# max-parallel: 1 below, never interleaved across runs), while non-E2E
-# workflows (unit tests, lint, CodeQL) continue running concurrently.
+# The group is keyed to the ref on purpose. GitHub holds one running and one
+# pending run per concurrency group and supersedes the pending one on each
+# newer arrival. A single constant group (the previous shape) therefore let
+# ANY ref's arrival — a merge to main, another PR's push, another lane's
+# dispatch — supersede a pending run belonging to a different ref. Under the
+# factory's parallel PR load that is what made the required E2E Container
+# contexts unattainable: every pending run was cancelled before its jobs
+# started (conclusion: cancelled, jobs: []), for whichever head was unlucky
+# enough to be pending when the next arrival landed (WORK-381).
+#
+# Keying the group to ${{ github.ref }} makes supersession mean what it
+# should: only a newer run for the SAME ref (a newer push to that branch, a
+# newer merge to main) replaces that ref's pending run — only the latest push
+# of a branch matters. No run is ever cancelled by a run belonging to a
+# different ref, so every PR head's two required contexts eventually complete
+# with no manual dispatch.
 #
 # cancel-in-progress stays false. Killing a suite mid-write is how profiles
 # leak (a cancelled run never reaches its deleteProfile teardown), and a
 # queue that cancels its own members would drop the main-branch run that
 # Auto Release gates on.
 #
-# GitHub holds one running and one pending run per group and supersedes the
-# pending one on a newer arrival. Under agent commit churn that is what you
-# want (only the latest push of a branch matters); a suite that does lose the
-# quota race anyway waits out the window and retries instead of failing.
+# Serialization across refs is deliberately relaxed to "one pending run per
+# ref": a concurrency group cannot queue more than one pending run, so a
+# repo-wide queue would reintroduce the cross-ref cancellation above. Modest
+# overlap between refs is tolerated instead — the account-level quota is
+# enforced upstream, and the suite treats a 429 as "wait out the window and
+# retry" (bounded backoff in scripts/run_container_e2e.py) rather than
+# failing. Within a run, slim and alpine stay serialized by max-parallel: 1
+# below, so a run never interleaves its own variants, and non-E2E workflows
+# (unit tests, lint, CodeQL) continue running concurrently.
 concurrency:
-  group: nextdns-live-api
+  group: nextdns-live-api-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
