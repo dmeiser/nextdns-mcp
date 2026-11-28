@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 """
 
 import re
+from collections.abc import Callable
 from typing import Any, cast
 
 from prefab_ui.app import PrefabApp
@@ -188,7 +189,7 @@ def _render_domain_content(title: str, data: list[dict[str, Any]], key_name: str
         _render_chart_view(chart_data, title, color, view_type)
 
 
-def _build_analytics_card(title: str, description: str, render_content) -> Card:
+def _build_analytics_card(title: str, description: str, render_content: Callable[[], None]) -> Card:
     """Build a generic analytics card shell around rendered content."""
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
@@ -232,7 +233,7 @@ def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
 def build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
     """Build the reasons for blocking card."""
 
-    def _render():
+    def _render() -> None:
         if not data:
             Text("No queries were blocked during this period.", css_class="text-sm text-muted-foreground py-4")
         elif view_type == "table":
