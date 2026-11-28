@@ -634,7 +634,7 @@ class TestAccessControlledClientRequestLogging:
         with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.transport"):
             with pytest.raises(AccessDeniedError) as exc_info:
                 await transport._api_request("GET", request_url)
-            payload = await transport._api_request_payload("GET", request_url)
+            payload = await transport.api_request_payload("GET", request_url)
 
         assert exc_info.value.code == "access_denied"
         assert payload["code"] == "access_denied"
@@ -650,7 +650,7 @@ class TestAccessControlledClientRequestLogging:
     async def test_api_request_denial_raises_typed_error_and_payload_translates_it(
         self, clean_env: Callable[[str, str], None], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """One ACL denial: _api_request raises it, _api_request_payload keeps the payload."""
+        """One ACL denial: _api_request raises it, api_request_payload keeps the payload."""
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
         message = "Read access denied for profile: abc123"
         denial = AccessDeniedError(message, code="read_access_denied", profile_id="abc123")
@@ -663,7 +663,7 @@ class TestAccessControlledClientRequestLogging:
         assert exc_info.value.code == "read_access_denied"
         assert exc_info.value.profile_id == "abc123"
 
-        payload = await transport._api_request_payload("GET", "/profiles/abc123/logs")
+        payload = await transport.api_request_payload("GET", "/profiles/abc123/logs")
         assert payload == {
             "error": message,
             "code": "read_access_denied",
