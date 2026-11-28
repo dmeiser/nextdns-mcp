@@ -245,8 +245,8 @@ class TestCallLogRecordsTheGenerator:
 
     @pytest.mark.asyncio
     async def test_code_execution_records_as_a_write(self, tmp_path):
-        middleware, call_next, context, path = self._middleware_row(
-            tmp_path, "generate_prefab_ui", {"code": CODE}, {"read_only_hint": False}
+        middleware, call_next, context, path = TestCallLogRecordsTheGenerator._middleware_row(
+            self, tmp_path, "generate_prefab_ui", {"code": CODE}, {"read_only_hint": False}
         )
         await middleware.on_call_tool(context, call_next)
         row = _rows(path)[0]
@@ -264,8 +264,8 @@ class TestCallLogRecordsTheGenerator:
 
     @pytest.mark.asyncio
     async def test_no_context_leaves_the_old_reading(self, tmp_path):
-        middleware, call_next, context, path = self._middleware_row(
-            tmp_path, "generate_prefab_ui", {"code": CODE}, {"read_only_hint": False}
+        middleware, call_next, context, path = TestCallLogRecordsTheGenerator._middleware_row(
+            self, tmp_path, "generate_prefab_ui", {"code": CODE}, {"read_only_hint": False}
         )
         context.fastmcp_context = None
         await middleware.on_call_tool(context, call_next)
@@ -273,8 +273,8 @@ class TestCallLogRecordsTheGenerator:
 
     @pytest.mark.asyncio
     async def test_a_failing_catalog_read_never_fails_the_call(self, tmp_path, caplog):
-        middleware, call_next, context, path = self._middleware_row(
-            tmp_path, "generate_prefab_ui", {"code": CODE}, {"read_only_hint": False}
+        middleware, call_next, context, path = TestCallLogRecordsTheGenerator._middleware_row(
+            self, tmp_path, "generate_prefab_ui", {"code": CODE}, {"read_only_hint": False}
         )
 
         async def broken(name):
@@ -346,3 +346,36 @@ class TestUiActionEvidence:
     def test_a_non_string_key_never_reads_as_a_handler(self):
         document = {"$prefab": {"version": "0.3"}, "view": {7: "onClick", 1: {"action": "nope"}}}
         assert "actions" not in _result_evidence(self._R(document), write=False)
+
+
+class TestReviewFindings:
+    def test_non_handler_on_words_are_not_actions(self):
+        document = {
+            "$prefab": {"version": "0.3"},
+            "view": {"type": "Div", "once": {"action": "not-an-action"}, "onClick": {"action": "showToast"}},
+        }
+        assert _result_evidence(TestUiActionEvidence._R(document), write=False)["actions"] == ["showToast"]
+
+    def test_a_caller_cannot_override_the_code_digest_in_args(self):
+        digest = _code_sha256({"code": CODE})
+        parsed = json.loads(_args_text({"code": CODE, "code_sha256": "forged"}, digest))
+        assert parsed["code_sha256"] == digest
+        assert "forged" not in json.dumps(parsed)
+
+    @pytest.mark.asyncio
+    async def test_a_known_write_tool_skips_a_second_catalog_lookup(self, tmp_path):
+        middleware, call_next, context, _path = TestCallLogRecordsTheGenerator._middleware_row(
+            self, tmp_path, "generate_prefab_ui", {"code": CODE}, {"read_only_hint": False}
+        )
+        calls = []
+        registered = context.fastmcp_context.fastmcp.get_tool
+
+        async def counted(name):
+            calls.append(name)
+            return await registered(name)
+
+        context.fastmcp_context.fastmcp.get_tool = counted
+        await middleware.on_call_tool(context, call_next)
+        context.message = SimpleNamespace(name="generate_prefab_ui", arguments={"code": CODE})
+        await middleware.on_call_tool(context, call_next)
+        assert calls == ["generate_prefab_ui"]

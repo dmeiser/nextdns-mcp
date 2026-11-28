@@ -42,12 +42,18 @@ class CallLogMiddleware(Middleware):
         }
         self._write_tools: set[str] = set()
 
+    def _needs_annotation_write(self, name: str) -> bool:
+        """Whether this row will consult the tool's own annotations for `write`."""
+        return bool(self._path) and name not in self._endpoints and name not in self._write_tools
+
     async def _note_annotation_write(self, context: MiddlewareContext, name: str) -> None:
         """Remember tools whose own readOnlyHint says they are writes.
 
         The route map cannot speak for local tools; the live catalog can. No
         context, no catalog, or no match leaves the tool a read.
         """
+        if not self._needs_annotation_write(name):
+            return
         fastmcp_context = getattr(context, "fastmcp_context", None)
         if fastmcp_context is None:
             return

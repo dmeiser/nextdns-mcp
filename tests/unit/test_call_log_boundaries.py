@@ -34,7 +34,7 @@ PACKAGE_MODULES = {
     "projection.py": 115,
     "evidence.py": 190,
     "record.py": 110,
-    "middleware.py": 110,
+    "middleware.py": 115,
 }
 
 # The public surface: `openapi.py` and the e2e harness import these from the

@@ -107,5 +107,9 @@ def _args_text(arguments: Mapping[str, Any], digest: str) -> str:
     Slicing a finished dump used to cut inside a string and produce invalid
     JSON; the shared truncation envelope keeps the row readable instead.
     """
-    projected = {"code_sha256": digest, **arguments} if digest else dict(arguments)
+    if digest:
+        client_args = {key: value for key, value in arguments.items() if key != "code_sha256"}
+        projected = {"code_sha256": digest, **client_args}
+    else:
+        projected = dict(arguments)
     return _result_text(SimpleNamespace(structured_content=projected), ARGS_CHARS)

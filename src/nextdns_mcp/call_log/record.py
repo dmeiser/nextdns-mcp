@@ -100,7 +100,5 @@ def build_row(
     }
     if digest:
         row["code_sha256"] = digest
-    if digest:
-        row["code_sha256"] = digest
     _attach_derived_fields(row, endpoint, result, ok, write)
     return row

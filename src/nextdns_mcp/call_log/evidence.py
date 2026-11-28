@@ -83,7 +83,9 @@ def _walk_identities(node: Any, out: list[dict[str, str]], seen: set[str]) -> No
 
 def _is_action_key(key: Any) -> bool:
     """Whether a component field holds UI actions (`onClick`, `actions`) not data."""
-    return isinstance(key, str) and (key.lower().startswith("on") or key == "actions")
+    if not isinstance(key, str):
+        return False
+    return key == "actions" or (key.startswith("on") and len(key) > 2 and key[2].isupper())
 
 
 def _action_name(descriptor: Any) -> str:
