@@ -128,7 +128,7 @@ def test_tabstrigger_functional_children_chart_is_rejected():
 
 
 def test_repeated_tab_blocks_scale_subquadratically(monkeypatch):
-    """Many chart-free Tab blocks must validate in one linear walk (DoS regression).
+    """Many chart-free Tab blocks must validate in linear time (DoS regression).
 
     Wall-clock ratios move with machine load, so the walk's node examinations
     are counted instead and the scaling claim becomes an exact integer check.
@@ -138,9 +138,9 @@ def test_repeated_tab_blocks_scale_subquadratically(monkeypatch):
         examinations = {"n": 0}
         original = chart_placement_module._node_visits
 
-        def counting(node, in_tab):
+        def counting(node, in_tab, ctx):
             examinations["n"] += 1
-            return original(node, in_tab)
+            return original(node, in_tab, ctx)
 
         monkeypatch.setattr(chart_placement_module, "_node_visits", counting)
         code = "".join(f"with Tab('T{i}'):\n    pass\n" for i in range(blocks))
@@ -177,6 +177,182 @@ def test_tab_positional_chart_arg_is_rejected():
 def test_bare_tab_call_without_chart_is_accepted():
     """A chart-free Tab(...) call leaves a later top-level chart alone."""
     code = "Tab('Data')\nAreaChart(data=[], series=[])\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_all_chart_types_in_tab_are_rejected():
+    """Every Recharts chart type exported by prefab_ui is rejected inside a Tab."""
+    for chart in (
+        "AreaChart",
+        "LineChart",
+        "BarChart",
+        "PieChart",
+        "DonutChart",
+        "RadarChart",
+        "RadialChart",
+        "ScatterChart",
+        "WaterfallChart",
+    ):
+        code = f"with Tab('Charts'):\n    {chart}(data=[], series=[])\n"
+        with pytest.raises(ValueError, match="Recharts chart components"):
+            _validate_chart_placement(code)
+
+
+def test_chart_parent_tab_call_is_rejected():
+    """A chart attaching to a Tab via parent= is nested even outside a with block."""
+    code = "AreaChart(data=[], series=[], parent=Tab('Charts'))\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_chart_parent_tab_binding_is_rejected():
+    """parent= referencing a name bound to a Tab call earlier is nested."""
+    code = "t = Tab('Charts')\nAreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_walrus_tab_with_scope_is_rejected():
+    """`with (t := Tab(...)):` still opens tab scope for its body."""
+    code = "with (t := Tab('Charts')):\n    AreaChart(data=[], series=[])\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_walrus_tab_binding_parent_is_rejected():
+    """A walrus-bound Tab referenced by a later parent= is nested."""
+    code = "with (t := Tab('Charts')):\n    DataTable(columns=[], rows=[])\nAreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_with_as_tab_binding_parent_is_rejected():
+    """`with Tab(...) as t` binds t, so a later parent=t is nested."""
+    code = "with Tab('Charts') as t:\n    DataTable(columns=[], rows=[])\nAreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_annotated_tab_binding_parent_is_rejected():
+    """An annotated assignment to a Tab call binds the name for parent=."""
+    code = "t: Component = Tab('Charts')\nAreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_walrus_chart_call_without_tab_is_accepted():
+    """A walrus-bound chart outside any tab stays accepted."""
+    code = "(c := AreaChart(data=[], series=[]))\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_parent_non_tab_binding_is_accepted():
+    """parent= referencing a non-Tab container stays accepted."""
+    code = "c = Card()\nAreaChart(data=[], series=[], parent=c)\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_parent_before_tab_binding_is_accepted():
+    """parent= naming a Tab bound only later stays accepted (source-order binding)."""
+    code = "AreaChart(data=[], series=[], parent=t)\nt = Tab('Charts')\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_in_card_attached_to_tab_is_rejected():
+    """A container with parent=tab carries its children into the 0px tab panel."""
+    code = "t = Tab('Charts')\nCard(parent=t, children=[LineChart(data=[], series=[])])\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_chart_in_with_card_attached_to_tab_is_rejected():
+    """A `with Card(parent=tab)` body is inside the tab panel."""
+    code = "t = Tab('Charts')\nwith Card(parent=t):\n    LineChart(data=[], series=[])\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_chart_in_card_attached_to_inline_tab_is_rejected():
+    """A container's parent= need not go through a name."""
+    code = "Card(parent=Tab('Charts'), children=[AreaChart(data=[], series=[])])\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_chart_in_tab_attached_container_after_children_keyword_is_rejected():
+    """parent= is inspected regardless of its position among the keywords."""
+    code = "t = Tab('Charts')\nCard(children=[AreaChart(data=[], series=[])], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_chart_parent_rebound_to_container_is_accepted():
+    """An earlier Tab binding does not survive a rebinding to a non-Tab."""
+    code = "t = Tab('Charts')\nt = Column()\nAreaChart(data=[], series=[], parent=t)\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_parent_parameter_shadows_tab_binding_is_accepted():
+    """A same-named parameter in another function is not the earlier Tab binding."""
+    code = "def build():\n    t = Tab('Charts')\n    return t\ndef panel(t):\n    return AreaChart(data=[], series=[], parent=t)\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_parent_outer_tab_binding_in_function_is_rejected():
+    """A function body that closes over a Tab name still nests the chart."""
+    code = "t = Tab('Charts')\ndef panel():\n    return AreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_chart_parent_never_bound_name_is_accepted():
+    """A parent= name with no binding anywhere resolves to no Tab."""
+    code = "AreaChart(data=[], series=[], parent=unknown)\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_method_parent_skips_class_scope_and_sees_enclosing_tab():
+    """Methods do not close over class-body names; the enclosing module Tab applies."""
+    code = "t = Tab('Charts')\nclass Panel:\n    t = Column()\n    def build(self):\n        return AreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_chart_parent_attribute_is_accepted():
+    """Only bare names get binding lookups; an attribute is not a known Tab binding."""
+    code = "AreaChart(data=[], series=[], parent=container.tab)\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_chart_parent_loop_target_is_accepted():
+    """A loop target rebinds the name to an unknown value, not the earlier Tab."""
+    code = "t = Tab('Charts')\nfor t in rows:\n    AreaChart(data=[], series=[], parent=t)\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_module_chart_parent_is_not_overridden_by_local_in_uncalled_function():
+    """A local Tab in an uncalled function does not change a module-level Column."""
+    code = "t = Column()\ndef unused():\n    t = Tab('Charts')\n    return t\nAreaChart(data=[], series=[], parent=t)\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_module_tab_parent_is_not_shadowed_by_parameter_in_uncalled_function():
+    """A parameter in an uncalled function does not hide a module-level Tab."""
+    code = "t = Tab('Charts')\ndef unused(t):\n    return t\nAreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_nested_function_closes_over_tab_binding():
+    """A real closure still resolves the enclosing scope's Tab binding."""
+    code = "def outer():\n    t = Tab('Charts')\n    def inner():\n        return AreaChart(data=[], series=[], parent=t)\n    return inner\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_chart_parent_comprehension_target_is_accepted():
+    """A comprehension target rebinds the name to an unknown value."""
+    code = "t = Tab('Charts')\n[(AreaChart(data=[], series=[], parent=t)) for t in rows]\n"
     _validate_chart_placement(code)  # should not raise
 
 
