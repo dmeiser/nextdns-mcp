@@ -374,6 +374,37 @@ def test_response_index_is_built_once_per_spec_object():
     assert get_operation_response_schema(spec, "listProfiles") == {"type": "object"}
 
 
+def test_spec_readers_share_one_operation_traversal():
+    """All three spec consumers see the same operations, including odd path items.
+
+    The schema index, the published catalog and the container runner's write gate
+    used to each spell the method filter differently, and only one tolerated a
+    non-mapping entry in ``paths``. A shared walk keeps them from disagreeing
+    about what the document publishes.
+    """
+    from scripts import run_container_e2e, validate_schema
+
+    get_op = {
+        "operationId": "getThing",
+        "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+    }
+    post_op = {
+        "operationId": "replaceThing",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object", "title": "Thing"}}}},
+    }
+    spec = {
+        "paths": {
+            "/things": {"get": get_op, "post": post_op, "summary": "not an operation", "trace": None},
+            "/not-a-mapping": None,
+        }
+    }
+
+    assert list(validate_schema._iter_spec_operations(spec)) == [("get", get_op), ("post", post_op)]
+    assert validate_schema.spec_operations(spec) == {"getThing": "get", "replaceThing": "post"}
+    assert validate_schema.get_operation_response_schema(spec, "getThing") == {"type": "object"}
+    assert run_container_e2e._spec_write_operations(spec) == {"replaceThing"}
+
+
 def test_catalog_constants_are_imported_not_restated():
     """The withheld set, the spec path, and the local tools are the server's own.
 
@@ -710,4 +741,27 @@ def test_search_prefab_components_not_content_tool():
 
     assert "search_prefab_components" not in validate_schema.CONTENT_TOOLS
     assert "search_prefab_components" in validate_schema.TOOL_RESPONSE_SCHEMAS
-    assert validate_schema.TOOL_RESPONSE_SCHEMAS["search_prefab_components"] == {"type": "string"}
+    assert validate_schema.TOOL_RESPONSE_SCHEMAS["search_prefab_components"] == {
+        "type": "object",
+        "required": ["result"],
+        "properties": {"result": {"type": "string"}},
+    }
+
+
+def test_search_prefab_components_pin_describes_the_wrapped_payload():
+    """The pin matches FastMCP's x-fastmcp-wrap-result shape, not the bare markdown.
+
+    The tool returns a markdown string; FastMCP wraps a scalar return as
+    {"result": <string>} on the wire (structured_content = {"result": ...},
+    x-fastmcp-wrap-result: True), so the wrapped object validates while the bare
+    string, a missing result key, or a non-string result are all rejected.
+    """
+    from scripts.validate_schema import load_openapi_spec
+
+    spec = load_openapi_spec(str(REAL_SPEC_PATH))
+    status, errors = validate_tool_response("search_prefab_components", {"result": "# Card"}, spec)
+    assert status == "VALID", errors
+    for payload in ("# Card", {}, {"result": 7}):
+        status, errors = validate_tool_response("search_prefab_components", payload, spec)
+        assert status == "INVALID", payload
+        assert errors

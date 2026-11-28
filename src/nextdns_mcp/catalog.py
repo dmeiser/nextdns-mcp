@@ -25,6 +25,11 @@ _GENERATIVE_UI_DATA_TOOLS = ("search_prefab_components",)
 _GENERATIVE_UI_TOOLS = (*_GENERATIVE_UI_CONTENT_TOOLS, *_GENERATIVE_UI_DATA_TOOLS)
 
 
+def _generative_ui_enabled(enabled: bool | None) -> bool:
+    """Use the decision a server already made, or read it for a direct caller."""
+    return is_generative_ui_enabled() if enabled is None else enabled
+
+
 def generative_ui_tool_names() -> tuple[str, ...]:
     """The generative-UI tool names this server publishes, from its single source.
 
@@ -54,29 +59,32 @@ def generative_ui_data_tool_names() -> tuple[str, ...]:
     return _GENERATIVE_UI_DATA_TOOLS
 
 
-def enabled_generative_ui_tool_names() -> tuple[str, ...]:
+def enabled_generative_ui_tool_names(enabled: bool | None = None) -> tuple[str, ...]:
     """The generative-UI names the published catalog includes, decided here.
 
     The catalog-inclusion gate the entry point used to branch on itself:
     the names join the catalog only when generative UI is enabled, so a
     server built with the feature off publishes exactly the spec and
-    composite tools and nothing generative.
+    composite tools and nothing generative. ``enabled`` is the decision the
+    server already made for this build; a direct caller without one still
+    reads the setting itself.
     """
-    if is_generative_ui_enabled():
+    if _generative_ui_enabled(enabled):
         return _GENERATIVE_UI_TOOLS
     return ()
 
 
-def register_generative_ui_provider(server: FastMCP) -> None:
+def register_generative_ui_provider(server: FastMCP, enabled: bool | None = None) -> None:
     """Register the generative-UI provider on ``server``, decided here.
 
     The provider-registration gate the entry point used to branch on itself:
     ``PrefabGenerativeUI`` is imported and added only when generative UI is
     enabled, so the heavy generative stack is never pulled in for a server
     that will not use it. The import stays inside the gate for the same
-    reason.
+    reason. The server passes its one already-made decision so the setting is
+    not read a second time for this build.
     """
-    if is_generative_ui_enabled():
+    if _generative_ui_enabled(enabled):
         from .generative import PrefabGenerativeUI
 
         server.add_provider(PrefabGenerativeUI())

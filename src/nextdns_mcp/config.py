@@ -19,8 +19,9 @@ SPDX-License-Identifier: MIT
 import logging
 import math
 import os
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 # DNS_STATUS_CODES and VALID_DNS_RECORD_TYPES are re-exported here: callers
@@ -49,6 +50,8 @@ from .profile_access import (
     parse_profile_list,
 )
 from .profile_access import _BOOL_TRUE_TOKENS as _BOOL_TRUE_TOKENS  # noqa: PLC0414
+from .profile_access import BOOL_FALSE_TOKENS as BOOL_FALSE_TOKENS  # noqa: PLC0414
+from .profile_access import BOOL_TRUE_TOKENS as BOOL_TRUE_TOKENS  # noqa: PLC0414
 from .profile_access import _combine_readable as _combine_readable  # noqa: PLC0414
 from .profile_access import _combine_set_readable as _combine_set_readable  # noqa: PLC0414
 from .profile_access import _is_allow_all as _is_allow_all  # noqa: PLC0414
@@ -81,6 +84,7 @@ __all__ = [
     "ConfigurationError",
     "MissingApiKeyError",
     "ProfileAccessControl",
+    "ServerConfig",
     "can_read_profile",
     "can_write_profile",
     "configure_logging",
@@ -129,8 +133,16 @@ DEFAULT_HTTP_TIMEOUT: float = 30.0
 DEFAULT_DOWNLOAD_MAX_BYTES: int = 1024 * 1024 * 1024  # 1 GiB
 
 
-def get_api_base() -> str:
-    """Get the API base URL from the environment, read at call time.
+def _effective_environ(environ: Mapping[str, str] | None) -> Mapping[str, str]:
+    """Return the caller's snapshot when supplied, otherwise the process environment."""
+    return os.environ if environ is None else environ
+
+
+def get_api_base(environ: Mapping[str, str] | None = None) -> str:
+    """Get the API base URL from ``environ`` (the process environment by default).
+
+    Passing the mapping a server snapshotted at creation is what keeps its
+    base URL stable while the process environment moves on.
 
     Returns:
         str: The configured base URL with any trailing slash removed
@@ -142,20 +154,26 @@ def get_api_base() -> str:
             so a runtime change cannot silently redirect the API key to a
             plaintext endpoint.
     """
-    base_url = os.getenv("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
+    env = _effective_environ(environ)
+    base_url = env.get("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
     if not base_url.lower().startswith("https://"):
         raise ConfigurationError("NEXTDNS_API_BASE must use https://")
     return base_url
 
 
-def get_api_key() -> str | None:
-    """Get API key from environment."""
-    key = os.getenv("NEXTDNS_API_KEY")
+def get_api_key(environ: Mapping[str, str] | None = None) -> str | None:
+    """Get API key from ``environ`` (the process environment by default).
+
+    The ``NEXTDNS_API_KEY_FILE`` fallback is unchanged: a Docker secret is
+    still read from the path the environment names.
+    """
+    env = _effective_environ(environ)
+    key = env.get("NEXTDNS_API_KEY")
     if key:
         return key.strip()
 
     # Fall back to a file (Docker secret)
-    key_file = os.getenv("NEXTDNS_API_KEY_FILE")
+    key_file = env.get("NEXTDNS_API_KEY_FILE")
     if key_file:
         try:
             logger.debug(f"Reading API key from file: {key_file}")
@@ -169,8 +187,8 @@ def get_api_key() -> str | None:
     return None
 
 
-def get_http_timeout() -> float:
-    """Get HTTP timeout from environment.
+def get_http_timeout(environ: Mapping[str, str] | None = None) -> float:
+    """Get HTTP timeout from ``environ`` (the process environment by default).
 
     Returns:
         float: Configured HTTP timeout in seconds (default 30.0).
@@ -178,7 +196,8 @@ def get_http_timeout() -> float:
     Raises:
         ConfigurationError: If NEXTDNS_HTTP_TIMEOUT is not a positive finite number.
     """
-    raw = os.getenv("NEXTDNS_HTTP_TIMEOUT")
+    env = _effective_environ(environ)
+    raw = env.get("NEXTDNS_HTTP_TIMEOUT")
     if raw is None:
         return DEFAULT_HTTP_TIMEOUT
 
@@ -194,8 +213,8 @@ def get_http_timeout() -> float:
     return val
 
 
-def get_download_max_bytes() -> int:
-    """Get the total download size cap in bytes.
+def get_download_max_bytes(environ: Mapping[str, str] | None = None) -> int:
+    """Get the download cap from ``environ`` (the process environment by default).
 
     The cap is read from the ``NEXTDNS_DOWNLOAD_MAX_BYTES`` environment
     variable; see :data:`DEFAULT_DOWNLOAD_MAX_BYTES` for the default.
@@ -207,7 +226,8 @@ def get_download_max_bytes() -> int:
     Raises:
         ConfigurationError: If NEXTDNS_DOWNLOAD_MAX_BYTES is not a positive integer.
     """
-    raw = os.getenv("NEXTDNS_DOWNLOAD_MAX_BYTES")
+    env = _effective_environ(environ)
+    raw = env.get("NEXTDNS_DOWNLOAD_MAX_BYTES")
     if raw is None:
         return DEFAULT_DOWNLOAD_MAX_BYTES
 
@@ -223,18 +243,20 @@ def get_download_max_bytes() -> int:
     return val
 
 
-def get_default_profile() -> str | None:
-    """Get default profile from environment."""
-    return os.getenv("NEXTDNS_DEFAULT_PROFILE")
+def get_default_profile(environ: Mapping[str, str] | None = None) -> str | None:
+    """Get default profile from ``environ`` (the process environment by default)."""
+    env = _effective_environ(environ)
+    return env.get("NEXTDNS_DEFAULT_PROFILE")
 
 
-def is_generative_ui_enabled() -> bool:
+def is_generative_ui_enabled(environ: Mapping[str, str] | None = None) -> bool:
     """Check if Generative UI (on-the-fly Prefab UI generation) is enabled.
 
     Opt-in beta feature (disabled by default). Can be enabled by setting
     NEXTDNS_GENERATIVE_UI to 'true', '1', 'on', or 'yes'.
     """
-    return _parse_bool_env(os.getenv("NEXTDNS_GENERATIVE_UI", "off")) is True
+    env = _effective_environ(environ)
+    return _parse_bool_env(env.get("NEXTDNS_GENERATIVE_UI", "off")) is True
 
 
 # Tool-search modes accepted by NEXTDNS_TOOL_SEARCH. "bm25" (the default)
@@ -252,8 +274,8 @@ TOOL_SEARCH_MODES: tuple[str, ...] = ("off", "bm25")
 DEFAULT_TOOL_SEARCH_MODE = "bm25"
 
 
-def get_tool_search_mode() -> str:
-    """Get the tool-search (progressive disclosure) mode from the environment.
+def get_tool_search_mode(environ: Mapping[str, str] | None = None) -> str:
+    """Get the tool-search mode from ``environ`` (the process environment by default).
 
     Reads ``NEXTDNS_TOOL_SEARCH``: ``"bm25"`` (the default) enables FastMCP's
     search transform, which hides the real tool catalog behind a
@@ -267,7 +289,8 @@ def get_tool_search_mode() -> str:
         ConfigurationError: If NEXTDNS_TOOL_SEARCH is not one of the accepted
             values.
     """
-    raw = os.getenv("NEXTDNS_TOOL_SEARCH", "").strip().lower()
+    env = _effective_environ(environ)
+    raw = env.get("NEXTDNS_TOOL_SEARCH", "").strip().lower()
     if not raw:
         return DEFAULT_TOOL_SEARCH_MODE
     if raw not in TOOL_SEARCH_MODES:
@@ -275,6 +298,85 @@ def get_tool_search_mode() -> str:
             f"Invalid NEXTDNS_TOOL_SEARCH: {raw!r}. Expected one of: {', '.join(TOOL_SEARCH_MODES)}."
         )
     return raw
+
+
+# The environment inputs a server snapshots at creation. Access-control and
+# call-log settings are deliberately absent: those stay per-request/per-call
+# reads so their existing semantics (see profile_access and call_log) cannot
+# be changed by a configuration snapshot.
+_SERVER_CONFIG_ENV_KEYS = (
+    "NEXTDNS_API_BASE",
+    "NEXTDNS_API_KEY",
+    "NEXTDNS_API_KEY_FILE",
+    "NEXTDNS_HTTP_TIMEOUT",
+    "NEXTDNS_DOWNLOAD_MAX_BYTES",
+    "NEXTDNS_DEFAULT_PROFILE",
+    "NEXTDNS_GENERATIVE_UI",
+    "NEXTDNS_TOOL_SEARCH",
+)
+
+
+@dataclass(frozen=True)
+class ServerConfig:
+    """The immutable configuration a single server was created with.
+
+    A server snapshots the environment once, then every consumer reads through
+    this object instead of ``os.environ``. Two embedded servers built under
+    different environment values therefore keep different settings even after
+    the process environment changes. Validation stays at the same use sites as
+    before: the snapshot holds raw values and the existing getters parse them,
+    so an invalid value still fails where it always did (for example the
+    readiness probe can still report an invalid timeout as unready).
+
+    The caller can supply the one generative-UI decision already made for the
+    build; that avoids a second read of the same setting when the server
+    assembles its catalog and provider.
+
+    One deliberate exception to the freeze is a key sourced from
+    ``NEXTDNS_API_KEY_FILE``: the path is frozen, but the file is re-read when
+    a client is built, so secret rotation and deletion still take effect at
+    client rebuild time.
+    """
+
+    _environ: Mapping[str, str]
+    _generative_ui_enabled: bool | None = None
+
+    @classmethod
+    def from_env(cls, *, generative_ui_enabled: bool | None = None) -> "ServerConfig":
+        """Snapshot the server configuration inputs from the current environment."""
+        snapshot = MappingProxyType({key: os.environ[key] for key in _SERVER_CONFIG_ENV_KEYS if key in os.environ})
+        return cls(snapshot, generative_ui_enabled)
+
+    @property
+    def api_base(self) -> str:
+        return get_api_base(self._environ)
+
+    @property
+    def api_key(self) -> str | None:
+        """The snapshot's API key; a file-sourced key is read from the frozen path."""
+        return get_api_key(self._environ)
+
+    @property
+    def http_timeout(self) -> float:
+        return get_http_timeout(self._environ)
+
+    @property
+    def download_max_bytes(self) -> int:
+        return get_download_max_bytes(self._environ)
+
+    @property
+    def default_profile(self) -> str | None:
+        return get_default_profile(self._environ)
+
+    @property
+    def generative_ui_enabled(self) -> bool:
+        if self._generative_ui_enabled is not None:
+            return self._generative_ui_enabled
+        return is_generative_ui_enabled(self._environ)
+
+    @property
+    def tool_search_mode(self) -> str:
+        return get_tool_search_mode(self._environ)
 
 
 def _log_api_key_error() -> None:
@@ -346,6 +448,7 @@ def validate_configuration() -> None:
     get_http_timeout()
     get_download_max_bytes()
     get_api_base()  # Validates NEXTDNS_API_BASE (https scheme) at startup.
+    get_tool_search_mode()  # Reject an unsupported disclosure mode before the server is built.
     for env_name, default in (
         ("NEXTDNS_READ_ONLY", ""),
         ("NEXTDNS_GENERATIVE_UI", "off"),

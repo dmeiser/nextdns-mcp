@@ -454,6 +454,15 @@ async def _adopt_profile_id(state: _RunState, m: Any) -> None:
         state.report.profile_id = pid
 
 
+def _needs_profile_id(step: Any) -> bool:
+    """Whether the step can only run once this run holds a profile id."""
+    # A step whose prompt names {profile_id} — profiles.delete included —
+    # cannot run without one: it used to launch the actor on a prompt with the
+    # placeholder rendered empty, and the deletion verifier then false-passed
+    # on the empty id.
+    return step.section != "profiles" or "{profile_id}" in step.prompt
+
+
 def _skip_step(state: _RunState, step: Any) -> bool:
     """Whether the step is skipped before any attempt, recording the row."""
     if state.aborted_reason:
@@ -462,7 +471,7 @@ def _skip_step(state: _RunState, step: Any) -> bool:
     if time.monotonic() - state.started > state.budget:
         state.report.results.append(_skipped_result(step, f"overall time budget ({state.budget:.0f}s) exhausted"))
         return True
-    if step.section != "profiles" and not state.pid:
+    if not state.pid and _needs_profile_id(step):
         state.report.results.append(_skipped_result(step, "test profile was not provisioned"))
         return True
     return False
@@ -480,15 +489,13 @@ async def _attempt_all(
 ) -> tuple[_Attempt, int]:
     """Attempt the step until it passes or the transient budget is spent."""
     attempt = 0
-    att: _Attempt | None = None
+    att: _Attempt
     while True:
         attempt += 1
         harness._progress(f"[{i}/{state.total}] {step.id}" + (f" (retry {attempt - 1})" if attempt > 1 else ""))
         att = await _attempt_step(state, m, step, prompt, prompt_pid, transients, attempts_by_kind)
         if not att.transient:
             break
-    if att is None:  # pragma: no cover - defensive
-        att = _Attempt(harness.ActorRun(command=list(state.step_cfg.command)), "failed", "", "", {}, False, "", [])
     return att, attempt
 
 

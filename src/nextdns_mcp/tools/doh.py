@@ -45,16 +45,22 @@ from ..client import _log_safe_error
 from ..coercion import OptionalProfileId
 from ..config import (
     ProfileAccessControl,
+    ServerConfig,
     get_http_timeout,
     load_profile_access_control,
 )
-from ..constants import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES
+from ..constants import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES, escape_control_chars
 from ..errors import ErrorCode, StateOwnershipError, error_payload, http_error_payload
 from ..state import request_resources
 from ..transport import access_denied_payload
 from ..utils import resolve_default_profile
 
 logger = logging.getLogger(__name__)
+
+
+def _doh_timeout(config: ServerConfig | None) -> float:
+    """Use the server snapshot timeout when one exists, otherwise the process environment."""
+    return config.http_timeout if config is not None else get_http_timeout()
 
 
 # The DoH client persists for keep-alive connection reuse, owned explicitly
@@ -72,20 +78,29 @@ class DohClientOwner:
     owns it from then on, including closing it.
     """
 
-    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        config: ServerConfig | None = None,
+    ) -> None:
+        self.config = config
         self._client = client
 
     def get(self) -> httpx.AsyncClient:
-        """Return this owner's DoH client, creating it on first use."""
+        """Return this owner's DoH client, creating it on first use.
+
+        A server-owned owner uses its creation-time config snapshot; a
+        standalone owner keeps reading the process environment.
+        """
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=get_http_timeout())
+            self._client = httpx.AsyncClient(timeout=_doh_timeout(self.config))
         return self._client
 
     async def aclose(self) -> None:
         """Close this owner's DoH client if one exists and reset it.
 
-        The next :meth:`get` constructs a fresh client, picking up any updated
-        configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+        The next :meth:`get` constructs a fresh client from this owner's
+        snapshot, or from the process environment for a standalone owner.
         """
         if self._client is not None:
             client = self._client
@@ -145,7 +160,7 @@ async def close_doh_client() -> None:
     await current_doh_client_owner().aclose()
 
 
-def _validate_record_type(record_type: str) -> tuple[bool, str]:
+def _normalize_and_validate_record_type(record_type: str) -> tuple[bool, str]:
     """Validate DNS record type.
 
     Returns:
@@ -181,7 +196,7 @@ def _read_denied(target_profile: str) -> dict[str, Any]:
     has the same shape (typed code, reason, profile id, nominal 403) as a
     denial from the ACL layer - the caller branches on one contract, not two.
     """
-    logger.warning(f"Read access denied for profile: {target_profile}")
+    logger.warning("Read access denied for profile: %s", escape_control_chars(target_profile))
     return access_denied_payload(
         ErrorCode.READ_ACCESS_DENIED,
         f"Read access denied for profile: {target_profile}",
@@ -251,9 +266,9 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
     if not access.can_read(target_profile):
         return _read_denied(target_profile)
 
-    is_valid, record_type_upper = _validate_record_type(record_type)
+    is_valid, record_type_upper = _normalize_and_validate_record_type(record_type)
     if not is_valid:
-        logger.warning(f"Invalid DNS record type requested: {record_type}")
+        logger.warning("Invalid DNS record type requested: %s", escape_control_chars(record_type))
         return error_payload(
             ErrorCode.INVALID_RECORD_TYPE,
             f"Invalid record type: {record_type}",
@@ -264,7 +279,11 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
     # The queried domain is what the caller is asking *about* - query names are
     # browsing-shaped sensitive data - so it belongs at DEBUG, while the
     # routine "a lookup ran" fact stays at INFO without it.
-    logger.info("DoH lookup (%s) via profile %s", record_type_upper, target_profile)
+    logger.info(
+        "DoH lookup (%s) via profile %s",
+        escape_control_chars(record_type_upper),
+        escape_control_chars(target_profile),
+    )
     logger.debug("DoH lookup: %s (%s) via profile %s", domain, record_type_upper, target_profile)
     return await doh_lookup(doh_url, domain, record_type_upper, target_profile, access)
 

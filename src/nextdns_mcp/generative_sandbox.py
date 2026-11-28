@@ -268,6 +268,15 @@ async def _await_ready(proc: subprocess.Popen[bytes]) -> None:
             break
 
 
+class _ResultTooLarge(ValueError):
+    """The worker's answer line exceeded the wire cap while it was being read.
+
+    A ``ValueError`` subclass so existing handlers keep catching it, but a
+    distinct type so the tool layer can answer ``response_too_large`` rather
+    than lumping the guard in with the generated code's own failures.
+    """
+
+
 class _BoundedStdout:
     """File-like bounding each stdout line to ``limit`` bytes during the read.
 
@@ -316,7 +325,7 @@ class _BoundedStdout:
             complete, total = self._feed(chunk, chunks, total)
         if total > self._limit:
             self._on_overflow()
-            raise ValueError(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
+            raise _ResultTooLarge(f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes")
         return b"".join(chunks)
 
     def close(self) -> None:
@@ -367,6 +376,14 @@ class DenoPyodideSandbox:
     def __init__(self) -> None:
         self._process: subprocess.Popen[bytes] | None = None
         self._lock = asyncio.Lock()
+        # ``stop()`` is called from a worker thread (``asyncio.to_thread``) and
+        # synchronously from the bounded-stdout overflow callback inside the
+        # executor thread that reads the answer, so the process slot and the
+        # closed flag are guarded by a threading lock — an ``asyncio.Lock``
+        # cannot be held by those callers, and an unguarded swap let a shutdown
+        # race a cold start (issue #746).
+        self._state_lock = threading.Lock()
+        self._closed = False
 
     async def start(self) -> None:
         """Cold-start the worker, outside the user-code execution timeout."""
@@ -374,8 +391,16 @@ class DenoPyodideSandbox:
             await self._ensure_worker()
 
     def stop(self) -> None:
-        """Discard the worker so the next execution gets a fresh interpreter."""
-        process, self._process = self._process, None
+        """Discard the worker and close this sandbox against any later start.
+
+        The slot is taken under ``_state_lock`` so a concurrent cold start
+        cannot publish a worker behind the shutdown, and the reaping happens
+        outside the lock because it blocks for up to 5s. Calling ``stop()``
+        twice is safe: the second call finds no process.
+        """
+        with self._state_lock:
+            self._closed = True
+            process, self._process = self._process, None
         if process is not None:
             _reap_process(process)
 
@@ -401,10 +426,17 @@ class DenoPyodideSandbox:
         return _decode_response(await self._exchange(worker, request_id, code, data), request_id)
 
     async def _ensure_worker(self) -> subprocess.Popen[bytes]:
-        """Return a live worker, cold-starting one when none is running."""
+        """Return a live worker, cold-starting one when none is running.
+
+        Raises once this sandbox has been stopped: a sandbox is disposable by
+        design, and a render that arrives after teardown must not spawn a
+        worker nothing will ever reap.
+        """
         process = self._process
         if process is not None and process.poll() is None:
             return process
+        if self._closed:
+            raise _WorkerGone("Sandbox is shut down")
         return await self._start()
 
     async def _exchange(
@@ -418,7 +450,9 @@ class DenoPyodideSandbox:
         stdin, stdout = process.stdin, process.stdout
         if stdin is None or stdout is None:
             raise _WorkerGone("Sandbox failed to start")
-        frame = (json.dumps({"id": request_id, "code": code, "data": data or {}}) + "\n").encode()
+        # allow_nan=False: a Python float('nan') would serialize as the literal NaN and
+        # the worker's JSON.parse would fail on a frame the server already accepted.
+        frame = (json.dumps({"id": request_id, "code": code, "data": data or {}}, allow_nan=False) + "\n").encode()
         try:
             return await asyncio.get_running_loop().run_in_executor(None, _round_trip, stdin, stdout, frame)
         except OSError:
@@ -440,8 +474,20 @@ class DenoPyodideSandbox:
             await asyncio.to_thread(_reap_process, process)
             raise
         process.stdout = _BoundedStdout(process.stdout, MAX_WIRE_LINE_BYTES, self.stop)  # type: ignore[assignment]
-        self._process = process
+        if not self._register_worker(process):
+            # ``stop()`` landed while this worker was booting: reclaim it rather
+            # than hand back a subprocess no owner will ever terminate.
+            await asyncio.to_thread(_reap_process, process)
+            raise _WorkerGone("Sandbox is shut down")
         return process
+
+    def _register_worker(self, process: subprocess.Popen[bytes]) -> bool:
+        """Publish a cold-started worker, unless this sandbox was stopped while it booted."""
+        with self._state_lock:
+            if self._closed:
+                return False
+            self._process = process
+            return True
 
 
 def _frame_answers(response: Any, request_id: str) -> bool:

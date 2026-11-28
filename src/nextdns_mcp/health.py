@@ -16,14 +16,16 @@ hammer the API. The route is registered with FastMCP's ``custom_route`` so it
 is served alongside the ``/mcp`` streamable-HTTP endpoint; in stdio mode there
 is no HTTP surface, so the route is simply not reachable.
 
-The probe sends through the shared raw probe client (issue #603's ACL-free
-transport, owned upstream of this module's scope).
+The probe sends through the raw probe transport the server owns (issue #603's
+ACL-free transport, held on the server's ``ServerResources`` and handed to
+the prober when the route is registered).
 
 SPDX-License-Identifier: MIT
 """
 
 import asyncio
 import logging
+import re
 import time
 from typing import NamedTuple
 
@@ -32,8 +34,9 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .client import get_raw_probe_client
-from .config import ConfigurationError, get_api_key
+from .client import ProbeClientOwner
+from .config import ConfigurationError
+from .lifespan import server_resources
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +88,15 @@ class ReadinessProber:
     ``FastMCP`` server gets its own prober when its ``/health`` route is
     registered, so two servers embedded in one process keep independent
     readiness state and never serialize each other's probes.
+
+    The prober also holds the server's probe transport owner
+    (:class:`~nextdns_mcp.client.ProbeClientOwner` on its
+    ``ServerResources``), so the transport a probe sends through belongs to
+    the same server and is closed by the same lifespan.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, probe_client: ProbeClientOwner | None = None) -> None:
+        self._probe_client = probe_client if probe_client is not None else ProbeClientOwner()
         self._cache: tuple[float, _HealthFailure | None] | None = None
         # Guards probe *construction*, not cache reads: concurrent ``/health``
         # pollers that all miss an empty (or just-expired) cache used to each
@@ -107,8 +116,9 @@ class ReadinessProber:
         (see ``self._lock``). A poller that arrives while a probe is running
         returns that probe's result, not a stale or duplicate one.
 
-        The probe transport is the shared raw probe client (issue #603's
-        ACL-free transport, owned upstream of this card's scope).
+        The probe transport comes from this prober's own
+        :class:`~nextdns_mcp.client.ProbeClientOwner` - the one the serving
+        server's ``ServerResources`` holds (issue #603's ACL-free transport).
 
         Returns:
             None when the configured credentials work against NextDNS,
@@ -146,8 +156,8 @@ class ReadinessProber:
     async def _probe(self) -> _HealthFailure | None:
         """Probe the NextDNS API once with the configured credentials.
 
-        The request goes through the raw probe transport
-        (``client.get_raw_probe_client()``), which bypasses profile access
+        The request goes through this prober's raw probe transport owner
+        (``client.ProbeClientOwner.get()``), which bypasses profile access
         control: a local ACL denial must not mask the true upstream
         authentication state. Only the status code and the exception type
         name are reported, never the API key, the auth headers, or the response
@@ -158,10 +168,10 @@ class ReadinessProber:
             _HealthFailure.
         """
         try:
-            probe_client = get_raw_probe_client()
+            probe_client = self._probe_client.get()
             response = await probe_client.request("GET", HEALTH_PROBE_PATH, timeout=HEALTH_PROBE_TIMEOUT)
-        except ConfigurationError:
-            return _configuration_failure()
+        except ConfigurationError as exc:
+            return _configuration_failure(exc)
         except httpx.TimeoutException:
             return _HealthFailure(
                 HEALTH_FAILURE_UNREACHABLE,
@@ -183,12 +193,14 @@ def register_health_route(mcp: FastMCP) -> None:
 
     See the module docstring for the probe contract this route serves. The
     prober — the route's TTL cache and single-flight lock — is owned here, per
-    server, so two embedded servers never share readiness state.
+    server, so two embedded servers never share readiness state, and it probes
+    through the probe transport owner on the same server's ``ServerResources``,
+    so the transport is closed by the same lifespan that owns the route.
 
     Args:
         mcp: The FastMCP server to attach the route to.
     """
-    prober = ReadinessProber()
+    prober = ReadinessProber(server_resources(mcp).probe_client)
 
     async def health_check(_request: Request) -> JSONResponse:
         """Report NextDNS API readiness as measured by a live credential probe."""
@@ -208,18 +220,40 @@ def _log_readiness_failure(failure: _HealthFailure) -> None:
     move that detail, not drop it. Both fields are built from a status code, an
     exception type name, and configuration state (`_HealthFailure`), never from a
     request URL or an exception message, so this WARNING needs no redaction
-    pass (`_redacted()` in `client.py` guards those shapes).
+    pass (`redacted()` in `client.py` guards those shapes).
     """
     logger.warning("NextDNS readiness probe failed: class=%s reason=%s", failure.failure_class, failure.reason)
 
 
-def _configuration_failure() -> _HealthFailure:
-    """Classify a ConfigurationError from building the client: no key at all is auth."""
-    if not get_api_key():
+_CONFIG_ENV_VAR = re.compile(r"NEXTDNS_[A-Z0-9_]+")
+"""A NEXTDNS_* environment variable name inside a ConfigurationError message.
+
+Every ConfigurationError the client constructors raise names the setting it
+blames, so the classification reads the variable out of the caught exception
+instead of re-reading os.environ and guessing (issue #785)."""
+
+_API_KEY_ENV_VARS = frozenset({"NEXTDNS_API_KEY", "NEXTDNS_API_KEY_FILE"})
+"""Variables whose failure is an authentication problem, not an unreachable API."""
+
+
+def _configuration_failure(exc: ConfigurationError) -> _HealthFailure:
+    """Classify a ConfigurationError from building the client by the setting it names.
+
+    Only the variable name is reported - never the exception message, which can
+    quote the invalid value - so the warning stays sanitized while the operator
+    learns which setting to fix.
+    """
+    match = _CONFIG_ENV_VAR.search(str(exc))
+    if match is not None and match.group(0) in _API_KEY_ENV_VARS:
         return _HealthFailure(HEALTH_FAILURE_AUTH, "No usable NextDNS API key is configured")
+    if match is not None:
+        return _HealthFailure(
+            HEALTH_FAILURE_UNREACHABLE,
+            f"NextDNS client configuration is invalid (check {match.group(0)})",
+        )
     return _HealthFailure(
         HEALTH_FAILURE_UNREACHABLE,
-        "NextDNS client configuration is invalid (check NEXTDNS_HTTP_TIMEOUT)",
+        "NextDNS client configuration is invalid",
     )
 
 

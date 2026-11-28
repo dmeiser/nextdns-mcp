@@ -364,6 +364,62 @@ class TestAccessControlledClientFailsClosed:
         assert exc_info.value.code == "access_denied"
 
     @pytest.mark.asyncio
+    async def test_denies_encoded_newline_profile_bypassing_protected_list(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """Regression for issue #747: /profiles/abc123%0a/... escaped the protected-profile denylist.
+
+        httpx decodes the path while parsing, so the segment is "abc123\\n". The
+        pattern's ``$`` matched before that trailing newline, the ACL authorized
+        the request against an id that no NEXTDNS_PROTECTED_PROFILES entry can
+        equal, and the write reached upstream.
+        """
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "abc123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("POST", "/profiles/abc123%0a/settings")
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == "access_denied"
+
+    @pytest.mark.asyncio
+    async def test_denies_profile_path_with_a_literal_newline(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """A URL httpx cannot parse is an ACL denial, not an unhandled httpx.InvalidURL.
+
+        Before the anchor fix such an id passed input validation, so this reached
+        the access-control layer as an INTERNAL_ERROR instead of a refusal.
+        """
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("GET", "/profiles/abc123\n/settings")
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == "access_denied"
+
+    @pytest.mark.asyncio
+    async def test_stream_denies_profile_path_with_a_literal_newline(
+        self, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """The same unparseable URL is refused by stream(), which shares _authorize()."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+
+        with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
+            async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+                with pytest.raises(AccessDeniedError) as exc_info:
+                    async with client.stream("GET", "/profiles/abc123\n/settings"):
+                        pass
+
+        mock_send.assert_not_called()
+        assert exc_info.value.code == "access_denied"
+
+    @pytest.mark.asyncio
     async def test_denies_relative_profile_path_when_not_readable(
         self, mock_super_request: Any, clean_env: Callable[[str, str], None]
     ) -> None:
@@ -546,19 +602,19 @@ class TestAccessControlledClientRequestLogging:
     ) -> None:
         """_api_request's warning/error wrapper must log method + path, never the query string.
 
-        Upstream failures are raised as typed ``NextDNSError`` subclasses (issue #181);
-        the access-control denial is still returned as a payload. Either way the
-        redaction contract of the log record is what this asserts.
+        Every failure is raised - ACL denials as ``AccessDeniedError`` and other
+        failures as typed ``NextDNSError`` subclasses (issue #181). Either way
+        the redaction contract of the log record is what this asserts.
         """
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
         monkeypatch.setattr(AccessControlledClient, "request", AsyncMock(side_effect=raised))
 
-        with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.transport"):
-            if isinstance(raised, AccessDeniedError):
-                await transport._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
-            else:
-                with pytest.raises(transport.NextDNSError):
-                    await transport._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
+        expected = AccessDeniedError if isinstance(raised, AccessDeniedError) else transport.NextDNSError
+        with (
+            caplog.at_level(logging.DEBUG, logger="nextdns_mcp.transport"),
+            pytest.raises(expected),
+        ):
+            await transport._api_request("GET", "/profiles/abc123/logs?search=secret-search-term")
 
         log_messages = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
         assert log_messages
@@ -568,16 +624,19 @@ class TestAccessControlledClientRequestLogging:
         assert any("/profiles/abc123/logs" in msg for msg in log_messages)
 
     @pytest.mark.asyncio
-    async def test_denied_api_request_payload_verbatim_but_log_redacted(
+    async def test_denied_api_request_raises_but_payload_verbatim_and_log_redacted(
         self, clean_env: Callable[[str, str], None], caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The caller gets the full URL back; only the log record loses the query string."""
+        """The payload keeps the full URL; only the log record loses the query string."""
         clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
         request_url = "/profiles/abc.def/logs?search=secret-search-term"
 
         with caplog.at_level(logging.DEBUG, logger="nextdns_mcp.transport"):
-            payload = await transport._api_request("GET", request_url)
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await transport._api_request("GET", request_url)
+            payload = await transport.api_request_payload("GET", request_url)
 
+        assert exc_info.value.code == "access_denied"
         assert payload["code"] == "access_denied"
         assert payload["error"] == f"Forbidden URL: {request_url}"
         warning_messages = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
@@ -586,6 +645,31 @@ class TestAccessControlledClientRequestLogging:
             assert "secret-search-term" not in msg
             assert "?" not in msg, f"Query string leaked at WARNING: {msg}"
         assert any("/profiles/abc.def/logs" in msg for msg in warning_messages)
+
+    @pytest.mark.asyncio
+    async def test_api_request_denial_raises_typed_error_and_payload_translates_it(
+        self, clean_env: Callable[[str, str], None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One ACL denial: _api_request raises it, api_request_payload keeps the payload."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        message = "Read access denied for profile: abc123"
+        denial = AccessDeniedError(message, code="read_access_denied", profile_id="abc123")
+        monkeypatch.setattr(AccessControlledClient, "request", AsyncMock(side_effect=denial))
+
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await transport._api_request("GET", "/profiles/abc123/logs")
+        assert exc_info.value is denial
+        assert exc_info.value.message == message
+        assert exc_info.value.code == "read_access_denied"
+        assert exc_info.value.profile_id == "abc123"
+
+        payload = await transport.api_request_payload("GET", "/profiles/abc123/logs")
+        assert payload == {
+            "error": message,
+            "code": "read_access_denied",
+            "status_code": 403,
+            "profile_id": "abc123",
+        }
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("status_code", [401, 429, 503], ids=["unauthorized", "rate-limited", "server-error"])
@@ -859,7 +943,7 @@ class TestLibraryLoggerRedaction:
 
         real_async_client = httpx.AsyncClient
         monkeypatch.setattr(
-            logs_module.httpx,
+            httpx,
             "AsyncClient",
             lambda *args, **kwargs: real_async_client(transport=httpx.MockTransport(handler)),
         )

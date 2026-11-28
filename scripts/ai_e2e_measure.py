@@ -27,7 +27,7 @@ from ai_e2e_common import (
     _content_texts,
     _unwrap_id,
 )
-from ai_e2e_config import HarnessConfig, _expand_env_refs, _profile_list_cursor
+from ai_e2e_config import _MAX_PROFILE_PAGES, HarnessAbortError, HarnessConfig, _expand_env_refs, _profile_list_cursor
 from ai_e2e_task import TaskTargets
 
 
@@ -81,11 +81,14 @@ class MeasureClient:
         return await self.rest_request("DELETE", path)
 
     async def find_profile(self, name: str) -> dict[str, Any] | None:
-        resp = await self.rest_get("/profiles")
-        if isinstance(resp, dict) and resp.get("ok"):
-            for p in (resp.get("body") or {}).get("data", []):
-                if isinstance(p, dict) and p.get("name") == name:
-                    return p
+        # Paginated like every other listing read: a one-page lookup missed a
+        # profile that lived on page 2 and reported it absent.
+        rows = await _all_profile_rows(self)
+        if rows is None:
+            return None
+        for p in rows:
+            if isinstance(p, dict) and p.get("name") == name:
+                return p
         return None
 
 
@@ -113,12 +116,13 @@ async def _profile_gone(m: MeasureClient, pid: str, targets: TaskTargets) -> tup
     elif not (isinstance(by_id, dict) and by_id.get("status") == 404):
         status = by_id.get("status") if isinstance(by_id, dict) else by_id
         return False, f"{INDETERMINATE}: GET /profiles/{pid} answered HTTP {status!r}, which proves nothing"
-    listing = await m.rest_get("/profiles")
-    rows = common._readable_rows(listing)
+    # The listing half paginates too: a renamed profile living on page 2 used
+    # to read as ABSENT after a by-id 404, confirming a deletion that never
+    # happened.
+    rows = await _all_profile_rows(m)
     if rows is None:
         return False, (
-            f"{INDETERMINATE}: the profile listing answered HTTP "
-            f"{common._resp_status(listing)!r} without a list, so neither name could be checked"
+            f"{INDETERMINATE}: the profile listing failed or its pagination cycled, so neither name could be checked"
         )
     names = {str(p.get("name", "")) for p in rows if isinstance(p, dict)}
     if targets.profile_name in names or targets.renamed_name in names:
@@ -126,29 +130,61 @@ async def _profile_gone(m: MeasureClient, pid: str, targets: TaskTargets) -> tup
     return True, ABSENT
 
 
-async def _all_profile_ids(m: MeasureClient) -> dict[str, str] | None:
-    """Map every profile id currently on the account to its name.
+async def _all_profile_rows(m: MeasureClient) -> list[Any] | None:
+    """Every profile row on the account, following the listing cursor to its end.
 
-    ``None`` when the listing failed: an empty mapping from a failed read used
-    to look like an empty account, which handed the stray sweep every profile on
-    it. Callers must treat ``None`` as "account state uncertain".
+    ``None`` when any page failed, the cursor repeated, the cursor was
+    malformed, or the listing did not end within ``_MAX_PROFILE_PAGES``: one
+    GET is only the first page, and a partial listing presented as the whole
+    account misses names on later pages and reads a server-side cursor cycle
+    as the end of the list. Callers must treat ``None`` as "account state
+    uncertain" — no other failure mode escapes this function.
     """
-    # Same pagination contract the protection probe holds: one GET is only
-    # the first page, and a page-truncated map under-protects and under-deletes.
+    # Same pagination contract the protection probe holds: a page-truncated
+    # listing under-protects and under-deletes.
     cursor: str | None = None
     seen_cursors: set[str] = set()
     rows: list[Any] = []
-    while True:
+    for _page in range(_MAX_PROFILE_PAGES):
         page = await m.rest_get("/profiles", params={"cursor": cursor} if cursor else None)
         page_rows = common._readable_rows(page)
         if page_rows is None:
             return None
         rows.extend(page_rows)
         body = page.get("body") if isinstance(page, dict) else None
-        cursor = _profile_list_cursor(body)
-        if not cursor or cursor in seen_cursors:
-            break
+        try:
+            cursor = _profile_list_cursor(body)
+        except HarnessAbortError:
+            # A malformed cursor (present, not a non-empty string) is fatal to
+            # the startup probe but only a failed page here: mid-run it must
+            # degrade to "uncertain", not escape as a traceback that kills the
+            # run with no report.
+            return None
+        if not cursor:
+            return rows
+        if cursor in seen_cursors:
+            # A repeated cursor is a cycle, not the end: fail closed rather
+            # than return the rows gathered so far as if they were complete.
+            return None
         seen_cursors.add(cursor)
+    # Fresh unique cursors forever are a runaway pagination loop, not a huge
+    # account (the probe's own cap): unbounded, quickly-answered pages would
+    # hang the run mid-step until the CI job timeout, with no report.
+    return None
+
+
+async def _all_profile_ids(m: MeasureClient) -> dict[str, str] | None:
+    """Map every profile id currently on the account to its name.
+
+    ``None`` when the listing failed or its pagination cycled: an empty mapping
+    from a failed read used to look like an empty account, which handed the
+    stray sweep every profile on it, and a partial map from a cursor cycle
+    under-protected and under-deleted the same way. Callers must treat ``None``
+    as "account state uncertain".
+    """
+    rows = await _all_profile_rows(m)
+    if rows is None:
+        return None
     out: dict[str, str] = {}
     for p in rows:
         if isinstance(p, dict) and p.get("id"):

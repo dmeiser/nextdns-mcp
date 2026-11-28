@@ -23,11 +23,13 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 
 # One concern per module, with the line budget each one carries. A split costs
 # lines over the module it replaces (a docstring and an import block per
-# module), so the 560 total is the honest cost of the 498-line file, not a
-# number to squeeze the code under.
+# module), so the total is the honest cost of the split file plus the SEC-8
+# checked-open growth noted below, not a number to squeeze the code under.
 PACKAGE_MODULES = {
     "__init__.py": 45,
-    "store.py": 110,
+    # 110 -> 125 for SEC-8 (#766): every read and append now goes through the
+    # O_NOFOLLOW + S_ISREG checked open (`_checked_fd`); the check is the growth.
+    "store.py": 125,
     "projection.py": 110,
     "evidence.py": 150,
     "record.py": 100,
@@ -109,7 +111,10 @@ def test_each_module_stays_inside_its_line_budget():
         lines = len(_source(name).splitlines())
         total += lines
         assert lines <= budget, f"{name} is {lines} lines, over its {budget}-line budget"
-    assert total <= 560, f"the package is {total} lines, over the 560-line total"
+    # 560 -> 595 for SEC-8 (#766): the O_NOFOLLOW + S_ISREG checked open
+    # (store.py), the iterative depth-capped identity walk (evidence.py) and
+    # the bounded profile_id (record.py) cost 34 lines of real code.
+    assert total <= 595, f"the package is {total} lines, over the 595-line total"
 
 
 def test_middleware_is_the_only_module_that_knows_fastmcp():

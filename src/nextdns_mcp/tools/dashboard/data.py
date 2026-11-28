@@ -10,12 +10,20 @@ SPDX-License-Identifier: MIT
 """
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Mapping
 from itertools import islice
 from typing import Any, NamedTuple
 
-from ...charts import resolve_time_point, series_budget_error
+from ...charts import (
+    build_chart_data,
+    cap_chart_series,
+    downsample_chart_series,
+    extract_series_fields,
+    resolve_time_point,
+    series_budget_error,
+)
 from ...errors import ErrorCode, error_payload
 from ...transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ...utils import (
@@ -24,6 +32,8 @@ from ...utils import (
     normalize_time_value,
     sanitize_label,
 )
+
+logger = logging.getLogger(__name__)
 
 # Byte ceiling on the bounded (non-``;series``) analytics endpoints this
 # dashboard fetches. A ``;series`` answer is capped at MAX_SERIES_RESPONSE_BYTES
@@ -73,9 +83,16 @@ async def _fetch_analytics_payload(
     return await fetch_analytics_payload(url, params, max_response_bytes=max_bytes)
 
 
-def _format_share(count: int, total: int) -> str:
-    """Format a query count as a percentage share of the total."""
-    return f"{(count / total * 100):.1f}%" if total > 0 else "0.0%"
+def _share_ratio(count: int, total: int) -> float:
+    """A query count as a fraction of the total, in ``0.0``-``1.0``.
+
+    The number stays numeric on purpose: the Share cell is sorted by the client,
+    and a pre-formatted ``"12.3%"`` string sorts lexicographically, which puts
+    ``10.0%`` before ``2.0%``. Prefab's ``percent`` cell format takes fractional
+    input, so ``0.123`` renders as ``12.3%`` and the display does not change
+    (issue #800).
+    """
+    return (count / total) if total > 0 else 0.0
 
 
 def item_queries(item: dict[str, Any]) -> int:
@@ -115,8 +132,14 @@ def reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
     return {
         "name": reason_label(item),
         "queries": q,
-        "share": _format_share(q, total),
+        "share": _share_ratio(q, total),
     }
+
+
+def reason_rows(data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Format the reasons table rows, with the share denominator computed once."""
+    total = sum(item_queries(item) for item in data)
+    return [reason_row(item, total) for item in data]
 
 
 def _device_name(item: dict[str, Any]) -> str:
@@ -141,8 +164,14 @@ def device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
         "device": device_label(item),
         "model": sanitize_label(item.get("model") or "-"),
         "queries": q,
-        "share": _format_share(q, total),
+        "share": _share_ratio(q, total),
     }
+
+
+def device_rows(data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Format the devices table rows, with the share denominator computed once."""
+    total = sum(item_queries(item) for item in data)
+    return [device_row(item, total) for item in data]
 
 
 def _location_string(geo: dict[str, Any]) -> str:
@@ -174,7 +203,7 @@ def _single_gafam_row(item: dict[str, Any], total: int) -> tuple[dict[str, Any],
     return {"label": name, "company": name, "queries": q}, {
         "company": name,
         "queries": q,
-        "share": _format_share(q, total),
+        "share": _share_ratio(q, total),
     }
 
 
@@ -184,6 +213,31 @@ def gafam_rows(data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[d
     pairs = [_single_gafam_row(item, total) for item in data]
     table_rows: list[dict[str, Any]] = [p[1] for p in pairs]
     return [p[0] for p in pairs], table_rows
+
+
+def prepare_queries_series(series_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """Extract a ``status;series`` payload and shape it for the queries evolution card.
+
+    Returns the ``(chart_data, chart_series_data)`` pair the card renders from,
+    or ``None`` when the payload carries nothing plottable - the card is then
+    omitted from the page rather than rendered empty. The rendered rows are
+    downsampled through the shared chart budget: a multi-year overview answers
+    up to 1,999 intervals, and this card is one of many on the page, so
+    full-resolution rows here bloat the whole ``PrefabApp`` rather than one
+    chart result (issue #550). Payload-shape errors degrade to ``None``; any
+    other failure is a programming error and propagates (FUNC-5 / WORK-324).
+    """
+    try:
+        times, series_data = extract_series_fields(series_payload)
+        if not times or not series_data:
+            return None
+        series_data = cap_chart_series(series_data)
+        chart_times, chart_series_data = downsample_chart_series(times, series_data)
+        chart_data = build_chart_data(chart_times, chart_series_data)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        logger.warning("Error preparing queries series data")
+        return None
+    return chart_data, chart_series_data
 
 
 def _matching_queries(item: dict[str, Any], flag_key: str) -> int:
@@ -287,13 +341,6 @@ async def fetch_card_data(
 
 OVERVIEW_FANOUT_CONCURRENCY = 4
 
-# Upstream answers that reject the request itself rather than this one endpoint.
-# Every queued wave of the fan-out sends the same profile id on the same API key,
-# so a wave that has not started yet can only repeat the failure: the 429 spends
-# quota that was already refused, the 401/403 re-proves a credential that just
-# failed, the 404 names a profile no endpoint of this profile can resolve.
-FANOUT_STOP_STATUS_CODES = frozenset({401, 403, 404, 429})
-
 # What one overview fan-out fetch answers: the payload or the typed error. Every
 # fetch is built under a name, and that name is what the unpacking layer reads,
 # so the payload a field gets follows the key it was fetched under and never the
@@ -302,20 +349,20 @@ FetchResult = tuple[dict[str, Any] | None, dict[str, Any] | None]
 
 
 class _FanoutStop:
-    """The stop signal one fan-out shares: the first error that condemns every remaining wave.
+    """The stop signal one fan-out shares: the first error condemns every remaining wave.
 
-    A per-request 5xx or an over-large series body says nothing about the other
-    endpoints, so only ``FANOUT_STOP_STATUS_CODES`` latch here.
+    The unpacking layer answers the overview with the first error it is handed
+    and discards every payload beside it, so once any fetch has failed the
+    waves still queued can only spend quota and latency on results that will
+    never be read - a 5xx, a timeout or an over-large body included.
     """
 
     def __init__(self) -> None:
         self.error: dict[str, Any] | None = None
 
     def observe(self, err: dict[str, Any] | None) -> None:
-        """Latch the first request-fatal error; later failures keep the first one's payload."""
-        if self.error is not None or err is None:
-            return
-        if err.get("status_code") in FANOUT_STOP_STATUS_CODES:
+        """Latch the first error; later failures keep the first one's payload."""
+        if self.error is None and err is not None:
             self.error = err
 
 
@@ -361,6 +408,41 @@ class ExtraDashboardPayloads(NamedTuple):
     countries: list[dict[str, Any]]
     encryption: list[dict[str, Any]]
     dnssec: list[dict[str, Any]]
+
+
+class PreparedExtraSections(NamedTuple):
+    """Extra dashboard sections with the aggregate math already done.
+
+    ``components.append_extra_cards`` only lays these out: the GAFAM row pairs
+    and the security rates are computed here, in the data layer, so the UI
+    module consumes prepared inputs (WORK-339).
+    """
+
+    reasons: list[dict[str, Any]]
+    devices: list[dict[str, Any]]
+    ips: list[dict[str, Any]]
+    root_domains: list[dict[str, Any]]
+    gafam_chart: list[dict[str, Any]]
+    gafam_table: list[dict[str, Any]]
+    countries: list[dict[str, Any]]
+    encryption_rate: tuple[int, int, float]
+    dnssec_rate: tuple[int, int, float]
+
+
+def prepare_extra_sections(payloads: ExtraDashboardPayloads) -> PreparedExtraSections:
+    """Compute the aggregates the extra dashboard cards render from."""
+    gafam_chart, gafam_table = gafam_rows(payloads.gafam)
+    return PreparedExtraSections(
+        reasons=payloads.reasons,
+        devices=payloads.devices,
+        ips=payloads.ips,
+        root_domains=payloads.root_domains,
+        gafam_chart=gafam_chart,
+        gafam_table=gafam_table,
+        countries=payloads.countries,
+        encryption_rate=calc_rate(payloads.encryption, "encrypted"),
+        dnssec_rate=calc_rate(payloads.dnssec, "validated"),
+    )
 
 
 def _build_extra_tasks(

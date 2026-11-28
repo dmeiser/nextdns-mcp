@@ -14,9 +14,10 @@ import math
 import re
 from typing import Any
 
-from .config import _BOOL_FALSE_TOKENS, _BOOL_TRUE_TOKENS, get_default_profile
-from .constants import PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
+from .config import BOOL_FALSE_TOKENS, BOOL_TRUE_TOKENS, get_default_profile
+from .constants import CONTROL_CHARS_PATTERN, PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
 from .errors import ErrorCode, cap_with_marker, error_payload
+from .state import current_server_config
 
 
 def is_safe_profile_id(value: str | int) -> bool:
@@ -64,6 +65,29 @@ def _missing_profile_payload() -> dict[str, Any]:
     )
 
 
+def _profile_id_missing(value: str | int | None) -> bool:
+    """True when a profile id names nothing: ``None`` or a blank string.
+
+    "Missing" is an explicit test, not truthiness: ``profile_id=0`` is a caller
+    error that must surface as ``invalid_profile_id``, not silently select the
+    default. Whitespace-only strings carry no id and count as missing.
+    """
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _current_default_profile() -> str | None:
+    """The default profile for this call: the serving server's snapshot if one exists."""
+    config = current_server_config()
+    return get_default_profile() if config is None else config.default_profile
+
+
+def _defaulted_profile(profile_id: str | int | None) -> str | int | None:
+    """The explicit profile_id, or the configured default when the caller named none."""
+    if _profile_id_missing(profile_id):
+        return _current_default_profile()
+    return profile_id
+
+
 def resolve_profile_id(
     profile_id: str | int | None = None,
     *,
@@ -84,8 +108,10 @@ def resolve_profile_id(
         is a standardized error payload dict.
     """
     if allow_default:
-        target_profile: str | int | None = profile_id or get_default_profile()
-        if not target_profile:
+        target_profile: str | int | None = _defaulted_profile(profile_id)
+        # The explicit None check is for mypy's narrowing; _profile_id_missing alone
+        # covers it at runtime.
+        if target_profile is None or _profile_id_missing(target_profile):
             return None, _missing_profile_payload()
         if not is_safe_profile_id(target_profile):
             return None, error_payload(
@@ -163,22 +189,33 @@ ANALYTICS_LIMIT_MIN = 1
 ANALYTICS_LIMIT_MAX = 500
 
 
+def is_usable_integer(value: Any) -> bool:
+    """Whether ``value`` can be read as an integer argument by a range check.
+
+    ``bool`` is refused rather than read as its integer value: a caller that
+    sent a flag gets an error instead of a silent rewrite of its request.
+    A ``float`` is refused as well, and not only when it is fractional: a
+    range check cannot see either of the two ways a float escapes it.
+    ``float("nan")`` compares False against BOTH bounds (``nan < 1`` and
+    ``nan > 500``), so it passes a ``min <= value <= max`` gate without ever
+    being named, and a fractional float sits inside every integer band, so
+    ``1.5`` is answered as a request for one and a half of something. A
+    direct Python caller reaches these validators without the tool schema
+    in front of it (issue #759).
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def limit_range_error(limit: Any) -> dict[str, Any] | None:
     """The typed error for a ``limit`` outside ``1..500``, or None when it is usable.
 
-    ``bool`` is refused rather than read as its integer value: ``limit=True`` is
-    a caller that sent a flag, and answering it as ``limit=1`` silently rewrites
-    the request in a way the caller cannot see or correct. A non-numeric value
-    (e.g. a string reaching this helper from a direct Python caller, bypassing
-    the tool schema) is refused with the same typed payload instead of raising
-    ``TypeError`` on the range comparison.
+    The value must be an ``int`` in that band; see ``is_usable_integer`` for why
+    ``bool`` and ``float`` are refused before the comparison rather than read
+    through it. A non-numeric value (e.g. a string reaching this helper from a
+    direct Python caller, bypassing the tool schema) is refused with the same
+    typed payload instead of raising ``TypeError`` on the range comparison.
     """
-    if (
-        isinstance(limit, bool)
-        or not isinstance(limit, (int, float))
-        or limit < ANALYTICS_LIMIT_MIN
-        or limit > ANALYTICS_LIMIT_MAX
-    ):
+    if not is_usable_integer(limit) or limit < ANALYTICS_LIMIT_MIN or limit > ANALYTICS_LIMIT_MAX:
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,
             f"limit must be between {ANALYTICS_LIMIT_MIN} and {ANALYTICS_LIMIT_MAX}, got {limit}",
@@ -316,8 +353,8 @@ PARTIALS_VALUES = ("none", "all")
 # ``""`` is a false token for env flags but is not a ``partials`` spelling, so it
 # is excluded here rather than mapped onto "none".
 _PARTIALS_ALIASES = {
-    **{token: "none" for token in sorted(_BOOL_FALSE_TOKENS - {""})},
-    **{token: "all" for token in sorted(_BOOL_TRUE_TOKENS)},
+    **{token: "none" for token in sorted(BOOL_FALSE_TOKENS - {""})},
+    **{token: "all" for token in sorted(BOOL_TRUE_TOKENS)},
 }
 
 
@@ -357,7 +394,6 @@ def schema_required(schema: dict[str, Any] | None) -> list[str]:
     return [str(name) for name in ((schema or {}).get("required") or [])]
 
 
-_CONTROL_CHARS_RE = re.compile(r"[\r\n\x00-\x1f\x7f-\x9f]")
 _MAX_LABEL_LENGTH = 200
 _LABEL_TRUNCATION_MARKER = "…"
 
@@ -372,7 +408,7 @@ def sanitize_label(value: Any) -> str:
     exactly once, at extraction/shaping time: the cap appends a character, so
     a second pass would see a 201-character label and cut it again.
     """
-    text = _CONTROL_CHARS_RE.sub("", str(value))
+    text = CONTROL_CHARS_PATTERN.sub("", str(value))
     # errors.body.cap_with_marker holds the one cap-and-marker implementation,
     # borrowed from the package root by public name; re-inlining the comparison
     # here is the second copy of the cut both callers must make identically.

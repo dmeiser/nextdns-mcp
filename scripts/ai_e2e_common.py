@@ -15,10 +15,11 @@ This module holds the deterministic building blocks used by the E2E harness
   server state via the raw NextDNS REST API (never via the MCP tool response).
 
 Nothing in this module opens a network connection, builds the MCP server, or
-starts a subprocess. The only package it imports from the server is
+starts a subprocess. The only package modules it imports from the server are
+``nextdns_mcp.config``, for the shared API-base resolver, and
 ``nextdns_mcp.tools.metrics``, the typed literal the plot tool validates its
-metric against — the one table here that would otherwise be a copy of something
-the server already owns. It is importable both as a sibling of
+metric against — values that would otherwise be copies of something the server
+already owns. It is importable both as a sibling of
 ``ai_e2e_harness.py`` (the harness inserts ``scripts/`` onto ``sys.path``) and
 directly by file path from the unit tests.
 """
@@ -26,15 +27,17 @@ directly by file path from the unit tests.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import random
+import stat
 import string
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, get_args
 
-from nextdns_mcp.config import DEFAULT_API_BASE
+from nextdns_mcp.config import get_api_base
 from nextdns_mcp.tools.metrics import PlotMetric
 
 # --------------------------------------------------------------------------- #
@@ -49,7 +52,9 @@ def api_base() -> str:
     module, so a snapshot taken here at import time would keep ``NEXTDNS_API_BASE``
     out of both the MCP server's environment and the measuring client — the two
     halves would then talk to different hosts and every contract check would come
-    back looking like a server fault rather than an env fault.
+    back looking like a server fault rather than an env fault. Resolving through
+    the server's own getter keeps the harness and the server on one rule for the
+    default, trailing slashes and the https-only check.
 
     Raises:
         ValueError: If the configured base is not ``https://``. This function is
@@ -58,10 +63,7 @@ def api_base() -> str:
             env default), so refusing here keeps the key off a plaintext wire:
             an ``http`` base fails before any request is constructed.
     """
-    base = os.environ.get("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
-    if not base.lower().startswith("https://"):
-        raise ValueError(f"NEXTDNS_API_BASE must use https:// — refusing to send the API key to {base!r}")
-    return base
+    return get_api_base()
 
 
 # Checklist coverage, grouped into run sections. A section maps 1:1 onto an
@@ -245,10 +247,17 @@ def private_open(path: Any, mode: str = "w"):
     CI host. The mode is applied through the fd so a pre-existing permissive
     file is tightened too, not only a brand-new one made private. Fail closed:
     if 0600 cannot be established the artifact is not written at all.
+
+    The descriptor is validated before the ``fchmod``: ``O_NOFOLLOW`` refuses
+    a symlink (ELOOP), ``O_NONBLOCK`` refuses a FIFO with no reader before
+    the open can hang, and ``fstat`` refuses anything that is not a regular
+    file.
     """
-    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC) | os.O_NOFOLLOW | os.O_NONBLOCK
     fd = os.open(str(Path(path)), flags, 0o600)
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "harness artifact is not a regular file", str(path))
         os.fchmod(fd, 0o600)
     except OSError:
         os.close(fd)

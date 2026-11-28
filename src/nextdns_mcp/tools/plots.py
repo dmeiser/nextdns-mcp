@@ -12,21 +12,25 @@ from prefab_ui.components import Column, Heading, Metric, Row
 
 from ..chart_ui import (
     DASHBOARD_THEME,
+    bounded_app_result,
     build_chart_series,
     build_timeseries_area_chart,
 )
 from ..charts import (
     build_chart_data,
+    cap_chart_series,
     downsample_chart_series,
+    extract_series_fields,
     series_budget_error,
-    validate_series_payload,
 )
 from ..coercion import OptionalProfileId
+from ..constants import escape_control_chars
 from ..errors import ErrorCode, error_payload
 from ..transport import MAX_SERIES_RESPONSE_BYTES, fetch_analytics_payload
 from ..utils import (
     PARTIALS_VALUES,
     build_series_params,
+    is_usable_integer,
     limit_range_error,
     normalize_partials,
     normalize_time_value,
@@ -49,15 +53,23 @@ def _build_series_chart(
     metric: str,
     times: list[str],
     series_data: list[dict[str, Any]],
-) -> ToolResult:
+) -> ToolResult | dict[str, Any]:
     """Build an interactive Prefab chart view and return a ToolResult with summary.
 
     The rendered rows are downsampled to the shared chart budget, but the
     reported interval count is the upstream ``len(times)``: the chart was drawn
     with fewer points, yet the series the caller asked for - and paid the range
     budget for - still carried all of them (issue #550).
+
+    The series count is capped by the sibling budget before those rows are built:
+    a ``;series`` answer carries one series per grouped value (per device, per
+    protocol), and each one costs a value in every chart row, so an uncapped M
+    materialized a dense 250 x M document before anything was drawn. The busiest
+    series are kept and the rest are summed interval by interval into one
+    ``Other`` series, so the plotted totals still match the summary (issue #789).
     """
     total_queries = sum(sum(series.get("queries") or []) for series in series_data)
+    series_data = cap_chart_series(series_data)
     chart_times, chart_series_data = downsample_chart_series(times, series_data)
     chart_data = build_chart_data(chart_times, chart_series_data)
     chart_series = build_chart_series(chart_series_data)
@@ -71,12 +83,27 @@ def _build_series_chart(
         build_timeseries_area_chart(chart_data, chart_series)
 
     summary = f"NextDNS Analytics: {metric} ({total_queries:,} total queries across {len(times)} intervals)"
-    app = PrefabApp(view=view, theme=DASHBOARD_THEME)
-    return ToolResult(content=summary, structured_content=app)
+    return bounded_app_result(PrefabApp(view=view, theme=DASHBOARD_THEME), summary, "analytics chart")
 
 
 def _validate_interval_and_limit(interval: int, limit: int) -> dict[str, Any] | None:
-    """The two bounds a caller can overshoot the same way: interval and limit."""
+    """The two bounds a caller can overshoot the same way: interval and limit.
+
+    ``interval`` is type-checked before the band is read: ``float("nan")``
+    compares False against both 60 and 86400, and a fractional interval is not
+    a window the ``;series`` endpoint can answer, so neither survives a bare
+    range check from a direct Python caller (issue #759). The band itself is
+    unchanged and stays inclusive.
+    """
+    if not is_usable_integer(interval):
+        return error_payload(
+            ErrorCode.INVALID_ARGUMENT,
+            f"interval must be an integer number of seconds, got {interval}",
+            minimum_interval=60,
+            max_interval=PLOT_INTERVAL_MAX,
+            interval=interval,
+        )
+
     if interval < 60:
         return error_payload(
             ErrorCode.INVALID_ARGUMENT,
@@ -152,7 +179,7 @@ async def _fetch_series_payload(
     """Fetch a time-series payload through the shared payload wrapper.
 
     Goes through ``transport.fetch_analytics_payload``, which awaits
-    ``transport._api_request_payload`` - the one place that turns raised
+    ``transport.api_request_payload`` - the one place that turns raised
     ``NextDNSError`` into standardized error payloads, returns the ACL layer's
     denial payload, and adds the profile/entry hint to a 404 (issue #183).
     Plotting keeping its own raise/except wrapper around the raw
@@ -183,7 +210,7 @@ async def _plot_analytics_series_impl(
     # an offset, not 1969 (see utils.normalize_time_value).
     from_time = normalize_time_value(from_time)
     to_time = normalize_time_value(to_time)
-    partials, partials_error = _validate_partials(partials)
+    partials, partials_error = _normalize_and_validate_partials(partials)
     if partials_error:
         return partials_error
 
@@ -203,7 +230,7 @@ async def _plot_analytics_series_impl(
     return await _fetch_plot_series(metric, validated.profile_id, params)
 
 
-def _validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:
+def _normalize_and_validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:
     """Map ``partials`` through normalize_partials and check the endpoint accepts it."""
     partials = normalize_partials(partials)
     if partials is not None and partials not in PARTIALS_VALUES:
@@ -219,7 +246,11 @@ def _validate_partials(partials: str) -> tuple[Any, dict[str, Any] | None]:
 async def _fetch_plot_series(metric: str, target_profile: str, params: dict[str, Any]) -> dict[str, Any] | ToolResult:
     """Fetch the metric's series for the profile and plot it, or return the fetch error."""
     url = f"/profiles/{target_profile}/analytics/{metric};series"
-    logger.info(f"Plotting analytics series: {metric} for profile {target_profile}")
+    logger.info(
+        "Plotting analytics series: %s for profile %s",
+        escape_control_chars(metric),
+        escape_control_chars(target_profile),
+    )
 
     payload, fetch_error = await _fetch_series_payload(url, params)
     if fetch_error:
@@ -240,7 +271,7 @@ def _plot_rendered_series(metric: str, target_profile: str, payload: dict[str, A
     cannot be unpacked is reported as INTERNAL_ERROR.
     """
     try:
-        times, series_data = validate_series_payload(payload)
+        times, series_data = extract_series_fields(payload)
 
         if not times or not series_data:
             return error_payload(
@@ -251,9 +282,9 @@ def _plot_rendered_series(metric: str, target_profile: str, payload: dict[str, A
             )
 
         return _build_series_chart(metric, times, series_data)
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error rendering chart for {metric}: {e}")
-        return error_payload(ErrorCode.INTERNAL_ERROR, f"Error rendering chart: {e}")
+    except (ValueError, TypeError, KeyError, AttributeError):
+        logger.error("Error rendering chart")
+        return error_payload(ErrorCode.INTERNAL_ERROR, "Error rendering chart")
 
 
 async def plotAnalytics(
@@ -301,6 +332,13 @@ async def plotAnalytics(
       read as UTC), must end after it starts, and spans at most 2000 intervals
       (at most 2000 points per series), so a wide range needs a proportionally
       larger ``interval``.
+
+    What is plotted is bounded independently of what is fetched: the chart draws
+    at most 250 downsampled intervals and at most 25 series - the busiest ones,
+    with every omitted series summed interval by interval into one ``Other``
+    series, so the chart still accounts for the query totals the summary reports.
+    A rendered chart over the 262144-byte result ceiling is refused with a
+    ``response_too_large`` payload naming its size rather than delivered trimmed.
 
     Examples:
         - ``plotAnalytics(metric="status", profile_id="<profile id>", from_time="-1d")``

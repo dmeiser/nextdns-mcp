@@ -20,7 +20,7 @@ import shutil
 import pytest
 
 from nextdns_mcp import generative_sandbox as sandbox_module
-from nextdns_mcp.chart_placement import _validate_chart_placement
+from nextdns_mcp.chart_placement import validate_chart_placement
 from nextdns_mcp.generative import PrefabGenerativeUI, _build_renderer_resource, _renderer_csp
 from nextdns_mcp.generative_sandbox import MAX_RESULT_BYTES, MAX_WIRE_LINE_BYTES
 
@@ -65,22 +65,55 @@ async def test_host_smoke_executes_generated_tree() -> None:
 
 @pytest.mark.asyncio
 async def test_host_smoke_renderer_resource_advertises_csp() -> None:
-    """The renderer resource carries the CSP domains the host must enforce."""
+    """The renderer resource needs no external origin: Python executes server-side."""
     resource = _build_renderer_resource(_renderer_csp())
     assert resource.mime_type == "text/html;profile=mcp-app"
     csp = resource.meta["ui"]["csp"]
-    assert csp["resourceDomains"] == ["https://cdn.jsdelivr.net"]
-    assert csp["connectDomains"] == [
-        "https://cdn.jsdelivr.net",
-        "https://pypi.org",
-        "https://files.pythonhosted.org",
-    ]
+    assert csp == {
+        "resourceDomains": [],
+        "connectDomains": [],
+        "frameDomains": [],
+        "baseUriDomains": [],
+    }
 
 
 def test_host_smoke_chart_sizing_guard_rejects_charts_in_tabs() -> None:
     """Charts nested in tabs are rejected so they never render at 0px width."""
     with pytest.raises(ValueError, match="cannot be placed"):
-        _validate_chart_placement("with Tabs():\n    with Tab('Charts'):\n        BarChart(data=[], series=[])")
+        validate_chart_placement("with Tabs():\n    with Tab('Charts'):\n        BarChart(data=[], series=[])")
+
+
+@requires_deno
+@pytest.mark.asyncio
+async def test_host_smoke_rejects_active_generated_trees() -> None:
+    """SEC-3 (nextdns-mcp#749): active content is rejected at the server boundary.
+
+    The sandbox executes model code with full Python, so the code imports the
+    blocked names itself — the prelude allowlist is ergonomics, and this
+    server-side tree validation is the actual boundary.
+    """
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = await _generate_tool(gen_ui)
+
+    embed_code = 'from prefab_ui.components import Embed\nwith PrefabApp() as app:\n    Embed(html="<script>alert(1)</script>")\n'
+    with pytest.raises(ValueError, match="Generated UI rejected"):
+        await gen_tool.fn(code=embed_code)
+
+    bridge_code = (
+        "from prefab_ui.actions import CallTool\n"
+        "with PrefabApp() as app:\n"
+        "    Button(label='go', on_click=CallTool('list_profiles'))\n"
+    )
+    with pytest.raises(ValueError, match="Generated UI rejected"):
+        await gen_tool.fn(code=bridge_code)
+
+    stylesheet_code = "with PrefabApp(stylesheets=['https://evil.example/x.css']) as app:\n    Text('x')\n"
+    with pytest.raises(ValueError, match="Generated UI rejected"):
+        await gen_tool.fn(code=stylesheet_code)
+
+    # A passive tree through the same path still renders.
+    app = await gen_tool.fn(code=SMOKE_CODE)
+    assert app.model_dump(by_alias=True)["title"] == "Prefab"
 
 
 @requires_deno
@@ -132,8 +165,10 @@ async def test_host_smoke_rejects_oversized_result_during_read(monkeypatch) -> N
     # The string is built at runtime in the worker so the submitted code stays
     # tiny; only the serialized result exceeds the wire cap.
     oversized = f'with PrefabApp() as app:\n    with Column(gap=4):\n        Text("x" * {MAX_WIRE_LINE_BYTES + 1})\n'
-    with pytest.raises(ValueError, match="result exceeds maximum size"):
-        await gen_tool.fn(code=oversized)
+    result = await gen_tool.fn(code=oversized)
+    assert result.is_error is True
+    assert result.structured_content["code"] == "response_too_large"
+    assert "result exceeds maximum size" in result.structured_content["error"]
 
     # The oversized wire must never have been decoded or validated — on pre-fix
     # code both lists carry a ~MAX_WIRE_LINE_BYTES+ entry and these assertions fail.

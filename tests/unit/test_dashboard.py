@@ -1,18 +1,20 @@
 """Unit tests for NextDNS interactive analytics dashboard and specialized UI tools."""
 
 import asyncio
+import inspect
 import json
 from collections.abc import Mapping
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastmcp.tools.base import ToolResult
-from prefab_ui.components import Card
+from prefab_ui.components import Card, Column, DataTableColumn
 
 from nextdns_mcp import chart_ui as chart_ui_module
 from nextdns_mcp import charts as charts_module
 from nextdns_mcp import utils as utils_mod
 from nextdns_mcp.tools import dashboard as dash_module
+from nextdns_mcp.tools import plots as plots_module
 from nextdns_mcp.tools.dashboard import components as ui
 from nextdns_mcp.tools.dashboard import data as data_mod
 from nextdns_mcp.tools.dashboard import formatters as fmt
@@ -32,6 +34,16 @@ def _find_component(node, comp_type):
     return None
 
 
+def _find_all_components(node, comp_type):
+    """Every component of ``comp_type`` in a builder's component tree, in document order."""
+    found = []
+    if getattr(node, "type", None) == comp_type:
+        found.append(node)
+    for child in getattr(node, "children", None) or []:
+        found.extend(_find_all_components(child, comp_type))
+    return found
+
+
 class TestDashboardHelpers:
     """Tests for unit formatting and component builder helpers."""
 
@@ -39,7 +51,7 @@ class TestDashboardHelpers:
         """The card is the view's direct child, and wrapping never mutates the card."""
         card = Card(title="Card title")
         snapshot = card.model_dump(exclude={"id"})
-        result = ui.wrap_card_result(card, "Summary text")
+        result = tool_mod._wrap_card_result(card, "Summary text")
         assert isinstance(result, ToolResult)
         assert result.content[0].text == "Summary text"
         view = result.structured_content["view"]
@@ -58,9 +70,9 @@ class TestDashboardHelpers:
         assert p["extra_key"] == "val"
         assert "none_key" not in p
 
-    def test_format_share(self):
-        assert data_mod._format_share(25, 100) == "25.0%"
-        assert data_mod._format_share(0, 0) == "0.0%"
+    def test_share_ratio(self):
+        assert data_mod._share_ratio(25, 100) == 0.25
+        assert data_mod._share_ratio(0, 0) == 0.0
 
     def test_item_and_blocked_queries(self):
         assert data_mod.item_queries({"queries": 42}) == 42
@@ -95,14 +107,15 @@ class TestDashboardHelpers:
         assert len(row.children) == 3
 
     def test_build_queries_series_card(self):
-        empty_card = ui._build_queries_series_card({})
-        assert empty_card is None
+        assert data_mod.prepare_queries_series({}) is None
 
         valid_payload = {
             "meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}},
             "data": [{"name": "blocked", "queries": [5]}],
         }
-        card = ui._build_queries_series_card(valid_payload)
+        prepared = data_mod.prepare_queries_series(valid_payload)
+        assert prepared is not None
+        card = ui._build_queries_series_card(*prepared)
         assert card is not None
 
     def test_build_queries_series_card_uses_the_shared_factory(self):
@@ -113,7 +126,9 @@ class TestDashboardHelpers:
             {"name": "blocked", "queries": [10, 20]},
             {"name": "allowed", "queries": [5, 8]},
         ]
-        card = ui._build_queries_series_card({"meta": {"series": {"times": times}}, "data": series_data})
+        prepared = data_mod.prepare_queries_series({"meta": {"series": {"times": times}}, "data": series_data})
+        assert prepared is not None
+        card = ui._build_queries_series_card(*prepared)
         chart = _find_component(card, "AreaChart")
         assert chart is not None
         assert chart.model_dump(exclude={"id"}, by_alias=True) == chart_ui_module.build_timeseries_area_chart(
@@ -128,7 +143,9 @@ class TestDashboardHelpers:
         n = 1999
         times = [f"2024-01-01T{(i // 3600) % 24:02d}:{(i // 60) % 60:02d}:{i % 60:02d}Z" for i in range(n)]
         series_data = [{"name": "blocked", "queries": [2] * n}]
-        card = ui._build_queries_series_card({"meta": {"series": {"times": times}}, "data": series_data})
+        prepared = data_mod.prepare_queries_series({"meta": {"series": {"times": times}}, "data": series_data})
+        assert prepared is not None
+        card = ui._build_queries_series_card(*prepared)
         chart = _find_component(card, "AreaChart")
         assert chart is not None
         assert len(chart.data) <= charts_module.PLOT_CHART_MAX_POINTS
@@ -152,7 +169,7 @@ class TestDashboardHelpers:
 
         empty_row = data_mod.reason_row({}, 0)
         assert empty_row["name"] == "Unknown"
-        assert empty_row["share"] == "0.0%"
+        assert empty_row["share"] == 0.0
 
     def test_devices_card(self):
         data = [
@@ -192,6 +209,42 @@ class TestDashboardHelpers:
         assert ui.build_gafam_card(chart_data, table_rows, view_type="bar") is not None
         assert ui.build_gafam_card(chart_data, table_rows, view_type="table") is not None
 
+    def test_gafam_card_pie_view_renders_only_the_chart(self):
+        # view_type="pie" must render only the chart; rendering the table too
+        # was the FUNC-5 defect (WORK-324). "auto" keeps rendering both.
+        data = [{"company": "google", "queries": 100}]
+        chart_data, table_rows = data_mod.gafam_rows(data)
+        pie_card = ui.build_gafam_card(chart_data, table_rows, view_type="pie")
+        assert _find_component(pie_card, "PieChart") is not None
+        assert _find_component(pie_card, "DataTable") is None
+        auto_card = ui.build_gafam_card(chart_data, table_rows, view_type="auto")
+        assert _find_component(auto_card, "PieChart") is not None
+        assert _find_component(auto_card, "DataTable") is not None
+
+    def test_pie_chart_clamps_negative_counts(self):
+        # A negative upstream count used to raise ValidationError from the
+        # pie's aggregation check (FUNC-5 / WORK-324); it clamps to zero.
+        chart = ui._pie_chart([{"label": "a", "queries": -1}, {"label": "b", "queries": 20}])
+        assert [row["queries"] for row in chart.data] == [0, 20]
+
+    def test_share_cells_sort_numerically_in_every_share_table(self):
+        # Issue #800: the Share cells carried pre-formatted ``"10.0%"`` strings,
+        # so an ascending sort put 10.0% before 2.0%. The cells now carry the
+        # ratio and the column formats it, so the sort is the numeric one.
+        counts = [("alpha", 2), ("bravo", 10), ("charlie", 88)]
+        _, gafam_table_rows = data_mod.gafam_rows([{"company": n, "queries": q} for n, q in counts])
+        tables = {
+            "reasons": ui._reasons_table([{"name": n, "queries": q} for n, q in counts]),
+            "devices": ui._devices_table([{"name": n, "queries": q} for n, q in counts]),
+            "gafam": ui._gafam_table(gafam_table_rows),
+        }
+        for name, table in tables.items():
+            (share_col,) = [c for c in table.columns if c.key == "share"]
+            assert share_col.sortable, name
+            assert share_col.format == "percent:1", name
+            rows = list(table.rows)
+            assert [r["share"] for r in sorted(rows, key=lambda r: r["share"])] == [0.02, 0.1, 0.88], name
+
     def test_security_card(self):
         enc = [{"encrypted": True, "queries": 90}, {"encrypted": False, "queries": 10}]
         dnssec = [{"validated": True, "queries": 20}, {"validated": False, "queries": 80}]
@@ -200,6 +253,20 @@ class TestDashboardHelpers:
 
         empty_card = ui.build_security_card(data_mod.calc_rate([], "encrypted"), data_mod.calc_rate([], "validated"))
         assert empty_card is not None
+
+    @pytest.mark.parametrize(
+        ("matching", "nonmatching", "expected"),
+        [(-20, 120, 0.0), (120, -20, 100.0), (50, 50, 50.0)],
+    )
+    def test_security_progress_stays_inside_the_bar_range(self, matching: int, nonmatching: int, expected: float):
+        # Issue #800: ``calc_rate`` answers whatever the API counted, and a count
+        # outside 0-100 reached ``Progress`` unclamped. The bar clamps; the text
+        # still reports the rate the API gave.
+        items = [{"encrypted": True, "queries": matching}, {"encrypted": False, "queries": nonmatching}]
+        val, total, pct = data_mod.calc_rate(items, "encrypted")
+        section = ui._build_security_section("Encrypted DNS", val, total, pct)
+        (progress,) = _find_all_components(section, "Progress")
+        assert progress.value == expected
 
     def test_destinations_card(self):
         data = [
@@ -232,6 +299,122 @@ class TestDashboardHelpers:
         # Single overlong label gets truncated to budget
         over = "x" * 100
         assert data_mod.destination_row({"domains": [over]})["sample_domains"] == over[:60]
+
+
+class TestDashboardRenderCaps:
+    """Render caps: paginated tables, rolled-up charts, and one byte ceiling per page.
+
+    ``limit`` bounds what an analytics endpoint answers - up to 500 rows - and
+    every one of those rows used to be serialized into the returned ``PrefabApp``:
+    ``section="all"`` at ``limit=500`` embedded thousands of rows in the document
+    handed back to the model (issue #789). These tests pin the caps that keep the
+    rendered page bounded while its totals stay the caller's.
+    """
+
+    @pytest.fixture
+    def mock_fat_endpoints(self, monkeypatch):
+        """Every endpoint answers 500 rows, and the series answers 100 series x 250 points."""
+        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
+
+        async def fake_fetch(pid, endpoint, params=None):
+            if endpoint == "status;series":
+                return (
+                    {
+                        "meta": {"series": {"times": [f"2024-01-01T{i:05d}" for i in range(250)]}},
+                        "data": [{"name": f"dev{i}", "queries": [1] * 250} for i in range(100)],
+                    },
+                    None,
+                )
+            return (
+                {
+                    "data": [
+                        {
+                            "domain": f"sub{i:04d}.example-domain.com",
+                            "name": f"Name {i}",
+                            "id": f"dev{i}",
+                            "model": f"Model {i}",
+                            "ip": f"10.{i // 65536 % 256}.{i // 256 % 256}.{i % 256}",
+                            "company": f"corp{i % 5}",
+                            "code": f"C{i % 50:02d}",
+                            "domains": [f"sample{i}.example.com"],
+                            "queries": 500 - (i % 400),
+                        }
+                        for i in range(500)
+                    ]
+                },
+                None,
+            )
+
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
+
+    def test_a_large_table_is_capped_and_paginated(self):
+        data = [{"domain": f"d{i:03d}.example.com", "queries": 500 - i} for i in range(500)]
+        table = _find_component(ui.build_domains_card("Resolved Domains", "desc", data), "DataTable")
+        assert table is not None
+        assert len(table.rows) == ui.MAX_TABLE_ROWS
+        assert table.paginated is True
+        assert table.page_size == ui.TABLE_PAGE_SIZE
+        # The busiest rows are the ones that survive the cap.
+        assert table.rows[0]["domain"] == "d000.example.com"
+        assert table.rows[-1]["queries"] == 500 - (ui.MAX_TABLE_ROWS - 1)
+
+    def test_a_table_inside_the_page_size_is_not_paginated(self):
+        data = [{"domain": f"d{i}.example.com", "queries": 5} for i in range(3)]
+        table = _find_component(ui.build_domains_card("Resolved Domains", "desc", data), "DataTable")
+        assert table is not None
+        assert table.paginated is False
+        assert len(table.rows) == 3
+
+    def test_bar_and_pie_charts_roll_up_their_categories(self):
+        data = [{"domain": f"d{i:03d}.example.com", "queries": 500 - i} for i in range(500)]
+        total = sum(item["queries"] for item in data)
+        for view_type, comp_type in (("bar", "BarChart"), ("pie", "PieChart")):
+            chart = _find_component(
+                ui.build_domains_card("Resolved Domains", "desc", data, view_type=view_type), comp_type
+            )
+            assert chart is not None
+            assert len(chart.data) == charts_module.CHART_MAX_CATEGORIES
+            assert chart.data[-1]["label"] == charts_module.CHART_ROLLUP_LABEL
+            # The rollup carries what the chart no longer draws, so the total holds.
+            assert sum(row["queries"] for row in chart.data) == total
+
+    def test_categories_within_the_budget_come_back_untouched(self):
+        rows = [{"label": f"c{i}", "queries": i} for i in range(charts_module.CHART_MAX_CATEGORIES)]
+        assert charts_module.cap_chart_categories(rows) is rows
+
+    def test_categories_are_ranked_and_a_null_count_prices_at_zero(self):
+        rows = [{"label": f"c{i}", "queries": 10} for i in range(charts_module.CHART_MAX_CATEGORIES)] + [
+            {"label": "null", "queries": None}
+        ]
+        capped = charts_module.cap_chart_categories(rows)
+        assert len(capped) == charts_module.CHART_MAX_CATEGORIES
+        assert capped[0]["label"] == "c0"
+        # One kept-budget row and the null row are the omitted set; null adds nothing.
+        assert capped[-1] == {"label": charts_module.CHART_ROLLUP_LABEL, "queries": 10}
+
+    def test_the_queries_card_caps_its_series(self):
+        payload = {
+            "meta": {"series": {"times": ["2024-01-01T00:00:00Z"]}},
+            "data": [{"name": f"dev{i}", "queries": [i + 1]} for i in range(100)],
+        }
+        prepared = data_mod.prepare_queries_series(payload)
+        assert prepared is not None
+        chart = _find_component(ui._build_queries_series_card(*prepared), "AreaChart")
+        assert chart is not None
+        assert len(chart.series) == charts_module.CHART_MAX_SERIES
+        assert chart.series[-1].label == charts_module.CHART_ROLLUP_LABEL
+        assert sum(row[f"series_{i}"] for row in chart.data for i in range(charts_module.CHART_MAX_SERIES)) == sum(
+            range(1, 101)
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("view_type", ["table", "bar", "pie"])
+    async def test_all_sections_at_the_maximum_limit_stay_under_the_result_ceiling(self, mock_fat_endpoints, view_type):
+        """The reported shape: ``section="all"``, ``limit=500``, 500 rows per card (issue #789)."""
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="all", limit=500, view_type=view_type)
+        assert isinstance(res, ToolResult)
+        wire = json.dumps(res.structured_content, separators=(",", ":")).encode("utf-8")
+        assert len(wire) <= chart_ui_module.MAX_RESULT_BYTES
 
 
 class TestDashboardFetchAndValidation:
@@ -269,14 +452,14 @@ class TestDashboardFetchAndValidation:
     @pytest.mark.asyncio
     async def test_fetch_analytics_payload_error_classification(self, monkeypatch):
         monkeypatch.setattr(
-            "nextdns_mcp.transport._api_request_payload",
+            "nextdns_mcp.transport.api_request_payload",
             AsyncMock(return_value={"code": "http_error", "error": "upstream"}),
         )
         payload, err = await data_mod._fetch_analytics_payload("p1", "status")
         assert payload is None and err["code"] == "http_error"
 
         monkeypatch.setattr(
-            "nextdns_mcp.transport._api_request_payload", AsyncMock(return_value={"data": [{"ok": True}]})
+            "nextdns_mcp.transport.api_request_payload", AsyncMock(return_value={"data": [{"ok": True}]})
         )
         payload, err = await data_mod._fetch_analytics_payload("p1", "status")
         assert payload == {"data": [{"ok": True}]} and err is None
@@ -285,7 +468,7 @@ class TestDashboardFetchAndValidation:
     async def test_fetch_analytics_payload_caps_series_and_bounded_endpoints(self, monkeypatch):
         """`;series` runs under the series ceiling, every other endpoint under the dashboard cap."""
         stub = AsyncMock(return_value={"data": []})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", stub)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", stub)
 
         payload, err = await data_mod._fetch_analytics_payload("p1", "status")
         assert payload == {"data": []} and err is None
@@ -777,9 +960,18 @@ class TestDashboardToolsExecution:
             assert "2000-point series budget" in res["error"], section
             assert calls == [], section
 
-    def test_build_queries_series_card_exception_handling(self, monkeypatch):
-        monkeypatch.setattr(ui, "validate_series_payload", MagicMock(side_effect=ValueError("bad data")))
-        assert ui._build_queries_series_card({"meta": {}}) is None
+    def test_prepare_queries_series_exception_handling(self, monkeypatch):
+        monkeypatch.setattr(data_mod, "extract_series_fields", MagicMock(side_effect=ValueError("bad data")))
+        assert data_mod.prepare_queries_series({"meta": {}}) is None
+
+    def test_prepare_queries_series_unexpected_error_propagates(self, monkeypatch):
+        # Only payload-shape errors degrade to a missing card; anything else
+        # is a programming error and must surface (FUNC-5 / WORK-324).
+        monkeypatch.setattr(
+            data_mod, "extract_series_fields", MagicMock(side_effect=RuntimeError("unexpected failure"))
+        )
+        with pytest.raises(RuntimeError, match="unexpected failure"):
+            data_mod.prepare_queries_series({"meta": {}})
 
     def test_empty_cards_rendering(self):
         # Format summary with empty items
@@ -836,14 +1028,47 @@ class TestDashboardToolsExecution:
         assert len(calls) == 12
         assert 1 <= max_in_flight <= data_mod.OVERVIEW_FANOUT_CONCURRENCY
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", ["overview", "all", "domains", "kpi"])
+    async def test_a_page_over_the_result_ceiling_is_refused(self, mock_all_endpoints, monkeypatch, section):
+        """Every page surface ends at the same gate: no oversized app reaches the caller."""
+        monkeypatch.setattr(chart_ui_module, "MAX_RESULT_BYTES", 1)
+        res = await dash_module.overviewDashboard(profile_id="abc123", section=section, limit=500)
+        assert res["code"] == "response_too_large"
+        assert res["max_result_bytes"] == 1
+        assert res["result_bytes"] > 1
+
+    def test_rendered_app_bytes_counts_raw_utf8_not_ascii_escapes(self):
+        """The ceiling must charge what the stdio wire carries, not ``\\uXXXX`` escapes."""
+        label = "münchen-例え.jp" * 5
+        rows = [{"domain": label, "queries": 100} for _ in range(100)]
+        table = ui._data_table([DataTableColumn(key="domain", header="Domain")], rows)
+        with Column(gap=4, css_class="p-6", children=[Card(title="Non-ASCII", children=[table])]) as view:
+            pass
+        app = ui.build_page_app(view)
+        measured = chart_ui_module.rendered_app_bytes(app)
+        wire = len(json.dumps(app.to_json(), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        escaped = len(json.dumps(app.to_json(), separators=(",", ":")).encode("utf-8"))
+        assert measured == wire
+        assert escaped > wire
+
+    def test_model_facing_cap_claims_match_the_renderer(self):
+        """Published descriptions state the totals the caps actually render."""
+        dash_doc = inspect.getdoc(dash_module.overviewDashboard) or ""
+        plot_doc = inspect.getdoc(plots_module.plotAnalytics) or ""
+        assert "24 busiest entries" in dash_doc
+        assert "25 series including" in dash_doc
+        assert "at most 25 series" in plot_doc
+
 
 class TestFanoutShortCircuit:
-    """A queued fan-out wave is skipped once upstream has rejected the request itself.
+    """A queued fan-out wave is skipped once any fetch of the fan-out has failed.
 
     ``overviewDashboard(section='all')`` dispatches 12 endpoints under a semaphore of
-    4, so two thirds of the fan-out is still queued when the first wave answers. A 429,
-    401, 403 or 404 rejects the credential, the profile or the quota — not one endpoint —
-    so the queued waves can only repeat it while spending quota and latency (issue #549).
+    4, so two thirds of the fan-out is still queued when the first wave answers. The
+    unpacking layer answers the overview with the first error and discards every
+    payload beside it, so once any fetch has failed the queued waves can only spend
+    quota and latency on results that are never read (issues #549, #792).
     """
 
     EXTRA_ENDPOINTS = ("reasons", "devices", "ips", "encryption", "dnssec")
@@ -879,33 +1104,38 @@ class TestFanoutShortCircuit:
         assert started == ["status", "status;series", "domains", "domains"]
 
     @pytest.mark.asyncio
-    async def test_per_endpoint_failure_still_dispatches_every_wave(self, monkeypatch):
-        """A 5xx says nothing about the other endpoints, so the fan-out must not stop."""
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            {"code": "http_error", "error": "upstream said 502", "status_code": 502},
+            {"code": "http_error", "error": "request timed out"},
+            {"code": "response_too_large", "error": "response crossed the byte budget", "max_response_bytes": 65536},
+        ],
+        ids=["http_502", "timeout", "response_too_large"],
+    )
+    async def test_a_first_wave_failure_stops_the_queued_waves(self, monkeypatch, failure):
+        """Any first-wave error condemns the fan-out: its result would be discarded anyway."""
         started: list[str] = []
-        gateway = {"code": "http_error", "error": "upstream said 502", "status_code": 502}
         monkeypatch.setattr(
-            data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("status", gateway), "status")
+            data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("status", failure), "status")
         )
 
         _, _, _, _, extra, err = await data_mod.fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
 
-        assert err == gateway
-        assert len(started) == 12
+        assert err == failure
         assert extra is None
+        assert started == ["status", "status;series", "domains", "domains"]
 
-    def test_stop_signal_latches_only_a_request_fatal_error(self):
-        """The first fatal error is the one reported, and a success or a 5xx never latches."""
+    def test_stop_signal_latches_the_first_error_and_only_errors(self):
+        """A success never latches; the first error is the one reported."""
         stop = data_mod._FanoutStop()
         stop.observe(None)
         assert stop.error is None
         gateway = {"code": "http_error", "error": "upstream said 502", "status_code": 502}
         stop.observe(gateway)
-        assert stop.error is None
-        rate_limited = {"code": "http_error", "error": "upstream said 429", "status_code": 429}
-        stop.observe(rate_limited)
         stop.observe({"code": "http_error", "error": "upstream said 401", "status_code": 401})
         stop.observe(None)
-        assert stop.error is rate_limited
+        assert stop.error is gateway
 
 
 class TestExtraSectionBinding:
@@ -1453,6 +1683,17 @@ class TestViewTypeScope:
         counts = self._counts(res)
         # Resolved, Blocked, Root, Reasons, Devices, GAFAM, Countries; IPs has no chart form.
         assert counts["BarChart"] == 7
+        assert "PieChart" not in counts
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("view_type", ["auto", "table", "bar", "pie"])
+    async def test_ips_is_fixed_format_and_ignores_view_type(self, rows, view_type):
+        """The documented table-only card stays table-only for every format value."""
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="ips", view_type=view_type)
+        assert isinstance(res, ToolResult)
+        counts = self._counts(res)
+        assert counts["DataTable"] == 1
+        assert "BarChart" not in counts
         assert "PieChart" not in counts
 
 

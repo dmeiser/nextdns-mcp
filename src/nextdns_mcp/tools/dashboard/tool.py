@@ -6,7 +6,8 @@ single-card section over a shared fetch-word-render flow, the few sections whose
 payload shape differs (kpi, gafam, security), and the table that maps a ``section``
 argument to a handler. Each implementation reads through ``data``, renders through
 ``components`` and words its result through ``formatters`` - it holds no transport
-call and no Prefab construction of its own.
+call; the one Prefab it builds is the ``Column`` that wraps a card into the served
+``ToolResult`` (WORK-339).
 
 SPDX-License-Identifier: MIT
 """
@@ -17,8 +18,9 @@ from functools import partial
 from typing import Any, Literal, NamedTuple, Protocol, get_args
 
 from fastmcp.tools.base import ToolResult
-from prefab_ui.components import Card
+from prefab_ui.components import Card, Column
 
+from ...chart_ui import bounded_app_result
 from ...charts import analytics_range_error
 from ...coercion import OptionalProfileId
 from ...errors import ErrorCode, error_payload
@@ -35,7 +37,6 @@ from .components import (
     build_page_app,
     build_reasons_card,
     build_security_card,
-    wrap_card_result,
 )
 from .data import (
     build_analytics_params,
@@ -50,6 +51,8 @@ from .data import (
     gafam_rows,
     item_queries,
     payload_data,
+    prepare_extra_sections,
+    prepare_queries_series,
     reason_label,
 )
 from .formatters import (
@@ -58,6 +61,13 @@ from .formatters import (
     ip_summary_items,
     overview_top_summary,
 )
+
+
+def _wrap_card_result(card: Card, summary_text: str) -> ToolResult | dict[str, Any]:
+    """Wrap a single visual card into the ToolResult the MCP surface answers with."""
+    with Column(gap=4, css_class="p-6", children=[card]) as view:
+        pass
+    return bounded_app_result(build_page_app(view), summary_text, "dashboard card")
 
 
 @dataclass(frozen=True)
@@ -95,7 +105,7 @@ async def _card_analytics_impl(
         return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = spec.items(data)
     summary = format_items_summary(spec.summary_title, spec.summary_noun, items, sum(q for _, q in items))
-    return wrap_card_result(spec.build_card(data, view_type), summary)
+    return _wrap_card_result(spec.build_card(data, view_type), summary)
 
 
 _RESOLVED_DOMAINS_SPEC = _CardSpec(
@@ -157,6 +167,8 @@ _DEVICES_SPEC = _CardSpec(
     build_card=lambda data, view_type: build_devices_card(data, view_type=view_type),
 )
 
+# IPs have no chart form: `build_ips_card` is fixed-format and ignores view_type,
+# as documented for section="ips". The shared builder signature drops that argument here.
 _IPS_SPEC = _CardSpec(
     endpoint="ips",
     summary_title="IP Analytics",
@@ -193,7 +205,7 @@ async def _gafam_analytics_impl(
     chart_data, table_rows = gafam_rows(data)
     items = gafam_summary_items(chart_data)
     summary = format_items_summary("GAFAM Dominance", None, items, sum(q for _, q in items))
-    return wrap_card_result(build_gafam_card(chart_data, table_rows, view_type=view_type), summary)
+    return _wrap_card_result(build_gafam_card(chart_data, table_rows, view_type=view_type), summary)
 
 
 async def _security_analytics_impl(
@@ -219,7 +231,7 @@ async def _security_analytics_impl(
         f"[Rendered Security Analytics: Encrypted DNS {enc_pct:.2f}% ({enc_val:,}/{enc_total:,}), "
         f"DNSSEC {dnssec_pct:.2f}% ({dnssec_val:,}/{dnssec_total:,})]"
     )
-    return wrap_card_result(build_security_card(encryption_rate, dnssec_rate), summary)
+    return _wrap_card_result(build_security_card(encryption_rate, dnssec_rate), summary)
 
 
 async def _kpi_analytics_impl(
@@ -239,7 +251,7 @@ async def _kpi_analytics_impl(
     summary = (
         f"[Rendered NextDNS KPI Metrics: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%)]"
     )
-    return ToolResult(content=summary, structured_content=build_kpi_app(kpis))
+    return bounded_app_result(build_kpi_app(kpis), summary, "KPI cards")
 
 
 DashboardSection = Literal[
@@ -352,16 +364,19 @@ async def _render_overview_page(
 
     eff_domain_view = _resolve_domain_view(domain_view, view_type)
     kpis = calculate_status_kpis(payload_data(status_payload))
-    view = assemble_overview_layout(kpis, series_payload, resolved_data, blocked_data, domain_view=eff_domain_view)
+    series_chart = prepare_queries_series(series_payload)
+    view = assemble_overview_layout(kpis, series_chart, resolved_data, blocked_data, domain_view=eff_domain_view)
     if include_extra and extra_payloads is not None:
-        append_extra_cards(view, extra_payloads, domain_view=eff_domain_view, view_type=view_type)
+        append_extra_cards(
+            view, prepare_extra_sections(extra_payloads), domain_view=eff_domain_view, view_type=view_type
+        )
 
     top_summary = overview_top_summary(resolved_data, blocked_data)
     summary = (
         f"[Rendered NextDNS Dashboard: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
         f"{top_summary}]"
     )
-    return ToolResult(content=summary, structured_content=build_page_app(view))
+    return bounded_app_result(build_page_app(view), summary, "dashboard page")
 
 
 def _validate_dashboard_arg(name: str, value: Any, allowed_literal: Any) -> dict[str, Any] | None:
@@ -513,6 +528,15 @@ async def overviewDashboard(
         section: Dashboard section or widget to render (default "overview").
         view_type: Visualization format: "auto" (default: table or card default), "bar", "table", or "pie".
         domain_view: Visualization format for domain cards in overview mode: "table" (default), "bar", or "pie".
+
+    What is fetched is bounded by ``limit``; what is rendered is bounded too. A
+    table shows at most its 100 busiest rows, paginated 25 to a page, and a bar or
+    pie chart draws its 24 busiest entries with the rest rolled up into one
+    "Other" entry (25 entries in all), so the chart's totals still account for
+    every row it was sent. A time-series chart draws at most 25 series including
+    that rollup. A rendered page still over the 262144-byte result ceiling is
+    refused with a ``response_too_large`` payload naming its size rather than
+    delivered trimmed.
     """
     return await _overview_dashboard_impl(
         profile_id=profile_id,

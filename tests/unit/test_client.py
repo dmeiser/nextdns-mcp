@@ -440,45 +440,50 @@ class TestAccessControlledClientVerbConveniences:
         assert exc_info.value.code == "read_access_denied"
 
 
-class TestRawProbeClientSingleton:
-    """The probe transport is a lazy singleton closed on shutdown (issue #639)."""
+class TestProbeClientOwner:
+    """The probe transport is a lazy per-owner client closed at shutdown (issues #639, #774)."""
 
-    def test_get_raw_probe_client_caches_instance(self, monkeypatch, mock_api_key) -> None:
+    def test_the_owner_caches_its_transport(self, monkeypatch, mock_api_key) -> None:
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        client_module._set_raw_probe_client_singleton_for_tests(None)
+        owner = client_module.ProbeClientOwner()
 
-        first = client_module.get_raw_probe_client()
-        second = client_module.get_raw_probe_client()
+        first = owner.get()
+        second = owner.get()
 
         assert first is second
         assert isinstance(first, client_module.RawProbeTransport)
         assert first.base_url == "https://api.nextdns.io"
         assert first.headers["X-Api-Key"] == mock_api_key
 
-    @pytest.mark.asyncio
-    async def test_close_raw_probe_client_closes_and_resets(self, monkeypatch, mock_api_key) -> None:
+    def test_two_owners_never_share_a_transport(self, monkeypatch, mock_api_key) -> None:
+        """Per-server ownership: one server's probe transport is not its sibling's."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        client_module._set_raw_probe_client_singleton_for_tests(None)
 
-        transport = client_module.get_raw_probe_client()
+        assert client_module.ProbeClientOwner().get() is not client_module.ProbeClientOwner().get()
+
+    @pytest.mark.asyncio
+    async def test_aclose_closes_and_resets(self, monkeypatch, mock_api_key) -> None:
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        owner = client_module.ProbeClientOwner()
+
+        transport = owner.get()
         assert not transport.is_closed
 
-        await client_module.close_raw_probe_client()
+        await owner.aclose()
         assert transport.is_closed
-        assert client_module._get_raw_probe_client_singleton_for_tests() is None
+        assert owner._client is None
 
     @pytest.mark.asyncio
-    async def test_close_raw_probe_client_noop_when_none(self) -> None:
-        client_module._set_raw_probe_client_singleton_for_tests(None)
+    async def test_aclose_is_a_noop_before_any_transport(self) -> None:
+        owner = client_module.ProbeClientOwner()
 
-        await client_module.close_raw_probe_client()
-        assert client_module._get_raw_probe_client_singleton_for_tests() is None
+        await owner.aclose()
+        assert owner._client is None
 
-    def test_get_raw_probe_client_requires_an_api_key(self, monkeypatch) -> None:
+    def test_get_requires_an_api_key(self, monkeypatch) -> None:
         """No key means no probe transport: the same fail-fast as the ACL client."""
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
         monkeypatch.delenv("NEXTDNS_API_KEY_FILE", raising=False)
-        client_module._set_raw_probe_client_singleton_for_tests(None)
 
         with pytest.raises(ConfigurationError):
-            client_module.get_raw_probe_client()
+            client_module.ProbeClientOwner().get()

@@ -39,7 +39,7 @@ def _flat_key(name: str) -> str:
     return _WORD_SPLIT.sub("", name.casefold())
 
 
-def _words(text: str) -> set[str]:
+def comparable_words(text: str) -> set[str]:
     """Split a tool name or query into comparable words.
 
     Trailing 's' is stripped from longer words so the plural of a tool's name
@@ -85,7 +85,7 @@ def _usable_partners(word: str, vocabulary: set[str]) -> set[str]:
     return {p for p in _morphological_partners(word) if len(p) > 2 and p in vocabulary and p != word}
 
 
-def _variant_words(query: str, vocabulary: set[str], exclude: set[str] | frozenset[str] = frozenset()) -> set[str]:
+def variant_words(query: str, vocabulary: set[str], exclude: set[str] | frozenset[str] = frozenset()) -> set[str]:
     """Plural/singular partners of the query's words that tool names do use.
 
     bm25 indexes raw text with no stemming, so a query that says 'categories'
@@ -102,7 +102,7 @@ def _variant_words(query: str, vocabulary: set[str], exclude: set[str] | frozens
     extra: set[str] = set()
     for raw in _WORD_SPLIT.split(query):
         word = raw.casefold()
-        if len(word) < 3 or any(folded in exclude for folded in _words(word)):
+        if len(word) < 3 or any(folded in exclude for folded in comparable_words(word)):
             continue
         extra.update(_usable_partners(word, vocabulary))
     return extra
@@ -120,7 +120,7 @@ def _parameter_words(tool: Tool) -> set[str]:
     """The words of one tool's parameter names."""
     words: set[str] = set()
     for parameter in _tool_properties(tool):
-        words.update(_words(parameter))
+        words.update(comparable_words(parameter))
     return words
 
 
@@ -140,13 +140,13 @@ def _scope_words(tools: Sequence[Tool]) -> set[str]:
     return {word for word, count in counts.items() if count >= threshold}
 
 
-def _strip_scope_mentions(query: str, scope_words: set[str]) -> str:
+def strip_scope_mentions(query: str, scope_words: set[str]) -> str:
     """Take scope references out of a query before anything scores it.
 
     Only the pair counts: `profile` on its own is a subject ("delete profile"),
     and stays. A word that is not a scope noun stays too, even before an
     identifier, because then the identifier is the thing being asked about.
-    The captured token is compared through :func:`_words` because the regex
+    The captured token is compared through :func:`comparable_words` because the regex
     keeps a compound spelling whole (`profile_id`) while the scope set holds
     the split folded words (`profile`, `id`); without the split the `=`-mention
     the comment above cites never matched, measured live.
@@ -154,7 +154,7 @@ def _strip_scope_mentions(query: str, scope_words: set[str]) -> str:
 
     def _replace(match: re.Match[str]) -> str:
         separator = match.group(2)
-        if separator and _words(match.group(1)) & scope_words:
+        if separator and comparable_words(match.group(1)) & scope_words:
             return " "
         return match.group(0)
 
@@ -180,7 +180,7 @@ def _leading_word(name: str) -> str:
 
 def _name_words(tools: Sequence[Tool]) -> dict[str, set[str]]:
     """The words of each tool's name."""
-    return {tool.name: set(_words(tool.name)) for tool in tools}
+    return {tool.name: set(comparable_words(tool.name)) for tool in tools}
 
 
 def _accepted_value_words(schema: Any) -> set[str]:
@@ -188,7 +188,7 @@ def _accepted_value_words(schema: Any) -> set[str]:
     accepted = schema.get("enum") if isinstance(schema, dict) else None
     if not isinstance(accepted, list):
         return set()
-    return {word for value in accepted for word in _words(str(value))}
+    return {word for value in accepted for word in comparable_words(str(value))}
 
 
 def _vocabulary_words(tools: Sequence[Tool]) -> dict[str, set[str]]:
@@ -202,7 +202,7 @@ def _vocabulary_words(tools: Sequence[Tool]) -> dict[str, set[str]]:
     for tool in tools:
         words: set[str] = set()
         for parameter, schema in _tool_properties(tool).items():
-            words.update(_words(parameter))
+            words.update(comparable_words(parameter))
             words.update(_accepted_value_words(schema))
         out[tool.name] = words
     return out
@@ -352,7 +352,7 @@ def _tool_named_by(
     name_shared: set[str],
     vocab_shared: set[str],
 ) -> bool:
-    """Whether the caller's own words name this tool (see _named_tools)."""
+    """Whether the caller's own words name this tool (see named_tools)."""
     if (query_words & name_words) - {leading_word}:
         return True
     verb_match = leading_word in query_words and leading_word in name_words
@@ -361,7 +361,7 @@ def _tool_named_by(
     )
 
 
-def _named_tools(
+def named_tools(
     query_words: set[str],
     names: dict[str, set[str]],
     vocabulary: dict[str, set[str]],
@@ -427,12 +427,14 @@ def _word_scorer(
     )
 
 
-def _rank_by_name_overlap(
+def rank_by_name_overlap(
     tools: Sequence[Tool],
     query: str,
     names: dict[str, set[str]] | None = None,
     vocabulary: dict[str, set[str]] | None = None,
     shared: tuple[set[str], set[str]] | None = None,
+    leading: Mapping[str, str] | None = None,
+    generic: set[str] | frozenset[str] | None = None,
 ) -> list[Tool]:
     """Order matched tools by how much of the query their own words account for.
 
@@ -451,15 +453,18 @@ def _rank_by_name_overlap(
     to the underlying rank: the shared-word discount made "delete profile" score
     equal for deleteProfile and deleteRewrite (both match on the verb "delete",
     "profile" is discounted), and only the raw name overlap says the caller also
-    spelled deleteProfile itself. `names`/`vocabulary`/`shared` let the transform
-    hand in its memoized catalog structures instead of rebuilding them.
+    spelled deleteProfile itself. `names`/`vocabulary`/`shared`/`leading`/`generic`
+    let the transform hand in its memoized catalog structures instead of
+    rebuilding them: without the last two, every warm rank re-derived each
+    name's leading word and the catalog's generic verbs - 162 regex splits at
+    the shipped 81-tool catalog, on every query.
     """
     names = _name_words(tools) if names is None else names
     vocabulary = _vocabulary_words(tools) if vocabulary is None else vocabulary
-    query_words = _words(query)
+    query_words = comparable_words(query)
     if not query_words:
         return list(tools)
-    scorer = _word_scorer(query_words, names, vocabulary, shared)
+    scorer = _word_scorer(query_words, names, vocabulary, shared, leading, generic)
 
     def _key(pair: tuple[int, Tool]) -> tuple[int, int, int]:
         index, tool = pair
@@ -476,7 +481,7 @@ def _overlap(query_words: set[str], words: set[str] | None, shared: set[str]) ->
 
 
 @dataclass
-class _CatalogWords:
+class CatalogWords:
     """One catalog's word structures, computed once and reused on every query.
 
     The catalog is registered at startup and static while the server runs, so
@@ -499,11 +504,11 @@ class _CatalogWords:
     flat_names: dict[str, str]
 
 
-def _catalog_words_for(tools: Sequence[Tool]) -> _CatalogWords:
+def _catalog_words_for(tools: Sequence[Tool]) -> CatalogWords:
     names = _name_words(tools)
     vocabulary = _vocabulary_words(tools)
     name_shared, vocab_shared = _shared_word_sets(names, vocabulary)
-    return _CatalogWords(
+    return CatalogWords(
         names=names,
         vocabulary=vocabulary,
         leading={name: _leading_word(name) for name in names},
@@ -516,7 +521,7 @@ def _catalog_words_for(tools: Sequence[Tool]) -> _CatalogWords:
     )
 
 
-class _CatalogWordMemos:
+class CatalogWordMemos:
     """The two-level word memo shared by the disclosure paths.
 
     ``by_order`` is the hot-path key: the catalog's tool names in the order
@@ -527,11 +532,11 @@ class _CatalogWordMemos:
     """
 
     def __init__(self) -> None:
-        self.by_order: dict[tuple[str, ...], _CatalogWords] = {}
-        self.by_names: dict[tuple[str, ...], _CatalogWords] = {}
+        self.by_order: dict[tuple[str, ...], CatalogWords] = {}
+        self.by_names: dict[tuple[str, ...], CatalogWords] = {}
 
 
-def _catalog_words_memo(memos: _CatalogWordMemos, tools: Sequence[Tool]) -> _CatalogWords:
+def catalog_words_memo(memos: CatalogWordMemos, tools: Sequence[Tool]) -> CatalogWords:
     """One catalog's word structures, shared by the search and call-shape paths.
 
     The transform's query ranking and the middleware's unknown-name matching
@@ -554,6 +559,14 @@ def _catalog_words_memo(memos: _CatalogWordMemos, tools: Sequence[Tool]) -> _Cat
         memos.by_names[key] = memo
     memos.by_order[order_key] = memo
     return memo
+
+
+# Pre-rename private names, kept bound for tool_search_shape's imports, which
+# this rename does not move; tool_search takes the public names (issue #783).
+_words = comparable_words
+_catalog_words_memo = catalog_words_memo
+_CatalogWords = CatalogWords
+_CatalogWordMemos = CatalogWordMemos
 
 
 def _tool_properties(tool: Tool) -> dict[str, Any]:

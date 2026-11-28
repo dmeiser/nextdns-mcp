@@ -99,8 +99,22 @@ async def _profile_renamed_check(m: Any, targets: Any, pid: str) -> tuple[str, s
     )
 
 
+def _profile_gone_without_id() -> tuple[str, str, str, dict[str, Any]]:
+    # An empty pid means this run never established a profile id, and absence
+    # can only be proven FOR an id: the old ``(True, ABSENT)`` shortcut turned
+    # a failed profiles.create into a verified deletion pass.
+    return (
+        "failed",
+        "no profile id was established for this run, so deletion cannot be confirmed",
+        "",
+        {"endpoint": "GET /profiles/{id}", "verified_gone": False, "verdict": common.INDETERMINATE},
+    )
+
+
 async def _profile_gone_check(m: Any, targets: Any, pid: str) -> tuple[str, str, str, dict[str, Any]]:
-    gone, verdict = (True, common.ABSENT) if not pid else await harness._profile_gone(m, pid, targets)
+    if not pid:
+        return _profile_gone_without_id()
+    gone, verdict = await harness._profile_gone(m, pid, targets)
     return _outcome(
         gone,
         f"profile {pid} not confirmed deleted ({verdict})",

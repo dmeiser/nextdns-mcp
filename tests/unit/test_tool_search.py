@@ -14,6 +14,8 @@ import re
 import pytest
 
 from nextdns_mcp import tool_search as ts
+from nextdns_mcp import tool_search_answer as search_answer
+from nextdns_mcp import tool_search_shape as search_shape
 from nextdns_mcp.config import ConfigurationError, get_tool_search_mode
 from nextdns_mcp.server import build_mcp_server, published_tool_names
 from nextdns_mcp.spec_tools import spec_tool_names
@@ -92,7 +94,7 @@ class TestNameAwareRanking:
         """
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getDenylist"),
@@ -100,20 +102,20 @@ class TestNameAwareRanking:
             Tool.from_function(lambda: None, name="replaceDenylist"),
             Tool.from_function(lambda: None, name="addToDenylist"),
         ]
-        assert _rank_by_name_overlap(tools, "add entry to denylist")[0].name == "addToDenylist"
-        assert _rank_by_name_overlap(tools, "change an entry in the denylist")[0].name == "updateDenylistEntry"
+        assert rank_by_name_overlap(tools, "add entry to denylist")[0].name == "addToDenylist"
+        assert rank_by_name_overlap(tools, "change an entry in the denylist")[0].name == "updateDenylistEntry"
 
     def test_rank_prefers_name_overlap_and_keeps_underlying_order_on_ties(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getAnalyticsDomains"),
             Tool.from_function(lambda: None, name="listProfiles"),
             Tool.from_function(lambda: None, name="plotAnalytics"),
         ]
-        ranked = [t.name for t in _rank_by_name_overlap(tools, "generate analytics plot")]
+        ranked = [t.name for t in rank_by_name_overlap(tools, "generate analytics plot")]
         assert ranked == ["plotAnalytics", "getAnalyticsDomains", "listProfiles"]
 
     @pytest.mark.asyncio
@@ -149,6 +151,43 @@ class TestNameAwareRanking:
         assert "dohLookup" in [tool.get("name") for tool in found.data]
 
 
+class TestWarmRankReusesTheCatalogsLeadingWords:
+    """A warm search must not recompute the catalog's per-name leading words.
+
+    ``_rank_by_name_overlap`` derived every name's leading word and the
+    catalog's generic verbs on each call; measured at intake, a second
+    'add to denylist' search against the 81-tool catalog ran 162 regex
+    splits the word memo already held. The transform now hands its memoized
+    ``catalog.leading`` and ``catalog.generic_verbs`` down, so the warm rank
+    derives nothing and the answer comes out unchanged.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_second_search_derives_no_leading_words(self, monkeypatch):
+        from fastmcp import Client
+
+        import nextdns_mcp.tool_search_rank as rank
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            first = await client.call_tool("search_tools", {"query": "add to denylist"}, raise_on_error=False)
+
+            calls = 0
+            original = rank._leading_word
+
+            def counting(name):
+                nonlocal calls
+                calls += 1
+                return original(name)
+
+            monkeypatch.setattr(rank, "_leading_word", counting)
+            second = await client.call_tool("search_tools", {"query": "add to denylist"}, raise_on_error=False)
+
+        assert calls == 0
+        assert [t.get("name") for t in second.data] == [t.get("name") for t in first.data]
+        assert second.data[0].get("name") == "addToDenylist"
+
+
 class TestMorphologicalQueryExpansion:
     """Lexical search has to bridge plurals: live gemma 12b queries failed on them.
 
@@ -158,26 +197,26 @@ class TestMorphologicalQueryExpansion:
     """
 
     def test_variant_words_adds_catalog_partners(self):
-        from nextdns_mcp.tool_search_rank import _variant_words
+        from nextdns_mcp.tool_search_rank import variant_words
 
         vocabulary = {"category", "categories", "native", "natives"}
-        assert _variant_words("categories natives", vocabulary) == {"category", "native"}
+        assert variant_words("categories natives", vocabulary) == {"category", "native"}
 
     def test_variant_words_ignores_partners_the_catalog_never_wrote(self):
-        from nextdns_mcp.tool_search_rank import _variant_words
+        from nextdns_mcp.tool_search_rank import variant_words
 
-        assert _variant_words("categories aa", {"categories"}) == set()
+        assert variant_words("categories aa", {"categories"}) == set()
 
     def test_variant_words_adds_plural_of_a_singular_word(self):
-        from nextdns_mcp.tool_search_rank import _variant_words
+        from nextdns_mcp.tool_search_rank import variant_words
 
-        assert _variant_words("category entry", {"categories", "entries"}) == {"categories", "entries"}
+        assert variant_words("category entry", {"categories", "entries"}) == {"categories", "entries"}
 
     def test_variant_words_skips_words_that_name_every_tool(self):
-        from nextdns_mcp.tool_search_rank import _variant_words
+        from nextdns_mcp.tool_search_rank import variant_words
 
         vocabulary = {"profile", "profiles", "category", "categories"}
-        assert _variant_words("delete profile categories", vocabulary, exclude={"profile"}) == {"category"}
+        assert variant_words("delete profile categories", vocabulary, exclude={"profile"}) == {"category"}
 
     def test_bm25_concatenates_variants_into_the_query(self):
         from nextdns_mcp.tool_search import FallbackBM25SearchTransform
@@ -288,13 +327,13 @@ class TestPublishedDescriptions:
         """
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import SEARCH_DESCRIPTION_CHARS, _compact_search_results
+        from nextdns_mcp.tool_search import SEARCH_DESCRIPTION_CHARS
 
         one_line = "parameter details. " * 300  # > budget, and not a single newline
         assert len(one_line) > SEARCH_DESCRIPTION_CHARS
         tool = Tool.from_function(lambda: None, name="wideTool", description=one_line)
 
-        [result] = _compact_search_results([tool])
+        [result] = search_answer._compact_search_results([tool])
         assert result["description"].endswith("[description truncated]")
         assert len(result["description"]) <= SEARCH_DESCRIPTION_CHARS + len("\n[description truncated]")
         # Cut at the budget, and nothing before it is lost: the excerpt starts at the beginning.
@@ -302,9 +341,7 @@ class TestPublishedDescriptions:
 
     def test_an_unresolvable_name_against_an_empty_catalog_answers_nothing(self):
         """No catalog, no suggestion — and no crash on the ranking's own bookkeeping."""
-        from nextdns_mcp.tool_search import _closest_tools
-
-        assert _closest_tools("addToDenylist", []) == []
+        assert search_shape._closest_tools("addToDenylist", []) == []
 
 
 class TestSearchPathGuards:
@@ -318,14 +355,14 @@ class TestSearchPathGuards:
     def test_a_query_with_no_words_leaves_the_order_as_it_was(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getDenylist"),
             Tool.from_function(lambda: None, name="addToDenylist"),
         ]
-        assert [tool.name for tool in _rank_by_name_overlap(tools, "")] == ["getDenylist", "addToDenylist"]
-        assert [tool.name for tool in _rank_by_name_overlap(tools, "   ")] == ["getDenylist", "addToDenylist"]
+        assert [tool.name for tool in rank_by_name_overlap(tools, "")] == ["getDenylist", "addToDenylist"]
+        assert [tool.name for tool in rank_by_name_overlap(tools, "   ")] == ["getDenylist", "addToDenylist"]
 
     def test_a_name_with_no_words_has_no_leading_word(self):
         """The verb is the first word; a name that has none has nothing to score."""
@@ -493,7 +530,7 @@ class TestToolSearchServerWiring:
         async with Client(server) as client:
             first = await client.call_tool("search_tools", {"query": "addToDenylist"}, raise_on_error=False)
             names = [t["name"] for t in first.data]
-            cached = {id(payload) for payload, _ in (v[1:] for v in transform._compacted_cache.values())}
+            cached = {id(v[2]) for v in transform._compacted_cache.values()}
             assert names and not any(id(t) in cached for t in first.data)
             for entry in first.data:
                 entry["name"] = "mutated-through-the-answer"
@@ -596,10 +633,8 @@ class TestSearchAnswerAsName:
         """Tolerance has a limit: nothing to read means the original rejection."""
         from fastmcp import Client
 
-        from nextdns_mcp.tool_search import _name_from_search_answer
-
-        assert _name_from_search_answer(42) == ""
-        assert _name_from_search_answer([{"id": 1}]) == ""
+        assert search_shape._name_from_search_answer(42) == ""
+        assert search_shape._name_from_search_answer([{"id": 1}]) == ""
         async with Client(build_mcp_server()) as client:
             with pytest.raises(Exception, match="Input should be"):
                 await client.call_tool("call_tool", {"name": 42, "arguments": {}})
@@ -624,17 +659,17 @@ class TestMistypedToolName:
 
     def test_separators_and_case_are_not_part_of_a_name(self):
         names = ["getDenylist", "listRewrites", "plotAnalytics"]
-        assert ts._match_tool_name("get_denylist", names) == "getDenylist"
-        assert ts._match_tool_name("getdenylist", names) == "getDenylist"
+        assert search_shape._match_tool_name("get_denylist", names) == "getDenylist"
+        assert search_shape._match_tool_name("getdenylist", names) == "getDenylist"
 
     def test_the_same_words_in_another_order_are_the_same_tool(self):
         names = ["listProfiles", "getAnalyticsDomains", "plotAnalytics"]
-        assert ts._match_tool_name("analytics/plot", names) == "plotAnalytics"
+        assert search_shape._match_tool_name("analytics/plot", names) == "plotAnalytics"
 
     def test_an_ambiguous_or_unmatched_name_is_left_alone(self):
-        assert ts._match_tool_name("get", ["getDenylist", "getLogs"]) == ""
-        assert ts._match_tool_name("totallyDifferent", ["getDenylist"]) == ""
-        assert ts._match_tool_name("getDenylist", ["getDenylist"]) == ""
+        assert search_shape._match_tool_name("get", ["getDenylist", "getLogs"]) == ""
+        assert search_shape._match_tool_name("totallyDifferent", ["getDenylist"]) == ""
+        assert search_shape._match_tool_name("getDenylist", ["getDenylist"]) == ""
 
     @pytest.fixture(autouse=True)
     def _server_env(self, monkeypatch):
@@ -743,7 +778,7 @@ class TestRankingOnTheWordsTheCatalogOwns:
     )
     def test_a_scope_reference_comes_out_and_a_subject_stays(self, query, kept):
         """`profile 87c444` names which account, not which tool."""
-        stripped = ts._strip_scope_mentions(query, {"profile"})
+        stripped = ts.strip_scope_mentions(query, {"profile"})
         assert " ".join(stripped.split()) == " ".join(kept.split())
 
     def test_the_scope_words_are_read_from_the_catalog(self):
@@ -775,7 +810,7 @@ class TestRankingOnTheWordsTheCatalogOwns:
             return Tool.from_function(run, name=name)
 
         tools = [make("updateSettings"), make("getDenylist"), make("getLogs"), make("updateProfile")]
-        ranked = [tool.name for tool in ts._rank_by_name_overlap(tools, "read the current settings")]
+        ranked = [tool.name for tool in ts.rank_by_name_overlap(tools, "read the current settings")]
         assert ranked[0] == "updateSettings"
 
     # Three live shapes - "replace privacy_natives with alexa profile <id>",
@@ -871,17 +906,17 @@ class TestATypedNameSaysWhichNamesThereAre:
 
     def test_a_name_from_another_api_ranks_on_this_catalogs_words(self):
         """`analytics.plot` is not a tool; its words are plotAnalytics'."""
-        closest = [tool.name for tool in ts._closest_tools("analytics.plot", self._catalog())]
+        closest = [tool.name for tool in search_shape._closest_tools("analytics.plot", self._catalog())]
         assert closest[0] == "plotAnalytics"
 
     def test_a_name_that_carries_no_catalog_word_matches_nothing(self):
-        assert ts._closest_tools("zzzqqq", self._catalog()) == []
+        assert search_shape._closest_tools("zzzqqq", self._catalog()) == []
 
     def test_the_required_arguments_come_from_the_tools_own_schema(self):
         """The correction names what the call cannot leave out, read from that tool."""
         by_name = {tool.name: tool for tool in self._catalog()}
-        assert ts._required_arguments(by_name["addToDenylist"]) == "profile_id, id"
-        assert ts._required_arguments(by_name["deleteRewrite"]) == "profile_id, entry_id"
+        assert search_shape._required_arguments(by_name["addToDenylist"]) == "profile_id, id"
+        assert search_shape._required_arguments(by_name["deleteRewrite"]) == "profile_id, entry_id"
 
     async def test_a_typed_name_is_answered_with_the_names_and_arguments_to_use(self, monkeypatch):
         from fastmcp import Client
@@ -902,6 +937,80 @@ class TestATypedNameSaysWhichNamesThereAre:
             with pytest.raises(Exception, match="is not a tool of this server") as raised:
                 await client.call_tool("call_tool", {"name": "zzzqqqTool", "arguments": {}})
         assert "search_tools(query)" in str(raised.value)
+
+
+class TestExactPublishedCallsSkipTheCatalog:
+    """PERF-9: an exact published name needs no catalog read to be resolved."""
+
+    @staticmethod
+    def _context(name: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            message=SimpleNamespace(name="call_tool", arguments={"name": name, "arguments": {}}),
+            fastmcp_context=object(),
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "listProfiles",
+            "plotAnalytics",
+            "dohLookup",
+            "overviewDashboard",
+            "generate_prefab_ui",
+            "search_prefab_components",
+        ],
+    )
+    async def test_an_exact_published_name_does_not_read_the_catalog(self, name):
+        class CountingTransform:
+            def __init__(self):
+                self.calls = 0
+
+            async def get_tool_catalog(self, context):
+                self.calls += 1
+                return []
+
+        transform = CountingTransform()
+        middleware = ts.CallToolShapeMiddleware(
+            transform=transform,
+            endpoints={"listProfiles": ("GET", "/profiles")},
+            tool_names=[
+                "plotAnalytics",
+                "dohLookup",
+                "overviewDashboard",
+                "generate_prefab_ui",
+                "search_prefab_components",
+            ],
+        )
+
+        async def call_next(context):
+            return "ran"
+
+        assert await middleware.on_call_tool(self._context(name), call_next) == "ran"
+        assert transform.calls == 0
+
+    async def test_a_non_exact_name_still_uses_the_resolution_path(self):
+        from fastmcp.tools.base import Tool
+
+        class CountingTransform:
+            def __init__(self):
+                self.calls = 0
+
+            async def get_tool_catalog(self, context):
+                self.calls += 1
+                return [Tool.from_function(lambda: None, name="getProfile")]
+
+        transform = CountingTransform()
+        middleware = ts.CallToolShapeMiddleware(transform=transform, endpoints={}, tool_names=["getProfile"])
+        context = self._context("get profile")
+
+        async def call_next(context):
+            return "ran"
+
+        assert await middleware.on_call_tool(context, call_next) == "ran"
+        assert transform.calls == 1
+        assert context.message.arguments["name"] == "getProfile"
 
 
 class TestUnknownNameReusesTheCatalogsWordData:
@@ -964,15 +1073,19 @@ class TestUnknownNameReusesTheCatalogsWordData:
             monkeypatch.setattr(module, name, count_rebuild)
 
         normalized: list[str] = []
-        for module in (rank, shape):
-            for name in ("_flat_key", "_words"):
-                original = getattr(module, name)
+        for module, name in (
+            (rank, "_flat_key"),
+            (rank, "comparable_words"),
+            (shape, "_flat_key"),
+            (shape, "_words"),
+        ):
+            original = getattr(module, name)
 
-                def count_normalization(text, _original=original, _normalized=normalized):
-                    _normalized.append(text)
-                    return _original(text)
+            def count_normalization(text, _original=original, _normalized=normalized):
+                _normalized.append(text)
+                return _original(text)
 
-                monkeypatch.setattr(module, name, count_normalization)
+            monkeypatch.setattr(module, name, count_normalization)
         return counts, normalized
 
     @staticmethod
@@ -1042,7 +1155,7 @@ class TestUnknownNameReusesTheCatalogsWordData:
     def test_an_exact_name_resolves_from_the_map_without_matching(self, tools):
         """The resolver answers an exact name from the map alone — no word data."""
         by_name = {tool.name: tool for tool in tools}
-        assert ts._resolved_entry("plotAnalytics", by_name) == ("plotAnalytics", by_name["plotAnalytics"])
+        assert search_shape._resolved_entry("plotAnalytics", by_name) == ("plotAnalytics", by_name["plotAnalytics"])
 
     def test_the_unmemoized_fallback_normalizes_each_candidate_once(self, tools, work_counts):
         """Direct callers without a catalog keep the linear O(catalog) contract.
@@ -1056,7 +1169,7 @@ class TestUnknownNameReusesTheCatalogsWordData:
         counts, normalized = work_counts
         names = [tool.name for tool in tools]
 
-        assert ts._match_tool_name("generate analytics plot", names) == ""
+        assert search_shape._match_tool_name("generate analytics plot", names) == ""
 
         per_candidate = Counter(text for text in normalized if text in set(names))
         assert per_candidate == Counter({"getDenylist": 2, "plotAnalytics": 2})
@@ -1159,7 +1272,7 @@ class TestTieBreakOnUndiscountedNameOverlap:
     def test_a_tie_breaks_for_the_tool_whose_name_holds_more_query_words(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="deleteRewrite"),
@@ -1167,7 +1280,7 @@ class TestTieBreakOnUndiscountedNameOverlap:
         ]
         # deleteRewrite is listed first and ties on the weighted score; the
         # tie-break must not let registration order answer for the name itself.
-        assert _rank_by_name_overlap(tools, "delete profile")[0].name == "deleteProfile"
+        assert rank_by_name_overlap(tools, "delete profile")[0].name == "deleteProfile"
 
 
 class TestMemoizedCatalogStructures:
@@ -1176,9 +1289,9 @@ class TestMemoizedCatalogStructures:
     The word memo keys on the catalog's tool NAMES: the ordered-names tuple is
     the hot-path key (no sort), and the sorted-names store it falls back to
     keeps one memo shared across orderings of the same catalog. The
-    compaction cache keys on the Tool instance and holds a strong reference so
-    an id cannot be recycled under it. A replaced catalog is a new name-set /
-    a new instance and rebuilds.
+    compaction cache keys on the tool NAME with a metadata fingerprint (see
+    TestCompactionCacheKeying). A replaced catalog is a new name-set and
+    rebuilds.
     """
 
     def test_catalog_words_are_memoized_by_tool_names(self):
@@ -1266,6 +1379,78 @@ class TestMemoizedCatalogStructures:
         assert transform._make_search_tool() is not transform._make_call_tool()
 
 
+class TestCompactionCacheKeying:
+    """The compaction cache keys on tool NAME, not Tool instance (PERF-4).
+
+    FastMCP hands the search catalog a fresh ``model_copy`` of every app tool
+    on every read, so an instance key missed the cache on each search and
+    leaked one entry per app tool per query for the life of the server. The
+    fixed cache holds one entry per tool name: a per-read copy of an
+    unchanged tool hits it, and changed metadata replaces the entry.
+    """
+
+    async def test_repeated_searches_hold_the_cache_size_steady(self, monkeypatch):
+        """The reported leak: three rounds of the two UI-tool searches.
+
+        With the instance key the cache grew 12 -> 14 -> 16 over the rounds,
+        one fresh entry per app tool per round. The fixed cache is stable
+        after the first round, and both tools are still returned every time.
+        """
+        from fastmcp import Client
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        monkeypatch.setenv("NEXTDNS_API_KEY", "sk-test")
+        server = build_mcp_server()
+        transform = next(t for t in server._transforms if isinstance(t, ts.FallbackBM25SearchTransform))
+        queries = ("generate analytics plot", "show me a dashboard of my account")
+        async with Client(server) as client:
+            sizes = []
+            for _ in range(3):
+                for query in queries:
+                    found = await client.call_tool("search_tools", {"query": query}, raise_on_error=False)
+                    assert found.data, f"no results for {query!r}"
+                sizes.append(len(transform._compacted_cache))
+        assert sizes[0] == sizes[1] == sizes[2], f"the cache grew across identical rounds: {sizes}"
+        assert "plotAnalytics" in transform._compacted_cache
+        assert "overviewDashboard" in transform._compacted_cache
+
+    def test_a_per_read_copy_of_an_app_tool_hits_the_same_entry(self):
+        """The app-tool shape: a shallow model_copy that rebuilds only meta.
+
+        FastMCP's per-read copy shares every structure with the registered
+        tool and rebuilds the meta dict with the same content; that copy must
+        hit the cache, not open a new entry.
+        """
+        from fastmcp.tools.base import Tool
+
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        tool = Tool.from_function(
+            lambda: None,
+            name="aTool",
+            description="does a thing",
+            meta={"ui": {"resourceUri": "ui://renderer"}},
+        )
+        first, _ = transform._cached_compaction(tool)
+        copy = tool.model_copy(update={"meta": {"ui": {"resourceUri": "ui://renderer"}}})
+        second, _ = transform._cached_compaction(copy)
+        assert second is first
+        assert len(transform._compacted_cache) == 1
+
+    def test_changed_metadata_replaces_the_entry_under_the_same_name(self):
+        """A re-registered tool with changed metadata refreshes the payload."""
+        from fastmcp.tools.base import Tool
+
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        before = Tool.from_function(lambda: None, name="aTool", description="does a thing")
+        first, _ = transform._cached_compaction(before)
+        assert len(transform._compacted_cache) == 1
+        after = Tool.from_function(lambda: None, name="aTool", description="does another thing")
+        second, _ = transform._cached_compaction(after)
+        assert second is not first
+        assert second["description"] == "does another thing"
+        assert len(transform._compacted_cache) == 1
+
+
 class TestAnswerByteBudget:
     """The whole-answer budget counts BYTES and skips rather than breaks (PRIN-11/PERF-8)."""
 
@@ -1273,7 +1458,7 @@ class TestAnswerByteBudget:
         from fastmcp.tools.base import Tool
 
         tool = Tool.from_function(lambda: None, name="accentedTool", description="café " * 400)
-        dumped, cost = ts._compact_entry(tool)
+        dumped, cost = ts.compact_entry(tool)
         # The cost is the UTF-8 byte length of the wire JSON (unescaped, as the
         # MCP payload carries it), not the character count its dumps reported:
         # each é is one character and two bytes.
@@ -1290,13 +1475,13 @@ class TestAnswerByteBudget:
         small_one = Tool.from_function(lambda: None, name="smallOne", description="a")
         huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
         small_two = Tool.from_function(lambda: None, name="smallTwo", description="b")
-        cost_one = ts._compact_entry(small_one)[1]
-        cost_huge = ts._compact_entry(huge)[1]
-        cost_two = ts._compact_entry(small_two)[1]
+        cost_one = ts.compact_entry(small_one)[1]
+        cost_huge = ts.compact_entry(huge)[1]
+        cost_two = ts.compact_entry(small_two)[1]
         assert cost_huge > cost_one and cost_huge > cost_two
         # The budget fits exactly the two small results, framing comma counted.
         monkeypatch.setattr(nextdns_mcp.tool_search_answer, "SEARCH_ANSWER_MAX_BYTES", cost_one + len(",") + cost_two)
-        names = [result["name"] for result in ts._compact_search_results([small_one, huge, small_two])]
+        names = [result["name"] for result in search_answer._compact_search_results([small_one, huge, small_two])]
         assert names == ["smallOne", "smallTwo"]
 
     def test_the_first_result_is_kept_even_when_it_alone_overflows(self, monkeypatch):
@@ -1308,7 +1493,7 @@ class TestAnswerByteBudget:
         monkeypatch.setattr(nextdns_mcp.tool_search_answer, "SEARCH_ANSWER_MAX_BYTES", 1)
         huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
         small = Tool.from_function(lambda: None, name="smallOne", description="b")
-        assert [result["name"] for result in ts._compact_search_results([huge, small])] == ["hugeOne"]
+        assert [result["name"] for result in search_answer._compact_search_results([huge, small])] == ["hugeOne"]
 
     async def test_the_cached_render_encodes_what_the_uncached_reference_encodes(self):
         """The memoized serializer must not drift from the uncached one, in either mode.
@@ -1327,7 +1512,7 @@ class TestAnswerByteBudget:
             Tool.from_function(lambda: None, name="listProfiles", description="List the profiles on the account."),
             Tool.from_function(lambda: None, name="getDenylist", description="Read the denylist entries of a profile."),
         ]
-        expected = encoded(ts._compact_search_results(tools))
+        expected = encoded(search_answer._compact_search_results(tools))
         assert encoded(await transform._render_results(tools)) == expected
         assert encoded(await transform._render_results(await transform._search(tools, "profile"))) == expected
         assert encoded(await transform._render_results(await transform._search(tools, "zzz unmatchable"))) == expected
@@ -1671,14 +1856,33 @@ class TestShapeRepairAnnouncesItself:
     def test_a_non_dict_payload_passes_the_annotation_through_unchanged(self):
         from types import SimpleNamespace
 
-        from nextdns_mcp.tool_search import _annotate_resolved_from
-
         result = SimpleNamespace(structured_content=None)
-        assert _annotate_resolved_from(result, "other", "realTool") is result
-        assert _annotate_resolved_from(result, "realTool", "realTool") is result
-        assert _annotate_resolved_from(result, "other", None) is result
-        shaped = _annotate_resolved_from(SimpleNamespace(structured_content={"ok": True}), ["x"], "realTool")
+        assert search_shape._annotate_resolved_from(result, "other", "realTool") is result
+        assert search_shape._annotate_resolved_from(result, "realTool", "realTool") is result
+        assert search_shape._annotate_resolved_from(result, "other", None) is result
+        shaped = search_shape._annotate_resolved_from(
+            SimpleNamespace(structured_content={"ok": True}), ["x"], "realTool"
+        )
         assert shaped.structured_content["resolved_from"] == '["x"]'
+
+    def test_a_prefab_payload_keeps_its_wire_shape_and_gets_a_content_note(self):
+        """The re-target is still announced, but not inside the renderer's document.
+
+        A Prefab UI payload (``$prefab``) is the renderer's wire contract, not
+        this server's response shape: ``resolved_from``/``resolved_name``
+        injected there would be read as document content. The annotation moves
+        to the result content, beside the tool's own answer.
+        """
+        import mcp.types
+        from fastmcp.tools import ToolResult
+
+        payload = {"$prefab": {"version": "0.3"}, "view": {}}
+        result = ToolResult(content=[mcp.types.TextContent(type="text", text="Rendered")], structured_content=payload)
+        shaped = search_shape._annotate_resolved_from(result, "overview_dashboard", "overviewDashboard")
+        assert shaped.structured_content == payload
+        note = shaped.content[-1]
+        assert note.type == "text"
+        assert "overviewDashboard" in note.text and "overview_dashboard" in note.text
 
     async def test_the_description_says_a_write_headed_answer_is_refused_not_run(self, monkeypatch):
         from fastmcp import Client

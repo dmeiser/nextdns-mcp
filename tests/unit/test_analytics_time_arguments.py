@@ -130,7 +130,7 @@ class TestTheToolsSaySoThemselves:
             captured["params"] = params or {}
             return {"data": []}
 
-        monkeypatch.setattr(spec_tools, "_api_request_payload", fake)
+        monkeypatch.setattr(spec_tools, "api_request_payload", fake)
         return captured
 
     async def _call(self, tool: str, arguments: dict) -> dict:

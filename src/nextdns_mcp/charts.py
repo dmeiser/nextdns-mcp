@@ -1,4 +1,4 @@
-"""Shared time-series primitives: range resolution, payload shape, chart rows and series budgets.
+"""Shared time-series primitives: range resolution, payload shape, chart rows, series budgets and render caps.
 
 Both hand-written analytics surfaces consume this module - ``tools.plots`` plots one
 series, ``tools.dashboard`` renders many - and neither one owns it. The primitives
@@ -43,6 +43,26 @@ PLOT_MAX_POINTS = 2000
 # under it too - it sits inside a page of other cards, so an unbudgeted chart
 # there is worse, not better, than in a single-chart result (issue #550).
 PLOT_CHART_MAX_POINTS = 250
+
+# Visual cap on the categories (bars, slices, legend entries) one rendered chart
+# carries. ``limit`` bounds what an analytics endpoint may answer - up to 500 rows
+# - and every answered row used to be embedded in the rendered ``PrefabApp``, so a
+# dashboard asked for 500 rows paid for 500 bars per chart (issue #789). The cap
+# keeps the busiest categories and rolls the rest into one entry, which bounds the
+# rendered rows while leaving the chart's totals true.
+CHART_MAX_CATEGORIES = 25
+
+# The same ceiling on the number of series one time-series chart renders. Chart
+# rows are dense - ``build_chart_data`` writes one value per series into every
+# interval - so M series cost 250 x M point values before a single pixel is drawn
+# (issue #789). ``cap_chart_series`` limits the series *before* those rows are
+# built and rolls the omitted series' counts into one entry, so the plotted
+# totals still add up to the whole answer.
+CHART_MAX_SERIES = 25
+
+# Label of the entry both caps append. One name so a bar chart, a pie chart and a
+# multi-series area chart cannot spell the same rollup three different ways.
+CHART_ROLLUP_LABEL = "Other"
 
 # The relative-offset grammar (amount matcher, unit alphabet and unit table) is
 # shared through ``utils``: this module owns resolution to Unix seconds and
@@ -151,6 +171,69 @@ def downsample_chart_series(
     new_times = [times[i] for i in range(0, n, bucket_size)]
     new_series = [_bucket_single_series(s, n, bucket_size) for s in series_data]
     return new_times, new_series
+
+
+def _chart_row_queries(row: dict[str, Any]) -> int:
+    """The query count a rendered chart row carries; a missing or null value prices at zero."""
+    return row.get("queries") or 0
+
+
+def cap_chart_categories(
+    rows: list[dict[str, Any]],
+    max_categories: int = CHART_MAX_CATEGORIES,
+    rollup_label: str = CHART_ROLLUP_LABEL,
+) -> list[dict[str, Any]]:
+    """Cap a category chart to its busiest rows, rolling the rest into one entry.
+
+    Bar and pie charts render one row per category, so a caller that asked for 500
+    top domains embedded 500 rows in the result for every such chart. The busiest
+    ``max_categories - 1`` rows are kept and every omitted query count is summed
+    into a final rollup row: the chart stays bounded, and its totals stay the
+    caller's. A chart already inside the budget comes back untouched, order
+    included - the cap never reshapes a chart the caller can see in full.
+    """
+    if len(rows) <= max_categories:
+        return rows
+    ranked = sorted(rows, key=_chart_row_queries, reverse=True)
+    kept, omitted = ranked[: max_categories - 1], ranked[max_categories - 1 :]
+    rollup = {"label": rollup_label, "queries": sum(_chart_row_queries(row) for row in omitted)}
+    return [*kept, rollup]
+
+
+def _series_query_total(series: dict[str, Any]) -> int:
+    """Total queries one series carries across its intervals; a null series counts as zero."""
+    return sum(series.get("queries") or [])
+
+
+def _series_rollup(omitted: list[dict[str, Any]], width: int, rollup_label: str) -> dict[str, Any]:
+    """Sum the omitted series into the one rollup series, interval by interval."""
+    totals = [0] * width
+    for series in omitted:
+        for index, count in enumerate(series.get("queries") or []):
+            totals[index] += count
+    return {"name": rollup_label, "queries": totals}
+
+
+def cap_chart_series(
+    series_data: list[dict[str, Any]],
+    max_series: int = CHART_MAX_SERIES,
+    rollup_label: str = CHART_ROLLUP_LABEL,
+) -> list[dict[str, Any]]:
+    """Cap a time-series chart to its busiest series, rolling the rest into one.
+
+    The series a ``;series`` endpoint returns is bounded only by what upstream
+    groups - a devices metric on a large network answers one series per device -
+    and each one costs a value in every chart row (issue #789). The busiest
+    ``max_series - 1`` series are kept and the omitted ones are summed interval by
+    interval into a final rollup series, so the chart still accounts for every
+    query it was given. A payload already inside the budget comes back untouched.
+    """
+    if len(series_data) <= max_series:
+        return series_data
+    ranked = sorted(series_data, key=_series_query_total, reverse=True)
+    kept, omitted = ranked[: max_series - 1], ranked[max_series - 1 :]
+    width = max((len(series.get("queries") or []) for series in series_data), default=0)
+    return [*kept, _series_rollup(omitted, width, rollup_label)]
 
 
 def current_time() -> float:
@@ -371,7 +454,7 @@ def series_budget_error(
     return _budget_exceeded_error(start, end, span, interval)
 
 
-def validate_series_payload(payload: dict[str, Any]) -> tuple[list[Any], list[Any]]:
+def extract_series_fields(payload: dict[str, Any]) -> tuple[list[Any], list[Any]]:
     """Extract the time axis and data rows from a time-series payload.
 
     Nulls are normalized with ``or`` rather than ``dict.get(key, default)``:

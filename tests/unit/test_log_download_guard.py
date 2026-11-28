@@ -22,6 +22,7 @@ import os
 import socket
 import tempfile
 import threading
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Self
@@ -245,7 +246,7 @@ class TestAddressVetting:
             ]
 
         monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-        assert await logs_module._host_resolves_to_public_address("mixed.example") is False
+        assert await guard._resolve_public_addresses("mixed.example") is None
 
     async def test_an_unresolvable_host_is_refused(self, monkeypatch):
         """Name-resolution failure fails the vetting closed (issue #266 review).
@@ -261,7 +262,7 @@ class TestAddressVetting:
             raise socket.gaierror("no such host")
 
         monkeypatch.setattr(socket, "getaddrinfo", fail)
-        assert await logs_module._host_resolves_to_public_address("gone.example") is False
+        assert await guard._resolve_public_addresses("gone.example") is None
 
     async def test_an_empty_resolution_is_refused(self, monkeypatch):
         """An empty address list proves nothing either - same closed default."""
@@ -270,7 +271,7 @@ class TestAddressVetting:
             return []
 
         monkeypatch.setattr(socket, "getaddrinfo", none)
-        assert await logs_module._host_resolves_to_public_address("ghost.example") is False
+        assert await guard._resolve_public_addresses("ghost.example") is None
 
 
 class TestRedirectRefusal:
@@ -392,12 +393,223 @@ class TestUnauthenticatedFollowUp:
         assert client.closed is False, "a completed download must not close the shared client"
         await logs_module.close_redirect_client()
         assert client.closed is True
-        assert redirects._redirect_client is None, "closing must reset the singleton"
+        owner = redirects.current_redirect_client_owner()
+        assert owner._client is None, "closing must reset the owner's client"
 
     async def test_close_before_any_download_is_a_noop(self):
         """The shutdown close is safe when no download ever created the client."""
         await logs_module.close_redirect_client()
-        assert redirects._redirect_client is None
+        assert redirects.current_redirect_client_owner()._client is None
+
+    async def test_close_waits_for_an_active_fetch(self):
+        """The shutdown close runs under the fetch lock (issue #774): it must wait
+        for a chain holding the lock rather than close the client mid-fetch."""
+        async with logs_module._PIN_FETCH_LOCK:  # stands in for an in-flight chain
+            close_task = asyncio.create_task(logs_module.close_redirect_client())
+            await asyncio.sleep(0.05)
+            assert not close_task.done(), "close completed while a fetch held the lock"
+        await asyncio.wait_for(close_task, timeout=5)
+
+    async def test_two_owners_never_share_a_redirect_client(self):
+        """Per-server ownership: one server's redirect client is not its sibling's."""
+        first = redirects.RedirectClientOwner()
+        second = redirects.RedirectClientOwner()
+        try:
+            assert first.get() is not second.get()
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+    def test_the_fetch_lock_contends_in_two_event_loops(self):
+        """The pinned-resolver lock is process-global, so it must contend cleanly
+        from more than one event loop (issue #774): an import-time asyncio.Lock
+        binds to the first loop and raises ``bound to a different event loop``
+        the moment a second loop contends it."""
+
+        async def contend() -> None:
+            async def hold() -> None:
+                async with logs_module._PIN_FETCH_LOCK:
+                    await asyncio.sleep(0.02)
+
+            await asyncio.gather(hold(), hold())
+
+        asyncio.run(contend())
+        asyncio.run(contend())  # a loop-bound lock raises RuntimeError here
+
+    async def test_a_cancelled_waiter_never_leaks_the_lock(self):
+        """A waiter cancelled while queued (the download's overall timeout can
+        fire while a chain waits behind another) must not leave the
+        process-global lock held forever: the orphaned acquire's release is
+        tied to its completion."""
+        async with logs_module._PIN_FETCH_LOCK:
+            waiter = asyncio.create_task(logs_module._PIN_FETCH_LOCK.__aenter__())
+            await asyncio.sleep(0.05)  # the waiter is blocked in its worker thread
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        # The orphaned acquire completes once the holder releases, and the
+        # handoff gives the lock straight back: a fresh acquire must not hang.
+        async with asyncio.timeout(5):
+            async with logs_module._PIN_FETCH_LOCK:
+                pass
+
+    def test_a_teardown_cancelled_waiter_never_leaks_the_lock(self):
+        """Loop teardown cancels the shielded task itself - which the shield
+        cannot protect against - while its worker is blocked in ``acquire``.
+        The orphaned acquire still completes, and must hand the process-global
+        lock back instead of stranding every later fetch and close."""
+        lock = guard._CrossLoopLock()
+
+        def hold_section() -> None:
+            lock._lock.acquire()  # another server's download chain
+            time.sleep(0.5)
+            lock._lock.release()
+
+        holder = threading.Thread(target=hold_section, daemon=True)
+        holder.start()
+        time.sleep(0.05)
+
+        async def torn_down_loop() -> None:
+            asyncio.ensure_future(lock.__aenter__())
+            await asyncio.sleep(0.15)  # the waiter is queued in its worker thread
+            # returning makes asyncio.run cancel every pending task, the
+            # shielded acquire included, and then join the worker
+
+        asyncio.run(torn_down_loop())
+        holder.join()
+        time.sleep(0.1)  # let the orphaned worker finish its acquire
+
+        assert not lock._lock.locked()
+        assert lock._lock.acquire(blocking=False) is True
+        lock._lock.release()
+
+    async def test_an_abandoned_waiter_releases_what_the_worker_took(self):
+        """Race: the worker finishes the acquire just before the waiter is
+        cancelled, so it never sees the abandonment. The waiter must release
+        what the worker took - once, and not again when the task completes."""
+        lock = guard._CrossLoopLock()
+        release_holder = threading.Event()
+
+        def hold_section() -> None:
+            lock._lock.acquire()
+            release_holder.wait(5)
+            lock._lock.release()
+
+        holder = threading.Thread(target=hold_section, daemon=True)
+        holder.start()
+        time.sleep(0.05)  # noqa: ASYNC251 - a thread holds the section, not this loop
+
+        waiter = asyncio.ensure_future(lock.__aenter__())
+        await asyncio.sleep(0.1)  # the waiter's worker is blocked in acquire
+        release_holder.set()
+        # Hold the loop: the worker takes the freed section and its result
+        # queues up undelivered, so the waiter is cancelled with the lock
+        # already in the worker's hands and the handoff still unrecorded here.
+        time.sleep(0.2)  # noqa: ASYNC251 - blocking the loop IS the setup
+        holder.join()
+        assert lock._lock.locked(), "the worker never took the freed section: nothing to hand back"
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await asyncio.sleep(0)  # reap the completed acquire task
+        assert not lock._lock.locked()
+
+    async def test_an_acquire_that_failed_releases_nothing(self, monkeypatch):
+        """An executor refusal during teardown ends the acquire with an
+        exception rather than cancellation: nothing was acquired, so another
+        server's hold on the section must survive untouched."""
+        lock = guard._CrossLoopLock()
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            async def fail() -> None:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+
+            return fail()
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(asyncio, "to_thread", refuse)
+            assert lock._lock.acquire(blocking=False)  # a sibling's in-flight chain
+            try:
+                with pytest.raises(RuntimeError, match="cannot schedule new futures"):
+                    await lock.__aenter__()
+                assert lock._lock.locked()
+            finally:
+                lock._lock.release()
+        async with asyncio.timeout(5):
+            async with lock:
+                pass
+
+    def test_a_teardown_cancelled_close_does_not_strand_a_sibling(self):
+        """The same leak through the public path: one server's shutdown close
+        queued behind another's in-flight chain, cancelled by loop teardown,
+        must not block the live sibling's own shutdown close."""
+        live = redirects.RedirectClientOwner()
+        doomed = redirects.RedirectClientOwner()
+        live_client = live.get()
+        doomed.get()
+        release_chain = threading.Event()
+
+        def hold_like_a_chain() -> None:
+            guard._PIN_FETCH_LOCK._lock.acquire()
+            release_chain.wait(5)
+            guard._PIN_FETCH_LOCK._lock.release()
+
+        holder = threading.Thread(target=hold_like_a_chain, daemon=True)
+        holder.start()
+        time.sleep(0.1)
+
+        async def torn_down_shutdown() -> None:
+            asyncio.ensure_future(doomed.aclose())
+            await asyncio.sleep(0.15)  # the close is queued behind the chain
+            # returning cancels the close task, as loop teardown does
+
+        asyncio.run(torn_down_shutdown())
+        release_chain.set()
+        holder.join()
+
+        outcomes: list[str] = []
+
+        def run_live_shutdown() -> None:
+            async def close() -> None:
+                async with asyncio.timeout(5):
+                    await live.aclose()
+
+            try:
+                asyncio.run(close())
+                outcomes.append("closed")
+            except RuntimeError as exc:
+                outcomes.append(str(exc))
+
+        # A leaked lock blocks inside a worker thread that asyncio.run joins,
+        # so observe the close off-loop rather than hanging the whole suite.
+        shutdown = threading.Thread(target=run_live_shutdown, daemon=True)
+        shutdown.start()
+        shutdown.join(6)
+        assert not shutdown.is_alive(), "the live sibling's close is stuck on a leaked lock"
+        assert outcomes == ["closed"]
+        assert live_client.is_closed
+
+    def test_the_fetch_lock_excludes_a_second_loop(self):
+        """Serialization is process-wide, not per loop: two loops in two threads
+        must never hold the pinned-resolver section at the same time."""
+        events: list[str] = []
+
+        def run_loop(tag: str) -> None:
+            async def work() -> None:
+                async with logs_module._PIN_FETCH_LOCK:
+                    events.append(f"{tag}-in")
+                    await asyncio.sleep(0.05)
+                    events.append(f"{tag}-out")
+
+            asyncio.run(work())
+
+        threads = [threading.Thread(target=run_loop, args=(tag,)) for tag in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(events) == 4
+        assert events[0][:-3] == events[1][:-4], f"the two loops interleaved inside the section: {events}"
 
     async def test_a_cookie_from_one_download_does_not_reach_the_next(self, tmp_path, unauthenticated):
         """The persistent client shares one cookie jar, so each chain must start from
@@ -495,7 +707,7 @@ class TestTempFileCleanup:
         def refuse(target: str, *args: Any) -> None:
             raise PermissionError("device busy")
 
-        monkeypatch.setattr(logs_module.os, "unlink", refuse)
+        monkeypatch.setattr(os, "unlink", refuse)
         with caplog.at_level("WARNING"):
             logs_module._unlink_temp_file(str(path))
         assert "Failed to remove temp log file" in caplog.text
@@ -513,7 +725,7 @@ class TestTempFileCleanup:
         def refuse(target: str, *args: Any) -> None:
             raise OSError("not empty")
 
-        monkeypatch.setattr(logs_module.os, "rmdir", refuse)
+        monkeypatch.setattr(os, "rmdir", refuse)
         logs_module._unlink_temp_file(str(path))
         assert not path.exists()
 
@@ -536,6 +748,96 @@ class TestStreamingToDisk:
         assert payload["preview"]["line_count"] == logs_module.DOWNLOAD_PREVIEW_MAX_LINES
         assert payload["preview"]["bytes"] <= logs_module.DOWNLOAD_PREVIEW_MAX_BYTES
         assert payload["preview"]["truncated"] is True
+
+    async def test_after_the_preview_fills_later_chunks_are_not_decoded_and_writes_are_coalesced(
+        self, tmp_path, monkeypatch
+    ):
+        """The preview window is the last use of the body text (PERF-9)."""
+        decode_calls = 0
+        real_incremental_decoder = stream.codecs.getincrementaldecoder
+
+        def counting_incremental_decoder(encoding):
+            decoder_type = real_incremental_decoder(encoding)
+
+            class CountingDecoder:
+                def __init__(self, errors):
+                    self._decoder = decoder_type(errors)
+
+                def decode(self, data: bytes, final: bool = False) -> str:
+                    nonlocal decode_calls
+                    decode_calls += 1
+                    return self._decoder.decode(data, final=final)
+
+            return CountingDecoder
+
+        monkeypatch.setattr(stream.codecs, "getincrementaldecoder", counting_incremental_decoder)
+
+        real_fdopen = stream.os.fdopen
+        writes: list[bytes] = []
+
+        class CountingFile:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+
+            def write(self, data: bytes) -> int:
+                writes.append(bytes(data))
+                return self._wrapped.write(data)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._wrapped, name)
+
+        monkeypatch.setattr(stream.os, "fdopen", lambda fd, mode: CountingFile(real_fdopen(fd, mode)))
+
+        path = str(tmp_path / "download.csv")
+        chunks = [f"row{i},host\n" for i in range(28)] + ["名前,値", "last"]
+        payload = await logs_module._write_stream_to_tempfile(_FakeResponse("https://x/file.csv", chunks=chunks), path)
+
+        expected_bytes = "".join(chunks).encode("utf-8")
+        assert Path(path).read_bytes() == expected_bytes
+        assert payload["row_count"] == 29
+        assert payload["preview"]["line_count"] == logs_module.DOWNLOAD_PREVIEW_MAX_LINES
+        assert payload["preview"]["text"] == "".join(chunks[: logs_module.DOWNLOAD_PREVIEW_MAX_LINES])
+        # The decoder is needed only while text can enter the preview; the
+        # skipped body still contributes raw bytes and raw newline counts.
+        assert decode_calls == logs_module.DOWNLOAD_PREVIEW_MAX_LINES
+        # One offload per preview-filling chunk, then the small body tail is
+        # coalesced into one write instead of one offload per stream chunk.
+        assert len(writes) == logs_module.DOWNLOAD_PREVIEW_MAX_LINES + 1
+        assert b"".join(writes) == expected_bytes
+
+    async def test_post_preview_chunks_flush_when_the_coalesce_buffer_fills(self, tmp_path, monkeypatch):
+        """A full buffer lands immediately; only the remainder waits for EOF."""
+        monkeypatch.setattr(stream, "_STREAM_WRITE_COALESCE_BYTES", 8)
+        real_fdopen = stream.os.fdopen
+        writes: list[bytes] = []
+
+        class CountingFile:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+
+            def write(self, data: bytes) -> int:
+                writes.append(bytes(data))
+                return self._wrapped.write(data)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._wrapped, name)
+
+        monkeypatch.setattr(stream.os, "fdopen", lambda fd, mode: CountingFile(real_fdopen(fd, mode)))
+
+        path = str(tmp_path / "download.csv")
+        chunks = [f"row{i}\n" for i in range(logs_module.DOWNLOAD_PREVIEW_MAX_LINES)] + [
+            "a" * 5,
+            "b" * 5,
+            "c" * 3,
+        ]
+        payload = await logs_module._write_stream_to_tempfile(_FakeResponse("https://x/file.csv", chunks=chunks), path)
+
+        expected_bytes = "".join(chunks).encode("utf-8")
+        assert Path(path).read_bytes() == expected_bytes
+        assert payload["row_count"] == logs_module.DOWNLOAD_PREVIEW_MAX_LINES + 1
+        assert len(writes) == logs_module.DOWNLOAD_PREVIEW_MAX_LINES + 2
+        assert writes[-2:] == [b"a" * 5 + b"b" * 5, b"c" * 3]
+        assert b"".join(writes) == expected_bytes
 
     async def test_a_final_line_without_a_newline_is_counted(self, tmp_path):
         payload = await logs_module._write_stream_to_tempfile(
@@ -696,7 +998,7 @@ class TestDiskWritesDoNotStallTheLoop:
         path = str(tmp_path / "download.csv")
         chunks = ["a.com,blocked\n", "b.com,blocked\n", "c.com,blocked\n"]
         sink = _HoldingSink()
-        monkeypatch.setattr(logs_module.os, "fdopen", sink)
+        monkeypatch.setattr(os, "fdopen", sink)
 
         progress = threading.Event()
         watcher = _LoopStallWatcher(sink, progress)
@@ -835,7 +1137,7 @@ class TestCancellationDuringAWrite:
     async def test_cancelling_during_a_raw_write_keeps_the_loop_running(self, tmp_path, monkeypatch):
         path = str(tmp_path / "download.csv")
         sink = _BlockingRawSink()
-        monkeypatch.setattr(logs_module.os, "fdopen", sink.open_over)
+        monkeypatch.setattr(os, "fdopen", sink.open_over)
 
         loop = asyncio.get_running_loop()
         cancel_requested = threading.Event()
@@ -868,8 +1170,8 @@ class TestCancellationDuringAWrite:
             return made
 
         sink = _BlockingRawSink()
-        monkeypatch.setattr(logs_module.os, "fdopen", sink.open_over)
-        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(os, "fdopen", sink.open_over)
+        monkeypatch.setattr(tempfile, "mkdtemp", watch_mkdtemp)
         # The download resolves its client through the current owner (issue
         # #642): the key comes first, then an owner carrying the scripted
         # client is published around the whole flow.
@@ -979,7 +1281,7 @@ class TestDownloadTool:
             created.append(made)
             return made
 
-        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(tempfile, "mkdtemp", watch_mkdtemp)
 
         signed = "https://storage.example/file.csv?Signature=deadbeef"
         with owned_api_client(
@@ -1083,6 +1385,43 @@ class TestDownloadTool:
         assert payload["code"] == ErrorCode.HTTP_ERROR
         assert payload["status_code"] is None
 
+    async def test_a_chain_deadline_expiry_reports_http_error_not_internal(self, monkeypatch, owned_api_client):
+        """The redirect-chain deadline surfaces as http_error, not internal_error (WORK-326).
+
+        The chain deadline in ``redirects._follow_redirects_to_tempfile`` is an
+        ``asyncio.timeout``, which raises the *builtin* ``TimeoutError`` - not
+        an httpx error - so it used to fall through to the generic handler and
+        a download timeout was reported as ``internal_error`` with an empty
+        message (issue #760). A zero deadline expires the real ``asyncio.timeout``
+        while the chain waits on the pinned-fetch lock, with no network at all.
+        """
+        created: list[str] = []
+        real_mkdtemp = __import__("tempfile").mkdtemp
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            return made
+
+        monkeypatch.setattr(tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(client_module, "get_http_timeout", lambda: 0.0)
+        # A fresh lock for this test: making the download *block* on the
+        # module-level lock would bind it to this test's event loop and break
+        # the contended-lock tests that run in later loops.
+        pin_lock = asyncio.Lock()
+        monkeypatch.setattr(guard, "_PIN_FETCH_LOCK", pin_lock)
+
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        with owned_api_client(
+            _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+        ):
+            # Holding the lock in this task makes the chain's acquisition wait,
+            # which is where the zero deadline expires.
+            async with pin_lock:
+                payload = await logs_module._download_logs_to_tempfile("abc123")
+        assert payload == {"error": "Timed out while downloading logs", "code": ErrorCode.HTTP_ERROR}
+        assert created and not os.path.exists(created[0]), "a timed-out download must leave no temp directory"
+
     async def test_the_temp_file_and_its_directory_are_removed_on_failure(self, monkeypatch, owned_api_client):
         """A failed download leaves neither a partial CSV nor an empty directory."""
         created: list[str] = []
@@ -1093,7 +1432,7 @@ class TestDownloadTool:
             created.append(made)
             return made
 
-        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(tempfile, "mkdtemp", watch_mkdtemp)
 
         class Boom:
             def stream(self, method, url, **kwargs):
@@ -1326,6 +1665,13 @@ class TestDiallingTheVettedAddress:
 
 class TestPreviewRespectsRecordBoundaries:
     """Chunk boundaries are not CSV record boundaries: a split line is previewed whole."""
+
+    def test_append_preview_short_circuits_once_the_window_is_full(self, monkeypatch):
+        """No later text is split or appended once either preview cap is reached."""
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_LINES", 1)
+        lines = ["first\n"]
+        assert preview._append_preview(lines, 6, "second\nthird\n") == 6
+        assert lines == ["first\n"]
 
     async def test_a_record_split_across_chunks_is_previewed_whole(self, tmp_path, unauthenticated, monkeypatch):
         signed = "https://storage.example/file.csv"

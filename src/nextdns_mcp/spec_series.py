@@ -44,7 +44,7 @@ def _interval_seconds(value: Any) -> int | None:
     return seconds if seconds > 0 else None
 
 
-def _series_budget_for_generated_call(route: HTTPRoute, query: dict[str, Any]) -> dict[str, Any] | None:
+def series_budget_for_generated_call(route: HTTPRoute, query: dict[str, Any]) -> dict[str, Any] | None:
     """Refuse a generated ``;series`` call whose range, interval or row count outpoint the budget.
 
     Two ceilings are enforced before the request is constructed, on every
@@ -103,7 +103,7 @@ def _default_interval_estimate(from_time: Any, to_time_raw: Any) -> int | None:
     )
 
 
-def _capped_transport_kwargs(route: HTTPRoute, request: Callable[..., Any]) -> dict[str, Any]:
+def capped_transport_kwargs(route: HTTPRoute, request: Callable[..., Any]) -> dict[str, Any]:
     """The transport kwargs a call needs: the cap only for routes that want it and transports that take it."""
     if ";series" in route.path and _transport_accepts_cap(request):
         return {"max_response_bytes": MAX_SERIES_RESPONSE_BYTES}
@@ -117,7 +117,7 @@ def _capped_transport_kwargs(route: HTTPRoute, request: Callable[..., Any]) -> d
 _CAP_SUPPORT_BY_REQUEST: dict[int, tuple[Callable[..., Any], bool]] = {}
 
 
-def _ceiling_measured_on_the_wire(request: Callable[..., Any], transport_kwargs: dict[str, Any]) -> bool:
+def ceiling_measured_on_the_wire(request: Callable[..., Any], transport_kwargs: dict[str, Any]) -> bool:
     """Whether the transport that answered already held the body under the ceiling.
 
     Only the transport this package ships enforces the cap: it streams under
@@ -131,7 +131,7 @@ def _ceiling_measured_on_the_wire(request: Callable[..., Any], transport_kwargs:
     :func:`_series_response_ceiling_error` stays in charge of every other
     transport, and of this one when a test replaces it by attribute.
     """
-    return bool(transport_kwargs) and request is _transport._api_request_payload
+    return bool(transport_kwargs) and request is _transport.api_request_payload
 
 
 def _transport_accepts_cap(request: Callable[..., Any]) -> bool:
@@ -143,7 +143,7 @@ def _transport_accepts_cap(request: Callable[..., Any]) -> bool:
     such a callable would raise ``TypeError`` before its first line runs, so
     the capability is probed from the signature instead: a legacy transport
     keeps the old call shape, and its oversized ``;series`` answers are still
-    refused by the serialized backstop in :func:`_series_refusal`. A callable
+    refused by the serialized backstop in :func:`series_refusal`. A callable
     whose signature cannot be introspected is treated as legacy for the same
     reason - the unpriced path still enforces the ceiling, the priced one
     must not guess.
@@ -172,9 +172,7 @@ def _probe_transport_cap(request: Callable[..., Any]) -> bool:
     return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
-def _series_refusal(
-    route: HTTPRoute, payload: Any, ceiling_measured_on_the_wire: bool = False
-) -> dict[str, Any] | None:
+def series_refusal(route: HTTPRoute, payload: Any, ceiling_measured_on_the_wire: bool = False) -> dict[str, Any] | None:
     """The typed ceiling refusal for a ``;series`` result, from either layer.
 
     The transport enforces the cap while streaming and answers with the typed
@@ -183,7 +181,7 @@ def _series_refusal(
     wire). The serialized check is the backstop for a transport that was never
     asked to cap the body, and ``ceiling_measured_on_the_wire`` says whether
     this call's transport was (see
-    :func:`_ceiling_measured_on_the_wire`): a payload the shipped transport
+    :func:`ceiling_measured_on_the_wire`): a payload the shipped transport
     streamed in under the cap needs no second measurement, because the second
     measurement re-serializes the whole answer to price a bound the wire
     already enforced. The ceiling is a ``;series`` policy only: aggregate
@@ -230,7 +228,7 @@ def _series_response_ceiling_error(route: HTTPRoute, payload: Any) -> dict[str, 
     cap the body (a legacy injected double, a future custom transport): a
     payload whose JSON is over the ceiling is refused as a typed error rather
     than dumped into the caller's context. Only reached for ``;series``
-    routes, and only when :func:`_ceiling_measured_on_the_wire` says the
+    routes, and only when :func:`ceiling_measured_on_the_wire` says the
     answering transport did no measuring of its own.
 
     What it prices is the re-serialized payload, not the bytes that arrived:
@@ -239,10 +237,7 @@ def _series_response_ceiling_error(route: HTTPRoute, payload: Any) -> dict[str, 
     separators), which is why this is a backstop and the streamed cap is the
     layer that bounds a normal call.
     """
-    try:
-        size = len(json.dumps(payload, default=str))
-    except (TypeError, ValueError):  # pragma: no cover - transport payloads are JSON-shaped
-        size = len(str(payload))
+    size = len(json.dumps(payload, default=str))
     if size <= MAX_SERIES_RESPONSE_BYTES:
         return None
     return _series_ceiling_payload(str(route.operation_id), size)

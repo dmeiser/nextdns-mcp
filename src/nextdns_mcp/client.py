@@ -17,12 +17,13 @@ import httpx
 from .config import (
     ConfigurationError,
     ProfileAccessControl,
+    ServerConfig,
     get_api_base,
     get_api_key,
     get_http_timeout,
     load_profile_access_control,
 )
-from .constants import LOOPBACK_HOSTS, SAFE_PROFILE_ID_PATTERN, is_write_operation
+from .constants import LOOPBACK_HOSTS, SAFE_PROFILE_ID_PATTERN, escape_control_chars, is_write_operation
 from .errors import ErrorCode, StateOwnershipError
 from .state import request_resources
 
@@ -109,28 +110,41 @@ def _allowed_destination_hosts(configured_base: str = "") -> frozenset[str]:
     return result
 
 
-def _redacted(url: str) -> str:
+def redacted(url: str) -> str:
     """Return the URL with any query string removed (issue #139).
 
     Query strings can carry sensitive data (DNS search terms, device IDs, cursor
     tokens), so every log site that runs at INFO or above must use this helper
     instead of the raw URL. Use the full URL only at DEBUG.
+
+    The remaining path is escaped too: a caller can put CR/LF or an ANSI escape
+    in a profile id, and removing only the query would still let one record
+    print as several lines or move the operator's terminal (issue #767).
     """
-    return str(url).split("?", 1)[0]
+    return escape_control_chars(str(url).split("?", 1)[0])
 
 
-def _log_safe_error(error: Exception) -> str:
+def log_safe_error(error: Exception) -> str:
     """Return exception text that is safe to log at INFO or above (issue #139).
 
     httpx builds ``HTTPStatusError`` messages from the fully merged request
     URL, so only the status is logged for those. Every other message keeps its
-    wording but goes through :func:`_redacted`, because an exception raised by
+    wording but goes through :func:`redacted`, because an exception raised by
     the ACL layer names the URL the caller asked for verbatim. The exception
     itself is never rewritten: the caller still receives the full text.
+    The status branch escapes the reason phrase as well: it comes from the
+    upstream response line, not from a value this server controls.
     """
     if isinstance(error, httpx.HTTPStatusError):
-        return f"{error.response.status_code} {error.response.reason_phrase}"
-    return _redacted(str(error))
+        return escape_control_chars(f"{error.response.status_code} {error.response.reason_phrase}")
+    return redacted(str(error))
+
+
+# Pre-rename private names, kept bound for the callers this rename does not
+# move (tools/doh.py, tools/logs/tool.py); transport takes the public names
+# (issue #783).
+_redacted = redacted
+_log_safe_error = log_safe_error
 
 
 # Match the first path segment case-insensitively; anything under a
@@ -142,19 +156,40 @@ _PROFILE_PREFIX = re.compile(r"^/profiles/([^/]+)(?:/|$)", re.IGNORECASE)
 _PROFILE_ROOT = re.compile(r"^/profiles/", re.IGNORECASE)
 
 
+def _relative_request_path(url: str) -> str | None:
+    """Return the path of a relative, parseable request URL, or None.
+
+    None means the request cannot be classified against the profile ACL: an
+    absolute or authority-bearing URL ("https://host/...", "//host/...") targets
+    a different host, and a URL httpx cannot parse (a control character such as
+    a decoded "%0a", an invalid port, a broken percent-escape) has no path at
+    all. Both are the fail-closed shape in _authorize(); the parse error in
+    particular must not escape as an unhandled INTERNAL_ERROR (issue #747).
+
+    Note httpx percent-decodes the path while parsing, so the returned path is
+    what the ACL must judge: "/profiles/abc123%0a/settings" arrives here as
+    "/profiles/abc123\\n/settings".
+    """
+    try:
+        parsed = httpx.URL(str(url))
+    except httpx.InvalidURL:
+        return None
+    if parsed.is_absolute_url or parsed.scheme or parsed.host:
+        return None
+    return parsed.path
+
+
 def _normalized_request_path(url: str) -> str | None:
     """Return the request path with a guaranteed leading slash.
 
     Relative paths are resolved the same way httpx joins them against the API
     base URL: a path without a leading "/" is treated as rooted at the base
-    (e.g. "profiles/abc123" -> "/profiles/abc123"). Returns None for absolute
-    or authority-bearing URLs (e.g. "https://host/..." or "//host/..."), which
-    target a different host and must not be routed through the profile ACL.
+    (e.g. "profiles/abc123" -> "/profiles/abc123"). Returns None whenever
+    :func:`_relative_request_path` reports no classifiable path.
     """
-    parsed = httpx.URL(str(url))
-    if parsed.is_absolute_url or parsed.scheme or parsed.host:
+    path = _relative_request_path(url)
+    if path is None:
         return None
-    path = parsed.path
     if not path.startswith("/"):
         path = "/" + path
     return path
@@ -254,9 +289,16 @@ def _destination_host(base_url: Any, url: Any) -> str:
 
     Relative URLs resolve against the client's ``base_url``, exactly as
     httpx merges them, so a client built on a non-NextDNS base is caught
-    here too. A relative URL on a client with no base URL yields "".
+    here too. A relative URL on a client with no base URL yields "", and so
+    does a URL httpx cannot parse: there is no destination to allow, and the
+    access-controlled client still denies the unclassifiable request (issue
+    #747). The ACL-free probe client hands such a URL to httpx, which rejects
+    it before any I/O.
     """
-    parsed = httpx.URL(str(url))
+    try:
+        parsed = httpx.URL(str(url))
+    except httpx.InvalidURL:
+        return ""
     if parsed.is_absolute_url or parsed.scheme or parsed.host:
         return _normalized_host(parsed.host)
     return _normalized_host(httpx.URL(str(base_url)).host)
@@ -367,7 +409,7 @@ class AccessControlledClient:
         """Whether the wrapped client has been closed."""
         return self._client.is_closed
 
-    def _check_write_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_write_access(self, profile_id: str, access: ProfileAccessControl) -> None:
         """Check write access against the request snapshot; raise AccessDeniedError if denied."""
         if access.can_write(profile_id):
             return
@@ -382,7 +424,7 @@ class AccessControlledClient:
         logger.warning(error_msg)
         raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED, profile_id=profile_id)
 
-    def _check_read_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_read_access(self, profile_id: str, access: ProfileAccessControl) -> None:
         """Check read access against the request snapshot; raise AccessDeniedError if denied."""
         if access.can_read(profile_id):
             return
@@ -391,7 +433,7 @@ class AccessControlledClient:
         logger.warning(error_msg)
         raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED, profile_id=profile_id)
 
-    def _check_collection_write_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_collection_write_access(self, access: ProfileAccessControl) -> None:
         """Enforce global write denials for collection endpoints (no profile_id in URL).
 
         Collection endpoints such as POST /profiles create resources that belong to a
@@ -408,7 +450,7 @@ class AccessControlledClient:
             logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
-    def _check_collection_read_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_collection_read_access(self, access: ProfileAccessControl) -> None:
         """Enforce global read denials for collection endpoints (no profile_id in URL).
 
         Collection endpoints such as GET /profiles list profile-scoped resources, so
@@ -420,19 +462,19 @@ class AccessControlledClient:
             logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED)
 
-    def _check_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_access(self, profile_id: str, method: str, access: ProfileAccessControl) -> None:
         """Check access control for profile operations; raise AccessDeniedError if denied."""
         if is_write_operation(method):
-            self._check_write_access(profile_id, method, url, access)
+            self._check_write_access(profile_id, access)
         else:
-            self._check_read_access(profile_id, method, url, access)
+            self._check_read_access(profile_id, access)
 
-    def _check_collection_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_collection_access(self, method: str, access: ProfileAccessControl) -> None:
         """Check access control for collection operations; raise AccessDeniedError if denied."""
         if is_write_operation(method):
-            self._check_collection_write_access(method, url, access)
+            self._check_collection_write_access(access)
         else:
-            self._check_collection_read_access(method, url, access)
+            self._check_collection_read_access(access)
 
     def _authorize(self, method: str, url: Any) -> None:
         """Apply the destination allow-list and the profile ACL to one request.
@@ -453,7 +495,7 @@ class AccessControlledClient:
         access = load_profile_access_control()
 
         if profile_id:
-            self._check_access(profile_id, method, url_str, access)
+            self._check_access(profile_id, method, access)
         elif _unmatchable_profile_url(request_path):
             # Fail closed: a URL whose profile cannot be classified is denied
             # instead of being allowed to bypass the profile ACL check. The log
@@ -463,7 +505,7 @@ class AccessControlledClient:
             logger.warning("Forbidden URL: request could not be classified against the profile ACL")
             raise AccessDeniedError(f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id="")
         else:
-            self._check_collection_access(method, url_str, access)
+            self._check_collection_access(method, access)
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Make an HTTP request with access control checks.
@@ -484,7 +526,7 @@ class AccessControlledClient:
         """
         # Query strings can carry sensitive data (search terms, device IDs, cursor
         # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
-        logged_path = _redacted(url)
+        logged_path = redacted(url)
         logger.info(f"HTTP Request: {method} {logged_path}")
         logger.debug(f"HTTP Request: {method} {url}")
 
@@ -536,7 +578,7 @@ class AccessControlledClient:
         """
         # Query strings can carry sensitive data (search terms, device IDs, cursor
         # tokens). Log only the path. (issue #249)
-        logged_path = _redacted(url)
+        logged_path = redacted(url)
         logger.info(f"HTTP Stream: {method} {logged_path}")
 
         # _authorize() applies the destination allow-list and the profile ACL
@@ -549,7 +591,14 @@ class AccessControlledClient:
             yield response
 
 
-def _authenticated_client_kwargs() -> dict[str, Any]:
+def _auth_settings(config: ServerConfig | None) -> tuple[str | None, str, float]:
+    """Read the key/base/timeout once from a server snapshot or the process."""
+    if config is None:
+        return get_api_key(), get_api_base(), get_http_timeout()
+    return config.api_key, config.api_base, config.http_timeout
+
+
+def _authenticated_client_kwargs(config: ServerConfig | None = None) -> dict[str, Any]:
     """Validate the configuration and return the shared client constructor kwargs.
 
     Both the ACL client and the raw probe client are built from these kwargs,
@@ -560,15 +609,16 @@ def _authenticated_client_kwargs() -> dict[str, Any]:
     resolving it separately for the destination allowance would be a second
     read of the same setting: a configuration change landing between the two
     would leave the client aimed at one host and its guard allowing another.
+    When a server passes its creation-time snapshot, all three values come
+    from it instead of from the process environment.
     """
-    key = get_api_key()
+    key, base_url, timeout = _auth_settings(config)
     if not key or not key.strip():
         raise ConfigurationError(
             "NEXTDNS_API_KEY is required. Set the NEXTDNS_API_KEY environment "
             "variable or NEXTDNS_API_KEY_FILE pointing to a Docker secret."
         )
 
-    base_url = get_api_base()
     return {
         "base_url": base_url,
         "configured_base": base_url,
@@ -577,13 +627,17 @@ def _authenticated_client_kwargs() -> dict[str, Any]:
             "Accept": "application/json",
             "Content-Type": "application/json",
         },
-        "timeout": get_http_timeout(),
+        "timeout": timeout,
         "follow_redirects": False,
     }
 
 
-def create_nextdns_client() -> AccessControlledClient:
+def create_nextdns_client(config: ServerConfig | None = None) -> AccessControlledClient:
     """Create an authenticated HTTP client for NextDNS API with access control.
+
+    Args:
+        config: A server's creation-time configuration snapshot. Standalone
+            callers without one keep reading the process environment here.
 
     Returns:
         AccessControlledClient: Configured async HTTP client with authentication
@@ -593,7 +647,7 @@ def create_nextdns_client() -> AccessControlledClient:
         ConfigurationError: If the API key is absent or empty, or
             NEXTDNS_HTTP_TIMEOUT is not a positive number of seconds.
     """
-    return AccessControlledClient(**_authenticated_client_kwargs())
+    return AccessControlledClient(**_authenticated_client_kwargs(config))
 
 
 class RawProbeTransport:
@@ -693,24 +747,30 @@ class ApiClientOwner:
     another owner's connections.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: ServerConfig | None = None) -> None:
+        self.config = config
         self._client: AccessControlledClient | None = None
 
     def get(self) -> AccessControlledClient:
         """Return this owner's client, creating it on first use.
 
         The client is built lazily so that importing this module has no side
-        effects and configuration changes (e.g. in tests) are picked up.
+        effects. A server-owned client is built from that server's config
+        snapshot; a standalone owner keeps reading the environment at creation.
         """
         if self._client is None:
-            self._client = create_nextdns_client()
+            # Standalone owners keep the no-argument creation path so tests and
+            # scripts that substitute a zero-argument factory keep working.
+            self._client = create_nextdns_client() if self.config is None else create_nextdns_client(self.config)
         return self._client
 
     async def aclose(self) -> None:
         """Close this owner's client if one exists and reset it.
 
-        The next :meth:`get` constructs a fresh client, picking up any updated
-        configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+        The next :meth:`get` constructs a fresh client. A server-owned owner
+        rebuilds from its unchanged creation-time snapshot (including the key
+        file path it names, which is re-read at rebuild); a standalone owner
+        picks up any updated process configuration.
         """
         if self._client is not None:
             client = self._client
@@ -764,61 +824,43 @@ def api_client_owned(owner: ApiClientOwner) -> Iterator[ApiClientOwner]:
         api_client_owner.reset(token)
 
 
-_raw_probe_client: RawProbeTransport | None = None
+class ProbeClientOwner:
+    """Owns one ACL-free probe transport for one explicit lifetime.
 
-
-def get_raw_probe_client() -> RawProbeTransport:
-    """Return the shared ACL-free probe transport, creating it on first use.
-
-    The /health readiness check uses this instead of :func:`get_api_client` so
-    the class that enforces the profile ACL exposes no bypass at all, while the
-    probe still observes the true upstream state.
+    Explicit owner for the transport state that used to live in the
+    module-global ``_raw_probe_client`` singleton (mirrors
+    :class:`ApiClientOwner`): a server lifespan owns one owner per server on
+    its ``ServerResources`` and hands it to the ``/health`` route it
+    registers, so two servers embedded in one process never share a probe
+    transport and one server's shutdown cannot close a live sibling's. The
+    transport is created lazily on first use and reused until
+    :meth:`aclose`.
     """
-    global _raw_probe_client
-    if _raw_probe_client is None:
-        _raw_probe_client = create_raw_probe_client()
-    return _raw_probe_client
 
+    def __init__(self) -> None:
+        self._client: RawProbeTransport | None = None
 
-async def close_raw_probe_client() -> None:
-    """Close the shared probe transport if one exists and reset the singleton."""
-    global _raw_probe_client
-    if _raw_probe_client is not None:
-        transport = _raw_probe_client
-        _raw_probe_client = None
-        await transport.aclose()
+    def get(self) -> RawProbeTransport:
+        """Return this owner's ACL-free probe transport, creating it on first use.
 
+        The /health readiness check uses this instead of the API client owner
+        so the class that enforces the profile ACL exposes no bypass at all,
+        while the probe still observes the true upstream state.
+        """
+        if self._client is None:
+            self._client = create_raw_probe_client()
+        return self._client
 
-# Test-support seam for the one process-global state left after issue #642 moved
-# the API client, DoH client, readiness cache and server instance onto explicit
-# owners (issue #660). Tests read and reset this global to exercise lazy creation
-# and shutdown; doing it through these two functions instead of naming
-# ``_raw_probe_client`` keeps the suite off the private attribute name, so the
-# name can change without editing tests. Production code never calls them: it
-# goes through get_raw_probe_client / close_raw_probe_client above.
-def _get_raw_probe_client_singleton_for_tests() -> RawProbeTransport | None:
-    """Return the shared probe transport without creating one (test support only).
+    async def aclose(self) -> None:
+        """Close this owner's probe transport if one exists and reset it.
 
-    Unlike :func:`get_raw_probe_client` this reads the slot as it is: no
-    transport is built and no configuration is read, so a test can capture the
-    value it is about to replace, or assert a shutdown cleared it, without the
-    read itself creating the thing it is checking for.
-    """
-    return _raw_probe_client
-
-
-def _set_raw_probe_client_singleton_for_tests(transport: RawProbeTransport | None) -> None:
-    """Install ``transport`` in the shared probe slot, or clear it (test support only).
-
-    Passing ``None`` is how a test asks for lazy creation; passing a double is how
-    it injects one. What the setter replaces is discarded, not closed: a double
-    owns no real connection, and a test that wants the real transport closed calls
-    :func:`close_raw_probe_client`. A plain call has no teardown the way
-    ``monkeypatch.setattr`` does, so conftest's ``restore_lazy_singletons`` fixture
-    writes back the value each test started with.
-    """
-    global _raw_probe_client
-    _raw_probe_client = transport
+        The next :meth:`get` constructs a fresh transport, picking up any
+        updated configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+        """
+        if self._client is not None:
+            client = self._client
+            self._client = None
+            await client.aclose()
 
 
 def get_api_client() -> AccessControlledClient:

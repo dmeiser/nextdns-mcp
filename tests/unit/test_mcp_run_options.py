@@ -28,7 +28,7 @@ class TestGetMcpRunOptions:
         """Test that HTTP mode returns dict with default host and port."""
         with patch.dict(os.environ, {"MCP_TRANSPORT": "http"}, clear=True):
             options = get_mcp_run_options()
-            assert options == {"transport": "http", "host": "127.0.0.1", "port": 8000}
+            assert options == {"transport": "http", "host": "127.0.0.1", "port": 8000, "json_response": True}
 
     def test_http_default_host_is_loopback_only(self):
         """Regression test for #142: default HTTP bind must be loopback-only.
@@ -49,7 +49,7 @@ class TestGetMcpRunOptions:
             {"MCP_TRANSPORT": "http", "MCP_HOST": "127.0.0.1", "MCP_PORT": "9999"},
         ):
             options = get_mcp_run_options()
-            assert options == {"transport": "http", "host": "127.0.0.1", "port": 9999}
+            assert options == {"transport": "http", "host": "127.0.0.1", "port": 9999, "json_response": True}
 
     def test_http_case_insensitive(self):
         """Test that transport mode is case-insensitive."""
@@ -72,13 +72,13 @@ class TestGetMcpRunOptions:
         """Test HTTP with only host customized."""
         with patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_HOST": "localhost"}, clear=True):
             options = get_mcp_run_options()
-            assert options == {"transport": "http", "host": "localhost", "port": 8000}
+            assert options == {"transport": "http", "host": "localhost", "port": 8000, "json_response": True}
 
     def test_http_with_only_custom_port(self):
         """Test HTTP with only port customized."""
         with patch.dict(os.environ, {"MCP_TRANSPORT": "http", "MCP_PORT": "3000"}, clear=True):
             options = get_mcp_run_options()
-            assert options == {"transport": "http", "host": "127.0.0.1", "port": 3000}
+            assert options == {"transport": "http", "host": "127.0.0.1", "port": 3000, "json_response": True}
 
     def test_http_non_loopback_host_emits_security_warning(self):
         """Test that an explicit non-loopback bind logs a security warning."""

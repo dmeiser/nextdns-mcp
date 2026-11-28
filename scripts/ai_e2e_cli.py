@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import ai_e2e_harness as harness
+from dotenv import load_dotenv
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -141,12 +142,11 @@ def _print_steps_or_select(args: Any, cli_steps: list[Any]) -> int | None:
 
 def _load_dotenv_file(args: Any) -> None:
     """Load the .env file if present (or the one given explicitly)."""
-    if harness._load_dotenv is not None:
-        for candidate in (harness._REPO_ROOT / ".env", Path.cwd() / ".env"):
-            if candidate.exists():
-                harness._load_dotenv(candidate, override=False)
-        if args.env_file:
-            harness._load_dotenv(args.env_file, override=True)
+    for candidate in (harness._REPO_ROOT / ".env", Path.cwd() / ".env"):
+        if candidate.exists():
+            load_dotenv(candidate, override=False)
+    if args.env_file:
+        load_dotenv(args.env_file, override=True)
 
 
 # CLI arguments that override one field of the loaded config: the arg name, the

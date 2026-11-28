@@ -13,18 +13,7 @@ from fastmcp.tools import ToolResult
 from nextdns_mcp import relaxation, spec_tools
 from nextdns_mcp.relaxation import StripExtraFieldsMiddleware
 from nextdns_mcp.server import build_mcp_server
-
-
-class _FakeServer(SimpleNamespace):
-    """Server stand-in weakref-able, unlike plain ``types.SimpleNamespace``.
-
-    The middleware keys its caches on the server object via a WeakKeyDictionary;
-    fixture servers must support weak references the way real FastMCP servers do.
-    """
-
-    __slots__ = ("__weakref__",)
-    __hash__ = object.__hash__  # identity, like the real FastMCP server key
-    __eq__ = object.__eq__
+from tests.conftest import _FakeServer
 
 
 class TestStripExtraFieldsMiddleware:
@@ -198,6 +187,20 @@ class TestStripExtraFieldsMiddleware:
         assert "schema fetch failed" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_a_result_with_no_note_carrier_still_succeeds(self, middleware, mock_context):
+        """A dropped argument is reported best-effort: an unannotatable result cannot fail the call.
+
+        A tool answer with no structured dict and no ``content`` list has nowhere to put the
+        note. Losing the note is recoverable; replacing the tool's answer with an error is not.
+        """
+        call_next = AsyncMock(return_value={"ok": True})
+
+        result = await middleware.on_call_tool(mock_context, call_next)
+
+        assert result == {"ok": True}
+        call_next.assert_called_once_with(mock_context)
+
+    @pytest.mark.asyncio
     async def test_not_found_error_passes_through_unwrapped(self, middleware, mock_context):
         """Test that NotFoundError (unknown tool) is re-raised, not wrapped as ToolError."""
         mock_context.fastmcp_context.fastmcp.get_tool = AsyncMock(side_effect=NotFoundError("Unknown tool: nope"))
@@ -220,8 +223,11 @@ class TestStripExtraFieldsMiddleware:
             await middleware.on_call_tool(mock_context, call_next)
 
         mock_logger.exception.assert_called_once()
-        msg = mock_logger.exception.call_args.args[0]
-        assert "testTool" in msg
+        call = mock_logger.exception.call_args
+        # The tool name is an escaped format argument now, not part of the
+        # format string: assert what the handler would render (issue #767).
+        rendered = call.args[0] % call.args[1:]
+        assert "testTool" in rendered
         mock_logger.warning.assert_not_called()
 
     @pytest.mark.asyncio
@@ -295,6 +301,62 @@ class TestStripExtraFieldsMiddleware:
         """Test array items are coerced when items schema is provided."""
         result = middleware._coerce_value(["true", "false"], {"type": "array", "items": {"type": "boolean"}})
         assert result == [True, False]
+
+    def test_coerce_value_recurses_opaque_containers_without_a_schema(self, middleware):
+        """Nested dict/list values get no schema context, so their strings stay strings.
+
+        Only the declared top-level property has a schema to coerce against; anything
+        inside an opaque object is identifier-like until a schema says otherwise.
+        """
+        assert middleware._coerce_value({"a": "true", "b": "2"}) == {"a": "true", "b": "2"}
+        assert middleware._coerce_value(["1", "2.2"]) == ["1", "2.2"]
+        assert middleware._coerce_value(["1", "2.2"], {"type": "array", "items": {"type": "number"}}) == [1, 2.2]
+
+    def test_coerce_value_without_a_schema_reuses_the_input_object(self, middleware):
+        """No schema means nothing to coerce: the caller's container comes back as it went in.
+
+        The schema-less path used to rebuild every nested dict and list, allocating deep copies
+        of containers the caller already held while no value ever changed. Identity is the
+        assertion here: an equal-but-rebuilt answer passes the equality checks above and fails
+        this one, and line coverage cannot see the difference because the path is still taken.
+        """
+        value = {"entries": [{"id": "007", "enabled": "true"}]}
+
+        coerced = middleware._coerce_value(value, None)
+
+        assert coerced is value
+        # The literal strings inside are preserved, not coerced.
+        assert coerced["entries"][0]["id"] == "007"
+        assert coerced["entries"][0]["enabled"] == "true"
+
+        # A declared integer array still coerces its items.
+        assert middleware._coerce_value(["7"], {"type": "array", "items": {"type": "integer"}}) == [7]
+
+    def test_coerce_value_passes_a_non_string_scalar_through_untouched(self, middleware):
+        """A value already at its wire type is not re-parsed on the way to the tool."""
+        assert middleware._coerce_value(10) == 10
+
+    def test_coerce_value_boolean_false_follows_its_schema(self, middleware):
+        """``"false"`` must land as ``False``, not the truthy non-empty string."""
+        assert middleware._coerce_value("false", {"type": "boolean"}) is False
+
+    @pytest.mark.asyncio
+    async def test_string_typed_leading_zero_identifier_reaches_the_tool_as_a_string(
+        self, middleware, mock_tool, mock_context
+    ):
+        """``{"password": "0012"}`` was the live corruption (string -> int 12) (issue #273).
+
+        ``0012`` is integer-shaped, so only the declared ``string`` schema keeps it a
+        string; the assertion is on the arguments the tool actually receives.
+        """
+        mock_tool.parameters = {"properties": {"password": {"type": "string"}}}
+        mock_context.message.arguments = {"password": "0012"}
+        call_next = AsyncMock(side_effect=lambda context: context.message.arguments)
+
+        result = await middleware.on_call_tool(mock_context, call_next)
+
+        assert result == {"password": "0012"}
+        assert isinstance(result["password"], str)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -625,8 +687,14 @@ class TestIgnoredArgumentsMerge:
         note = result.content[-1]
         assert note.type == "text" and "from" in note.text
 
-    def test_a_prefab_result_gets_both_content_note_and_structured_annotation(self):
-        """A Prefab UI result has a structured dict and also gets a visible content note."""
+    def test_a_prefab_result_gets_a_content_note_and_an_untouched_payload(self):
+        """A Prefab UI result carries its note in the content: the wire document keeps its keys.
+
+        The ``$prefab`` document is the renderer's contract, not this server's
+        response shape: adding ``ignored_arguments``/``hint`` to it would be
+        read by the renderer as document content. The drop is still reported -
+        in the content, beside the tool's own summary.
+        """
         result = ToolResult(
             content=[mcp.types.TextContent(type="text", text="Summary")],
             structured_content={"$prefab": {"version": "0.3"}, "view": {}},
@@ -634,8 +702,7 @@ class TestIgnoredArgumentsMerge:
         relaxation._report_ignored_arguments(result, ["from"], "from_time is this tool's name for it")
         assert len(result.content) == 2
         assert "from" in result.content[-1].text
-        assert result.structured_content["ignored_arguments"] == ["from"]
-        assert "from_time" in result.structured_content["ignored_arguments_hint"]
+        assert result.structured_content == {"$prefab": {"version": "0.3"}, "view": {}}
 
 
 class TestOwnerIndexUnderDisclosure:
@@ -648,7 +715,7 @@ class TestOwnerIndexUnderDisclosure:
             calls.append({"method": method, "url": url})
             return {"data": []}
 
-        monkeypatch.setattr(spec_tools, "_api_request_payload", fake_request)
+        monkeypatch.setattr(spec_tools, "api_request_payload", fake_request)
         server = build_mcp_server()
         async with Client(server) as client:
             found = await client.call_tool(

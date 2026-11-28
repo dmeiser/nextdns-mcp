@@ -412,6 +412,84 @@ class TestChartSeriesDownsampling:
         assert "6,003 total queries across 2001 intervals" in result.content[0].text
 
 
+class TestChartSeriesRenderCap:
+    """The series render cap: busiest kept, the rest rolled up, the whole answer still counted.
+
+    A ``;series`` answer carries one series per grouped value, so the series count
+    is the one dimension the range budget does not bound: chart rows are dense, and
+    100 series cost 250 x 100 point values before anything was drawn (issue #789).
+    """
+
+    def test_within_budget_the_series_come_back_untouched(self):
+        series_data = [{"name": f"s{i}", "queries": [i, i]} for i in range(charts_module.CHART_MAX_SERIES)]
+        assert charts_module.cap_chart_series(series_data) is series_data
+
+    def test_busiest_series_are_kept_and_the_rest_rolled_into_one(self):
+        series_data = [{"name": f"s{i}", "queries": [i, 1]} for i in range(100)]
+        capped = charts_module.cap_chart_series(series_data)
+
+        assert len(capped) == charts_module.CHART_MAX_SERIES
+        assert [series["name"] for series in capped[:3]] == ["s99", "s98", "s97"]
+        rollup = capped[-1]
+        assert rollup["name"] == charts_module.CHART_ROLLUP_LABEL
+        # The 76 omitted series are summed interval by interval, not dropped.
+        assert rollup["queries"] == [sum(range(76)), 76]
+        assert sum(sum(series["queries"]) for series in capped) == sum(sum(s["queries"]) for s in series_data)
+
+    def test_rollup_pads_short_series_and_prices_a_null_series_at_zero(self):
+        series_data = [{"name": f"s{i}", "queries": [10]} for i in range(charts_module.CHART_MAX_SERIES)] + [
+            {"name": "short", "queries": [1, 2]},
+            {"name": "none", "queries": None},
+        ]
+        rollup = charts_module.cap_chart_series(series_data)[-1]
+        # One kept-budget series, the short one and the null one are the omitted set.
+        assert rollup["queries"] == [11, 2]
+
+    def test_build_series_chart_caps_series_before_building_rows(self):
+        """The dense rows are built from the capped series, so 100 series cost 26 columns."""
+        times = [f"2024-01-{(i // 24) + 1:02d}T{i % 24:02d}:00:00Z" for i in range(250)]
+        data = [{"name": f"dev{i}", "queries": [i + 1] * 250} for i in range(100)]
+        result = plots_module._build_series_chart("by_qname", times, data)
+
+        assert isinstance(result, ToolResult)
+        chart = result.structured_content["view"]["children"][0]["children"][2]
+        series_keys = [key for key in chart["data"][0] if key != "time"]
+        assert len(series_keys) == charts_module.CHART_MAX_SERIES
+        assert len(chart["series"]) == charts_module.CHART_MAX_SERIES
+        assert chart["series"][-1]["label"] == charts_module.CHART_ROLLUP_LABEL
+        # Every query the answer carried is still in the chart, rollup included.
+        assert sum(sum(row[key] for key in series_keys) for row in chart["data"]) == sum(range(1, 101)) * 250
+
+        metrics = {
+            c["label"]: c["value"]
+            for c in result.structured_content["view"]["children"][0]["children"][1]["children"]
+            if c.get("type") == "Metric"
+        }
+        assert metrics["Series Count"] == str(charts_module.CHART_MAX_SERIES)
+        # The rollup does not touch the summary: it reports what upstream answered.
+        assert f"{sum(range(1, 101)) * 250:,} total queries" in result.content[0].text
+
+    def test_build_series_chart_over_the_result_ceiling_is_refused(self, monkeypatch):
+        """A chart that still breaches the byte ceiling is a typed refusal, not a trimmed chart."""
+        monkeypatch.setattr(chart_ui_module, "MAX_RESULT_BYTES", 1)
+        result = plots_module._build_series_chart(
+            "status", ["2024-01-15T10:00:00Z"], [{"name": "blocked", "queries": [10]}]
+        )
+        assert result["code"] == "response_too_large"
+        assert result["max_result_bytes"] == 1
+        assert result["result_bytes"] > 1
+
+    def test_a_full_series_answer_stays_under_the_result_ceiling(self):
+        """100 series x 250 intervals: the worst case the range budget allows, rendered."""
+        times = [f"2024-01-{(i // 24) + 1:02d}T{i % 24:02d}:00:00Z" for i in range(250)]
+        data = [{"name": f"dev{i}", "queries": list(range(i + 1, i + 251))} for i in range(100)]
+        result = plots_module._build_series_chart("devices", times, data)
+
+        assert isinstance(result, ToolResult)
+        wire = json.dumps(result.structured_content, separators=(",", ":")).encode("utf-8")
+        assert len(wire) <= chart_ui_module.MAX_RESULT_BYTES
+
+
 @pytest.fixture
 def now():
     """A fixed clock so relative from/to values resolve deterministically."""
@@ -788,7 +866,7 @@ class TestPlotAnalyticsSeriesImpl:
     async def test_http_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         wrapped = AsyncMock(return_value={"error": "boom", "code": "http_error"})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "http_error"
 
@@ -796,7 +874,7 @@ class TestPlotAnalyticsSeriesImpl:
     async def test_unexpected_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         wrapped = AsyncMock(return_value={"error": "boom", "code": "internal_error"})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "internal_error"
 
@@ -869,6 +947,25 @@ class TestPlotAnalyticsSeriesImpl:
         assert "view" in result.structured_content
 
 
+class TestPlotRenderedSeriesErrorHandling:
+    """The render catch is narrowed to payload-shape errors (FUNC-5 / WORK-324)."""
+
+    def test_payload_shape_error_returns_internal_error(self, monkeypatch):
+        monkeypatch.setattr(plots_module, "extract_series_fields", MagicMock(side_effect=ValueError("bad series")))
+        result = plots_module._plot_rendered_series("status", "abc123", {"meta": {}, "data": []})
+        assert result["code"] == "internal_error"
+        assert "Error rendering chart" in result["error"]
+
+    def test_unexpected_error_propagates(self, monkeypatch):
+        # A RuntimeError is a programming error, not a payload-shape problem;
+        # it must not hide behind the typed internal_error fallback.
+        monkeypatch.setattr(
+            plots_module, "extract_series_fields", MagicMock(side_effect=RuntimeError("unexpected failure"))
+        )
+        with pytest.raises(RuntimeError, match="unexpected failure"):
+            plots_module._plot_rendered_series("status", "abc123", {"meta": {}, "data": []})
+
+
 class TestPlotAnalyticsToolWrapper:
     """Smoke tests for the generic plotAnalytics wrapper."""
 
@@ -882,7 +979,7 @@ class TestPlotAnalyticsToolWrapper:
     async def test_plot_analytics_wrapper_with_default_profile(self, clean_env, monkeypatch, mock_api_client):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         wrapped = AsyncMock(return_value={"error": "boom", "code": "http_error"})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
         result = await server.plotAnalytics("status")
         assert result["code"] == "http_error"
 
@@ -952,7 +1049,7 @@ class TestPlotFetchUsesSharedWrapper:
 
     Before the fix ``_fetch_series_payload`` called the raw
     ``client.api_client.get(...)`` directly, bypassing the transport's payload
-    wrapper (``_api_request_payload``) and its error handling/logging - a
+    wrapper (``api_request_payload``) and its error handling/logging - a
     parallel wrapper of its own stayed a second copy of that contract. (and any future retry/rate-limit/telemetry). These
     mock-level assertions pin the wrapped path so a raw-client regression is
     caught: the shared wrapper is awaited and the raw transport is not.
@@ -963,7 +1060,7 @@ class TestPlotFetchUsesSharedWrapper:
         self, clean_env, monkeypatch, mock_api_client, sample_series_payload
     ):
         wrapped = AsyncMock(return_value=sample_series_payload)
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
 
         params = {"from": "-1d", "to": "now", "interval": 3600}
         payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", params)
@@ -979,7 +1076,7 @@ class TestPlotFetchUsesSharedWrapper:
     @pytest.mark.asyncio
     async def test_fetch_series_payload_surfaces_wrapper_error(self, clean_env, monkeypatch, mock_api_client):
         wrapped = AsyncMock(return_value={"error": "upstream failure", "code": "http_error", "status_code": 500})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
 
         payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", {})
 
@@ -994,7 +1091,7 @@ class TestPlotFetchUsesSharedWrapper:
         # Empty series so the impl returns before rendering; the fetch has already
         # run, which is what we are asserting on.
         wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
 
         # Drive the impl end-to-end; the fetch must go through the shared
         # wrapper rather than the raw client.
@@ -1026,7 +1123,7 @@ class TestRangeReportingAndProfileGuard:
         monkeypatch.setattr(utils_module, "resolve_profile_id", lambda profile_id, **kwargs: (None, None))
 
         wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
 
         result = await plots_module._plot_analytics_series_impl("status", profile_id="abc123")
         assert result["code"] == "internal_error"

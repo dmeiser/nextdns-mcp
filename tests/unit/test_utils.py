@@ -2,11 +2,24 @@ from nextdns_mcp import utils as utils_module
 
 
 def test_is_float_shaped_malformed_numerics():
-    for value in ("3-", "1-2", "3.14-", "--3", "-"):
+    for value in ("3-", "1-2", "3.14-", "--3", "-", "notfloat", "\u00b2", "1.\u00b2", ""):
         assert utils_module.is_float_shaped(value) is False, value
 
-    for value in ("-3", "-3.14", "0", "3.14", "3.", "-.5"):
+    for value in ("-3", "-3.14", "0", "3.14", "3.", "-.5", "1.23", "-1.23", "3"):
         assert utils_module.is_float_shaped(value) is True, value
+
+
+def test_is_integer_shaped_separates_integers_from_every_other_shape():
+    """The shape test behind the coercion guard (issue #273).
+
+    ``0012`` is integer-shaped and must stay that way: it is why the schema-aware
+    layer is the only thing standing between a leading-zero identifier and ``int``.
+    """
+    for value in ("123", "-5", "0012"):
+        assert utils_module.is_integer_shaped(value) is True, value
+
+    for value in ("1.2", "\u00b2", "-\u00b2"):
+        assert utils_module.is_integer_shaped(value) is False, value
 
 
 def test_truncate_at_boundary_leaves_text_at_or_below_limit_untouched():

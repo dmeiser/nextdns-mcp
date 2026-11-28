@@ -52,11 +52,8 @@ def _extract_error_events(run: ActorRun) -> list[str]:
 
 
 def _call_blob(call: ToolCall) -> str:
-    """The call's arguments as one searchable string, best effort."""
-    try:
-        return json.dumps(call.args, default=str).lower()
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        return str(call.args).lower()
+    """The call's arguments as one searchable string."""
+    return json.dumps(call.args, default=str).lower()
 
 
 def _instrument_tokens(path: str) -> list[str]:

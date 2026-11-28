@@ -11,7 +11,7 @@ from nextdns_mcp.tools import doh as doh_module
 from nextdns_mcp.tools.doh import (
     _build_doh_metadata,
     _dohLookup_impl,
-    _validate_record_type,
+    _normalize_and_validate_record_type,
 )
 
 
@@ -100,27 +100,27 @@ class TestAccessDeniedError:
         assert not isinstance(AccessDeniedError("denied"), httpx.HTTPError)
 
 
-class TestValidateRecordType:
-    """Tests for _validate_record_type function."""
+class TestNormalizeAndValidateRecordType:
+    """Tests for _normalize_and_validate_record_type function."""
 
     def test_validates_valid_types(self):
         """Test validates valid DNS record types."""
         valid_types = ["A", "AAAA", "CNAME", "MX", "TXT"]
 
         for record_type in valid_types:
-            is_valid, normalized = _validate_record_type(record_type)
+            is_valid, normalized = _normalize_and_validate_record_type(record_type)
             assert is_valid is True
             assert normalized == record_type.upper()
 
     def test_validates_lowercase_types(self):
         """Test validates lowercase record types."""
-        is_valid, normalized = _validate_record_type("a")
+        is_valid, normalized = _normalize_and_validate_record_type("a")
         assert is_valid is True
         assert normalized == "A"
 
     def test_rejects_invalid_types(self):
         """Test rejects invalid DNS record types."""
-        is_valid, normalized = _validate_record_type("INVALID")
+        is_valid, normalized = _normalize_and_validate_record_type("INVALID")
         assert is_valid is False
         assert normalized == "INVALID"
 

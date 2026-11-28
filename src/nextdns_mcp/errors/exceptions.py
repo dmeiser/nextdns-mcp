@@ -1,7 +1,7 @@
 """The typed failures a NextDNS request can raise.
 
 The transport raises these and the tools convert them into payloads
-(``_api_request_payload``), so the hierarchy is the shape of a failure between
+(``api_request_payload``), so the hierarchy is the shape of a failure between
 those two points. It is a leaf: it reads no response and imports nothing else
 from the package.
 

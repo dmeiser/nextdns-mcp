@@ -144,7 +144,7 @@ async def test_upstream_status_raises_typed_exception_with_status_and_body(
 
 @pytest.mark.asyncio
 async def test_successful_upstream_response_is_unchanged(stub_nextdns_api):
-    payload = await transport._api_request_payload("GET", "/profiles")
+    payload = await transport.api_request_payload("GET", "/profiles")
     assert payload == {"data": [{"id": "abc123", "name": "Home Network"}]}
 
 
@@ -237,14 +237,14 @@ async def test_an_oversized_response_is_refused_before_it_is_parsed(stub_nextdns
 @pytest.mark.asyncio
 async def test_the_payload_surface_types_the_ceiling_refusal(stub_nextdns_api):
     _serve(200, "[" * 200_000)
-    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=10_000)
+    payload = await transport.api_request_payload("GET", "/profiles", max_response_bytes=10_000)
     assert payload["code"] == "response_too_large"
     assert payload["max_response_bytes"] == 10_000
 
 
 @pytest.mark.asyncio
 async def test_a_response_under_the_cap_parses_unchanged(stub_nextdns_api):
-    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=10_000)
+    payload = await transport.api_request_payload("GET", "/profiles", max_response_bytes=10_000)
     assert payload == {"data": [{"id": "abc123", "name": "Home Network"}]}
 
 
@@ -253,7 +253,7 @@ async def test_an_error_status_under_the_cap_keeps_its_typed_error(stub_nextdns_
     """The capped (streamed) path re-exposes the body as a normal response:
     status handling and the error payload are unchanged below the cap."""
     _serve(503, '{"error":"upstream unavailable"}')
-    payload = await transport._api_request_payload("GET", "/upstream/unavailable", max_response_bytes=10_000)
+    payload = await transport.api_request_payload("GET", "/upstream/unavailable", max_response_bytes=10_000)
     assert payload["code"] == "http_error"
     assert payload["status_code"] == 503
 
@@ -268,7 +268,7 @@ async def test_a_gzipped_response_under_the_cap_is_decoded_exactly_once(stub_nex
     transport failure.
     """
     _serve(200, gzip.compress(json.dumps({"data": [{"x": i} for i in range(2000)]}).encode()))
-    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=5_000_000)
+    payload = await transport.api_request_payload("GET", "/profiles", max_response_bytes=5_000_000)
     assert len(payload["data"]) == 2000
 
 
@@ -277,7 +277,7 @@ async def test_the_cap_counts_decoded_bytes_of_a_gzipped_body(stub_nextdns_api):
     """The ceiling bounds what would be parsed, not what the wire compressed."""
     big = json.dumps({"data": [{"x": i} for i in range(50_000)]}).encode()
     _serve(200, gzip.compress(big))
-    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=10_000)
+    payload = await transport.api_request_payload("GET", "/profiles", max_response_bytes=10_000)
     assert payload["code"] == "response_too_large"
 
 
@@ -286,7 +286,7 @@ async def test_the_cap_boundary_is_exact_a_single_chunk_exactly_at_the_cap_parse
     """Exactly the cap is not "exceeded": a one-chunk body of cap bytes parses."""
     body = json.dumps({"data": [f"row-{i}" for i in range(300)]})
     _serve(200, body)
-    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=len(body))
+    payload = await transport.api_request_payload("GET", "/profiles", max_response_bytes=len(body))
     assert payload.get("code") != "response_too_large"
     assert len(payload["data"]) == 300
 
@@ -297,7 +297,7 @@ async def test_a_single_chunk_one_byte_over_the_cap_refuses_without_the_overshoo
     buffer beyond the cap, and the boundary is one byte, not one chunk."""
     body = json.dumps({"data": [f"row-{i}" for i in range(300)]})
     _serve(200, body)
-    payload = await transport._api_request_payload("GET", "/profiles", max_response_bytes=len(body) - 1)
+    payload = await transport.api_request_payload("GET", "/profiles", max_response_bytes=len(body) - 1)
     assert payload["code"] == "response_too_large"
     assert payload["max_response_bytes"] == len(body) - 1
 

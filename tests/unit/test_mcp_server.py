@@ -13,7 +13,6 @@ from nextdns_mcp.openapi import create_mcp_server
 from nextdns_mcp.relaxation import StripExtraFieldsMiddleware
 from nextdns_mcp.tools import doh as doh_module
 from nextdns_mcp.tools import logs as logs_module
-from nextdns_mcp.tools.logs import redirects as logs_redirects
 
 
 class TestCreateMcpServer:
@@ -164,6 +163,39 @@ class TestProductionServerTools:
         assert "search_prefab_components" not in names
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "arguments, bad_field",
+        [
+            ({"code": "print(1)", "data": ["value"]}, "data"),
+            ({"code": 123}, "code"),
+        ],
+    )
+    async def test_generate_ui_wrong_type_is_a_typed_error_over_mcp(
+        self, mock_api_key, monkeypatch, arguments, bad_field
+    ):
+        """Signature-level refusals must reach callers as the typed contract.
+
+        FastMCP validates a function tool's arguments before its body runs, so
+        calling ``gen_tool.fn`` directly with a list bypasses the very check a
+        real MCP client hits. Go through ``Client.call_tool``: the refusal must
+        be a flagged ``invalid_argument`` with structured content, not a bare
+        ValidationError with ``structured_content=None``.
+        """
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_GENERATIVE_UI", "on")
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool("generate_prefab_ui", arguments, raise_on_error=False)
+
+        assert result.is_error is True
+        structured = result.structured_content or {}
+        assert structured["code"] == "invalid_argument"
+        assert bad_field in structured["error"]
+
+    @pytest.mark.asyncio
     async def test_the_grouped_area_tools_are_not_published(self):
         """The eight area tools are gone, and so is the second choice they imposed.
 
@@ -203,8 +235,6 @@ class TestServerLifespan:
     async def test_server_lifespan_closes_http_clients(self, mock_api_key, monkeypatch):
         """Server lifespan exit must close every long-lived client owned by the server."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        client_module._set_raw_probe_client_singleton_for_tests(None)
-        monkeypatch.setattr(logs_redirects, "_redirect_client", None)
 
         from nextdns_mcp import lifespan as lifespan_module
 
@@ -217,9 +247,9 @@ class TestServerLifespan:
         ):
             async with server._lifespan_manager():
                 api_client = client_module.get_api_client()
-                probe_client = client_module.get_raw_probe_client()
+                probe_client = resources.probe_client.get()
                 doh_client = doh_module.current_doh_client_owner().get()
-                redirect_client = logs_redirects._get_redirect_client()
+                redirect_client = resources.redirect_client.get()
                 assert not api_client.is_closed
                 assert not probe_client.is_closed
                 assert not doh_client.is_closed
@@ -230,9 +260,51 @@ class TestServerLifespan:
         assert doh_client.is_closed
         assert redirect_client.is_closed, "_server_lifespan left the download redirect client open"
         assert resources.api_client._client is None
-        assert client_module._get_raw_probe_client_singleton_for_tests() is None
+        assert resources.probe_client._client is None
         assert resources.doh_client._client is None
-        assert logs_redirects._redirect_client is None
+        assert resources.redirect_client._client is None
+
+    @pytest.mark.asyncio
+    async def test_lifespan_cleanup_continues_after_a_close_fails(self, mock_api_key, monkeypatch):
+        """A close that raises must not skip the closes after it (issue #774).
+
+        The teardown runs through ``ServerResources.aclose()``'s
+        ``AsyncExitStack``: every close is attempted, the first failure is
+        re-raised only after the last close has run, and the lifespan's
+        ``finally`` still resets the owner context vars.
+        """
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        from nextdns_mcp import lifespan as lifespan_module
+
+        server = create_mcp_server()
+        resources = lifespan_module.server_resources(server)
+
+        async def boom() -> None:
+            raise RuntimeError("injected probe close failure")
+
+        monkeypatch.setattr(resources.probe_client, "aclose", boom)
+
+        ambient_redirect_owner = logs_module._redirect_client_owner.get()
+        with pytest.raises(RuntimeError, match="injected probe close failure"):
+            async with server._lifespan_manager():
+                api_client = resources.api_client.get()
+                doh_client = resources.doh_client.get()
+                redirect_client = resources.redirect_client.get()
+                # The lifespan published the server's owners into this context;
+                # the resets in its finally must run even though aclose raised.
+                assert client_module.api_client_owner.get() is resources.api_client
+                assert doh_module.doh_client_owner.get() is resources.doh_client
+                assert logs_module._download_registry.get() is resources.downloads
+                assert logs_module._redirect_client_owner.get() is resources.redirect_client
+
+        assert api_client.is_closed, "the close before the failure must still have run"
+        assert doh_client.is_closed, "a failed probe close skipped the DoH client close"
+        assert redirect_client.is_closed, "a failed probe close skipped the redirect client close"
+        assert client_module.api_client_owner.get() is None
+        assert doh_module.doh_client_owner.get() is None
+        assert logs_module._download_registry.get() is None
+        assert logs_module._redirect_client_owner.get() is ambient_redirect_owner
 
     @pytest.mark.asyncio
     async def test_real_client_session_closes_http_clients_on_disconnect(self, mock_api_key, monkeypatch):
@@ -244,8 +316,6 @@ class TestServerLifespan:
         """
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
-        monkeypatch.setattr(logs_redirects, "_redirect_client", None)
-
         from nextdns_mcp import lifespan as lifespan_module
 
         server = create_mcp_server()
@@ -255,7 +325,7 @@ class TestServerLifespan:
             await mcp_client.list_tools()
             api_client = resources.api_client.get()
             doh_client = resources.doh_client.get()
-            redirect_client = logs_redirects._get_redirect_client()
+            redirect_client = resources.redirect_client.get()
             assert not api_client.is_closed
             assert not doh_client.is_closed
             assert not redirect_client.is_closed
@@ -264,7 +334,7 @@ class TestServerLifespan:
         assert doh_client.is_closed
 
         assert redirect_client.is_closed, "the Client session did not close the download redirect client"
-        assert logs_redirects._redirect_client is None
+        assert resources.redirect_client._client is None
 
     @pytest.mark.asyncio
     async def test_a_sibling_servers_shutdown_leaves_this_servers_clients_open(self, mock_api_key, monkeypatch):
@@ -280,15 +350,27 @@ class TestServerLifespan:
 
         async with server_a._lifespan_manager():
             a_api_client = resources_a.api_client.get()
+            a_probe_client = resources_a.probe_client.get()
+            a_redirect_client = resources_a.redirect_client.get()
             # Server B starts and finishes WHILE server A is live:
             async with server_b._lifespan_manager():
                 b_api_client = resources_b.api_client.get()
+                b_probe_client = resources_b.probe_client.get()
+                b_redirect_client = resources_b.redirect_client.get()
                 assert a_api_client is not b_api_client
-            # B's shutdown closed only B's client:
+                assert a_probe_client is not b_probe_client, "two servers shared one probe transport"
+                assert a_redirect_client is not b_redirect_client, "two servers shared one redirect client"
+            # B's shutdown closed only B's clients:
             assert b_api_client.is_closed
+            assert b_probe_client.is_closed
+            assert b_redirect_client.is_closed
             assert not a_api_client.is_closed, "a sibling server's shutdown closed this server's client"
+            assert not a_probe_client.is_closed, "a sibling server's shutdown closed this server's probe transport"
+            assert not a_redirect_client.is_closed, "a sibling server's shutdown closed this server's redirect client"
 
         assert a_api_client.is_closed
+        assert a_probe_client.is_closed
+        assert a_redirect_client.is_closed
 
 
 class TestCompositeErrorResultsAreFlagged:
@@ -334,6 +416,135 @@ class TestCompositeErrorResultsAreFlagged:
 
         assert result.is_error is True, "an argument refusal must surface as isError, not a success"
         assert "code" in result.structured_content
+
+    @pytest.mark.asyncio
+    async def test_plotAnalytics_enum_violation_is_a_typed_error_result(self, mock_api_key, monkeypatch):
+        """A bogus Literal enum must not escape as a bare pydantic error (issue #778).
+
+        FastMCP's argument model used to reject ``metric='bogus'`` before the
+        tool ran, so the caller got ``structured_content=None`` and the strip
+        middleware never annotated the extra argument it dropped. The refusal
+        now comes back as the typed ``invalid_argument`` payload with
+        ``ignored_arguments`` naming the dropped key.
+        """
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool("plotAnalytics", {"metric": "bogus", "extra": True}, raise_on_error=False)
+
+        assert result.is_error is True
+        structured = result.structured_content or {}
+        assert structured["code"] == "invalid_argument"
+        assert "metric" in structured["error"]
+        assert structured["ignored_arguments"] == ["extra"]
+
+    @pytest.mark.asyncio
+    async def test_overviewDashboard_enum_violation_is_a_typed_error_result(self, mock_api_key, monkeypatch):
+        """The same contract for overviewDashboard's view_type enum (issue #778)."""
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "overviewDashboard", {"view_type": "bogus", "extra": True}, raise_on_error=False
+            )
+
+        assert result.is_error is True
+        structured = result.structured_content or {}
+        assert structured["code"] == "invalid_argument"
+        assert "view_type" in structured["error"]
+        assert structured["ignored_arguments"] == ["extra"]
+
+    @pytest.mark.asyncio
+    async def test_call_tool_alias_keeps_the_typed_error_and_resolved_from(self, mock_api_key, monkeypatch):
+        """An alias resolved by call_tool keeps resolved_from on the typed refusal (issue #778)."""
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "call_tool",
+                {"name": "plot analytics", "arguments": {"metric": "bogus", "extra": True}},
+                raise_on_error=False,
+            )
+
+        assert result.is_error is True
+        structured = result.structured_content or {}
+        assert structured["code"] == "invalid_argument"
+        assert structured["ignored_arguments"] == ["extra"]
+        assert structured["resolved_from"] == "plot analytics"
+        assert structured["resolved_name"] == "plotAnalytics"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments"),
+        [
+            ("plotAnalytics", {"metric": "status", "profile_id": 315244}),
+            ("overviewDashboard", {"profile_id": 315244}),
+            ("dohLookup", {"domain": "example.com", "profile_id": 315244}),
+        ],
+    )
+    async def test_an_integer_profile_id_is_still_coerced_and_accepted(
+        self, mock_api_key, monkeypatch, tool_name, arguments
+    ):
+        """An all-digit profile id sent as a JSON integer must keep working (issue #778 review).
+
+        ``OptionalProfileId`` declares a ``BeforeValidator`` that coerces an
+        integer profile id to a string, and clients do send it that way. The
+        typed-error handling must not refuse what the signature accepts: the
+        call has to pass validation, coerce, and reach the access-control
+        layer — where this profile, outside the readable set, is denied. A
+        schema-level ``invalid_argument`` here is the regression this guards.
+        """
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "abc123")
+        monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abc123")
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool(tool_name, arguments, raise_on_error=False)
+
+        structured = result.structured_content or {}
+        assert structured.get("code") == "read_access_denied", (
+            f"the integer profile_id must be coerced and reach access control, got: {structured}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_composite_schemas_still_publish_their_enums(self, mock_api_key, monkeypatch):
+        """In-tool validation must not cost the published JSON Schema enums (issue #778)."""
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        server = build_mcp_server()
+        tools = {tool.name: tool for tool in await server._list_tools()}
+        assert tools["plotAnalytics"].parameters["properties"]["metric"]["enum"] == [
+            "status",
+            "devices",
+            "protocols",
+            "queryTypes",
+            "ipVersions",
+            "dnssec",
+            "encryption",
+            "reasons",
+            "ips",
+        ]
+        assert tools["overviewDashboard"].parameters["properties"]["view_type"]["enum"] == [
+            "auto",
+            "bar",
+            "table",
+            "pie",
+        ]
 
     @pytest.mark.asyncio
     async def test_dohLookup_success_stays_a_normal_result(self, mock_api_key, monkeypatch, mock_doh_client=None):

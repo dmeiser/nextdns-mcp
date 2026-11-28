@@ -33,6 +33,7 @@ from nextdns_mcp.errors import (
     http_error_payload,
     upstream_error_codes,
 )
+from nextdns_mcp.errors.body import MAX_BODY_DEPTH, MAX_BODY_ITEMS, MAX_BODY_KEYS
 from nextdns_mcp.tools.plots import _plot_analytics_series_impl
 
 
@@ -300,6 +301,58 @@ class TestErrorPayloadShape:
         assert payload[422] == "the upstream status"
         assert "response_body_truncated" not in payload
 
+    def test_http_error_payload_deeply_nested_document_is_bounded_not_a_crash(self):
+        # A structured body nested past the depth cap used to crash the
+        # failure handler with an unhandled RecursionError before the typed
+        # error could be returned (issue #753). The deep tail is now projected
+        # to None, and the cut is flagged.
+        deep: dict[str, Any] = {"leaf": "value"}
+        for _ in range(600):
+            deep = {"nested": deep}
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 400
+        exc.response.json.return_value = {"error": "Bad Request", "context": deep}
+        payload = http_error_payload("msg", exc)
+        assert payload["error"] == "Bad Request"
+        assert payload["response_body_truncated"] is True
+        hops = 0
+        node: Any = payload["context"]
+        while isinstance(node, dict):
+            node = node["nested"]
+            hops += 1
+        assert node is None
+        assert hops == MAX_BODY_DEPTH
+
+    def test_http_error_payload_oversized_list_is_capped_and_names_the_drop(self):
+        # A list field keeps its leading items; the omission marker names how
+        # many the cap dropped, so the reader can tell the document was cut
+        # (issue #753).
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 400
+        exc.response.json.return_value = {"error": "Bad Request", "details": list(range(MAX_BODY_ITEMS + 5))}
+        payload = http_error_payload("msg", exc)
+        assert payload["details"] == [*range(MAX_BODY_ITEMS), {"_omitted_items": 5}]
+        assert payload["response_body_truncated"] is True
+
+    def test_http_error_payload_wide_document_caps_free_form_keys_and_keeps_the_typed_ones(self):
+        # The top-level key count is capped like any nested dict's (issue
+        # #753), but the typed fields callers branch on (issue #148) are
+        # exempt from the cap, and the dropped keys flag the cut.
+        wide = {f"field-{index}": index for index in range(MAX_BODY_KEYS + 10)}
+        exc = httpx.HTTPError("boom")
+        exc.response = MagicMock()
+        exc.response.status_code = 400
+        exc.response.json.return_value = {"error": "Bad Request", **wide}
+        payload = http_error_payload("msg", exc)
+        assert payload["error"] == "Bad Request"
+        assert payload["code"] == ErrorCode.HTTP_ERROR
+        assert payload["status_code"] == 400
+        kept = [key for key in payload if key.startswith("field-")]
+        assert len(kept) == MAX_BODY_KEYS
+        assert payload["response_body_truncated"] is True
+
     def test_http_error_payload_nested_small_document_is_complete(self):
         # Nested content within the cap is surfaced whole, with no flag.
         exc = httpx.HTTPError("boom")
@@ -548,7 +601,7 @@ class TestPlotAndDohErrorContract:
     async def test_plot_no_data(self, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
         result = await _plot_analytics_series_impl("status")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.NO_DATA
@@ -557,7 +610,7 @@ class TestPlotAndDohErrorContract:
     async def test_plot_http_error(self, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         wrapped = AsyncMock(return_value={"error": "boom", "code": ErrorCode.HTTP_ERROR, "status_code": 500})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
         result = await server.plotAnalytics("status")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.HTTP_ERROR

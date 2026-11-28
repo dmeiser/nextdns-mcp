@@ -161,9 +161,10 @@ jobs:
         if: fromJSON(steps.check-workflows.outputs.result).success == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ fromJSON(steps.check-workflows.outputs.result).pr_number }}
+          APPROVAL_BODY: ${{ fromJSON(steps.check-workflows.outputs.result).approval_body }}
+          REPO: ${{ github.repository }}
         run: |
-          PR_NUMBER='${{ fromJSON(steps.check-workflows.outputs.result).pr_number }}'
-          
           echo "✅ All required checks passed for PR #$PR_NUMBER"
           echo "Approving and enabling auto-merge..."
           
@@ -171,19 +172,19 @@ jobs:
           # required_workflows list that decided success, so the comment cannot
           # drift from the gate and cannot claim a check that did not run
           # (issue #271).
-          gh pr review "$PR_NUMBER" --repo ${{ github.repository }} --approve \
-            --body '${{ fromJSON(steps.check-workflows.outputs.result).approval_body }}'
+          gh pr review "$PR_NUMBER" --repo "$REPO" --approve \
+            --body "$APPROVAL_BODY"
           
           # Enable auto-merge
-          gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --auto --squash
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash
 
       - name: Comment on failed workflows
         if: fromJSON(steps.check-workflows.outputs.result).success == false
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REASON: ${{ fromJSON(steps.check-workflows.outputs.result).reason }}
+          REPO: ${{ github.repository }}
         run: |
-          PR_NUMBER='${{ github.event.pull_request.number }}'
-          REASON='${{ fromJSON(steps.check-workflows.outputs.result).reason }}'
-          
-          gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} \
+          gh pr comment "$PR_NUMBER" --repo "$REPO" \
             --body "❌ Auto-merge cancelled: $REASON"
