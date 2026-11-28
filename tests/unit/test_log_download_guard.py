@@ -940,6 +940,29 @@ class TestDownloadTool:
         logs_module.cleanup_successful_downloads()
         assert not os.path.exists(payload["file_path"])
 
+    async def test_the_initial_fetch_uses_the_owner_not_the_legacy_shim(
+        self, monkeypatch, owned_api_client, owned_registry
+    ):
+        """The initial download fetch resolves the owner directly, without client.api_client."""
+
+        def no_shim(name):
+            raise AssertionError(f"the deprecated client.{name} shim was used")
+
+        monkeypatch.setattr(client_module, "__getattr__", no_shim)
+        with owned_api_client(
+            _FakeClient(
+                [
+                    _FakeResponse(
+                        "https://api.nextdns.io/profiles/abc123/logs/download",
+                        chunks=["host,reason\na.com,blocked\n"],
+                    )
+                ]
+            )
+        ):
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+        assert payload["row_count"] == 2
+        logs_module.cleanup_successful_downloads()
+
     async def test_a_successful_download_is_reclaimed_at_shutdown(
         self, monkeypatch, unauthenticated, owned_api_client, owned_registry
     ):

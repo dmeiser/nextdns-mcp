@@ -11,7 +11,6 @@ SPDX-License-Identifier: MIT
 
 import asyncio
 import logging
-import time
 from collections.abc import Awaitable, Mapping
 from itertools import islice
 from typing import Any, NamedTuple
@@ -19,6 +18,7 @@ from typing import Any, NamedTuple
 from ...charts import (
     build_chart_data,
     cap_chart_series,
+    current_time,
     downsample_chart_series,
     extract_series_fields,
     resolve_time_point,
@@ -295,7 +295,7 @@ def payload_data(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 def _overview_interval(from_time: str | int, to_time: str | int) -> int:
     """Pick interval based on span: 3600 for <= 2 days, 86400 for longer."""
-    now = time.time()
+    now = current_time()
     start = resolve_time_point(from_time, now)
     end = resolve_time_point(to_time, now)
     if start is not None and end is not None:

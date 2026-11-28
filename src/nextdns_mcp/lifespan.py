@@ -1,9 +1,11 @@
 """Server lifespan and the per-server state it owns.
 
-``create_mcp_server`` (``nextdns_mcp.openapi``) attaches one
+``create_mcp_server`` (``nextdns_mcp.openapi``) registers one
 ``ServerResources`` — the API client owner, DoH client owner, and download
-registry — to each ``FastMCP`` instance and hands ``server_lifespan`` to
-FastMCP as the server's lifespan. The lifespan publishes the resources two
+registry — for each ``FastMCP`` instance (in :data:`_server_resources`, a
+weak-key registry, so the state never hangs off the third-party object and is
+reachable exactly as long as the server that owns it) and hands
+``server_lifespan`` to FastMCP as the server's lifespan. The lifespan publishes the resources two
 ways, both explicit: into each module's owner context var for same-task
 callers, and into the lifespan context FastMCP hands every request this
 server serves (issue #642). Shutdown releases everything the server owns.
@@ -20,6 +22,7 @@ SPDX-License-Identifier: MIT
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from fastmcp import FastMCP
 
@@ -38,7 +41,7 @@ class ServerResources:
     in process-global module singletons any caller could reach. Every client
     and download consumer reads the snapshot this server was created with rather
     than the process environment. ``create_mcp_server()`` builds one per
-    ``FastMCP`` instance and attaches it to the instance, so two embedded
+    ``FastMCP`` instance and registers it for that instance, so two embedded
     servers never read or reset each other's state. :meth:`aclose` closes the
     clients and reclaims the downloads - one server's shutdown cannot reach
     into a sibling server's connections or tracked CSVs.
@@ -65,16 +68,36 @@ class ServerResources:
             self.downloads.cleanup()
 
 
+# The state each server this package creates owns, keyed on the server itself.
+# Keyed WEAKLY on purpose: the package keeps no strong handle on a server's
+# resources, so an embedded server that goes out of scope takes its clients and
+# its download registry with it instead of parking them for the life of the
+# process. The alternative - hanging the resources on the ``FastMCP`` object as
+# a private attribute of ours - widened a third-party class, and that is what
+# this registry replaces.
+_server_resources: WeakKeyDictionary[FastMCP, ServerResources] = WeakKeyDictionary()
+
+
+def register_server_resources(mcp: FastMCP, resources: ServerResources) -> None:
+    """Record that ``mcp`` owns ``resources`` for as long as ``mcp`` lives.
+
+    Called once per server by ``create_mcp_server``; :func:`server_resources`
+    is how the lifespan reads it back.
+    """
+    _server_resources[mcp] = resources
+
+
 def server_resources(mcp: FastMCP) -> ServerResources:
-    """The resources attached to this FastMCP instance at creation.
+    """The resources registered for this FastMCP instance at creation.
 
     Raises:
-        RuntimeError: When the instance carries no resources - every server
-            this package creates attaches them in ``create_mcp_server``.
+        RuntimeError: When no resources are registered for the instance -
+            every server this package creates registers them in
+            ``create_mcp_server``.
     """
-    resources = getattr(mcp, "_nextdns_resources", None)
+    resources = _server_resources.get(mcp)
     if resources is None:
-        raise RuntimeError("FastMCP instance carries no nextdns_mcp ServerResources")
+        raise RuntimeError("No nextdns_mcp ServerResources registered for this FastMCP instance")
     return resources
 
 
@@ -83,7 +106,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage server lifespan: own the server's state explicitly, release it on shutdown.
 
     Own the state THIS server hands out: the API client, DoH client, and
-    download registry attached to the instance by ``create_mcp_server``. The
+    download registry registered for the instance by ``create_mcp_server``. The
     lifespan publishes them two ways, both explicit: into each module's owner
     context var for same-task callers, and into the lifespan context FastMCP
     hands every request this server serves (issue #642: the lifespan task

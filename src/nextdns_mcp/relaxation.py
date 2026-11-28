@@ -5,7 +5,8 @@
 # StripExtraFieldsMiddleware intercepts tool calls and filters arguments to
 # only include fields defined in the tool's schema, operating at the MCP call
 # level so that unknown fields are dropped (not rejected) while required/typed
-# fields are still validated. The dropped names are not lost: the result
+# fields are still validated. The prepared arguments go downstream on a copy of
+# the call, so the message the middleware was handed is never rewritten. The dropped names are not lost: the result
 # carries them under ``ignored_arguments`` with a hint naming the tool that
 # actually declares each, so a caller learns its real intent was discarded
 # instead of believing the call applied it.
@@ -511,18 +512,25 @@ class StripExtraFieldsMiddleware(Middleware):
     ) -> ToolResult:
         """Filter tool arguments to only include known parameters and coerce types.
 
+        The prepared arguments go downstream on a COPY of the call, never by
+        rewriting the message this middleware was handed: the call log, an
+        earlier link in the chain, or a retry all still see the call exactly as
+        it arrived, and only the tool body sees the filtered, coerced arguments.
+
         Fails closed: if the tool's parameter schema cannot be fetched, the call
         is aborted with a ToolError instead of passing arguments through
         unstripped/un-coerced.
         """
         arguments = context.message.arguments
         ignored: list[str] = []
+        downstream = context
         if arguments and context.fastmcp_context:
-            context.message.arguments, ignored = await self._prepare_arguments(
+            prepared, ignored = await self._prepare_arguments(
                 context.fastmcp_context.fastmcp, context.message.name, arguments
             )
+            downstream = context.copy(message=context.message.model_copy(update={"arguments": prepared}))
 
-        result = await call_next(context)
+        result = await call_next(downstream)
         if ignored:
             await self._annotate_ignored(result, context, ignored)
         return result

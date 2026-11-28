@@ -44,7 +44,7 @@ from .call_log import CallLogMiddleware, call_log_path
 from .compat import register_compat_routes
 from .config import ServerConfig
 from .health import register_health_route
-from .lifespan import ServerResources, server_lifespan
+from .lifespan import ServerResources, register_server_resources, server_lifespan
 from .relaxation import StripExtraFieldsMiddleware
 from .spec_tools import endpoints_for_routes
 from .tool_search import CallToolShapeMiddleware, build_search_transform
@@ -65,7 +65,7 @@ def create_mcp_server(
     around them: disclosure, argument relaxation, the call log, the health
     endpoint, and ownership of the server's long-lived state — one
     ``ServerResources`` (the API client, DoH client, and download registry)
-    is built here and attached to the instance, so every server owns its state
+    is built here and registered for the instance, so every server owns its state
     explicitly and embedded servers never share it.
 
         Args:
@@ -95,7 +95,7 @@ def create_mcp_server(
     _add_call_log_middleware(mcp, endpoints)
 
     logger.info("MCP server created successfully")
-    mcp._nextdns_resources = ServerResources(config=snapshot)  # type: ignore[attr-defined]
+    register_server_resources(mcp, ServerResources(config=snapshot))
     default_profile = snapshot.default_profile
     if default_profile:
         logger.info(f"Default profile: {default_profile}")

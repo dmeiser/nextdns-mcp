@@ -96,8 +96,8 @@ def _bound_value(value: Any) -> tuple[Any, bool]:
     return bound_json(value, _BODY_BOUNDS, depth=1)
 
 
-def bound_structured_fields(payload: dict[str, Any]) -> bool:
-    """Bound free-form keys and values in an inlined structured error document.
+def bound_structured_fields(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Bound free-form keys and values in a copy of an inlined structured error document.
 
     Every free-form string is capped at ``MAX_RESPONSE_BODY_CHARS`` (dict keys,
     and strings nested in dicts and lists too) and cut strings are flagged with
@@ -123,10 +123,14 @@ def bound_structured_fields(payload: dict[str, Any]) -> bool:
     shortened document.
 
     Args:
-        payload: The structured error document; replaced with its bounded copy.
+        payload: The structured error document; read only, never written to.
 
     Returns:
-        True when at least one key or value was truncated.
+        A ``(bounded_payload, truncated)`` pair: the bounded copy the caller
+        serves, and True when at least one key or value was truncated. The
+        document handed in keeps its contents, so a caller that still holds it
+        (a log line, a retry, the next failure built from the same parsed body)
+        cannot be handed a half-rewritten version of it.
     """
     typed, free = _split_typed_fields(payload)
     bounded: dict[str, Any] = {}
@@ -144,9 +148,7 @@ def bound_structured_fields(payload: dict[str, Any]) -> bool:
         cuts.extend((key_cut, value_cut))
     if len(bounded) < len(payload):
         cuts.append(True)
-    payload.clear()
-    payload.update(bounded)
-    return any(cuts)
+    return bounded, any(cuts)
 
 
 def _split_typed_fields(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[Any, Any]]:
