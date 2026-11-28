@@ -50,6 +50,12 @@ WIRE_LINE_SLACK = 4096
 MAX_WIRE_LINE_BYTES = MAX_RESULT_BYTES + WIRE_LINE_SLACK
 _READ_CHUNK_SIZE = 65536
 
+# Startup stderr is diagnostic only. Bound the bytes retained across every line
+# while the worker boots: a noisy Pyodide failure must not grow without limit.
+MAX_STARTUP_STDERR_BYTES = 4096
+_READY_SIGNAL_TEXT = "pyodide:ready"
+_READY_SIGNAL = _READY_SIGNAL_TEXT.encode()
+
 # Exact host environment variables approved for the Deno sandbox subprocess.
 # Generated code executes with Pyodide's full ``os`` module, so anything in the
 # subprocess environment is readable from LLM-generated code. A name-substring
@@ -236,6 +242,76 @@ def _startup_error(stderr_lines: list[str]) -> RuntimeError:
     return RuntimeError(f"Pyodide sandbox failed to start:\n{err}")
 
 
+class _BoundedStderr:
+    """File-like reader that retains at most ``limit`` startup stderr bytes.
+
+    Unlike ``readline`` on the raw pipe, this reads in chunks and stops
+    retaining bytes once the budget is spent, while still draining each line to
+    its newline. The readiness signal is detected independently of the retained
+    bytes, so a long boot log cannot hide it or stall the handshake. Extra
+    bytes past a chunk's newline are kept for the next line, as on a normal
+    stream.
+    """
+
+    def __init__(self, raw: Any, limit: int = MAX_STARTUP_STDERR_BYTES) -> None:
+        self._raw = raw
+        self._remaining = limit
+        self._pending = b""
+        self._tail = b""
+        self.ready = False
+
+    def _next_chunk(self) -> bytes:
+        if self._pending:
+            chunk, self._pending = self._pending, b""
+            return chunk
+        read1 = getattr(self._raw, "read1", None)
+        if read1 is None:
+            return self._raw.read(_READ_CHUNK_SIZE)
+        return read1(_READ_CHUNK_SIZE)
+
+    def _observe(self, chunk: bytes) -> None:
+        """Record the readiness signal, including one split across chunks."""
+        if self.ready:
+            return
+        scanned = self._tail + chunk
+        if _READY_SIGNAL in scanned:
+            self.ready = True
+        self._tail = scanned[-(len(_READY_SIGNAL) - 1) :]
+
+    def _next_piece(self) -> tuple[bytes, bool]:
+        chunk = self._next_chunk()
+        if not chunk:
+            return b"", True
+        newline = chunk.find(b"\n")
+        if newline == -1:
+            piece, complete = chunk, False
+        else:
+            self._pending = chunk[newline + 1 :]
+            piece, complete = chunk[: newline + 1], True
+        self._observe(piece)
+        return piece, complete
+
+    def _diagnostic_line(self, retained: list[bytes]) -> bytes:
+        result = b"".join(retained)
+        # A spent budget must not swallow the signal and turn a successful boot
+        # into a spurious EOF failure.
+        if self.ready and not result:
+            return _READY_SIGNAL
+        return result
+
+    def readline(self) -> bytes:
+        retained: list[bytes] = []
+        while True:
+            piece, complete = self._next_piece()
+            if self._remaining:
+                kept = piece[: self._remaining]
+                retained.append(kept)
+                self._remaining -= len(kept)
+            if complete:
+                break
+        return self._diagnostic_line(retained)
+
+
 async def _read_startup_line(proc_stderr: Any, stderr_lines: list[str]) -> str:
     """Read one startup stderr line, raising if the worker stopped signalling before readiness.
 
@@ -249,7 +325,9 @@ async def _read_startup_line(proc_stderr: Any, stderr_lines: list[str]) -> str:
     line = await loop.run_in_executor(None, proc_stderr.readline)
     if not line:
         raise _startup_error(stderr_lines)
-    decoded = line.decode().rstrip()
+    # A byte cap can end in the middle of a multi-byte character; keep the
+    # diagnostics instead of failing startup on a decode error.
+    decoded = line.decode(errors="replace").rstrip()
     stderr_lines.append(decoded)
     return decoded
 
@@ -262,9 +340,10 @@ async def _await_ready(proc: subprocess.Popen[bytes]) -> None:
     """
     assert proc.stderr is not None
     stderr_lines: list[str] = []
+    bounded_stderr = _BoundedStderr(proc.stderr)
     while True:
-        decoded = await _read_startup_line(proc.stderr, stderr_lines)
-        if "pyodide:ready" in decoded:
+        decoded = await _read_startup_line(bounded_stderr, stderr_lines)
+        if bounded_stderr.ready or _READY_SIGNAL_TEXT in decoded:
             break
 
 

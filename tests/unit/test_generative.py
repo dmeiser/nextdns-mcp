@@ -2160,6 +2160,10 @@ class _FakeStderr:
         assert self.reads <= self._max_reads, f"stderr read {self.reads} times; expected at most {self._max_reads}"
         return self._lines.pop(0) if self._lines else b""
 
+    def read1(self, _n: int) -> bytes:
+        """The bounded startup reader reads in chunks, one canned line at a time."""
+        return self.readline()
+
 
 class _FakeProc:
     """Minimal stand-in for the Deno subprocess during startup."""
@@ -2348,10 +2352,76 @@ def test_sandbox_startup_env_relocates_deno_cache(isolated_sandbox_deno_dir, mon
     assert "NEXTDNS_API_KEY" not in env
 
 
+def test_bounded_stderr_caps_bytes_across_lines_but_still_detects_ready():
+    raw = _ChunkedRaw(b"first line\n" + b"x" * 100 + b"\npyodide:ready\n", chunk_size=16)
+    bounded = sandbox_module._BoundedStderr(raw, limit=24)
+
+    assert bounded.readline() == b"first line\n"
+    assert len(bounded.readline()) == 13  # the rest of the 24-byte budget
+    assert bounded.ready is False
+
+    # The budget is spent, but draining continues so the readiness signal is seen.
+    assert bounded.readline() == b"pyodide:ready"
+    assert bounded.ready is True
+
+
+def test_bounded_stderr_detects_ready_split_across_chunks():
+    raw = _ChunkedRaw(b"pyodide:rea" + b"dy\n", chunk_size=7)
+    bounded = sandbox_module._BoundedStderr(raw)
+
+    assert bounded.readline() == b"pyodide:ready\n"
+    assert bounded.ready is True
+    bounded._observe(b"pyodide:ready")  # once ready, further bytes are ignored
+
+
+def test_bounded_stderr_keeps_lines_past_a_chunk_newline():
+    raw = _ChunkedRaw(b"boot log\npyodide:ready\n", chunk_size=64)
+    bounded = sandbox_module._BoundedStderr(raw)
+
+    assert bounded.readline() == b"boot log\n"
+    assert bounded.ready is False
+    assert bounded.readline() == b"pyodide:ready\n"
+    assert bounded.ready is True
+
+
+def test_bounded_stderr_works_with_read_only_streams():
+    class ReadOnly:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+            self._pos = 0
+
+        def read(self, n: int) -> bytes:
+            chunk = self._data[self._pos : self._pos + n]
+            self._pos += len(chunk)
+            return chunk
+
+    bounded = sandbox_module._BoundedStderr(ReadOnly(b"boot log\npyodide:ready\n"))
+    assert bounded.readline() == b"boot log\n"
+    assert bounded.readline() == b"pyodide:ready\n"
+    assert bounded.ready is True
+
+
+@pytest.mark.asyncio
+async def test_read_startup_line_replaces_bytes_cut_mid_character():
+    bounded = sandbox_module._BoundedStderr(_ChunkedRaw("αβγ\n".encode(), chunk_size=2), limit=3)
+    lines: list[str] = []
+    decoded = await sandbox_module._read_startup_line(bounded, lines)
+    assert "\ufffd" in decoded
+    assert lines == [decoded]
+
+
 @pytest.mark.asyncio
 async def test_await_ready_consumes_lines_until_ready():
     proc = _FakeProc([b"boot log\n", b"pyodide:ready\n"])
     await sandbox_module._await_ready(proc)  # returns once readiness is signalled
+
+
+@pytest.mark.asyncio
+async def test_await_ready_reaches_signal_past_oversized_stderr():
+    """A noisy boot log cannot exhaust memory or hide the readiness handshake."""
+    proc = _FakeProc([b"boot log\n", b"x" * 100_000 + b"\n", b"pyodide:ready\n"])
+    await sandbox_module._await_ready(proc)
+    assert proc.stderr.reads == 3
 
 
 @pytest.mark.asyncio
