@@ -10,8 +10,7 @@ SPDX-License-Identifier: MIT
 
 from typing import Any
 
-from ...utils import sanitize_label
-from .data import domain_label, item_queries
+from .data import ip_label, item_queries
 
 
 def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
@@ -44,11 +43,11 @@ def gafam_summary_items(chart_data: list[dict[str, Any]]) -> list[tuple[str, int
 
 def ip_summary_items(data: list[dict[str, Any]]) -> list[tuple[str, int]]:
     """Format (ip, queries) pairs for IP analytics summary."""
-    return [(sanitize_label(item.get("ip") or "-"), item_queries(item)) for item in data]
+    return [(ip_label(item), item_queries(item)) for item in data]
 
 
-def overview_top_summary(resolved_data: list[dict[str, Any]], blocked_data: list[dict[str, Any]]) -> str:
-    """Summarize leading resolved and blocked domains."""
-    top_res = _format_top_items([(domain_label(item, "domain"), item_queries(item)) for item in resolved_data])
-    top_blk = _format_top_items([(domain_label(item, "domain"), item_queries(item)) for item in blocked_data])
+def overview_top_summary(resolved_items: list[tuple[str, int]], blocked_items: list[tuple[str, int]]) -> str:
+    """Summarize leading resolved and blocked domains from the rows the cards already shaped."""
+    top_res = _format_top_items(resolved_items)
+    top_blk = _format_top_items(blocked_items)
     return f"Top resolved: {top_res or 'none'}; Top blocked: {top_blk or 'none'}"

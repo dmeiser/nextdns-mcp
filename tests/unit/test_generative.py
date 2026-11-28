@@ -2406,3 +2406,47 @@ async def test_generate_ui_cold_start_timeout_is_distinct():
         _assert_typed_generation_error(result, "timeout", "cold start exceeded")
         mock_exec.assert_not_called()
     worker.stop.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["AreaChart(data=[], series=[])\n", "with Tab('D'):\n    pass\n", "x = 1\n"],
+)
+def test_node_visits_are_iterators_not_per_node_lists(code: str) -> None:
+    """Child visits reach the walk's stack as iterators.
+
+    The walk extends its stack from these visits and discards them, so a list
+    per visited node is allocated and thrown away for nothing. `iter(x) is x`
+    fails for a list, which is the shape this replaces.
+    """
+    tree = ast.parse(code)
+    ctx = chart_placement_module._build_context(tree)
+    for node in ast.walk(tree):
+        visits = chart_placement_module._node_visits(node, False, ctx)
+        assert iter(visits) is visits, f"{type(node).__name__} child visits are materialized"
+
+
+def test_renderer_html_is_read_once_per_process(monkeypatch) -> None:
+    """Two providers in one process share one bundled-renderer file read.
+
+    Every renderer resource serves the same packaged document; re-reading it
+    per ``PrefabGenerativeUI`` charges each extra provider a full file read at
+    construction. ``cache_clear`` makes the count independent of test order.
+    """
+    import prefab_ui.renderer as prefab_renderer
+
+    generative_module._renderer_html.cache_clear()
+    reads = {"n": 0}
+    original = prefab_renderer._get_bundled_html
+
+    def counting_read() -> str:
+        reads["n"] += 1
+        return original()
+
+    monkeypatch.setattr(prefab_renderer, "_get_bundled_html", counting_read)
+
+    first = PrefabGenerativeUI()
+    second = PrefabGenerativeUI()
+
+    assert reads["n"] == 1
+    assert first._resources[0].text == second._resources[0].text == generative_module._renderer_html()

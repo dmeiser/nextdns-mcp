@@ -15,7 +15,7 @@ SPDX-License-Identifier: MIT
 
 import logging
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastmcp.tools.base import ToolResult
 from prefab_ui.app import PrefabApp
@@ -58,6 +58,7 @@ from .data import (
     device_row,
     domain_label,
     gafam_rows,
+    ip_label,
     ip_row,
     item_queries,
     reason_label,
@@ -192,9 +193,9 @@ def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
     )
 
 
-def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
-    """Build domain data table."""
-    rows: _TableRows = [{"domain": domain_label(item, key_name), "queries": item_queries(item)} for item in data]
+def _domain_table(items: list[tuple[str, int]]) -> DataTable:
+    """Build domain data table from the labels already shaped for the summary."""
+    rows: _TableRows = [{"domain": label, "queries": queries} for label, queries in items]
     return _data_table(
         [
             DataTableColumn(key="domain", header="Domain", sortable=True),
@@ -212,14 +213,14 @@ def _render_chart_view(chart_data: list[dict[str, Any]], title: str, color: str,
         _bar_chart(chart_data, title, color)
 
 
-def _render_domain_content(title: str, data: list[dict[str, Any]], key_name: str, view_type: str, color: str) -> None:
-    """Render domain card content based on chosen visualization type."""
-    if not data:
+def _render_domain_content(title: str, items: list[tuple[str, int]], view_type: str, color: str) -> None:
+    """Render domain card content from the labels already shaped for the summary."""
+    if not items:
         Text(f"No {title.lower()} available for this period.", css_class="text-sm text-muted-foreground py-4")
     elif view_type in ("table", "auto"):
-        _domain_table(data, key_name)
+        _domain_table(items)
     else:
-        chart_data = [{"label": domain_label(item, key_name), "queries": item_queries(item)} for item in data]
+        chart_data = [{"label": label, "queries": queries} for label, queries in items]
         _render_chart_view(chart_data, title, color, view_type)
 
 
@@ -237,23 +238,22 @@ def _build_analytics_card(title: str, description: str, render_content) -> Card:
 def build_domains_card(
     title: str,
     description: str,
-    data: list[dict[str, Any]],
-    key_name: str = "domain",
+    items: list[tuple[str, int]],
     view_type: str = "table",
     color: str = DEFAULT_BAR_COLOR,
 ) -> Card:
-    """Build a domain listing card with a sortable data table or bar chart."""
+    """Build a domain listing card from the labels already shaped for the summary."""
     return _build_analytics_card(
         title,
         description,
-        lambda: _render_domain_content(title, data, key_name, view_type, color),
+        lambda: _render_domain_content(title, items, view_type, color),
     )
 
 
-def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
-    """Build reasons data table."""
-    total = sum(item_queries(item) for item in data)
-    rows: _TableRows = [reason_row(item, total) for item in data]
+def _reasons_table(items: list[tuple[str, int]]) -> DataTable:
+    """Build reasons data table from the labels already shaped for the summary."""
+    total = sum(queries for _, queries in items)
+    rows: _TableRows = [reason_row(name, queries, total) for name, queries in items]
     return _data_table(
         [
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
@@ -264,16 +264,16 @@ def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     )
 
 
-def build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
-    """Build the reasons for blocking card."""
+def build_reasons_card(items: list[tuple[str, int]], view_type: str = "auto") -> Card:
+    """Build the reasons for blocking card from the labels already shaped for the summary."""
 
     def _render():
-        if not data:
+        if not items:
             Text("No queries were blocked during this period.", css_class="text-sm text-muted-foreground py-4")
         elif view_type == "table":
-            _reasons_table(data)
+            _reasons_table(items)
         else:
-            chart_data = [{"label": reason_label(item), "queries": item_queries(item)} for item in data]
+            chart_data = [{"label": name, "queries": queries} for name, queries in items]
             if view_type == "pie":
                 _pie_chart(chart_data)
             else:
@@ -286,10 +286,10 @@ def build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> C
     )
 
 
-def _devices_table(data: list[dict[str, Any]]) -> DataTable:
-    """Build devices data table."""
-    total = sum(item_queries(item) for item in data)
-    rows: _TableRows = [device_row(item, total) for item in data]
+def _devices_table(data: list[dict[str, Any]], items: list[tuple[str, int]]) -> DataTable:
+    """Build devices data table, reusing the labels already shaped for the summary."""
+    total = sum(queries for _, queries in items)
+    rows: _TableRows = [device_row(item, total, label) for item, (label, _) in zip(data, items)]
     return _data_table(
         [
             DataTableColumn(key="device", header="Device", sortable=True),
@@ -301,29 +301,29 @@ def _devices_table(data: list[dict[str, Any]]) -> DataTable:
     )
 
 
-def _render_device_content(data: list[dict[str, Any]], view_type: str) -> None:
-    """Render devices card content based on chosen visualization type."""
-    if not data:
+def _render_device_content(data: list[dict[str, Any]], items: list[tuple[str, int]], view_type: str) -> None:
+    """Render devices card content from the labels already shaped for the summary."""
+    if not items:
         Text("No device queries recorded for this period.", css_class="text-sm text-muted-foreground py-4")
     elif view_type in ("table", "auto"):
-        _devices_table(data)
+        _devices_table(data, items)
     else:
-        chart_data = [{"label": device_label(item), "queries": item_queries(item)} for item in data]
+        chart_data = [{"label": label, "queries": queries} for label, queries in items]
         _render_chart_view(chart_data, "Queries", "#3b82f6", view_type)
 
 
-def build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
-    """Build the devices card."""
+def build_devices_card(data: list[dict[str, Any]], items: list[tuple[str, int]], view_type: str = "auto") -> Card:
+    """Build the devices card from fetched rows and their summary labels."""
     return _build_analytics_card(
         "Devices",
         "Devices making the queries.",
-        lambda: _render_device_content(data, view_type),
+        lambda: _render_device_content(data, items, view_type),
     )
 
 
-def build_ips_card(data: list[dict[str, Any]]) -> Card:
-    """Build the IP addresses card; this fixed-format card is always a table."""
-    rows: _TableRows = [ip_row(item) for item in data]
+def build_ips_card(data: list[dict[str, Any]], items: list[tuple[str, int]]) -> Card:
+    """Build the IP addresses card; this fixed-format card is always a table, with labels reused from the summary."""
+    rows: _TableRows = [ip_row(item, label) for item, (label, _) in zip(data, items)]
     with Card(css_class="flex-1 min-w-[300px]") as card:
         with CardHeader():
             CardTitle("IPs")
@@ -410,9 +410,9 @@ def build_security_card(encryption_rate: tuple[int, int, float], dnssec_rate: tu
     return card
 
 
-def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
-    """Build destinations table."""
-    rows: _TableRows = [destination_row(item) for item in data]
+def _destinations_table(data: list[dict[str, Any]], items: list[tuple[str, int]]) -> DataTable:
+    """Build destinations table, reusing the labels already shaped for the summary."""
+    rows: _TableRows = [destination_row(item, label) for item, (label, _) in zip(data, items)]
     return _data_table(
         [
             DataTableColumn(key="country", header="Country", sortable=True),
@@ -424,34 +424,34 @@ def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
     )
 
 
-def _render_destination_content(data: list[dict[str, Any]], view_type: str) -> None:
-    """Render destination countries card content based on chosen visualization type."""
-    if not data:
+def _render_destination_content(data: list[dict[str, Any]], items: list[tuple[str, int]], view_type: str) -> None:
+    """Render destination countries card content from the labels already shaped for the summary."""
+    if not items:
         Text("No country traffic recorded for this period.", css_class="text-sm text-muted-foreground py-4")
     elif view_type in ("table", "auto"):
-        _destinations_table(data)
+        _destinations_table(data, items)
     else:
-        chart_data = [{"label": destination_label(item), "queries": item_queries(item)} for item in data]
+        chart_data = [{"label": label, "queries": queries} for label, queries in items]
         _render_chart_view(chart_data, "Queries", "#3b82f6", view_type)
 
 
-def build_destinations_card(data: list[dict[str, Any]], view_type: str = "auto") -> Card:
-    """Build the destination countries card."""
+def build_destinations_card(data: list[dict[str, Any]], items: list[tuple[str, int]], view_type: str = "auto") -> Card:
+    """Build the destination countries card from fetched rows and their summary labels."""
     return _build_analytics_card(
         "Traffic Destination",
         "Top destination countries based on DNS queries.",
-        lambda: _render_destination_content(data, view_type),
+        lambda: _render_destination_content(data, items, view_type),
     )
 
 
 def assemble_overview_layout(
     kpis: dict[str, Any],
     series_payload: dict[str, Any],
-    resolved_data: list[dict[str, Any]],
-    blocked_data: list[dict[str, Any]],
+    resolved_items: list[tuple[str, int]],
+    blocked_items: list[tuple[str, int]],
     domain_view: str = "table",
 ) -> Column:
-    """Build the main overview cards layout."""
+    """Build the main overview cards layout from the labels already shaped for the summary."""
     with Column(gap=6, css_class="p-6") as view:
         Heading("NextDNS Overview Dashboard", level=1)
         _build_kpi_row(kpis)
@@ -460,18 +460,35 @@ def assemble_overview_layout(
             build_domains_card(
                 "Resolved Domains",
                 "Domains that resolved without being blocked.",
-                resolved_data,
+                resolved_items,
                 view_type=domain_view,
                 color="#3b82f6",
             )
             build_domains_card(
                 "Blocked Domains",
                 "Domains blocked by security, privacy, or parental controls.",
-                blocked_data,
+                blocked_items,
                 view_type=domain_view,
                 color="#ef4444",
             )
     return view
+
+
+class _ExtraItems(NamedTuple):
+    reasons: list[tuple[str, int]]
+    devices: list[tuple[str, int]]
+    ips: list[tuple[str, int]]
+    countries: list[tuple[str, int]]
+
+
+def _extra_items(payloads: ExtraDashboardPayloads) -> _ExtraItems:
+    """Shape extra-section labels once, for the cards that render them."""
+    return _ExtraItems(
+        reasons=[(reason_label(item), item_queries(item)) for item in payloads.reasons],
+        devices=[(device_label(item), item_queries(item)) for item in payloads.devices],
+        ips=[(ip_label(item), item_queries(item)) for item in payloads.ips],
+        countries=[(destination_label(item), item_queries(item)) for item in payloads.countries],
+    )
 
 
 def append_extra_cards(
@@ -489,17 +506,19 @@ def append_extra_cards(
     take ``view_type``, which keeps ``"auto"`` and renders each card's own default
     instead of being coerced to a table (#547).
     """
+    items = _extra_items(payloads)
     with view:
         with Row(gap=4):
-            build_reasons_card(payloads.reasons, view_type=view_type)
-            build_devices_card(payloads.devices, view_type=view_type)
+            build_reasons_card(items.reasons, view_type=view_type)
+            build_devices_card(payloads.devices, items.devices, view_type=view_type)
         with Row(gap=4):
-            build_domains_card("Root Domains", "Aggregate root domains.", payloads.root_domains, view_type=domain_view)
-            build_ips_card(payloads.ips)
+            root_items = [(domain_label(item), item_queries(item)) for item in payloads.root_domains]
+            build_domains_card("Root Domains", "Aggregate root domains.", root_items, view_type=domain_view)
+            build_ips_card(payloads.ips, items.ips)
         with Row(gap=4):
             gafam_chart, gafam_table = gafam_rows(payloads.gafam)
             build_gafam_card(gafam_chart, gafam_table, view_type=view_type)
-            build_destinations_card(payloads.countries, view_type=view_type)
+            build_destinations_card(payloads.countries, items.countries, view_type=view_type)
         with Row(gap=4):
             build_security_card(
                 calc_rate(payloads.encryption, "encrypted"),

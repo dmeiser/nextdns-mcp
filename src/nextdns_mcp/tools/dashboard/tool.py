@@ -74,7 +74,9 @@ class _CardSpec:
     summary_title: str
     summary_noun: str
     items: Callable[[list[dict[str, Any]]], list[tuple[str, int]]]
-    build_card: Callable[[list[dict[str, Any]], str], Card]
+    # The card receives both the fetched rows (for fields beyond the label) and
+    # the shaped items, so a label is sanitized once for both surfaces.
+    build_card: Callable[[list[dict[str, Any]], list[tuple[str, int]], str], Card]
     fetch_extra: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -96,18 +98,23 @@ async def _card_analytics_impl(
         return error_payload(ErrorCode.INTERNAL_ERROR, "Card data fetch returned no data or error")
     items = spec.items(data)
     summary = format_items_summary(spec.summary_title, spec.summary_noun, items, sum(q for _, q in items))
-    return wrap_card_result(spec.build_card(data, view_type), summary)
+    return wrap_card_result(spec.build_card(data, items, view_type), summary)
+
+
+def _domain_items(data: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    """Shape domain rows once, for both the cards and the summary text."""
+    return [(domain_label(item), item_queries(item)) for item in data]
 
 
 _RESOLVED_DOMAINS_SPEC = _CardSpec(
     endpoint="domains",
     summary_title="Resolved Domains",
     summary_noun="domains",
-    items=lambda data: [(domain_label(item), item_queries(item)) for item in data],
-    build_card=lambda data, view_type: build_domains_card(
+    items=_domain_items,
+    build_card=lambda _data, items, view_type: build_domains_card(
         "Resolved Domains",
         "Domains that resolved without being blocked.",
-        data,
+        items,
         view_type=view_type,
     ),
     fetch_extra={"status": "default"},
@@ -117,11 +124,11 @@ _BLOCKED_DOMAINS_SPEC = _CardSpec(
     endpoint="domains",
     summary_title="Blocked Domains",
     summary_noun="domains",
-    items=lambda data: [(domain_label(item), item_queries(item)) for item in data],
-    build_card=lambda data, view_type: build_domains_card(
+    items=_domain_items,
+    build_card=lambda _data, items, view_type: build_domains_card(
         "Blocked Domains",
         "Domains blocked by security, privacy, or parental controls.",
-        data,
+        items,
         view_type=view_type,
         color="#ef4444",
     ),
@@ -132,11 +139,11 @@ _ROOT_DOMAINS_SPEC = _CardSpec(
     endpoint="domains",
     summary_title="Root Domains",
     summary_noun="domains",
-    items=lambda data: [(domain_label(item), item_queries(item)) for item in data],
-    build_card=lambda data, view_type: build_domains_card(
+    items=_domain_items,
+    build_card=lambda _data, items, view_type: build_domains_card(
         "Root Domains",
         "Aggregate queries for root domains and subdomains.",
-        data,
+        items,
         view_type=view_type,
     ),
     fetch_extra={"root": "true"},
@@ -147,7 +154,7 @@ _REASONS_SPEC = _CardSpec(
     summary_title="Reasons for Blocking",
     summary_noun="blocklists",
     items=lambda data: [(reason_label(item), item_queries(item)) for item in data],
-    build_card=lambda data, view_type: build_reasons_card(data, view_type=view_type),
+    build_card=lambda _data, items, view_type: build_reasons_card(items, view_type=view_type),
 )
 
 _DEVICES_SPEC = _CardSpec(
@@ -155,7 +162,7 @@ _DEVICES_SPEC = _CardSpec(
     summary_title="Device Analytics",
     summary_noun="devices",
     items=lambda data: [(device_label(item), item_queries(item)) for item in data],
-    build_card=lambda data, view_type: build_devices_card(data, view_type=view_type),
+    build_card=lambda data, items, view_type: build_devices_card(data, items, view_type=view_type),
 )
 
 # IPs have no chart form: `build_ips_card` is fixed-format and ignores view_type,
@@ -165,7 +172,7 @@ _IPS_SPEC = _CardSpec(
     summary_title="IP Analytics",
     summary_noun="IP addresses",
     items=ip_summary_items,
-    build_card=lambda data, view_type: build_ips_card(data),
+    build_card=lambda data, items, _view_type: build_ips_card(data, items),
 )
 
 _COUNTRIES_SPEC = _CardSpec(
@@ -173,7 +180,7 @@ _COUNTRIES_SPEC = _CardSpec(
     summary_title="Traffic Destinations",
     summary_noun="countries",
     items=lambda data: [(destination_label(item), item_queries(item)) for item in data],
-    build_card=lambda data, view_type: build_destinations_card(data, view_type=view_type),
+    build_card=lambda data, items, view_type: build_destinations_card(data, items, view_type=view_type),
     fetch_extra={"type": "countries"},
 )
 
@@ -355,11 +362,13 @@ async def _render_overview_page(
 
     eff_domain_view = _resolve_domain_view(domain_view, view_type)
     kpis = calculate_status_kpis(payload_data(status_payload))
-    view = assemble_overview_layout(kpis, series_payload, resolved_data, blocked_data, domain_view=eff_domain_view)
+    resolved_items = _domain_items(resolved_data)
+    blocked_items = _domain_items(blocked_data)
+    view = assemble_overview_layout(kpis, series_payload, resolved_items, blocked_items, domain_view=eff_domain_view)
     if include_extra and extra_payloads is not None:
         append_extra_cards(view, extra_payloads, domain_view=eff_domain_view, view_type=view_type)
 
-    top_summary = overview_top_summary(resolved_data, blocked_data)
+    top_summary = overview_top_summary(resolved_items, blocked_items)
     summary = (
         f"[Rendered NextDNS Dashboard: {kpis['total']:,} queries, {kpis['blocked']:,} blocked ({kpis['rate']:.2f}%). "
         f"{top_summary}]"
