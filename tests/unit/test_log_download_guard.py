@@ -2180,3 +2180,94 @@ class TestOffloadedCallsSurviveCancellation:
         assert created and not os.path.exists(created[0]), (
             "a rejected download must not leave an unregistered CSV behind"
         )
+
+
+class TestCancelledRegistrationKeepsOwnership:
+    """The download owns a finished CSV until it is handed back, cancellation included."""
+
+    async def test_a_cancellation_while_registration_is_pending_reclaims_everything(
+        self, monkeypatch, unauthenticated, owned_api_client
+    ):
+        """A cancel before the registry call runs must leave no CSV, no directory and no registry entry.
+
+        Registration is a separate task from the download. Cancelling the
+        download while that task is still pending must not strand the file in
+        the gap between ``downloaded = True`` and the caller receiving the
+        payload: the cleanup settles the registration, undoes it, and then
+        removes what the download made.
+        """
+        original = tool._register_successful_download
+        started = asyncio.Event()
+        gate: asyncio.Future[dict[str, Any] | None] = asyncio.get_running_loop().create_future()
+
+        async def gated_register(path: str, downloaded: bool) -> dict[str, Any] | None:
+            started.set()
+            await gate  # the registry call is still queued when the cancel lands
+            return await original(path, downloaded)
+
+        monkeypatch.setattr(tool, "_register_successful_download", gated_register)
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            return made
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        with (
+            logs_module.downloads_owned() as registry,
+            owned_api_client(
+                _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+            ),
+        ):
+            unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+            download = asyncio.create_task(logs_module._download_logs_to_tempfile("abc123"))
+            await asyncio.wait_for(started.wait(), _WRITE_START_SECONDS)
+            assert created and os.path.exists(os.path.join(created[0], "download.csv")), (
+                "the download finished writing before registration was cancelled"
+            )
+            download.cancel()
+            gate.set_result(None)  # let the registry call land after the cancellation
+            with pytest.raises(asyncio.CancelledError):
+                await download
+
+            assert created and not os.path.exists(created[0]), "the cancelled download left its CSV behind"
+            assert len(registry) == 0, "a deleted CSV stayed registered for shutdown reclaim"
+
+    async def test_a_second_cancellation_during_reclaim_still_leaves_nothing(self, monkeypatch):
+        """A second cancel during the directory reclaim cannot strand an abandoned temp directory."""
+        created: list[str] = []
+        entered_mkdtemp = threading.Event()
+        release_mkdtemp = threading.Event()
+        entered_removal = threading.Event()
+        release_removal = threading.Event()
+        real_mkdtemp = tempfile.mkdtemp
+        real_removal = retention._unlink_temp_file
+
+        def slow_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            entered_mkdtemp.set()
+            release_mkdtemp.wait(_RELEASE_SECONDS)
+            return made
+
+        def slow_removal(path: str) -> None:
+            entered_removal.set()
+            release_removal.wait(_RELEASE_SECONDS)
+            real_removal(path)
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", slow_mkdtemp)
+        monkeypatch.setattr(retention, "_unlink_temp_file", slow_removal)
+        download = asyncio.create_task(logs_module._download_logs_to_tempfile("abc123"))
+        assert await asyncio.to_thread(entered_mkdtemp.wait, _WRITE_START_SECONDS)
+        download.cancel()
+        release_mkdtemp.set()
+        assert await asyncio.to_thread(entered_removal.wait, _WRITE_START_SECONDS)
+        download.cancel()  # the second cancel lands while the reclaim worker is still running
+        release_removal.set()
+        with pytest.raises(asyncio.CancelledError):
+            await download
+
+        assert created and not os.path.exists(created[0]), "the second cancellation stranded the temp directory"

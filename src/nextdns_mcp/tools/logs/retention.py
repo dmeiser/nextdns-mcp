@@ -151,6 +151,17 @@ class DownloadRegistry:
                 if _remove_downloaded_file(path):
                     self._paths.pop(path, None)
 
+    def forget(self, path: str) -> None:
+        """Drop a registration whose download was cancelled before handoff.
+
+        The download is still the path's owner until its payload is returned.
+        If a cancellation landed while registration was running, settling it
+        and removing the path here keeps the registry from claiming a CSV the
+        caller is about to delete.
+        """
+        with self._lock:
+            self._paths.pop(path, None)
+
     def __contains__(self, path: object) -> bool:
         with self._lock:
             return path in self._paths
@@ -252,3 +263,15 @@ def _note_successful_download(path: str, downloaded: bool) -> None:
     if not downloaded:
         return
     current_download_registry().note(path, downloaded)
+
+
+def _forget_download(path: str) -> None:
+    """Undo a registration when the download was cancelled before handoff.
+
+    Resolves the owner the same way registration does, so a cancelled download
+    cannot remove another server's entry (issue #642).
+    """
+    try:
+        current_download_registry().forget(path)
+    except MissingDownloadRegistryError:
+        pass  # no owner means there is no registration to undo
