@@ -93,7 +93,8 @@ that names none — so for the last day write `-1d`.
 `to` omitted ends at now. The Grafana spelling `now-1d` is
 not accepted upstream; write `-1d`.
 `interval` (the `…Series` and `plotAnalytics` window size) is bounded to
-60–86400 seconds, and `partials` accepts only `none` or `all`. The 2000-point
+60–86400 seconds, and `partials` accepts `none` or `all` (a boolean spelling
+works too: `false` means `none`, `true` means `all`). The 2000-point
 budget described under `plotAnalytics` guards the generated `…Series` tools as
 well: a range that would return more points than that is refused with
 `invalid_argument` rather than answered with a truncated series.
@@ -105,8 +106,8 @@ history. Returns an interactive Prefab UI chart or an error if no data is availa
 A series is limited server-side to 2000 points (the requested range divided by
 `interval`) with `interval` between 60 and 86400 seconds. A request past either
 limit is rejected with an `invalid_argument` error rather than silently
-adjusted. `limit` must not exceed 500 and is rejected above that; the series
-endpoints consume no `limit`, so it is validated but never sent.
+adjusted. The tool publishes no `limit`: the series endpoints consume none, so
+the range and interval bounds above are the only exposure knobs.
 
 The rendered chart is bounded independently of the fetch: it draws at most 250
 downsampled intervals and at most 25 series - the busiest ones, with every omitted

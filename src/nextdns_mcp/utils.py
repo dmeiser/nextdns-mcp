@@ -239,8 +239,8 @@ def build_series_params(
     Both ``queryAnalytics(series=True)`` and ``plotAnalytics`` read the same
     ``/analytics/{metric};series`` endpoint, so they build the same parameter
     set through this one helper and cannot drift (issue #267). The ``;series``
-    endpoints take no ``limit``, so callers that expose one (as the plot tool
-    does) keep it out of this set and validate it on its own.
+    endpoints take no ``limit``, so a caller that exposes one (the dashboard)
+    keeps it out of this set and validates it on its own.
     """
     return build_query_params(
         **{

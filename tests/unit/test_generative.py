@@ -766,6 +766,64 @@ async def test_prefab_generative_ui_publishes_its_tools():
 
 
 @pytest.mark.asyncio
+async def test_the_components_tool_schema_exposes_only_the_callers_parameters():
+    """Upstream's ``components`` argument is test DI and never reaches the schema (issue #787)."""
+    gen_ui = PrefabGenerativeUI()
+
+    tools = await _tool_map(gen_ui)
+    properties = tools["search_prefab_components"].parameters["properties"]
+    assert set(properties) == {"query", "detail", "limit"}
+
+
+@pytest.mark.asyncio
+async def test_the_components_tool_forwards_to_upstream():
+    gen_ui = PrefabGenerativeUI()
+
+    tools = await _tool_map(gen_ui)
+    with patch.object(generative_module.prefab_generative, "search_components") as upstream:
+        upstream.return_value = "found"
+        result = tools["search_prefab_components"].fn("chart", detail=True, limit=3)
+    assert result == "found"
+    upstream.assert_called_once_with("chart", detail=True, limit=3)
+
+
+@pytest.mark.asyncio
+async def test_the_generate_tool_doc_describes_this_servers_parameters():
+    """The published description is server-owned: it names the real lookup tool and
+    documents only the parameters this tool takes (issue #787)."""
+    gen_ui = PrefabGenerativeUI()
+
+    tools = await _tool_map(gen_ui)
+    description = tools["generate_prefab_ui"].description or ""
+    assert "search_prefab_components" in description
+    # Upstream's execute() doc documents a caller-supplied sandbox and a tool
+    # called ``components``; neither exists on this server's surface.
+    assert "sandbox:" not in description
+    assert "`components` tool" not in description
+    properties = tools["generate_prefab_ui"].parameters["properties"]
+    assert set(properties) == {"code", "data"}
+
+
+@pytest.mark.asyncio
+async def test_the_generate_doc_matches_what_the_server_actually_does():
+    """Two claims the description has to keep honest (maintainer review, WORK-353).
+
+    The renderer CSP disables browser-side execution and the tool awaits and
+    validates the completed tree, so nothing streams; and the pinned Prefab
+    runner uses ``data`` for Python globals while ``PrefabApp(state=...)`` is
+    what sets client-side state an ``.rx`` binding reads.
+    """
+    gen_ui = PrefabGenerativeUI()
+
+    description = (await _tool_map(gen_ui))["generate_prefab_ui"].description or ""
+    assert "does not stream partial output" in description
+    assert "streams as the code builds" not in description
+    assert "completed result" in description
+    assert "PrefabApp(state=" in description
+    assert "pass initial state in `data`" not in description
+
+
+@pytest.mark.asyncio
 async def test_prefab_generative_ui_tool_lookup():
     """Compatibility: registered tools are retrievable via the provider lookup."""
     gen_ui = PrefabGenerativeUI()

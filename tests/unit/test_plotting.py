@@ -769,38 +769,26 @@ class TestPlotAnalyticsSeriesImpl:
             time.tzset()
         assert resolved == 1_705_312_800.0
 
-    @pytest.mark.asyncio
-    async def test_limit_over_cap_is_rejected(self, clean_env, mock_api_client, monkeypatch):
-        """An over-cap ``limit`` is rejected, never clamped into the request.
+    def test_limit_is_not_on_the_published_surface(self):
+        """The ``;series`` endpoint takes no ``limit``, so the plot tool publishes none.
 
-        ``limit`` stays on the published tool surface, so a caller passing the
-        old unbounded value gets a typed error naming the cap instead of a
-        silently different request.
+        A ``limit`` argument used to sit on the tool with nothing behind it:
+        validated on every call and never forwarded (issue #787).
         """
-        monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
-        mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
+        import inspect
 
-        result = await plots_module._plot_analytics_series_impl("status", limit=501)
-
-        assert result["code"] == "invalid_argument"
-        assert result["max_limit"] == utils_module.ANALYTICS_LIMIT_MAX
-        assert result["limit"] == 501
-        assert not mock_api_client.stream_calls
+        assert "limit" not in inspect.signature(plots_module.plotAnalytics).parameters
+        assert "limit" not in inspect.signature(plots_module._plot_analytics_series_impl).parameters
 
     @pytest.mark.asyncio
-    async def test_limit_at_cap_is_accepted_and_not_forwarded(self, clean_env, mock_api_client, monkeypatch):
-        """A valid ``limit`` is accepted and never reaches the ``;series`` endpoint."""
+    async def test_a_boolean_partials_is_sent_as_the_value_it_means(self, clean_env, mock_api_client, monkeypatch):
+        """``partials=False`` is the endpoint's ``none``, and the schema takes the boolean."""
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
-        monkeypatch.setattr(charts_module, "current_time", lambda: 1_700_000_000.0)
         mock_api_client.stream_state["body"] = json.dumps({"meta": {"series": {"times": []}}, "data": []}).encode()
 
-        await plots_module._plot_analytics_series_impl(
-            "status", from_time="-1d", limit=utils_module.ANALYTICS_LIMIT_MAX
-        )
+        await plots_module._plot_analytics_series_impl("status", from_time="-1d", interval=3600, partials=False)
 
-        params = mock_api_client.stream_calls[-1]["params"]
-        assert "limit" not in params
+        assert mock_api_client.stream_calls[-1]["params"]["partials"] == "none"
 
     @pytest.mark.asyncio
     async def test_uninterpretable_range_is_rejected(self, clean_env, mock_api_client, monkeypatch):

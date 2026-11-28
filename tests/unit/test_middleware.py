@@ -498,6 +498,64 @@ class TestIgnoredArgumentOwnerHint:
         hint = _owner_hint(["extra_field", "unknown"], "updateSettings", {})
         assert "check the tool's parameter list" in hint
 
+    def test_a_dropped_window_argument_names_the_time_alias(self):
+        """``from``/``to`` belong to many series tools; the UI tool spells them ``_time``."""
+        from nextdns_mcp.relaxation import _owner_hint
+
+        index = {
+            "from": ("getAnalyticsDevicesSeries", "getAnalyticsStatusSeries"),
+            "to": ("getAnalyticsDevicesSeries", "getAnalyticsStatusSeries"),
+        }
+        own = ("metric", "profile_id", "from_time", "to_time", "interval")
+        hint = _owner_hint(["from", "to"], "plotAnalytics", index, own)
+        assert "from_time" in hint
+        assert "to_time" in hint
+        assert "check the tool's parameter list" not in hint
+
+    def test_an_alias_alongside_an_owned_argument(self):
+        """The alias note and the owner note coexist in one hint."""
+        from nextdns_mcp.relaxation import _owner_hint
+
+        index = {
+            "from": ("getAnalyticsDevicesSeries", "getAnalyticsStatusSeries"),
+            "privacy": ("updatePrivacySettings",),
+        }
+        own = ("metric", "from_time", "to_time")
+        hint = _owner_hint(["from", "privacy"], "plotAnalytics", index, own)
+        assert "from_time" in hint
+        assert "updatePrivacySettings" in hint
+
+    def test_an_alias_with_no_own_time_parameter_stays_generic(self):
+        """A tool with no ``from_time`` of its own gets the owner-index answer, not an alias."""
+        from nextdns_mcp.relaxation import _owner_hint
+
+        index = {"from": ("getAnalyticsDevicesSeries", "getAnalyticsStatusSeries")}
+        hint = _owner_hint(["from"], "dohLookup", index, ("domain", "profile_id"))
+        assert "from_time" not in hint
+        assert "check the tool's parameter list" in hint
+
+
+class TestOwnPropertyNames:
+    """The alias lookup reads the called tool's cached schema; an unknown tool has none."""
+
+    async def test_an_unknown_tool_has_no_own_parameters(self):
+        from fastmcp import FastMCP
+
+        mw = StripExtraFieldsMiddleware()
+        assert await mw._own_property_names(FastMCP("bare"), "no-such-tool") == ()
+
+    async def test_a_known_tool_returns_its_declared_names(self):
+        from fastmcp import FastMCP
+        from fastmcp.tools import Tool
+
+        async def echo(domain: str, enabled: bool = True) -> str:
+            return domain
+
+        server = FastMCP("bare")
+        server.add_tool(Tool.from_function(echo))
+        mw = StripExtraFieldsMiddleware()
+        assert await mw._own_property_names(server, "echo") == ("domain", "enabled")
+
 
 class TestOwnerIndexIsTheRegisteredCatalog:
     """The owner index comes from the server's registered tools, not the spec.
