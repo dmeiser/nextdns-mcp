@@ -42,7 +42,7 @@ from fastmcp import FastMCP
 
 from .call_log import CallLogMiddleware, call_log_path
 from .compat import register_compat_routes
-from .config import get_default_profile, get_tool_search_mode
+from .config import ServerConfig
 from .health import register_health_route
 from .lifespan import ServerResources, server_lifespan
 from .relaxation import StripExtraFieldsMiddleware
@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 def create_mcp_server(
     tool_names: Sequence[str] = (),
     endpoints: Mapping[str, tuple[str, str]] | None = None,
+    config: ServerConfig | None = None,
 ) -> FastMCP:
     """Create and configure the NextDNS MCP server.
 
@@ -75,12 +76,17 @@ def create_mcp_server(
             tool surface are two views of one parse. ``None`` falls back to the
             shipped document's own parse; a caller registering tools from a
             modified document must pass the parse it registered from.
+        config: The immutable configuration snapshot this server owns. A
+            caller building a full server may take one snapshot and pass it
+            here so the catalog and the resources agree; ``None`` snapshots
+            the environment at creation.
 
     Returns:
         FastMCP: Configured MCP server instance
     """
     logger.info("Creating NextDNS MCP server...")
-    mcp, endpoints = _build_fastmcp_instance(tool_names, endpoints)
+    snapshot = config if config is not None else ServerConfig.from_env()
+    mcp, endpoints = _build_fastmcp_instance(tool_names, endpoints, snapshot)
 
     # Add middleware to strip unknown fields from tool arguments
     # This allows AI clients (like OpenAI) that send extra fields to work properly
@@ -89,8 +95,8 @@ def create_mcp_server(
     _add_call_log_middleware(mcp, endpoints)
 
     logger.info("MCP server created successfully")
-    mcp._nextdns_resources = ServerResources()  # type: ignore[attr-defined]
-    default_profile = get_default_profile()
+    mcp._nextdns_resources = ServerResources(config=snapshot)  # type: ignore[attr-defined]
+    default_profile = snapshot.default_profile
     if default_profile:
         logger.info(f"Default profile: {default_profile}")
 
@@ -103,6 +109,7 @@ def create_mcp_server(
 def _build_fastmcp_instance(
     tool_names: Sequence[str],
     endpoints: Mapping[str, tuple[str, str]] | None,
+    config: ServerConfig,
 ) -> tuple[FastMCP, Mapping[str, tuple[str, str]]]:
     """Build the ``FastMCP`` instance with progressive disclosure wired.
 
@@ -116,7 +123,7 @@ def _build_fastmcp_instance(
         endpoints = endpoints_for_routes()
 
     transforms: list[Any] = []
-    tool_search_mode = get_tool_search_mode()
+    tool_search_mode = config.tool_search_mode
     search_transform = build_search_transform(tool_search_mode, endpoints=endpoints)
     if search_transform is not None:
         transforms.append(search_transform)

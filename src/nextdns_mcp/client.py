@@ -17,6 +17,7 @@ import httpx
 from .config import (
     ConfigurationError,
     ProfileAccessControl,
+    ServerConfig,
     get_api_base,
     get_api_key,
     get_http_timeout,
@@ -590,7 +591,14 @@ class AccessControlledClient:
             yield response
 
 
-def _authenticated_client_kwargs() -> dict[str, Any]:
+def _auth_settings(config: ServerConfig | None) -> tuple[str | None, str, float]:
+    """Read the key/base/timeout once from a server snapshot or the process."""
+    if config is None:
+        return get_api_key(), get_api_base(), get_http_timeout()
+    return config.api_key, config.api_base, config.http_timeout
+
+
+def _authenticated_client_kwargs(config: ServerConfig | None = None) -> dict[str, Any]:
     """Validate the configuration and return the shared client constructor kwargs.
 
     Both the ACL client and the raw probe client are built from these kwargs,
@@ -601,15 +609,16 @@ def _authenticated_client_kwargs() -> dict[str, Any]:
     resolving it separately for the destination allowance would be a second
     read of the same setting: a configuration change landing between the two
     would leave the client aimed at one host and its guard allowing another.
+    When a server passes its creation-time snapshot, all three values come
+    from it instead of from the process environment.
     """
-    key = get_api_key()
+    key, base_url, timeout = _auth_settings(config)
     if not key or not key.strip():
         raise ConfigurationError(
             "NEXTDNS_API_KEY is required. Set the NEXTDNS_API_KEY environment "
             "variable or NEXTDNS_API_KEY_FILE pointing to a Docker secret."
         )
 
-    base_url = get_api_base()
     return {
         "base_url": base_url,
         "configured_base": base_url,
@@ -618,13 +627,17 @@ def _authenticated_client_kwargs() -> dict[str, Any]:
             "Accept": "application/json",
             "Content-Type": "application/json",
         },
-        "timeout": get_http_timeout(),
+        "timeout": timeout,
         "follow_redirects": False,
     }
 
 
-def create_nextdns_client() -> AccessControlledClient:
+def create_nextdns_client(config: ServerConfig | None = None) -> AccessControlledClient:
     """Create an authenticated HTTP client for NextDNS API with access control.
+
+    Args:
+        config: A server's creation-time configuration snapshot. Standalone
+            callers without one keep reading the process environment here.
 
     Returns:
         AccessControlledClient: Configured async HTTP client with authentication
@@ -634,7 +647,7 @@ def create_nextdns_client() -> AccessControlledClient:
         ConfigurationError: If the API key is absent or empty, or
             NEXTDNS_HTTP_TIMEOUT is not a positive number of seconds.
     """
-    return AccessControlledClient(**_authenticated_client_kwargs())
+    return AccessControlledClient(**_authenticated_client_kwargs(config))
 
 
 class RawProbeTransport:
@@ -734,24 +747,30 @@ class ApiClientOwner:
     another owner's connections.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: ServerConfig | None = None) -> None:
+        self.config = config
         self._client: AccessControlledClient | None = None
 
     def get(self) -> AccessControlledClient:
         """Return this owner's client, creating it on first use.
 
         The client is built lazily so that importing this module has no side
-        effects and configuration changes (e.g. in tests) are picked up.
+        effects. A server-owned client is built from that server's config
+        snapshot; a standalone owner keeps reading the environment at creation.
         """
         if self._client is None:
-            self._client = create_nextdns_client()
+            # Standalone owners keep the no-argument creation path so tests and
+            # scripts that substitute a zero-argument factory keep working.
+            self._client = create_nextdns_client() if self.config is None else create_nextdns_client(self.config)
         return self._client
 
     async def aclose(self) -> None:
         """Close this owner's client if one exists and reset it.
 
-        The next :meth:`get` constructs a fresh client, picking up any updated
-        configuration (such as ``NEXTDNS_HTTP_TIMEOUT``).
+        The next :meth:`get` constructs a fresh client. A server-owned owner
+        rebuilds from its unchanged creation-time snapshot (including the key
+        file path it names, which is re-read at rebuild); a standalone owner
+        picks up any updated process configuration.
         """
         if self._client is not None:
             client = self._client

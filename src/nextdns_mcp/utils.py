@@ -17,6 +17,7 @@ from typing import Any
 from .config import BOOL_FALSE_TOKENS, BOOL_TRUE_TOKENS, get_default_profile
 from .constants import CONTROL_CHARS_PATTERN, PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
 from .errors import ErrorCode, cap_with_marker, error_payload
+from .state import current_server_config
 
 
 def is_safe_profile_id(value: str | int) -> bool:
@@ -74,10 +75,16 @@ def _profile_id_missing(value: str | int | None) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _current_default_profile() -> str | None:
+    """The default profile for this call: the serving server's snapshot if one exists."""
+    config = current_server_config()
+    return get_default_profile() if config is None else config.default_profile
+
+
 def _defaulted_profile(profile_id: str | int | None) -> str | int | None:
     """The explicit profile_id, or the configured default when the caller named none."""
     if _profile_id_missing(profile_id):
-        return get_default_profile()
+        return _current_default_profile()
     return profile_id
 
 

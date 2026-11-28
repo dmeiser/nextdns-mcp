@@ -23,14 +23,39 @@ context is the channel FastMCP itself provides for exactly this.
 SPDX-License-Identifier: MIT
 """
 
+from contextvars import ContextVar
 from typing import Any
 
 from fastmcp.server.context import Context
 from fastmcp.server.dependencies import fastmcp_request_ctx, get_context
 
+from .config import ServerConfig
+
 # Key under which the server lifespan yields its ServerResources in the
 # lifespan context FastMCP hands to every served request.
 RESOURCES_LIFESPAN_KEY = "nextdns_resources"
+
+# The snapshot a server was created with, published by its lifespan for
+# same-task callers. Served requests reach the same object through the
+# lifespan context below; no process-global default exists.
+server_config: ContextVar[ServerConfig | None] = ContextVar("nextdns_server_config", default=None)
+
+
+def current_server_config() -> ServerConfig | None:
+    """The config of the server serving this call, or ``None`` outside a server.
+
+    Resolution order: the resources of the FastMCP server serving the current
+    request, then the context published by a server lifespan for same-task
+    callers. A served request must win when both are present: a host can enter
+    two server lifespans in one task, and the ambient context then names the
+    last-entered server rather than the one actually serving the call.
+    Standalone callers get ``None`` and keep using the process-environment
+    getters.
+    """
+    resources = request_resources()
+    if resources is not None:
+        return resources.config
+    return server_config.get()
 
 
 def _resources_in(lifespan_context: Any) -> Any | None:

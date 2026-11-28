@@ -25,8 +25,15 @@ import httpx
 
 from ...config import get_download_max_bytes
 from ...errors import BODY_SLICE_BYTES
+from ...state import current_server_config
 from ...transport import buffered_response, read_body_capped
 from . import preview as _preview
+
+
+def _current_download_cap() -> int:
+    """The cap for this call: the serving server's snapshot if one exists."""
+    config = current_server_config()
+    return get_download_max_bytes() if config is None else config.download_max_bytes
 
 
 class DownloadTooLargeError(Exception):
@@ -98,7 +105,7 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     so a single download cannot fill the temp directory.
     """
     await _raise_for_streamed_status(response)
-    max_total = get_download_max_bytes()
+    max_total = _current_download_cap()
     preview_lines: list[str] = []
     preview_bytes = 0
     row_count = 0

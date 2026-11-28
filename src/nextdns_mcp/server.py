@@ -29,9 +29,11 @@ from .catalog import (  # noqa: F401
 )
 from .client import get_api_client
 from .config import (
+    ServerConfig,
     configure_logging,
     get_api_base,
     get_http_timeout,
+    is_generative_ui_enabled,
     validate_configuration,
 )
 from .errors import StateOwnershipError
@@ -204,22 +206,23 @@ def mcp_server_owned(owner: McpServerOwner) -> Iterator[McpServerOwner]:
         mcp_server_owner.reset(token)
 
 
-def published_tool_names() -> list[str]:
+def published_tool_names(generative_ui_enabled: bool | None = None) -> list[str]:
     """Every tool name this server publishes, before any of them is registered.
 
     The ``initialize`` instructions describe the catalog, and they are written when
     the server is constructed — before the tools exist — so the names have to be
-    derivable without registering anything.
+    derivable without registering anything. A server passes the generative-UI
+    decision it already made so the setting is not read again here.
     """
     names = [
         *spec_tool_names(),
         *(composite.tool.__name__ for composite in _COMPOSITE_TOOLS),
-        *enabled_generative_ui_tool_names(),
+        *enabled_generative_ui_tool_names(generative_ui_enabled),
     ]
     return names
 
 
-def build_mcp_server() -> FastMCP:
+def build_mcp_server(config: ServerConfig | None = None) -> FastMCP:
     """Create the MCP server: one tool per NextDNS API operation, plus the three composite tools (plotAnalytics, dohLookup, overviewDashboard).
 
     The catalog is generated from the shipped OpenAPI document by ``spec_tools`` — a
@@ -228,16 +231,29 @@ def build_mcp_server() -> FastMCP:
     performs itself (``plotAnalytics``, ``dohLookup``, ``overviewDashboard``), which the document cannot
     describe because there is no endpoint to describe.
 
+    Args:
+        config: A configuration snapshot taken by the caller. Without one, the
+            build takes its own snapshot — including exactly one read of the
+            generative-UI setting — and uses it for the catalog, the provider,
+            and the resources attached to the server.
+
     Returns:
         FastMCP: Configured MCP server instance with all tools registered
     """
-    logger.info(f"Creating HTTP client for {get_api_base()}")
+    snapshot = config
+    if snapshot is None:
+        snapshot = ServerConfig.from_env(generative_ui_enabled=is_generative_ui_enabled())
+    logger.info(f"Creating HTTP client for {snapshot.api_base}")
     # One parse of the shipped document feeds all three views of it: the tool
     # surface, the call-log endpoint map, and the published-name list in the
     # initialize instructions (spec_tool_names hits the process-wide route
     # cache). Each used to parse the YAML independently.
     routes = spec_routes()
-    server = create_mcp_server(tool_names=published_tool_names(), endpoints=endpoints_for_routes(routes))
+    server = create_mcp_server(
+        tool_names=published_tool_names(snapshot.generative_ui_enabled),
+        endpoints=endpoints_for_routes(routes),
+        config=snapshot,
+    )
     register_spec_tools(server, routes)
     _register_composite_renderer(server)
     for composite in _COMPOSITE_TOOLS:
@@ -265,7 +281,7 @@ def build_mcp_server() -> FastMCP:
                 ),
             )
         )
-    register_generative_ui_provider(server)
+    register_generative_ui_provider(server, snapshot.generative_ui_enabled)
     return server
 
 
