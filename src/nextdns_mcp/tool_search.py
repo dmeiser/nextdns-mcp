@@ -38,7 +38,7 @@ SPDX-License-Identifier: MIT
 """
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from fastmcp.server.transforms.search import BM25SearchTransform
@@ -233,6 +233,20 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         fallback_answer.set(fell_back)
         return ranked if fell_back else ranked[: self._max_results]
 
+    def _make_synthetic_tool(self, key: str, build: Callable[[], Tool], description: str) -> Tool:
+        """The cached build of one synthetic tool, with this server's contract on it.
+
+        FastMCP rebuilds a Tool on every listing; these two are constants of
+        this transform, so the first build is the one kept, and its description
+        is replaced once at that moment.
+        """
+        tool = self._synthetic_tools.get(key)
+        if tool is None:
+            tool = build()
+            tool.description = description
+            self._synthetic_tools[key] = tool
+        return tool
+
     def _make_search_tool(self) -> Tool:
         """FastMCP's search tool, with this server's discovery contract on it.
 
@@ -240,24 +254,12 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         ``tools/list``, so their descriptions are the always-visible place to
         state how the server is meant to be used. FastMCP's own wording is a
         one-liner that never says the catalog is hidden or that guessing fails.
-        FastMCP rebuilds a Tool on every listing; these two are constants of
-        this transform, so the first build is the one kept.
         """
-        tool = self._synthetic_tools.get("search")
-        if tool is None:
-            tool = super()._make_search_tool()
-            tool.description = _SEARCH_TOOL_DESCRIPTION
-            self._synthetic_tools["search"] = tool
-        return tool
+        return self._make_synthetic_tool("search", super()._make_search_tool, _SEARCH_TOOL_DESCRIPTION)
 
     def _make_call_tool(self) -> Tool:
         """FastMCP's call_tool proxy, with this server's contract on it (cached)."""
-        tool = self._synthetic_tools.get("call")
-        if tool is None:
-            tool = super()._make_call_tool()
-            tool.description = _CALL_TOOL_DESCRIPTION
-            self._synthetic_tools["call"] = tool
-        return tool
+        return self._make_synthetic_tool("call", super()._make_call_tool, _CALL_TOOL_DESCRIPTION)
 
     async def _render_results(self, tools: Sequence[Tool]) -> Any:
         """The search answer, rendered from the cached compaction (see _serialize_results)."""

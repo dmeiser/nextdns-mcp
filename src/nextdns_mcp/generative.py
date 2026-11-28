@@ -241,10 +241,30 @@ def _parse_ui_data(data: str | dict[str, Any] | None) -> dict[str, Any] | None:
     return parsed
 
 
+def _byte_limit_message(measured_bytes: int, limit: int, source: str) -> str | None:
+    """The refusal sentence for a byte count over its limit, ``None`` when it fits.
+
+    Every size guard on the generate path charges a byte count against a limit
+    and names the refusal the same way, so the comparison and the sentence live
+    once. The caller keeps its own failure class: the input guards raise the
+    sentence as ``ValueError`` (the tool answers it as ``invalid_argument``) and
+    the result guard answers it as ``response_too_large``.
+    """
+    if measured_bytes > limit:
+        return f"{source} exceeds maximum size of {limit} bytes"
+    return None
+
+
+def _require_byte_limit(text: str, limit: int, source: str) -> None:
+    """Refuse an input payload bigger than its byte limit, measured as UTF-8."""
+    message = _byte_limit_message(len(text.encode("utf-8")), limit, source)
+    if message is not None:
+        raise ValueError(message)
+
+
 def _guard_string_data(data: str) -> dict[str, Any] | None:
     """Measure the JSON string as sent, then parse it."""
-    if len(data.encode("utf-8")) > MAX_DATA_BYTES:
-        raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
+    _require_byte_limit(data, MAX_DATA_BYTES, "data")
     return _parse_ui_data(data)
 
 
@@ -253,15 +273,13 @@ def _guard_object_data(data: dict[str, Any] | None) -> dict[str, Any] | None:
     parsed_data = _parse_ui_data(data)
     if parsed_data is None:
         return None
-    if len(json.dumps(parsed_data, allow_nan=False).encode("utf-8")) > MAX_DATA_BYTES:
-        raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
+    _require_byte_limit(json.dumps(parsed_data, allow_nan=False), MAX_DATA_BYTES, "data")
     return parsed_data
 
 
 def _validated_payload(code: str, data: str | dict[str, Any] | None) -> dict[str, Any] | None:
     """Apply the code and data guards and return the parsed data payload."""
-    if len(code.encode("utf-8")) > MAX_CODE_BYTES:
-        raise ValueError(f"code exceeds maximum size of {MAX_CODE_BYTES} bytes")
+    _require_byte_limit(code, MAX_CODE_BYTES, "code")
     validate_chart_placement(code)
     if isinstance(data, str):
         return _guard_string_data(data)
@@ -588,10 +606,9 @@ async def _run_guarded(
     except (RuntimeError, ValueError, OSError) as exc:
         logger.warning("generate_prefab_ui execution failed: %s", exc, exc_info=True)
         return _generation_error(ErrorCode.INTERNAL_ERROR, str(exc))
-    if result_size > MAX_RESULT_BYTES:
-        return _generation_error(
-            ErrorCode.RESPONSE_TOO_LARGE, f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes"
-        )
+    too_large = _byte_limit_message(result_size, MAX_RESULT_BYTES, "result")
+    if too_large is not None:
+        return _generation_error(ErrorCode.RESPONSE_TOO_LARGE, too_large)
     return result
 
 

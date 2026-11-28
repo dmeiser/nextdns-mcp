@@ -178,4 +178,4 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
         # task, which reaches neither handler — removes the temp file and its
         # mkdtemp parent, so an abandoned download leaves nothing behind.
         if not downloaded:
-            retention._unlink_temp_file(path)
+            retention._remove_temp_file(path)

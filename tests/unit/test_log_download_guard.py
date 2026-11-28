@@ -686,7 +686,7 @@ class TestTempFileCleanup:
     def test_a_file_that_was_never_written_is_not_an_error(self, tmp_path, caplog):
         """The ACL can refuse before a byte is written, so there is nothing to unlink."""
         missing = str(tmp_path / "download.csv")
-        logs_module._unlink_temp_file(missing)
+        logs_module._remove_temp_file(missing)
         assert "Failed to remove" not in caplog.text
 
     def test_a_file_that_cannot_be_removed_is_reported(self, tmp_path, monkeypatch, caplog):
@@ -699,7 +699,7 @@ class TestTempFileCleanup:
 
         monkeypatch.setattr(os, "unlink", refuse)
         with caplog.at_level("WARNING"):
-            logs_module._unlink_temp_file(str(path))
+            logs_module._remove_temp_file(str(path))
         assert "Failed to remove temp log file" in caplog.text
 
     def test_a_parent_directory_that_cannot_be_removed_is_not_fatal(self, tmp_path, monkeypatch):
@@ -716,5 +716,5 @@ class TestTempFileCleanup:
             raise OSError("not empty")
 
         monkeypatch.setattr(os, "rmdir", refuse)
-        logs_module._unlink_temp_file(str(path))
+        logs_module._remove_temp_file(str(path))
         assert not path.exists()

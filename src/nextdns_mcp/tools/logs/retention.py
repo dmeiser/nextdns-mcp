@@ -40,7 +40,8 @@ def _remove_temp_file(path: str) -> bool:
     Returns True when the file is gone (or never existed) and False when the
     unlink failed. A failed unlink is logged, never raised, so it cannot mask
     the download's own error; the caller that tracks the path (the download
-    registry) keeps a False path registered so a later cleanup can retry.
+    registry) keeps a False path registered so a later cleanup can retry, and
+    the failed-download path ignores the flag and cleans up fire-and-forget.
     Parent-directory removal is attempted on every exit and its errors are
     tolerated: another download may be writing in the same parent, and that is
     not worth replacing the download's own error with an unrelated one about a
@@ -62,11 +63,6 @@ def _remove_temp_file(path: str) -> bool:
     except OSError:
         pass
     return removed
-
-
-def _unlink_temp_file(path: str) -> None:
-    """Fire-and-forget cleanup of a failed download's temp file; ignores the outcome."""
-    _remove_temp_file(path)
 
 
 class MissingDownloadRegistryError(RuntimeError):
@@ -121,7 +117,7 @@ class DownloadRegistry:
         self._paths[path] = None
         while len(self._paths) > MAX_RETAINED_DOWNLOADS:
             oldest = next(iter(self._paths))
-            if not _remove_downloaded_file(oldest):
+            if not _remove_temp_file(oldest):
                 break  # cannot evict: leave the overflow for shutdown reclaim rather than spin
             self._paths.pop(oldest, None)
 
@@ -135,7 +131,7 @@ class DownloadRegistry:
         nothing.
         """
         for path in list(self._paths):
-            if _remove_downloaded_file(path):
+            if _remove_temp_file(path):
                 self._paths.pop(path, None)
 
     def __contains__(self, path: object) -> bool:
@@ -201,11 +197,6 @@ def downloads_owned(registry: DownloadRegistry | None = None) -> Iterator[Downlo
         yield owner
     finally:
         download_registry.reset(token)
-
-
-def _remove_downloaded_file(path: str) -> bool:
-    """Registry-side cleanup of a finished download; see ``_remove_temp_file``."""
-    return _remove_temp_file(path)
 
 
 def cleanup_successful_downloads() -> None:
