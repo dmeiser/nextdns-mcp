@@ -241,10 +241,20 @@ def _parse_ui_data(data: str | dict[str, Any] | None) -> dict[str, Any] | None:
     return parsed
 
 
+def _require_byte_limit(text: str, limit: int, source: str) -> None:
+    """Refuse a payload bigger than its byte limit, measured as UTF-8.
+
+    Every size guard on the generate path charges the same thing — the UTF-8
+    encoding of the text that actually goes to the worker — and reports it with
+    the same sentence, so the limit and the source name are the only variables.
+    """
+    if len(text.encode("utf-8")) > limit:
+        raise ValueError(f"{source} exceeds maximum size of {limit} bytes")
+
+
 def _guard_string_data(data: str) -> dict[str, Any] | None:
     """Measure the JSON string as sent, then parse it."""
-    if len(data.encode("utf-8")) > MAX_DATA_BYTES:
-        raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
+    _require_byte_limit(data, MAX_DATA_BYTES, "data")
     return _parse_ui_data(data)
 
 
@@ -253,15 +263,13 @@ def _guard_object_data(data: dict[str, Any] | None) -> dict[str, Any] | None:
     parsed_data = _parse_ui_data(data)
     if parsed_data is None:
         return None
-    if len(json.dumps(parsed_data, allow_nan=False).encode("utf-8")) > MAX_DATA_BYTES:
-        raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
+    _require_byte_limit(json.dumps(parsed_data, allow_nan=False), MAX_DATA_BYTES, "data")
     return parsed_data
 
 
 def _validated_payload(code: str, data: str | dict[str, Any] | None) -> dict[str, Any] | None:
     """Apply the code and data guards and return the parsed data payload."""
-    if len(code.encode("utf-8")) > MAX_CODE_BYTES:
-        raise ValueError(f"code exceeds maximum size of {MAX_CODE_BYTES} bytes")
+    _require_byte_limit(code, MAX_CODE_BYTES, "code")
     validate_chart_placement(code)
     if isinstance(data, str):
         return _guard_string_data(data)
