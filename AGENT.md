@@ -167,15 +167,15 @@ open htmlcov/index.html
 **The gate is `xenon`, and it requires grade A everywhere** — every block, every module, and the project average:
 
 ```bash
-uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/run_container_e2e.py
+uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/
 ```
 
 - Grade A means cyclomatic complexity ≤5, so no block may sit at grade B or worse. The `complexity` job in `.github/workflows/unit-tests.yml` runs exactly that command, and `tests/unit/test_complexity_gate.py` executes the workflow's own step against throwaway trees so the documented contract and CI cannot drift.
-- **What the contract covers:** `src/` and `scripts/run_container_e2e.py`. The rest of `scripts/` (`ai_e2e_harness.py`, `ai_e2e_common.py`, `validate_schema.py`) is **outside the gate** and contains blocks far above grade A. A green `complexity` job is not a claim that those files comply, and widening the gate's path list is a refactor project of its own, not a documentation change.
+- **What the contract covers:** every Python file under `src/` and under `scripts/`, gated by directory rather than by name — a new file in either root is inside the gate the moment it lands, and a file cannot leave the gate by being dropped from a list. The E2E harness files (`ai_e2e_*.py`) and `validate_schema.py` were folded in after their blocks were split to grade A; narrowing the path list again is a decision to argue, not a convenience to take when one file gets busy.
 - `radon` stays the local diagnostic — it names and ranks the blocks the way the gate summarizes them:
   ```bash
-  uv run radon cc src/ scripts/run_container_e2e.py -a    # average
-  uv run radon cc src/ scripts/run_container_e2e.py -nb   # every block ranked B or worse
+  uv run radon cc src/ scripts/ -a    # average
+  uv run radon cc src/ scripts/ -nb   # every block ranked B or worse
   ```
 - If a block exceeds grade A:
   - Refactor into smaller functions
@@ -200,8 +200,8 @@ Before claiming work is complete:
 - [ ] Run `uv run pytest tests/unit --cov=src/nextdns_mcp --cov-report=term` (100% statements and branches, **ALL tests pass**)
 - [ ] Apply the deletion test in the **Comments** section below to every comment this change adds or edits
 - [ ] Verify per-file coverage: all files 100% in `htmlcov/index.html` (statements and branches; see section 2)
-- [ ] Run the complexity gate locally: `uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/run_container_e2e.py` (every block grade A; the rest of `scripts/` is outside this gate — see section 3)
-- [ ] Optionally confirm the report with `uv run radon cc src/ scripts/run_container_e2e.py -nb` (it names the blocks the gate fails on)
+- [ ] Run the complexity gate locally: `uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/` (every block in both roots grade A; see section 3)
+- [ ] Optionally confirm the report with `uv run radon cc src/ scripts/ -nb` (it names the blocks the gate fails on)
 - [ ] Commit formatting changes as final commit before validation
 
 **CRITICAL**: If ANY check fails, fix the issues and restart from step 1. Continue iterating through all quality checks until every standard is met with zero failures.
@@ -225,8 +225,8 @@ Before claiming work is complete:
 
 **xenon** (complexity gate) - the machine contract for complexity:
 - Installed as a dev dependency
-- CI runs `uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/run_container_e2e.py` in the `complexity` job of `.github/workflows/unit-tests.yml`: every block in those paths, every module, and the average must be grade A
-- The gate's path list is part of the contract: it covers `src/` and `scripts/run_container_e2e.py` and nothing else under `scripts/` (see section 3)
+- CI runs `uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/` in the `complexity` job of `.github/workflows/unit-tests.yml`: every block in those paths, every module, and the average must be grade A
+- The gate's path list is part of the contract: it covers `src/` and all of `scripts/` by directory, so new files in either root are gated without editing the command (see section 3)
 
 **radon** (complexity analysis) - the same measurement, for reading locally:
 - Installed as a dev dependency
@@ -248,7 +248,7 @@ Before claiming work is complete:
    - **NEVER ignore, skip, or comment out failing tests**
    - Restart quality checks from step 1 after fixes
 4. **Coverage <100%**: Add missing test cases, remove dead code, or document why code is untestable with the exclusion markers listed in section 2, then restart quality checks
-5. **Complexity above grade A**: Refactor the block into smaller units, table-drive its branches, simplify the logic, then restart quality checks. Only `src/` and `scripts/run_container_e2e.py` are gated; if the violation is in another `scripts/` file, note it rather than silently widening the gate
+5. **Complexity above grade A**: Refactor the block into smaller units, table-drive its branches, simplify the logic, then restart quality checks. Everything under `src/` and `scripts/` is gated, so a violation in a harness or validator script is yours to refactor — never narrow the gate's path list to get past it
 
 **Iteration Loop**:
 - Fix the issue identified
