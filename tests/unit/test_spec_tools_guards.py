@@ -1,0 +1,957 @@
+"""Unit tests for the guards on the spec-generated tool surface.
+
+Covers refusals before transport, delegation guards, bounded schema error
+text, the generated series budget and stream ceiling, legacy injected
+transport compatibility, the transport capability probe, write refusals, profile
+creation guards, and tool annotations. The catalog half lives in
+``test_spec_tools.py``.
+
+SPDX-License-Identifier: MIT
+"""
+
+import inspect
+import json
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from nextdns_mcp import spec_arguments, spec_series, spec_tools, spec_validation, transport
+
+
+def _fake_api(payload: dict[str, Any], calls: list[Any]):
+    """Stand in for the HTTP layer, recording how the endpoint was addressed."""
+
+    async def _request(method, url, params=None, json_body=None, **extra):
+        calls.append({"method": method, "url": url, "params": params, "body": json_body, **extra})
+        return payload
+
+    return _request
+
+
+@pytest.fixture
+def routes() -> dict[str, Any]:
+    """Every offerable route, by operationId."""
+    return {route.operation_id: route for route in spec_tools.spec_routes()}
+
+
+class TestRefusalsBeforeTransport:
+    """Nothing malformed reaches the API: every guard answers before dispatch.
+
+    The published ``inputSchema`` is what docs/troubleshooting.md says the
+    server enforces ("rejected without reaching the API"), path arguments are
+    checked for anything that could address a different endpoint, and a series
+    range beyond the documented point budget is refused where it is built.
+    Each of these must answer as a typed payload with no upstream request at
+    all — an argument refused locally is cheaper and clearer than the 400 the
+    API would answer, and a path value refused here is the ACL layer never
+    having to interpret a crafted URL.
+    """
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    def _tool(self, monkeypatch, calls, operation_id: str):
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
+        return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}[operation_id])
+
+    async def test_a_value_beyond_the_published_bound_is_refused_locally(self, monkeypatch, calls):
+        """``LogsLimit`` caps at 1000; a larger limit never reaches the API."""
+        tool = self._tool(monkeypatch, calls, "getLogs")
+        result = await tool.run({"profile_id": "abc123", "limit": 99999})
+        payload = result.structured_content
+        assert result.is_error, "a schema refusal is an error, not a result"
+        assert payload["code"] == "invalid_argument"
+        assert "limit" in payload["error"]
+        assert calls == [], "an argument the published schema rejects must not be sent upstream"
+
+    async def test_a_nested_body_violation_is_refused_not_sent(self, monkeypatch, calls):
+        """The whole argument tree is validated: a body item without its required id.
+
+        ``replaceDenylist(body=[{"wrong": "x"}])`` is the exact call the
+        re-review reached the transport with; the published schema demands
+        ``id`` on every item, so the refusal - with the dotted path naming the
+        offending entry - is what docs/troubleshooting.md promises.
+        """
+        tool = self._tool(monkeypatch, calls, "replaceDenylist")
+        result = await tool.run({"profile_id": "abc123", "body": [{"wrong": "x"}]})
+        payload = result.structured_content
+        assert result.is_error
+        assert payload["code"] == "invalid_argument"
+        assert "body.0" in payload["error"], payload["error"]
+        assert calls == []
+
+    async def test_a_body_of_the_wrong_kind_is_refused_not_sent(self, monkeypatch, calls):
+        tool = self._tool(monkeypatch, calls, "replaceDenylist")
+        payload = (await tool.run({"profile_id": "abc123", "body": "not-an-array"})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert calls == []
+
+    async def test_a_schema_valid_nested_body_still_reaches_transport(self, monkeypatch, calls):
+        """Full-tree validation gates on the published schema only - valid bodies pass."""
+        tool = self._tool(monkeypatch, calls, "replaceDenylist")
+        await tool.run({"profile_id": "abc123", "body": [{"id": "evil.example"}]})
+        assert calls
+
+    async def test_a_deep_setting_value_outside_the_published_enum_is_refused(self, monkeypatch, calls):
+        """Nested enums bind too: Settings.logs.retention is an enum of seconds."""
+        tool = self._tool(monkeypatch, calls, "updateSettings")
+        result = await tool.run({"profile_id": "abc123", "logs": {"retention": 30}})
+        payload = result.structured_content
+        assert result.is_error
+        assert payload["code"] == "invalid_argument"
+        assert "logs.retention" in payload["error"], payload["error"]
+        assert calls == []
+
+    async def test_a_percent_in_a_path_value_is_refused_not_sent(self, monkeypatch, calls):
+        """``%`` is refused outright: its meaning depends on what decodes it.
+        ``%2e%2e`` is ``..`` to anything that percent-decodes, and a
+        double-encoded variant is invisible to a single decode pass; refusing
+        the character closes both, and no legal NextDNS id contains it.
+        """
+        tool = self._tool(monkeypatch, calls, "getDenylist")
+        result = await tool.run({"profile_id": "ab%cd"})
+        payload = result.structured_content
+        assert result.is_error
+        assert payload["code"] == "invalid_profile_id"
+        assert calls == []
+
+    @pytest.mark.parametrize("value", ["{profile_id}", "a}b", "{"])
+    async def test_a_brace_in_a_path_value_is_refused(self, monkeypatch, calls, value):
+        """A brace is the shape of a path placeholder; an id may not carry one."""
+        tool = self._tool(monkeypatch, calls, "getDenylist")
+        result = await tool.run({"profile_id": value})
+        payload = result.structured_content
+        assert result.is_error
+        assert payload["code"] == "invalid_profile_id"
+        assert calls == []
+
+    async def test_an_impossible_profile_shape_is_refused_before_the_acl(self, monkeypatch, calls):
+        """A printable-but-impossible id is an invalid id, not an unsafe URL.
+
+        13 lowercase alphanumerics contain none of the refused characters, so
+        without a shape guard this id used to be substituted into the path and
+        refused by the access-control layer as an unclassifiable URL - a 403
+        about the request when the honest answer names the id.
+        """
+        tool = self._tool(monkeypatch, calls, "getDenylist")
+        result = await tool.run({"profile_id": "abcdefg123456"})
+        payload = result.structured_content
+        assert result.is_error
+        assert payload["code"] == "invalid_profile_id"
+        assert "listProfiles()" in payload["hint"]
+        assert calls == []
+
+    async def test_a_null_path_value_is_missing_not_the_text_none(self, monkeypatch, calls):
+        """An explicit null for a path parameter means "not filled in"."""
+        tool = self._tool(monkeypatch, calls, "getDenylist")
+        result = await tool.run({"profile_id": None})
+        payload = result.structured_content
+        assert result.is_error
+        assert payload["code"] == "missing_required_argument"
+        assert "None" not in payload["error"]
+        assert calls == []
+
+    async def test_a_null_query_value_is_dropped_not_sent(self, monkeypatch, calls):
+        """``?to=`` is a validation error naming an empty string; null means absent."""
+        tool = self._tool(monkeypatch, calls, "getLogs")
+        await tool.run({"profile_id": "abc123", "to": None})
+        assert calls[0]["params"] is None or "to" not in calls[0]["params"]
+
+    def test_path_rendering_is_one_pass_so_a_value_cannot_re_substitute(self):
+        """A value is inserted, never rescanned.
+
+        With sequential ``str.replace`` passes, a second argument holding the
+        first argument's placeholder gets substituted on the later pass, so
+        the path that leaves differs from the one the ACL authorized. One
+        ``re.sub`` pass over the template makes that structurally impossible.
+        """
+        located = [
+            ("profile_id", "profile_id", "path"),
+            ("entry_id", "entry_id", "path"),
+        ]
+        rendered = spec_arguments._rendered_path(
+            "/profiles/{profile_id}/denylist/{entry_id}",
+            located,
+            {"profile_id": "abc123", "entry_id": "{profile_id}"},
+        )
+        # The inserted value is never rescanned: the second placeholder stays
+        # exactly what the caller sent, instead of becoming the authorized
+        # profile id a sequential-replace renderer would have substituted.
+        assert rendered == "/profiles/abc123/denylist/{profile_id}"
+
+    def test_many_schema_violations_are_named_then_counted(self):
+        """Up to five violations are named; the rest are counted, not hidden."""
+        from types import SimpleNamespace
+
+        problems = [SimpleNamespace(absolute_path=[f"f{i}"], message=f"bad {i}") for i in range(7)]
+        described = spec_validation._describe_schema_errors(problems[: spec_validation._SCHEMA_ERROR_LIMIT], 2)
+        assert "f0: bad 0" in described
+        assert "f4: bad 4" in described
+        assert "f5" not in described.split("; and")[0]
+        assert "and 2 more" in described
+
+    def test_a_root_schema_violation_is_located_at_the_arguments(self):
+        error = SimpleNamespace(absolute_path=[])
+        assert spec_validation._schema_error_where(error) == "<arguments>"
+
+
+class TestDelegationGuardsRunFirst:
+    """``downloadLogs`` is delegated, but delegation runs after the shape guards.
+
+    The guarded downloader builds ``/profiles/{profile_id}/logs/download`` from
+    the id it is handed, so the checks that keep a generated path honest have
+    to fire before the handoff — otherwise delegation is a door around them.
+    """
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    def _downloader(self, monkeypatch, calls):
+        from nextdns_mcp.tools import logs as logs_module
+
+        async def fake_download(profile_id):
+            calls.append({"profile_id": profile_id})
+            return {"ok": True}
+
+        monkeypatch.setattr(logs_module, "_download_logs_to_tempfile", fake_download)
+        return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"])
+
+    async def test_an_unsafe_profile_id_never_reaches_the_downloader(self, monkeypatch, calls):
+        tool = self._downloader(monkeypatch, calls)
+        result = await tool.run({"profile_id": "a/b"})
+        payload = result.structured_content
+        assert result.is_error
+        assert payload["code"] == "invalid_profile_id"
+        assert calls == [], "delegation must not run ahead of the unsafe-path guard"
+
+    @pytest.mark.parametrize("bad", ["nope", "TOOLONG1PROFILE", "ab cd"])
+    async def test_a_malformed_profile_id_is_refused_typed(self, monkeypatch, calls, bad):
+        tool = self._downloader(monkeypatch, calls)
+        result = await tool.run({"profile_id": bad})
+        payload = result.structured_content
+        assert result.is_error
+        assert payload["code"] == "invalid_profile_id"
+        assert calls == []
+
+    async def test_a_valid_id_reaches_the_guarded_downloader(self, monkeypatch, calls):
+        tool = self._downloader(monkeypatch, calls)
+        result = await tool.run({"profile_id": "abc123"})
+        assert result.structured_content == {"ok": True}
+        assert result.is_error is False, "a successful download payload is a result, not an error"
+        assert calls == [{"profile_id": "abc123"}]
+
+    async def test_a_download_failure_payload_is_flagged_as_an_error(self, monkeypatch, calls):
+        """The delegated handler answers failures as typed payloads; they carry isError."""
+        from nextdns_mcp.tools import logs as logs_module
+
+        async def failing_download(profile_id):
+            calls.append({"profile_id": profile_id})
+            return {"code": "http_error", "error": "HTTP error while downloading logs"}
+
+        monkeypatch.setattr(logs_module, "_download_logs_to_tempfile", failing_download)
+        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"])
+        result = await tool.run({"profile_id": "abc123"})
+        assert result.is_error is True
+        assert result.structured_content["code"] == "http_error"
+        assert calls == [{"profile_id": "abc123"}]
+
+    async def test_a_resolver_error_that_is_not_missing_is_forwarded_typed(self, monkeypatch, calls):
+        """Whatever else the resolver answers is the caller's answer, verbatim.
+
+        The shape guards above catch every malformed id a caller can send
+        through the public surface, so this pins the forwarding contract
+        itself: a resolver error other than \"missing\" (an access denial, for
+        instance) must reach the caller as the typed payload rather than be
+        swallowed into a downloader call with a None profile.
+        """
+        tool = self._downloader(monkeypatch, calls)
+        denial = {"code": "access_denied", "error": "profile abcdef is not readable"}
+        monkeypatch.setattr(spec_tools, "resolve_profile_id", lambda pid, **kwargs: (None, denial))
+        result = await tool.run({"profile_id": "abcdef"})
+        payload = result.structured_content
+        assert result.is_error, "a resolver denial is an error, not a result"
+        assert payload == denial
+        assert calls == [], "the delegation must not run when the resolver refused"
+
+
+class TestSchemaErrorTextIsBounded:
+    """An invalid value is named, not quoted back whole (and not kept whole)."""
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    async def test_a_giant_invalid_value_is_described_within_a_cap(self, monkeypatch, calls):
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
+        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
+        payload = (await tool.run({"profile_id": "abc123", "from": "-1d", "partials": "x" * 5000})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "x" * (spec_validation._SCHEMA_ERROR_MSG_CHARS + 1) not in payload["error"]
+        assert len(payload["error"]) < 1200
+        assert calls == []
+
+
+class TestGeneratedSeriesBudget:
+    """The documented 2000-point budget guards the generated door too.
+
+    ``plotAnalytics`` refuses an over-budget range; the ``getAnalytics*Series``
+    tools read the same endpoint with the same per-interval cost, so they get
+    the same refusal. A call that names no interval takes the endpoint's own
+    default, which this server did not choose and cannot bound.
+    """
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    def _tool(self, monkeypatch, calls):
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
+        return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
+
+    async def test_a_generated_series_range_beyond_the_budget_is_refused(self, monkeypatch, calls):
+        """30 days at 60s intervals would answer ~43k points against a 2000 cap."""
+        tool = self._tool(monkeypatch, calls)
+        result = await tool.run({"profile_id": "abc123", "from": "-30d", "interval": 60})
+        payload = result.structured_content
+        assert result.is_error, "a budget refusal is an error, not a result"
+        assert payload["code"] == "invalid_argument"
+        assert "2000" in payload["error"]
+        assert calls == []
+
+    async def test_a_generated_series_without_an_interval_is_not_bounded_here(self, monkeypatch, calls):
+        tool = self._tool(monkeypatch, calls)
+        await tool.run({"profile_id": "abc123", "from": "-30d"})
+        assert calls, "the request goes out; its interval is the endpoint's default"
+
+    async def test_to_zero_is_a_window_end_not_an_omission(self, monkeypatch, calls):
+        """``to=0`` is the epoch, not a missing value.
+
+        ``query.get("to") or "now"`` treated the literal 0 as absent: an
+        epoch-to-epoch window (zero span) was priced as now-minus-epoch -
+        decades - and the call was refused for a budget it never spent.
+        """
+        tool = self._tool(monkeypatch, calls)
+        result = await tool.run({"profile_id": "abc123", "from": 0, "to": 0, "interval": 60})
+        payload = result.structured_content
+        assert isinstance(payload, dict) and payload.get("code") == "invalid_argument"
+        assert "2000" not in payload["error"], f"budget arithmetic treated to=0 as now: {payload['error']}"
+        assert "end after" in payload["error"], "zero epoch span: range order is the honest refusal"
+
+    async def test_a_wide_no_interval_range_is_bounded_at_the_adaptive_default(self, monkeypatch, calls):
+        """No interval is no longer a pass-through: the default has no self-cap.
+
+        Probed live 2026-11: a 4000-day range with no interval answers at
+        interval 86400 with 4000 points - over the 2000-point cap. The call
+        is priced at the probed adaptive default (86400 above 7-day windows)
+        and refused before any request goes out.
+        """
+        tool = self._tool(monkeypatch, calls)
+        payload = (await tool.run({"profile_id": "abc123", "from": "-4000d"})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "2000" in payload["error"]
+        assert calls == []
+
+    async def test_a_no_interval_window_inside_the_default_is_allowed(self, monkeypatch, calls):
+        """Pricing the default interval is a bound, not a ban: -365d answers
+        365 points at 86400 (probed), inside every budget, and goes out."""
+        tool = self._tool(monkeypatch, calls)
+        await tool.run({"profile_id": "abc123", "from": "-365d"})
+        assert calls
+
+    async def test_an_oversized_series_answer_is_refused_not_dumped(self, monkeypatch, calls):
+        """Response-side backstop: the row count upstream returns is not ours
+        to price up front, so a payload over the byte ceiling comes back as a
+        typed refusal naming the size, never as a context flood."""
+
+        async def fat_api(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"data": [{"name": f"row{i}", "hits": ["x"] * 60} for i in range(2000)]}
+
+        monkeypatch.setattr(spec_tools, "api_request_payload", fat_api)
+        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
+        payload = (await tool.run({"profile_id": "abc123", "from": "-30d", "interval": 86400})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "series response ceiling" in payload["error"]
+        assert payload["response_bytes"] > spec_tools.MAX_SERIES_RESPONSE_BYTES
+        assert calls, "the guard bounds what is returned, after the bounded fetch"
+
+    async def test_a_budgeted_series_answer_passes_the_ceiling(self, monkeypatch, calls):
+        """A small, budgeted answer goes through untouched."""
+        tool = self._tool(monkeypatch, calls)
+        result = await tool.run({"profile_id": "abc123", "from": "-365d", "interval": 86400})
+        assert result.structured_content == {"data": []}
+        assert calls
+
+
+class TestSeriesBudgetHelperEdges:
+    """The generated-door budget helper, called directly on its defensive edges."""
+
+    def _route(self):
+        return next(r for r in spec_tools.spec_routes() if r.path.endswith("/analytics/status;series"))
+
+    def test_a_call_naming_no_from_is_not_priced_here(self):
+        """The required SeriesFrom makes this defensive; the helper still says so."""
+        assert spec_series.series_budget_for_generated_call(self._route(), {}) is None
+
+    def test_an_unresolvable_range_without_an_interval_is_left_to_the_endpoint(self):
+        """No interval means no local budget arithmetic; a garbage range is
+        the endpoint's 400 to give, not this helper's guess."""
+        query = {"from": "not-a-time", "to": "also-not-a-time"}
+        assert spec_series.series_budget_for_generated_call(self._route(), query) is None
+
+
+class TestSeriesStreamCeilingWiring:
+    """The byte ceiling travels into the transport, where streaming enforces it."""
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    def _series_tool(self, monkeypatch, calls):
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
+        return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getAnalyticsStatusSeries"])
+
+    async def test_a_generated_series_call_passes_the_cap_to_the_transport(self, monkeypatch, calls):
+        tool = self._series_tool(monkeypatch, calls)
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+        assert calls[0]["max_response_bytes"] == spec_tools.MAX_SERIES_RESPONSE_BYTES
+
+    async def test_a_non_series_call_carries_no_cap(self, monkeypatch, calls):
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
+        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["getDenylist"])
+        await tool.run({"profile_id": "abc123"})
+        assert "max_response_bytes" not in calls[0]
+
+    async def test_a_transport_ceiling_refusal_becomes_the_series_ceiling_payload(self, monkeypatch, calls):
+        async def capped_transport(*args, **kwargs):
+            return {"code": "response_too_large", "error": "exceeded the ceiling", "max_response_bytes": 1}
+
+        tool = self._series_tool(monkeypatch, calls)
+        monkeypatch.setattr(spec_tools, "api_request_payload", capped_transport)
+        payload = (await tool.run({"profile_id": "abc123", "from": "-1d"})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert "series response ceiling" in payload["error"]
+        assert payload["max_response_bytes"] == spec_tools.MAX_SERIES_RESPONSE_BYTES
+        assert "response_bytes" not in payload, "a mid-stream refusal has no measured size to claim"
+
+    def test_only_the_shipped_transport_is_credited_with_measuring_the_body(self):
+        """The cap kwarg says what was asked; the callable says who was asked.
+
+        An injected transport can name ``max_response_bytes`` in its signature
+        and ignore it, so being handed the cap is not proof the body came in
+        under it. Only this package's own transport streams under the ceiling,
+        so only its answer is credited with a measurement already made.
+        """
+
+        async def injected(method, url, params=None, json_body=None, max_response_bytes=None): ...
+
+        cap = {"max_response_bytes": spec_tools.MAX_SERIES_RESPONSE_BYTES}
+        assert spec_series.ceiling_measured_on_the_wire(spec_tools.api_request_payload, cap)
+        assert not spec_series.ceiling_measured_on_the_wire(injected, cap)
+        assert not spec_series.ceiling_measured_on_the_wire(spec_tools.api_request_payload, {})
+
+
+def test_a_wire_measured_series_answer_is_not_priced_again_at_the_generator_door():
+    """The two layers price different lengths, and the wire one carries its own calls.
+
+    A compact body that carries non-ASCII text is under the ceiling as the
+    transport counted it - decoded bytes, characters as sent - and over it once
+    ``json.dumps`` escapes every non-ASCII character and spaces its separators.
+    That gap predates this change; what changes is that the generator no longer
+    re-serializes an answer the transport already bounded to price a bound the
+    wire enforced, and an answer from a transport that did no measuring is
+    still priced here.
+    """
+    route = next(r for r in spec_tools.spec_routes() if r.path.endswith("/analytics/status;series"))
+    payload = {"data": [{"domain": "é" * 60 + ".example", "count": i} for i in range(3000)]}
+    wire = len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode())
+    dumped = len(json.dumps(payload, default=str))
+    assert wire <= spec_tools.MAX_SERIES_RESPONSE_BYTES < dumped
+
+    assert spec_series.series_refusal(route, payload, ceiling_measured_on_the_wire=True) is None
+    refused = spec_series.series_refusal(route, payload)
+    assert refused is not None
+    assert refused["response_bytes"] == dumped
+
+
+class TestSchemaProblemStreamIsBounded:
+    """Violations are streamed: retention and counting stay bounded, coverage does not."""
+
+    @pytest.fixture
+    def calls(self):
+        return []
+
+    def test_retention_stops_at_the_rendered_few_and_counting_at_the_cap(self):
+        import jsonschema as js
+
+        validator = js.Draft202012Validator({"type": "array", "items": {"required": ["id"]}})
+        body = [{"wrong": i} for i in range(1500)]
+        kept, extra = spec_validation._schema_problems(validator, body)
+        assert len(kept) == spec_validation._SCHEMA_ERROR_LIMIT
+        assert extra == spec_validation._SCHEMA_ERROR_COUNT_CAP  # counting stopped at the cap
+
+    async def test_an_over_cap_violation_tail_says_at_least(self, monkeypatch, calls):
+        monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api({"data": []}, calls))
+        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["replaceDenylist"])
+        body = [{"wrong": i} for i in range(spec_validation._SCHEMA_ERROR_COUNT_CAP + 100)]
+        payload = (await tool.run({"profile_id": "abc123", "body": body})).structured_content
+        assert payload["code"] == "invalid_argument"
+        assert f"and at least {spec_validation._SCHEMA_ERROR_COUNT_CAP} more" in payload["error"]
+        assert calls == []
+
+
+def test_series_refusal_ignores_a_non_mapping_answer():
+    """A transport that answers with a bare list gets no annotation, no crash."""
+    route = next(r for r in spec_tools.spec_routes() if r.path.endswith("/analytics/status;series"))
+    assert spec_series.series_refusal(route, ["data", "rows"]) is None
+
+
+class TestLegacyInjectedTransportCompatibility:
+    """A transport injected before the response cap existed keeps the legacy signature.
+
+    ``SpecApiTool(transport=...)`` is a published injection point; a callable
+    with exactly ``(method, url, params=None, json_body=None)`` was valid
+    until the capped ``;series`` call started passing ``max_response_bytes``.
+    Binding that kwarg to a legacy signature raises TypeError before its body
+    runs, so the capability must be probed - and the legacy path must still
+    have its oversized answers refused by the serialized backstop. So must any
+    other injected callable: taking the kwarg says nothing about honouring it.
+    """
+
+    async def test_a_legacy_four_argument_transport_runs_and_is_still_capped(self):
+        seen: list[tuple[str, str]] = []
+
+        async def legacy_transport(method, url, params=None, json_body=None):
+            seen.append((method, url))
+            return {"data": [{"x": "over-cap-padding-for-a-real-refusal", "i": i} for i in range(30_000)]}
+
+        route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
+        tool = spec_tools.SpecApiTool(route, transport=legacy_transport)
+        payload = (await tool.run({"profile_id": "abc123", "from": "-1d"})).structured_content
+
+        assert seen, "the legacy transport must be called with the legacy signature, not killed by the cap kwarg"
+        assert payload["code"] == "invalid_argument"
+        assert "series response ceiling" in payload["error"]
+        assert payload["response_bytes"] > spec_tools.MAX_SERIES_RESPONSE_BYTES  # the backstop priced it
+
+    async def test_a_modern_injected_transport_that_ignores_the_cap_is_still_priced(self):
+        """A signature that accepts the cap is not a transport that honours it.
+
+        ``transport=`` is a published injection point, so the serialized
+        backstop stays in charge of every injected callable: this one takes
+        ``max_response_bytes`` and does nothing with it, and its oversized
+        answer is still refused rather than handed to the caller.
+        """
+
+        async def ignoring(method, url, params=None, json_body=None, max_response_bytes=None):
+            return {"data": [{"x": "over-cap-padding-for-a-real-refusal", "i": i} for i in range(30_000)]}
+
+        route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
+        tool = spec_tools.SpecApiTool(route, transport=ignoring)
+        payload = (await tool.run({"profile_id": "abc123", "from": "-1d"})).structured_content
+
+        assert payload["code"] == "invalid_argument"
+        assert "series response ceiling" in payload["error"]
+        assert payload["response_bytes"] > spec_tools.MAX_SERIES_RESPONSE_BYTES
+
+    def test_the_probe_reads_named_and_variadic_signatures(self):
+        async def legacy(method, url, params=None, json_body=None): ...
+
+        async def modern(method, url, params=None, json_body=None, max_response_bytes=None): ...
+
+        async def star(method, url, **extra): ...
+
+        assert not spec_series._transport_accepts_cap(legacy)
+        assert spec_series._transport_accepts_cap(modern)
+        assert spec_series._transport_accepts_cap(star)
+
+    def test_the_default_transport_supports_the_cap(self):
+        assert spec_series._transport_accepts_cap(spec_tools.api_request_payload)
+
+    def test_a_callable_without_an_introspectable_signature_is_treated_as_legacy(self):
+        """The unpriced path still enforces the ceiling, so the guess is safe the only way."""
+        assert not spec_series._transport_accepts_cap(iter)  # builtin whose signature() raises ValueError
+
+
+class TestTransportCapabilityProbeIsMemoized:
+    """One signature inspection per transport callable, whatever the dispatch count.
+
+    The capability probe inspected the transport's signature on every
+    ``;series`` dispatch, for an answer that cannot change while the callable
+    lives. These tests count the inspections themselves and check that each
+    transport still receives the arguments it received before the memo.
+    """
+
+    @staticmethod
+    def _inspect_calls(monkeypatch) -> list[Any]:
+        """Route this module's ``inspect`` use through a counter, leaving the rest of the process alone."""
+        seen: list[Any] = []
+        real_signature = inspect.signature
+
+        def counting_signature(obj: Any, *args: Any, **kwargs: Any) -> Any:
+            seen.append(obj)
+            return real_signature(obj, *args, **kwargs)
+
+        monkeypatch.setattr(
+            spec_series, "inspect", SimpleNamespace(signature=counting_signature, Parameter=inspect.Parameter)
+        )
+        return seen
+
+    def _series_route(self):
+        return next(r for r in spec_tools.spec_routes() if r.operation_id == "getAnalyticsStatusSeries")
+
+    async def test_two_series_dispatches_inspect_a_capped_transport_once(self, monkeypatch):
+        inspections = self._inspect_calls(monkeypatch)
+        calls: list[dict[str, Any]] = []
+
+        async def capped_transport(method, url, params=None, json_body=None, max_response_bytes=None):
+            calls.append({"method": method, "url": url, "cap": max_response_bytes})
+            return {"data": []}
+
+        tool = spec_tools.SpecApiTool(self._series_route(), transport=capped_transport)
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+
+        assert inspections == [capped_transport], "the second dispatch reads the memo, not the signature"
+        assert [(call["method"], call["cap"]) for call in calls] == [("GET", spec_tools.MAX_SERIES_RESPONSE_BYTES)] * 2
+
+    async def test_two_series_dispatches_inspect_a_legacy_transport_once(self, monkeypatch):
+        inspections = self._inspect_calls(monkeypatch)
+        calls: list[tuple[str, str]] = []
+
+        async def legacy_transport(method, url, params=None, json_body=None):
+            calls.append((method, url))
+            return {"data": []}
+
+        tool = spec_tools.SpecApiTool(self._series_route(), transport=legacy_transport)
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+
+        assert inspections == [legacy_transport]
+        assert len(calls) == 2, "the legacy transport keeps its old four-argument call shape every time"
+
+    def test_each_callable_keeps_its_own_answer(self, monkeypatch):
+        """No transport inherits another's capability, so the memo may not key on equality."""
+        inspections = self._inspect_calls(monkeypatch)
+
+        async def legacy_transport(method, url, params=None, json_body=None): ...
+
+        async def capped_transport(method, url, params=None, json_body=None, max_response_bytes=None): ...
+
+        assert not spec_series._transport_accepts_cap(legacy_transport)
+        assert spec_series._transport_accepts_cap(capped_transport)
+        assert not spec_series._transport_accepts_cap(legacy_transport)
+        assert spec_series._transport_accepts_cap(capped_transport)
+        assert inspections == [legacy_transport, capped_transport]
+
+
+def test_a_big_non_series_payload_is_not_refused_by_the_series_backstop():
+    """The ceiling is a ;series policy: a wide aggregate answer is data, not an overrun."""
+    route = next(r for r in spec_tools.spec_routes() if r.operation_id == "getDenylist")
+    big = {"data": [{"id": f"entry-{i}", "name": "x" * 40} for i in range(30_000)]}
+    assert spec_series.series_refusal(route, big) is None
+
+
+def test_truncate_description_no_boundary():
+    from nextdns_mcp import spec_descriptions
+
+    out = spec_descriptions._truncate_description("a" * 2000, 100)
+    assert len(out) == 100
+
+
+def test_truncate_description_prefers_boundary():
+    from nextdns_mcp import spec_descriptions
+
+    text = "x" * 30 + "\n" + "y" * 30
+    out = spec_descriptions._truncate_description(text, 40)
+    assert len(out) <= 40
+    assert out.endswith("x")
+
+
+def test_empty_write_refusal_branches():
+    from types import SimpleNamespace
+
+    from nextdns_mcp import spec_tools
+
+    route = SimpleNamespace(
+        method="PATCH",
+        operation_id="updateSecuritySettings",
+        description="",
+        path="/x",
+        flat_param_schema={},
+        summary="",
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    # None body
+    res = tool._empty_write_refusal("PATCH", None)
+    assert res is not None and res.is_error
+    # empty dict
+    res2 = tool._empty_write_refusal("PATCH", {})
+    assert res2 is not None and res2.is_error
+    # non-empty body
+    assert tool._empty_write_refusal("PATCH", {"a": 1}) is None
+    # non-write method
+    assert tool._empty_write_refusal("GET", None) is None
+
+
+def test_create_profile_guard_all_protected(monkeypatch):
+
+    from nextdns_mcp import config, spec_tools
+
+    monkeypatch.setattr(
+        config,
+        "load_profile_access_control",
+        lambda: config.ProfileAccessControl(
+            read_only=False, readable=frozenset({"p1"}), writable=frozenset({"p1"}), protected=frozenset({"p1"})
+        ),
+    )
+    from types import SimpleNamespace
+
+    route = SimpleNamespace(
+        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    res = tool._create_profile_guard()
+    assert res is not None and res.is_error
+
+
+def test_create_profile_guard_not_all_protected(monkeypatch):
+
+    from nextdns_mcp import config, spec_tools
+
+    monkeypatch.setattr(
+        config,
+        "load_profile_access_control",
+        lambda: config.ProfileAccessControl(
+            read_only=False,
+            readable=frozenset({"p1", "p2"}),
+            writable=frozenset({"p1", "p2"}),
+            protected=frozenset({"p1"}),
+        ),
+    )
+    from types import SimpleNamespace
+
+    route = SimpleNamespace(
+        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    assert tool._create_profile_guard() is None
+
+
+def test_create_profile_guard_reads_protected_profiles_once(monkeypatch):
+    """One guard invocation takes a single snapshot: the denylist is read once."""
+
+    from nextdns_mcp import profile_access, spec_tools
+
+    monkeypatch.setenv("NEXTDNS_READ_ONLY", "")
+    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "")
+    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abcdef,fedcba")
+    monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "abcdef")
+
+    calls = 0
+    real_get_protected_profiles = profile_access.get_protected_profiles
+
+    def counting_get_protected_profiles() -> frozenset[str]:
+        nonlocal calls
+        calls += 1
+        return real_get_protected_profiles()
+
+    monkeypatch.setattr(profile_access, "get_protected_profiles", counting_get_protected_profiles)
+
+    from types import SimpleNamespace
+
+    route = SimpleNamespace(
+        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    assert tool._create_profile_guard() is None
+    assert calls == 1
+
+
+import asyncio
+
+
+def test_split_body_drops_none():
+
+    # located body prop with None
+    located = [("typoSquatting", "typoSquatting", "body")]
+    args = {"typoSquatting": None}
+    body = spec_arguments._split_body_arguments(located, args)
+    # should be None (no body props)
+    assert body is None
+
+
+def test_create_profile_guard_run_path(monkeypatch):
+    from types import SimpleNamespace
+
+    from nextdns_mcp import spec_tools
+    from nextdns_mcp.tools import logs as _logs  # noqa
+
+    route = SimpleNamespace(
+        method="POST",
+        operation_id="createProfile",
+        description="",
+        path="/profiles",
+        flat_param_schema={"type": "object", "properties": {}},
+        summary="",
+        parameter_map={},
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    tool._request_refusal = lambda args: None
+    tool._create_profile_guard = lambda: spec_tools.ToolResult(
+        structured_content={"code": "invalid_argument", "error": "x"}, is_error=True
+    )
+
+    async def main():
+        res = await tool.run({})
+        assert res.is_error
+
+    asyncio.run(main())
+
+
+def test_empty_write_run_path():
+    from types import SimpleNamespace
+
+    from nextdns_mcp import spec_tools
+
+    route = SimpleNamespace(
+        method="PATCH",
+        operation_id="updateSecuritySettings",
+        description="",
+        path="/x",
+        flat_param_schema={"type": "object", "properties": {}},
+        summary="",
+        parameter_map={},
+    )
+    tool = spec_tools.SpecApiTool(route=route)
+    tool._request_refusal = lambda args: None
+    tool._create_profile_guard = lambda: None
+
+    async def main():
+        res = await tool.run({})
+        assert res.is_error
+
+    asyncio.run(main())
+
+
+class TestToolAnnotations:
+    """readOnlyHint mirrors side effects, not just the HTTP method."""
+
+    def test_downloadLogs_is_not_annotated_read_only(self):
+        """downloadLogs answers a GET but WRITES a CSV to disk: readOnlyHint must
+        be False, or a caller scanning for side-effect-free tools is misled."""
+        routes = {route.operation_id: route for route in spec_tools.spec_routes()}
+        download = spec_tools.SpecApiTool(routes["downloadLogs"])
+        assert download.annotations is not None
+        assert download.annotations.read_only_hint is False
+        # The GET sibling, which writes nothing, stays read-only - the override
+        # is per-operation, not per-method.
+        get_logs = spec_tools.SpecApiTool(routes["getLogs"])
+        assert get_logs.annotations is not None
+        assert get_logs.annotations.read_only_hint is True
+
+    def test_destructive_hint_honors_x_mcp_destructive_on_post(self):
+        """A POST the spec declares `x-mcp-destructive: true` publishes as
+        destructive, so a future POST-shaped purge cannot bypass client
+        confirmation; a POST without the declaration stays non-destructive."""
+        spec: dict[str, Any] = {
+            "openapi": "3.1.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/profiles/{profile_id}/purge": {
+                    "post": {
+                        "operationId": "purgeThing",
+                        "summary": "Purge everything",
+                        "security": [{"ApiKeyAuth": []}],
+                        "responses": {"200": {"description": "ok"}},
+                        "x-mcp-destructive": True,
+                    }
+                },
+                "/profiles/{profile_id}/nudge": {
+                    "post": {
+                        "operationId": "nudgeThing",
+                        "summary": "Nudge everything",
+                        "security": [{"ApiKeyAuth": []}],
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                },
+            },
+        }
+        by_id = {route.operation_id: route for route in spec_tools.spec_routes(spec)}
+        purge = spec_tools.SpecApiTool(by_id["purgeThing"])
+        assert purge.annotations is not None
+        assert purge.annotations.destructive_hint is True
+        nudge = spec_tools.SpecApiTool(by_id["nudgeThing"])
+        assert nudge.annotations is not None
+        assert nudge.annotations.destructive_hint is False
+
+    def test_irreversible_operations_declare_x_mcp_destructive(self):
+        """Every operation whose summary or description declares irreversible
+        destruction carries `x-mcp-destructive: true` - today exactly
+        clearLogs and deleteProfile."""
+        routes = spec_tools.spec_routes()
+        irreversible = {
+            str(route.operation_id)
+            for route in routes
+            if "Permanently deletes" in f"{route.summary} {route.description}"
+            or "cannot be undone" in (route.description or "")
+        }
+        assert irreversible == {"clearLogs", "deleteProfile"}
+        for route in routes:
+            flagged = bool((getattr(route, "extensions", None) or {}).get("x-mcp-destructive"))
+            assert flagged == (str(route.operation_id) in irreversible)
+
+    def test_additive_posts_stay_non_destructive_and_known_hints_hold(self):
+        """The extension changes nothing already correct: the nine additive
+                POSTs stay non-destructive, the two irreversible operations stay
+        destructive, and the read-only hints are untouched."""
+        routes = {route.operation_id: route for route in spec_tools.spec_routes()}
+        additive_posts = [
+            "createProfile",
+            "addPrivacyBlocklist",
+            "addPrivacyNative",
+            "addRewrite",
+            "addSecurityTLD",
+            "addToAllowlist",
+            "addToDenylist",
+            "addToParentalControlCategories",
+            "addToParentalControlServices",
+        ]
+        assert len(additive_posts) == 9
+        for operation_id in additive_posts:
+            tool = spec_tools.SpecApiTool(routes[operation_id])
+            assert tool.annotations is not None
+            assert tool.annotations.destructive_hint is False, operation_id
+        for operation_id in ("clearLogs", "deleteProfile"):
+            tool = spec_tools.SpecApiTool(routes[operation_id])
+            assert tool.annotations is not None
+            assert tool.annotations.destructive_hint is True, operation_id
+        get_logs = spec_tools.SpecApiTool(routes["getLogs"])
+        assert get_logs.annotations is not None
+        assert get_logs.annotations.read_only_hint is True
+        download = spec_tools.SpecApiTool(routes["downloadLogs"])
+        assert download.annotations is not None
+        assert download.annotations.read_only_hint is False
+
+
+class TestPlotsSpecToolsImportCycle:
+    """tools.plots must not import spec_tools (the cycle was deferred, not removed)."""
+
+    def test_importing_plots_does_not_import_spec_tools(self):
+        import subprocess
+        import sys
+
+        code = (
+            "import sys; import nextdns_mcp.tools.plots; sys.exit(1 if 'nextdns_mcp.spec_tools' in sys.modules else 0)"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+        assert result.returncode == 0, (
+            "tools.plots pulled in spec_tools again (import cycle restored): " + result.stderr
+        )
+
+    def test_the_series_ceiling_lives_in_transport(self):
+
+        assert transport.MAX_SERIES_RESPONSE_BYTES == spec_tools.MAX_SERIES_RESPONSE_BYTES == 512_000
