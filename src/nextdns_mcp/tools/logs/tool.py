@@ -11,6 +11,7 @@ successful download.
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -103,18 +104,119 @@ def _download_error_detail(status: Any, scheme: Any, host: Any) -> str:
     )
 
 
-def _register_successful_download(path: str, downloaded: bool) -> dict[str, Any] | None:
+LOG_TEMP_DIR_PREFIX = "nextdns_logs_"
+
+
+async def _settle_task(task: asyncio.Future[Any]) -> Any:
+    """Return a task's outcome even when this task is cancelled while waiting.
+
+    Offloaded filesystem calls and the registration that owns a finished CSV
+    cannot be stopped by cancelling the await: the thread keeps running and the
+    result still exists. Cleanup that gives up on that result is what leaks a
+    file. Waiting through the cancellation, and clearing it once the wait is
+    done, lets the caller finish its own cleanup before the cancellation
+    propagates. The caller owns re-raising it.
+    """
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            assert current is not None  # this coroutine always runs inside a task
+            current.uncancel()
+    if task.cancelled():
+        return None
+    return task.result()
+
+
+async def _reclaim_abandoned_temp_dir(creating: asyncio.Future[str]) -> None:
+    """Take back a temp directory whose creating await was cancelled.
+
+    The worker thread cannot be cancelled, so the directory either exists by
+    the time the creation task finishes or never will: waiting for the task is
+    what makes the reclaim exact rather than best effort. The wait itself
+    survives another cancellation, so the directory is not left empty.
+    """
+    made = await _settle_task(creating)
+    if made is None:
+        return  # the directory was never created: there is nothing to hand back
+    removal = asyncio.ensure_future(asyncio.to_thread(retention._unlink_temp_file, os.path.join(made, "download.csv")))
+    await _settle_task(removal)
+
+
+async def _undo_registration(path: str) -> None:
+    """Take a cancelled download's path back out of its owning registry."""
+    forgetting = asyncio.ensure_future(asyncio.to_thread(retention._forget_download, path))
+    await _settle_task(forgetting)
+
+
+async def _reclaim_download(path: str) -> None:
+    """Remove a CSV and its parent, even if this task is cancelled again."""
+    removing = asyncio.ensure_future(asyncio.to_thread(retention._unlink_temp_file, path))
+    await _settle_task(removing)
+
+
+async def _finish_abandoned_download(path: str, registration: asyncio.Future[dict[str, Any] | None] | None) -> None:
+    """Undo a registration that raced a cancellation, then reclaim the CSV.
+
+    The download owns the path until it hands the payload back. When a
+    cancellation interrupted registration, let it finish before deciding: a
+    registration that landed has to be undone, or the owning lifespan would
+    keep a live entry for a file this call is about to delete. Both steps
+    settle through cancellation so no second cancel can strand either one.
+    """
+    if registration is not None:
+        rejection = await _settle_task(registration)
+        if rejection is None:
+            await _undo_registration(path)
+    await _reclaim_download(path)
+
+
+async def _create_download_path() -> str:
+    """Create this download's temp directory on the worker pool and return the CSV path.
+
+    ``mkdtemp`` is a syscall that can block - on a full or cold filesystem it
+    holds whatever thread calls it - so it runs on the pool, like the open,
+    write and unlink that follow it. The await is shielded because the
+    directory has no owner until the caller binds the path: a plain await that
+    is cancelled after the worker started would discard the created directory,
+    and the caller's cleanup guard has nothing to reclaim yet - exactly the
+    leak the cancellation contract forbids. The shield lets the creation land,
+    reclaims what it made, and re-raises the cancellation.
+    """
+    creating = asyncio.ensure_future(asyncio.to_thread(tempfile.mkdtemp, prefix=LOG_TEMP_DIR_PREFIX))
+    try:
+        temp_dir = await asyncio.shield(creating)
+    except asyncio.CancelledError:
+        await _reclaim_abandoned_temp_dir(creating)
+        raise
+    return os.path.join(temp_dir, "download.csv")
+
+
+async def _register_successful_download(path: str, downloaded: bool) -> dict[str, Any] | None:
     """Register a completed download with the owning lifespan's registry.
 
-    Returns the rejection payload when the download succeeded outside any
-    server lifespan - nothing could ever reclaim the CSV, so the caller must
-    not hand out the path - and None otherwise.
+    Returns the rejection payload when the download cannot be handed out at
+    all - it succeeded outside any server lifespan, or the registry call
+    itself failed - because in either case nothing could ever reclaim the CSV,
+    so the caller must not hand out the path and must remove the file. None
+    when the registry took ownership.
     """
     if not downloaded:
         return None
     try:
-        retention._note_successful_download(path, True)
+        # Registration is where past-MAX_RETAINED_DOWNLOADS eviction unlinks the
+        # oldest CSV, and that unlink is a filesystem call: it runs on a worker
+        # thread so the next request is not queued behind it.
+        await asyncio.to_thread(retention._note_successful_download, path, True)
     except retention.MissingDownloadRegistryError as e:
+        logger.error(f"Downloaded logs could not be registered for reclaim: {client._log_safe_error(e)}")
+        return error_payload(ErrorCode.INTERNAL_ERROR, f"Downloaded logs could not be handed out: {e}")
+    except Exception as e:  # noqa: BLE001
+        # A registry that answered with anything else still did not take the
+        # path, so handing the CSV out would leave it unregistered - invisible
+        # to shutdown reclaim and to eviction. Reject it and let the caller's
+        # cleanup guard remove it.
         logger.error(f"Downloaded logs could not be registered for reclaim: {client._log_safe_error(e)}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Downloaded logs could not be handed out: {e}")
     return None
@@ -152,8 +254,11 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     globally routable hosts, so a hostile ``Location`` cannot turn the download
     into a probe of an internal service.
     """
-    path = os.path.join(tempfile.mkdtemp(prefix="nextdns_logs_"), "download.csv")
+    # Created off the loop, and shielded: see ``_create_download_path``.
+    path = await _create_download_path()
     downloaded = False
+    registration: asyncio.Future[dict[str, Any] | None] | None = None
+    handed_off = False
     try:
         payload, downloaded = await _download_logs_controlled(profile_id, path)
         # The file must survive until the caller has read it; the server
@@ -161,11 +266,16 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
         # Registration requires an owning lifespan: without one the CSV could
         # never be reclaimed, so a successful download is rejected there and
         # removed like any other unsuccessful download (downloaded stays False
-        # for the finally below).
-        rejection = _register_successful_download(path, downloaded)
+        # for the finally below). Registration runs as its own shielded task:
+        # the download keeps ownership of the path until the payload is handed
+        # back, so a cancellation while the registry call is queued cannot stop
+        # the call from settling and undoing whatever it did.
+        registration = asyncio.ensure_future(_register_successful_download(path, downloaded))
+        rejection = await asyncio.shield(registration)
         if rejection is not None:
             downloaded = False
             return rejection
+        handed_off = downloaded
         return payload
     except httpx.HTTPError as e:
         logger.error(f"HTTP error downloading logs: {client._log_safe_error(e)}")
@@ -174,8 +284,10 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
         logger.error(f"Unexpected error downloading logs: {client._log_safe_error(e)}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Unexpected error while downloading logs: {e}")
     finally:
-        # Every exit that is not a successful download — including a cancelled
+        # Every exit that is not a handed-out payload — including a cancelled
         # task, which reaches neither handler — removes the temp file and its
-        # mkdtemp parent, so an abandoned download leaves nothing behind.
-        if not downloaded:
-            retention._unlink_temp_file(path)
+        # mkdtemp parent. A registration that raced the cancellation is settled
+        # and undone first, so no caller-less CSV is left for the registry to
+        # claim or for shutdown to miss.
+        if not handed_off:
+            await _finish_abandoned_download(path, registration)

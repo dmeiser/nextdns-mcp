@@ -20,6 +20,7 @@ sandboxes (issue #542).
 SPDX-License-Identifier: MIT
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
@@ -70,7 +71,10 @@ class ServerResources:
         """
         async with AsyncExitStack() as stack:
             stack.push_async_callback(self.redirect_client.aclose)
-            stack.callback(self.downloads.cleanup)
+            # Reclaiming tracked CSVs unlinks files that can be hundreds of
+            # megabytes; shutdown pushes that work to a worker thread so the
+            # event loop is not blocked by the final filesystem pass.
+            stack.push_async_callback(asyncio.to_thread, self.downloads.cleanup)
             stack.push_async_callback(self.doh_client.aclose)
             stack.push_async_callback(self.probe_client.aclose)
             stack.push_async_callback(self.api_client.aclose)

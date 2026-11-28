@@ -35,7 +35,7 @@ from nextdns_mcp import config
 from nextdns_mcp.client import AccessDeniedError
 from nextdns_mcp.errors import ErrorCode
 from nextdns_mcp.tools import logs as logs_module
-from nextdns_mcp.tools.logs import guard, preview, redirects, stream
+from nextdns_mcp.tools.logs import guard, preview, redirects, retention, stream, tool
 
 # example.com: an address Python's ipaddress module reports as globally routable.
 PUBLIC_IP = "93.184.216.34"
@@ -1850,3 +1850,424 @@ class TestSuccessfulDownloadLifecycle:
             assert all(survivor in registry for survivor in survivors), (
                 "an unevictable oldest must stop the sweep, not drop the rest"
             )
+
+
+class TestFilesystemCallsLeaveTheLoop:
+    """Creating, opening and reclaiming a CSV must not hold the event loop (issue #791).
+
+    The writes were already offloaded; the surrounding lifecycle calls were not.
+    Each probe records the thread that made the call: on the base behaviour the
+    recorded thread is the loop's own, and every other request waits behind it.
+    """
+
+    async def test_the_temp_directory_and_csv_are_created_off_the_loop(
+        self, monkeypatch, unauthenticated, owned_api_client
+    ):
+        loop_thread = threading.get_ident()
+        calls: list[tuple[str, bool]] = []
+        real_mkdtemp = tempfile.mkdtemp
+        real_open = os.open
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            if kwargs.get("prefix") == "nextdns_logs_":
+                calls.append(("mkdtemp", threading.get_ident() == loop_thread))
+            return real_mkdtemp(*args, **kwargs)
+
+        def watch_open(path: Any, *args: Any, **kwargs: Any) -> int:
+            if str(path).endswith("download.csv"):
+                calls.append(("open", threading.get_ident() == loop_thread))
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(logs_module.os, "open", watch_open)
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        with (
+            logs_module.downloads_owned(),
+            owned_api_client(
+                _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+            ),
+        ):
+            unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert {name for name, _ in calls} == {"mkdtemp", "open"}
+        assert not any(on_loop for _, on_loop in calls), calls
+        assert payload["size"] == len("host,reason\na.com,blocked\n")
+
+    async def test_a_failed_download_is_unlinked_off_the_loop(self, monkeypatch, owned_api_client):
+        loop_thread = threading.get_ident()
+        removed: list[bool] = []
+        real_unlink = os.unlink
+        real_rmdir = os.rmdir
+
+        def watch_unlink(path: Any) -> None:
+            if str(path).endswith("download.csv"):
+                removed.append(threading.get_ident() == loop_thread)
+            return real_unlink(path)
+
+        def watch_rmdir(path: Any) -> None:
+            if "nextdns_logs_" in str(path):
+                removed.append(threading.get_ident() == loop_thread)
+            return real_rmdir(path)
+
+        monkeypatch.setattr(logs_module.os, "unlink", watch_unlink)
+        monkeypatch.setattr(logs_module.os, "rmdir", watch_rmdir)
+
+        class Denied:
+            def stream(self, method, url, **kwargs):
+                raise AccessDeniedError(
+                    "Read access denied for profile: abc123",
+                    code=ErrorCode.READ_ACCESS_DENIED,
+                    profile_id="abc123",
+                )
+
+        with owned_api_client(Denied()):
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert payload["code"] == ErrorCode.READ_ACCESS_DENIED
+        assert len(removed) == 2, "both the CSV and its parent must be reclaimed"
+        assert not any(removed), removed
+
+    async def test_registration_including_eviction_runs_off_the_loop(
+        self, monkeypatch, unauthenticated, owned_api_client
+    ):
+        loop_thread = threading.get_ident()
+        notes: list[bool] = []
+
+        class RecordingRegistry(logs_module.DownloadRegistry):
+            def note(self, path: str, downloaded: bool) -> None:
+                notes.append(threading.get_ident() == loop_thread)
+                super().note(path, downloaded)
+
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        with (
+            logs_module.downloads_owned(RecordingRegistry()),
+            owned_api_client(
+                _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+            ),
+        ):
+            unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert notes == [False], "registration (and any eviction it performs) must run on a worker"
+        assert payload["row_count"] == 2
+
+    async def test_shutdown_reclaim_runs_off_the_loop(self, monkeypatch):
+        from nextdns_mcp import lifespan as lifespan_module
+
+        loop_thread = threading.get_ident()
+        threads: list[bool] = []
+
+        class RecordingRegistry(logs_module.DownloadRegistry):
+            def cleanup(self) -> None:
+                threads.append(threading.get_ident() == loop_thread)
+                super().cleanup()
+
+        class _Server:
+            _nextdns_resources: Any = None
+
+        server = _Server()
+        server._nextdns_resources = lifespan_module.ServerResources()
+        server._nextdns_resources.downloads = RecordingRegistry()
+        async with lifespan_module.server_lifespan(server):
+            pass
+        assert threads == [False], "shutdown reclaim must run on a worker"
+        await server._nextdns_resources.aclose()
+        assert threads == [False, False], "the resources-close path must offload too"
+
+    async def test_the_reported_size_never_stats_the_file(self, tmp_path, monkeypatch):
+        def refuse_stat(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError("payload size must come from the bytes written, not a second fs call")
+
+        monkeypatch.setattr(logs_module.os.path, "getsize", refuse_stat)
+        chunks = ["a.com,blocked\n", "bb.com,blocked\n"]
+        path = str(tmp_path / "download.csv")
+        payload = await logs_module._write_stream_to_tempfile(_FakeResponse("https://x/file.csv", chunks=chunks), path)
+        assert payload["size"] == sum(len(chunk) for chunk in chunks)
+        assert payload["size"] == os.stat(path).st_size
+
+
+class TestOffloadedCallsSurviveCancellation:
+    """An offloaded filesystem call whose await is cancelled must still be undone.
+
+    A worker thread cannot be cancelled, so the syscall lands after the caller
+    is already unwinding. Each probe parks the worker, cancels the awaiting
+    task, and checks what the abandoned result became: a directory nobody
+    reclaims, an open handle left to the collector, or a registry mutated from
+    two threads at once.
+    """
+
+    async def test_a_cancelled_temp_directory_creation_is_reclaimed(self, monkeypatch):
+        """The directory mkdtemp created after the cancel has no owner yet, so the creating call reclaims it."""
+        created: list[str] = []
+        entered = threading.Event()
+        release = threading.Event()
+        real_mkdtemp = tempfile.mkdtemp
+
+        def slow_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            entered.set()
+            release.wait(_RELEASE_SECONDS)
+            return made
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", slow_mkdtemp)
+        download = asyncio.create_task(logs_module._download_logs_to_tempfile("abc123"))
+        assert await asyncio.to_thread(entered.wait, _WRITE_START_SECONDS), (
+            "the download never reached the temp-directory call"
+        )
+        download.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await download
+
+        assert created, "no temp directory was created, so the reclaim claim is unproven"
+        assert not os.path.exists(created[0]), f"the cancelled download left {created[0]} behind"
+
+    async def test_an_abandoned_creation_that_never_landed_reclaims_nothing(self):
+        """A creation cancelled before it ran made no directory: there is nothing to hand back."""
+        never: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        never.cancel()
+        await tool._reclaim_abandoned_temp_dir(never)
+
+    async def test_an_abandoned_creation_that_landed_is_handed_back(self, tmp_path):
+        """The creation task holds the only reference to the directory, so waiting for it makes the reclaim exact."""
+        made = tmp_path / "nextdns_logs_abandoned"
+        made.mkdir()
+        done: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        done.set_result(str(made))
+        await tool._reclaim_abandoned_temp_dir(done)
+        assert not made.exists()
+
+    async def test_a_cancelled_file_open_closes_the_handle(self, tmp_path, monkeypatch):
+        """A handle the caller never bound is a handle no exit path can close; the opening call closes it."""
+        path = str(tmp_path / "download.csv")
+        entered = threading.Event()
+        release = threading.Event()
+        closed: list[bool] = []
+
+        class _ParkingOpen:
+            """Stands in for ``os.fdopen`` and parks inside the opening worker thread."""
+
+            def __init__(self) -> None:
+                self._file: Any = None
+
+            def __call__(self, fd: int, *args: Any, **kwargs: Any) -> Self:
+                self._file = _REAL_FDOPEN(fd, *args, **kwargs)
+                entered.set()
+                release.wait(_RELEASE_SECONDS)
+                return self
+
+            def write(self, raw: bytes) -> int:
+                return self._file.write(raw)
+
+            def close(self) -> None:
+                closed.append(True)
+                self._file.close()
+
+        sink = _ParkingOpen()
+        monkeypatch.setattr(logs_module.os, "fdopen", sink)
+        download = asyncio.create_task(
+            stream._write_stream_to_tempfile(_FakeResponse("https://x/file.csv", chunks=["a.com,blocked\n"]), path)
+        )
+        assert await asyncio.to_thread(entered.wait, _WRITE_START_SECONDS), "the download never reached the open"
+        download.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await download
+
+        assert closed, "the abandoned handle was left to the garbage collector instead of being closed"
+
+    async def test_an_abandoned_open_that_never_landed_closes_nothing(self):
+        never: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        never.cancel()
+        await stream._close_abandoned_handle(never)
+
+    def test_registration_and_eviction_hold_the_registry_lock(self, tmp_path, monkeypatch):
+        """Every registry mutation, including the eviction unlink, happens inside one lock."""
+        monkeypatch.setattr(retention, "MAX_RETAINED_DOWNLOADS", 1)
+        with logs_module.downloads_owned() as registry:
+            observed: list[bool] = []
+            real_remove = retention._remove_downloaded_file
+
+            def watch(path: str) -> bool:
+                observed.append(registry._lock.locked())
+                return real_remove(path)
+
+            monkeypatch.setattr(retention, "_remove_downloaded_file", watch)
+            for index in range(logs_module.MAX_RETAINED_DOWNLOADS + 1):
+                csv = tmp_path / f"dl{index}.csv"
+                csv.write_text("csv")
+                logs_module._note_successful_download(str(csv), True)
+            registry.cleanup()
+
+        assert observed, "no eviction or reclaim ran, so the locking claim is unproven"
+        assert all(observed), "a registry mutation happened outside the lock"
+
+    def test_a_concurrent_registration_waits_for_the_eviction_sweep(self, tmp_path, monkeypatch):
+        """The register-then-evict step is one step: a second note cannot mutate the dict mid-sweep.
+
+        The probe calls ``note`` from another thread while the eviction unlink
+        is running. Held under the lock, that call waits and lands; unlocked, it
+        mutates ``_paths`` inside the sweep's own iteration, which is the
+        ``RuntimeError: dictionary changed size during iteration`` that escapes
+        a download which had already finished writing.
+        """
+        monkeypatch.setattr(retention, "MAX_RETAINED_DOWNLOADS", 1)
+        second = tmp_path / "second.csv"
+        probed: set[int] = set()
+        waited: list[bool] = []
+        finished: list[bool] = []
+        others: list[threading.Thread] = []
+
+        def _register_second() -> None:
+            registry.note(str(second), True)
+            finished.append(True)
+
+        def probing_remove(path: str) -> bool:
+            if probed:
+                return True
+            probed.add(1)
+            other = threading.Thread(target=_register_second, name="second-note")
+            other.start()
+            other.join(0.3)
+            waited.append(other.is_alive())  # still parked: the sweep holds the lock
+            others.append(other)  # joined after the sweep returns and releases the lock
+            return True
+
+        monkeypatch.setattr(retention, "_remove_downloaded_file", probing_remove)
+        with logs_module.downloads_owned() as registry:
+            first = tmp_path / "first.csv"
+            logs_module._note_successful_download(str(first), True)
+            logs_module._note_successful_download(str(tmp_path / "evicted.csv"), True)
+
+        for other in others:
+            other.join(_RELEASE_SECONDS)
+        assert waited == [True], "a second registration mutated the registry while the sweep was iterating it"
+        assert finished == [True], "the waiting registration never landed"
+        assert str(second) in registry
+
+    async def test_a_registration_failure_reclaims_the_written_csv(
+        self, monkeypatch, unauthenticated, owned_api_client
+    ):
+        """A registry that did not take the path must not leave the CSV unregistered and unreclaimable."""
+
+        def refuse_note(path: str, downloaded: bool) -> None:
+            raise RuntimeError("dictionary changed size during iteration")
+
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            return made
+
+        monkeypatch.setattr(retention, "_note_successful_download", refuse_note)
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        with (
+            logs_module.downloads_owned(),
+            owned_api_client(
+                _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+            ),
+        ):
+            unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+            payload = await logs_module._download_logs_to_tempfile("abc123")
+
+        assert payload["code"] == ErrorCode.INTERNAL_ERROR
+        assert "could not be handed out" in payload["error"]
+        assert created and not os.path.exists(created[0]), (
+            "a rejected download must not leave an unregistered CSV behind"
+        )
+
+
+class TestCancelledRegistrationKeepsOwnership:
+    """The download owns a finished CSV until it is handed back, cancellation included."""
+
+    async def test_a_cancellation_while_registration_is_pending_reclaims_everything(
+        self, monkeypatch, unauthenticated, owned_api_client
+    ):
+        """A cancel before the registry call runs must leave no CSV, no directory and no registry entry.
+
+        Registration is a separate task from the download. Cancelling the
+        download while that task is still pending must not strand the file in
+        the gap between ``downloaded = True`` and the caller receiving the
+        payload: the cleanup settles the registration, undoes it, and then
+        removes what the download made.
+        """
+        original = tool._register_successful_download
+        started = asyncio.Event()
+        gate: asyncio.Future[dict[str, Any] | None] = asyncio.get_running_loop().create_future()
+
+        async def gated_register(path: str, downloaded: bool) -> dict[str, Any] | None:
+            started.set()
+            await gate  # the registry call is still queued when the cancel lands
+            return await original(path, downloaded)
+
+        monkeypatch.setattr(tool, "_register_successful_download", gated_register)
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def watch_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            return made
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        signed = "https://storage.example/file.csv?Signature=deadbeef"
+        with (
+            logs_module.downloads_owned() as registry,
+            owned_api_client(
+                _FakeClient([_FakeResponse("https://api.nextdns.io/profiles/abc123/logs/download", location=signed)])
+            ),
+        ):
+            unauthenticated([_FakeResponse(signed, chunks=["host,reason\na.com,blocked\n"])])
+            download = asyncio.create_task(logs_module._download_logs_to_tempfile("abc123"))
+            await asyncio.wait_for(started.wait(), _WRITE_START_SECONDS)
+            assert created and os.path.exists(os.path.join(created[0], "download.csv")), (
+                "the download finished writing before registration was cancelled"
+            )
+            download.cancel()
+            gate.set_result(None)  # let the registry call land after the cancellation
+            with pytest.raises(asyncio.CancelledError):
+                await download
+
+            assert created and not os.path.exists(created[0]), "the cancelled download left its CSV behind"
+            assert len(registry) == 0, "a deleted CSV stayed registered for shutdown reclaim"
+
+    async def test_a_second_cancellation_during_reclaim_still_leaves_nothing(self, monkeypatch):
+        """A second cancel during the directory reclaim cannot strand an abandoned temp directory."""
+        created: list[str] = []
+        entered_mkdtemp = threading.Event()
+        release_mkdtemp = threading.Event()
+        entered_removal = threading.Event()
+        release_removal = threading.Event()
+        real_mkdtemp = tempfile.mkdtemp
+        real_removal = retention._unlink_temp_file
+
+        def slow_mkdtemp(*args: Any, **kwargs: Any) -> str:
+            made = real_mkdtemp(*args, **kwargs)
+            created.append(made)
+            entered_mkdtemp.set()
+            release_mkdtemp.wait(_RELEASE_SECONDS)
+            return made
+
+        def slow_removal(path: str) -> None:
+            entered_removal.set()
+            release_removal.wait(_RELEASE_SECONDS)
+            real_removal(path)
+
+        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", slow_mkdtemp)
+        monkeypatch.setattr(retention, "_unlink_temp_file", slow_removal)
+        download = asyncio.create_task(logs_module._download_logs_to_tempfile("abc123"))
+        assert await asyncio.to_thread(entered_mkdtemp.wait, _WRITE_START_SECONDS)
+        download.cancel()
+        release_mkdtemp.set()
+        assert await asyncio.to_thread(entered_removal.wait, _WRITE_START_SECONDS)
+        download.cancel()  # the second cancel lands while the reclaim worker is still running
+        release_removal.set()
+        with pytest.raises(asyncio.CancelledError):
+            await download
+
+        assert created and not os.path.exists(created[0]), "the second cancellation stranded the temp directory"

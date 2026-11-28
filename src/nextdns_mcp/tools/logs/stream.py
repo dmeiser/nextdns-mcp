@@ -87,6 +87,51 @@ async def _stream_pieces(response: httpx.Response, decoder: codecs.IncrementalDe
         yield b"", tail
 
 
+def _open_private(path: str) -> Any:
+    """Open ``path`` for writing with 0o600, on the calling thread.
+
+    ``os.open``, not ``open()``: 0o600 is the requested mode only at ``open()``
+    time, and builtin ``open()`` takes the system default, so a customer CSV
+    would land group- and world-readable. It is a separate function only so the
+    caller can hand it to a worker thread: opening the file is a filesystem
+    call, and the loop must not wait for it.
+    """
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
+
+
+async def _close_abandoned_handle(opening: "asyncio.Future[Any]") -> None:
+    """Close a file handle whose opening await was cancelled.
+
+    The worker thread cannot be cancelled, so the handle exists as soon as the
+    opening task finishes. Dropping it to the garbage collector is not cleanup:
+    the caller's close-on-all-exits guard never sees an unbound handle, and on a
+    platform where an open handle holds its path, the CSV then cannot be
+    removed at all.
+    """
+    try:
+        handle = await asyncio.shield(opening)
+    except (asyncio.CancelledError, OSError):
+        return  # the file was never opened: there is nothing to close
+    await asyncio.to_thread(handle.close)
+
+
+async def _open_private_on_pool(path: str) -> Any:
+    """Open the CSV on the worker pool, never discarding the handle it returns.
+
+    On a busy or cold temp directory the open syscall holds whatever thread
+    calls it for as long as it takes, so it runs on the pool with the writes
+    that follow it. The await is shielded because a handle the caller never
+    bound is a handle no exit path can close: the shield lets the open land,
+    closes what it made, and re-raises the cancellation.
+    """
+    opening = asyncio.ensure_future(asyncio.to_thread(_open_private, path))
+    try:
+        return await asyncio.shield(opening)
+    except asyncio.CancelledError:
+        await _close_abandoned_handle(opening)
+        raise
+
+
 async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict[str, Any]:
     """Write a streaming response body to ``path`` without double-buffering.
 
@@ -120,10 +165,8 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     # record's tail - arriving in a later chunk, after the carry was dropped -
     # would be appended to the preview as if it were a new record.
     dropping_record = False
-    # os.open, not open(): 0o600 is the requested mode only at open() time, and
-    # builtin open() takes the system default, so a customer CSV would land
-    # group- and world-readable.
-    out = os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
+    # Private mode, off the loop, shielded: see ``_open_private_on_pool``.
+    out = await _open_private_on_pool(path)
     try:
         async for raw, text in _stream_pieces(response, decoder):
             if written_bytes + len(raw) > max_total:
@@ -160,7 +203,10 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
         preview_lines, preview_bytes, preview_carry, open_line, dropping_record
     )
     row_count += extra_rows
-    size = os.path.getsize(path)
+    # The bytes this loop wrote, not a second filesystem round trip: the size
+    # cap is already measured on the same counter, so ``stat`` would only add a
+    # blocking call on the loop to re-derive a number we own.
+    size = written_bytes
     text_preview = "".join(preview_lines)
     return {
         "content_type": response.headers.get("content-type"),
