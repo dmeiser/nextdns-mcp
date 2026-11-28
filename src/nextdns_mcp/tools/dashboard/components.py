@@ -194,9 +194,7 @@ def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
 
 def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     """Build domain data table."""
-    rows: _TableRows = [
-        {"domain": domain_label(item, key_name), "queries": item_queries(item)} for item in data
-    ]
+    rows: _TableRows = [{"domain": domain_label(item, key_name), "queries": item_queries(item)} for item in data]
     return _data_table(
         [
             DataTableColumn(key="domain", header="Domain", sortable=True),
