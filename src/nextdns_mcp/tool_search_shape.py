@@ -373,6 +373,7 @@ class CallToolShapeMiddleware(Middleware):
         transform: Any = None,
         call_tool_name: str = "call_tool",
         endpoints: Mapping[str, tuple[str, str]] | None = None,
+        tool_names: Sequence[str] = (),
     ) -> None:
         """`transform` supplies the real catalog under disclosure.
 
@@ -386,27 +387,29 @@ class CallToolShapeMiddleware(Middleware):
         (``plotAnalytics``, ``dohLookup``, ``overviewDashboard``) or the
         generative-UI pair - is classified from its own ``readOnlyHint``, so a
         tool that runs code is not mistaken for a read.
+
+        `tool_names` is the server's full published catalog. The route map only
+        covers spec operations, so without it an exact call to a composite or
+        a generative-UI tool pays a catalog read even though its name needs no
+        resolution. Passing the names the server actually registered keeps
+        that fast path exact: a disabled generative tool is not in the set.
         """
         self._call_tool_name = call_tool_name
         self._transform = transform
         self._endpoints = endpoints
+        self._exact_names = frozenset({*(endpoints or ()), *tool_names})
         self._catalog_memos = _CatalogWordMemos()
 
     def _is_exact_ready_call(self, supplied: Any, arguments: Mapping[str, Any]) -> bool:
         """A well-formed exact call: the name is a real operation, parameters are inside.
 
         The catalog fetch exists only to resolve names, and this shape needs
-        none: the endpoint map carries every spec operation's name. Parameters
-        sent beside ``name`` (the wrapper-shape repair) or an unlisted name
-        (aliases, search answers, the three composite operations (plotAnalytics, dohLookup, overviewDashboard)) take the catalog
-        path, where resolution happens.
+        none: the registered tool names are known before the call arrives.
+        Parameters sent beside ``name`` (the wrapper-shape repair) or a name
+        that is not published exactly (aliases and search answers) still take
+        the catalog path, where resolution happens.
         """
-        return (
-            isinstance(supplied, str)
-            and self._endpoints is not None
-            and supplied in self._endpoints
-            and set(arguments) <= {"name", "arguments"}
-        )
+        return isinstance(supplied, str) and supplied in self._exact_names and set(arguments) <= {"name", "arguments"}
 
     async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> Any:
         message = getattr(context, "message", None)

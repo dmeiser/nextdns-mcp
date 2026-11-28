@@ -939,6 +939,80 @@ class TestATypedNameSaysWhichNamesThereAre:
         assert "search_tools(query)" in str(raised.value)
 
 
+class TestExactPublishedCallsSkipTheCatalog:
+    """PERF-9: an exact published name needs no catalog read to be resolved."""
+
+    @staticmethod
+    def _context(name: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            message=SimpleNamespace(name="call_tool", arguments={"name": name, "arguments": {}}),
+            fastmcp_context=object(),
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "listProfiles",
+            "plotAnalytics",
+            "dohLookup",
+            "overviewDashboard",
+            "generate_prefab_ui",
+            "search_prefab_components",
+        ],
+    )
+    async def test_an_exact_published_name_does_not_read_the_catalog(self, name):
+        class CountingTransform:
+            def __init__(self):
+                self.calls = 0
+
+            async def get_tool_catalog(self, context):
+                self.calls += 1
+                return []
+
+        transform = CountingTransform()
+        middleware = ts.CallToolShapeMiddleware(
+            transform=transform,
+            endpoints={"listProfiles": ("GET", "/profiles")},
+            tool_names=[
+                "plotAnalytics",
+                "dohLookup",
+                "overviewDashboard",
+                "generate_prefab_ui",
+                "search_prefab_components",
+            ],
+        )
+
+        async def call_next(context):
+            return "ran"
+
+        assert await middleware.on_call_tool(self._context(name), call_next) == "ran"
+        assert transform.calls == 0
+
+    async def test_a_non_exact_name_still_uses_the_resolution_path(self):
+        from fastmcp.tools.base import Tool
+
+        class CountingTransform:
+            def __init__(self):
+                self.calls = 0
+
+            async def get_tool_catalog(self, context):
+                self.calls += 1
+                return [Tool.from_function(lambda: None, name="getProfile")]
+
+        transform = CountingTransform()
+        middleware = ts.CallToolShapeMiddleware(transform=transform, endpoints={}, tool_names=["getProfile"])
+        context = self._context("get profile")
+
+        async def call_next(context):
+            return "ran"
+
+        assert await middleware.on_call_tool(context, call_next) == "ran"
+        assert transform.calls == 1
+        assert context.message.arguments["name"] == "getProfile"
+
+
 class TestUnknownNameReusesTheCatalogsWordData:
     """PERF-3: the unknown-name path must not rebuild the catalog's word data per call.
 
