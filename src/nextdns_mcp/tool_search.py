@@ -414,46 +414,16 @@ def build_search_transform(mode: str, endpoints: Mapping[str, tuple[str, str]]) 
     raise ConfigurationError(f"Unknown tool-search mode {mode!r}; expected 'bm25' or 'off'.")
 
 
-# Re-exported for compatibility: the ranking, answer-construction and call-shape
-# modules each own their concern; these names keep the original
-# ``nextdns_mcp.tool_search`` import surface working for tests and callers.
+# The public surface of the split modules stays reachable from this module:
+# ``openapi`` wires the middleware and the transform factory from here, and the
+# constants are the documented budget knobs. Private helpers are NOT re-exported
+# - each belongs to the module that owns the concern, so import it there
+# (``tool_search_rank`` / ``tool_search_answer`` / ``tool_search_shape``).
 from fastmcp.exceptions import ToolError
 
 from .constants import is_write_operation
-from .tool_search_answer import (  # noqa: F401
-    SEARCH_DESCRIPTION_CHARS,
-    _compact_search_results,
-    _fit_under_budget,
-    _truncate_description,
-)
-from .tool_search_rank import (  # noqa: F401
-    _WORD_SPLIT,
-    _name_words,
-    _tool_properties,
-    _vocabulary_words,
-    _word_scorer,
-)
-from .tool_search_shape import (  # noqa: F401
-    CallToolShapeMiddleware,
-    _ambiguous_write_message,
-    _annotate_resolved_from,
-    _annotation_says_write,
-    _closest_tools,
-    _dict_entry_name,
-    _dict_or_empty,
-    _flat_equal_matches,
-    _match_tool_name,
-    _moved_into_arguments,
-    _name_from_search_answer,
-    _named_entries,
-    _note_search_answer_name,
-    _passthrough_resolution,
-    _required_arguments,
-    _resolved_entry,
-    _supplied_name_label,
-    _unknown_tool_message,
-    _word_equal_matches,
-)
+from .tool_search_answer import SEARCH_DESCRIPTION_CHARS
+from .tool_search_shape import CallToolShapeMiddleware
 from .utils import schema_required
 
 __all__ = [

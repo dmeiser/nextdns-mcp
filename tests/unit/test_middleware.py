@@ -13,18 +13,7 @@ from fastmcp.tools import ToolResult
 from nextdns_mcp import relaxation, spec_tools
 from nextdns_mcp.relaxation import StripExtraFieldsMiddleware
 from nextdns_mcp.server import build_mcp_server
-
-
-class _FakeServer(SimpleNamespace):
-    """Server stand-in weakref-able, unlike plain ``types.SimpleNamespace``.
-
-    The middleware keys its caches on the server object via a WeakKeyDictionary;
-    fixture servers must support weak references the way real FastMCP servers do.
-    """
-
-    __slots__ = ("__weakref__",)
-    __hash__ = object.__hash__  # identity, like the real FastMCP server key
-    __eq__ = object.__eq__
+from tests.conftest import _FakeServer
 
 
 class TestStripExtraFieldsMiddleware:
