@@ -5,8 +5,24 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+
+class _FakeServer(SimpleNamespace):
+    """Server stand-in weakref-able, unlike plain ``types.SimpleNamespace``.
+
+    ``StripExtraFieldsMiddleware`` keys its caches on the server object via a
+    WeakKeyDictionary; fixture servers must support weak references the way
+    real FastMCP servers do. Identity semantics too: the middleware's key is
+    the server object, never its contents, so two stand-ins with the same
+    fields stay two distinct servers.
+    """
+
+    __slots__ = ("__weakref__",)
+    __hash__ = object.__hash__  # identity, like the real FastMCP server key
+    __eq__ = object.__eq__
 
 
 @pytest.fixture

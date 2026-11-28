@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from typing import ClassVar
 
 import httpx
@@ -9,19 +8,7 @@ from nextdns_mcp import client as client_module
 from nextdns_mcp import config, relaxation, server
 from nextdns_mcp import utils as utils_module
 from nextdns_mcp.tools import doh as doh_module
-
-
-class _FakeServer(SimpleNamespace):
-    """Server stand-in weakref-able, unlike plain ``types.SimpleNamespace``.
-
-    StripExtraFieldsMiddleware keys its caches on the server object via a
-    WeakKeyDictionary; fixture servers must support weak references the way
-    real FastMCP servers do.
-    """
-
-    __slots__ = ("__weakref__",)
-    __hash__ = object.__hash__  # identity, like the real FastMCP server key
-    __eq__ = object.__eq__
+from tests.conftest import _FakeServer
 
 
 @pytest.fixture(autouse=True)

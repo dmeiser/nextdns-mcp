@@ -14,6 +14,8 @@ import re
 import pytest
 
 from nextdns_mcp import tool_search as ts
+from nextdns_mcp import tool_search_answer as search_answer
+from nextdns_mcp import tool_search_shape as search_shape
 from nextdns_mcp.config import ConfigurationError, get_tool_search_mode
 from nextdns_mcp.server import build_mcp_server, published_tool_names
 from nextdns_mcp.spec_tools import spec_tool_names
@@ -325,13 +327,13 @@ class TestPublishedDescriptions:
         """
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search import SEARCH_DESCRIPTION_CHARS, _compact_search_results
+        from nextdns_mcp.tool_search import SEARCH_DESCRIPTION_CHARS
 
         one_line = "parameter details. " * 300  # > budget, and not a single newline
         assert len(one_line) > SEARCH_DESCRIPTION_CHARS
         tool = Tool.from_function(lambda: None, name="wideTool", description=one_line)
 
-        [result] = _compact_search_results([tool])
+        [result] = search_answer._compact_search_results([tool])
         assert result["description"].endswith("[description truncated]")
         assert len(result["description"]) <= SEARCH_DESCRIPTION_CHARS + len("\n[description truncated]")
         # Cut at the budget, and nothing before it is lost: the excerpt starts at the beginning.
@@ -339,9 +341,7 @@ class TestPublishedDescriptions:
 
     def test_an_unresolvable_name_against_an_empty_catalog_answers_nothing(self):
         """No catalog, no suggestion — and no crash on the ranking's own bookkeeping."""
-        from nextdns_mcp.tool_search import _closest_tools
-
-        assert _closest_tools("addToDenylist", []) == []
+        assert search_shape._closest_tools("addToDenylist", []) == []
 
 
 class TestSearchPathGuards:
@@ -633,10 +633,8 @@ class TestSearchAnswerAsName:
         """Tolerance has a limit: nothing to read means the original rejection."""
         from fastmcp import Client
 
-        from nextdns_mcp.tool_search import _name_from_search_answer
-
-        assert _name_from_search_answer(42) == ""
-        assert _name_from_search_answer([{"id": 1}]) == ""
+        assert search_shape._name_from_search_answer(42) == ""
+        assert search_shape._name_from_search_answer([{"id": 1}]) == ""
         async with Client(build_mcp_server()) as client:
             with pytest.raises(Exception, match="Input should be"):
                 await client.call_tool("call_tool", {"name": 42, "arguments": {}})
@@ -661,17 +659,17 @@ class TestMistypedToolName:
 
     def test_separators_and_case_are_not_part_of_a_name(self):
         names = ["getDenylist", "listRewrites", "plotAnalytics"]
-        assert ts._match_tool_name("get_denylist", names) == "getDenylist"
-        assert ts._match_tool_name("getdenylist", names) == "getDenylist"
+        assert search_shape._match_tool_name("get_denylist", names) == "getDenylist"
+        assert search_shape._match_tool_name("getdenylist", names) == "getDenylist"
 
     def test_the_same_words_in_another_order_are_the_same_tool(self):
         names = ["listProfiles", "getAnalyticsDomains", "plotAnalytics"]
-        assert ts._match_tool_name("analytics/plot", names) == "plotAnalytics"
+        assert search_shape._match_tool_name("analytics/plot", names) == "plotAnalytics"
 
     def test_an_ambiguous_or_unmatched_name_is_left_alone(self):
-        assert ts._match_tool_name("get", ["getDenylist", "getLogs"]) == ""
-        assert ts._match_tool_name("totallyDifferent", ["getDenylist"]) == ""
-        assert ts._match_tool_name("getDenylist", ["getDenylist"]) == ""
+        assert search_shape._match_tool_name("get", ["getDenylist", "getLogs"]) == ""
+        assert search_shape._match_tool_name("totallyDifferent", ["getDenylist"]) == ""
+        assert search_shape._match_tool_name("getDenylist", ["getDenylist"]) == ""
 
     @pytest.fixture(autouse=True)
     def _server_env(self, monkeypatch):
@@ -908,17 +906,17 @@ class TestATypedNameSaysWhichNamesThereAre:
 
     def test_a_name_from_another_api_ranks_on_this_catalogs_words(self):
         """`analytics.plot` is not a tool; its words are plotAnalytics'."""
-        closest = [tool.name for tool in ts._closest_tools("analytics.plot", self._catalog())]
+        closest = [tool.name for tool in search_shape._closest_tools("analytics.plot", self._catalog())]
         assert closest[0] == "plotAnalytics"
 
     def test_a_name_that_carries_no_catalog_word_matches_nothing(self):
-        assert ts._closest_tools("zzzqqq", self._catalog()) == []
+        assert search_shape._closest_tools("zzzqqq", self._catalog()) == []
 
     def test_the_required_arguments_come_from_the_tools_own_schema(self):
         """The correction names what the call cannot leave out, read from that tool."""
         by_name = {tool.name: tool for tool in self._catalog()}
-        assert ts._required_arguments(by_name["addToDenylist"]) == "profile_id, id"
-        assert ts._required_arguments(by_name["deleteRewrite"]) == "profile_id, entry_id"
+        assert search_shape._required_arguments(by_name["addToDenylist"]) == "profile_id, id"
+        assert search_shape._required_arguments(by_name["deleteRewrite"]) == "profile_id, entry_id"
 
     async def test_a_typed_name_is_answered_with_the_names_and_arguments_to_use(self, monkeypatch):
         from fastmcp import Client
@@ -1083,7 +1081,7 @@ class TestUnknownNameReusesTheCatalogsWordData:
     def test_an_exact_name_resolves_from_the_map_without_matching(self, tools):
         """The resolver answers an exact name from the map alone — no word data."""
         by_name = {tool.name: tool for tool in tools}
-        assert ts._resolved_entry("plotAnalytics", by_name) == ("plotAnalytics", by_name["plotAnalytics"])
+        assert search_shape._resolved_entry("plotAnalytics", by_name) == ("plotAnalytics", by_name["plotAnalytics"])
 
     def test_the_unmemoized_fallback_normalizes_each_candidate_once(self, tools, work_counts):
         """Direct callers without a catalog keep the linear O(catalog) contract.
@@ -1097,7 +1095,7 @@ class TestUnknownNameReusesTheCatalogsWordData:
         counts, normalized = work_counts
         names = [tool.name for tool in tools]
 
-        assert ts._match_tool_name("generate analytics plot", names) == ""
+        assert search_shape._match_tool_name("generate analytics plot", names) == ""
 
         per_candidate = Counter(text for text in normalized if text in set(names))
         assert per_candidate == Counter({"getDenylist": 2, "plotAnalytics": 2})
@@ -1409,7 +1407,7 @@ class TestAnswerByteBudget:
         assert cost_huge > cost_one and cost_huge > cost_two
         # The budget fits exactly the two small results, framing comma counted.
         monkeypatch.setattr(nextdns_mcp.tool_search_answer, "SEARCH_ANSWER_MAX_BYTES", cost_one + len(",") + cost_two)
-        names = [result["name"] for result in ts._compact_search_results([small_one, huge, small_two])]
+        names = [result["name"] for result in search_answer._compact_search_results([small_one, huge, small_two])]
         assert names == ["smallOne", "smallTwo"]
 
     def test_the_first_result_is_kept_even_when_it_alone_overflows(self, monkeypatch):
@@ -1421,7 +1419,7 @@ class TestAnswerByteBudget:
         monkeypatch.setattr(nextdns_mcp.tool_search_answer, "SEARCH_ANSWER_MAX_BYTES", 1)
         huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
         small = Tool.from_function(lambda: None, name="smallOne", description="b")
-        assert [result["name"] for result in ts._compact_search_results([huge, small])] == ["hugeOne"]
+        assert [result["name"] for result in search_answer._compact_search_results([huge, small])] == ["hugeOne"]
 
     async def test_the_cached_render_encodes_what_the_uncached_reference_encodes(self):
         """The memoized serializer must not drift from the uncached one, in either mode.
@@ -1440,7 +1438,7 @@ class TestAnswerByteBudget:
             Tool.from_function(lambda: None, name="listProfiles", description="List the profiles on the account."),
             Tool.from_function(lambda: None, name="getDenylist", description="Read the denylist entries of a profile."),
         ]
-        expected = encoded(ts._compact_search_results(tools))
+        expected = encoded(search_answer._compact_search_results(tools))
         assert encoded(await transform._render_results(tools)) == expected
         assert encoded(await transform._render_results(await transform._search(tools, "profile"))) == expected
         assert encoded(await transform._render_results(await transform._search(tools, "zzz unmatchable"))) == expected
@@ -1784,13 +1782,13 @@ class TestShapeRepairAnnouncesItself:
     def test_a_non_dict_payload_passes_the_annotation_through_unchanged(self):
         from types import SimpleNamespace
 
-        from nextdns_mcp.tool_search import _annotate_resolved_from
-
         result = SimpleNamespace(structured_content=None)
-        assert _annotate_resolved_from(result, "other", "realTool") is result
-        assert _annotate_resolved_from(result, "realTool", "realTool") is result
-        assert _annotate_resolved_from(result, "other", None) is result
-        shaped = _annotate_resolved_from(SimpleNamespace(structured_content={"ok": True}), ["x"], "realTool")
+        assert search_shape._annotate_resolved_from(result, "other", "realTool") is result
+        assert search_shape._annotate_resolved_from(result, "realTool", "realTool") is result
+        assert search_shape._annotate_resolved_from(result, "other", None) is result
+        shaped = search_shape._annotate_resolved_from(
+            SimpleNamespace(structured_content={"ok": True}), ["x"], "realTool"
+        )
         assert shaped.structured_content["resolved_from"] == '["x"]'
 
     def test_a_prefab_payload_keeps_its_wire_shape_and_gets_a_content_note(self):
@@ -1804,11 +1802,9 @@ class TestShapeRepairAnnouncesItself:
         import mcp.types
         from fastmcp.tools import ToolResult
 
-        from nextdns_mcp.tool_search import _annotate_resolved_from
-
         payload = {"$prefab": {"version": "0.3"}, "view": {}}
         result = ToolResult(content=[mcp.types.TextContent(type="text", text="Rendered")], structured_content=payload)
-        shaped = _annotate_resolved_from(result, "overview_dashboard", "overviewDashboard")
+        shaped = search_shape._annotate_resolved_from(result, "overview_dashboard", "overviewDashboard")
         assert shaped.structured_content == payload
         note = shaped.content[-1]
         assert note.type == "text"

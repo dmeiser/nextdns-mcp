@@ -943,7 +943,7 @@ class TestLibraryLoggerRedaction:
 
         real_async_client = httpx.AsyncClient
         monkeypatch.setattr(
-            logs_module.httpx,
+            httpx,
             "AsyncClient",
             lambda *args, **kwargs: real_async_client(transport=httpx.MockTransport(handler)),
         )

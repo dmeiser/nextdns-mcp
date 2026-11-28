@@ -707,7 +707,7 @@ class TestTempFileCleanup:
         def refuse(target: str, *args: Any) -> None:
             raise PermissionError("device busy")
 
-        monkeypatch.setattr(logs_module.os, "unlink", refuse)
+        monkeypatch.setattr(os, "unlink", refuse)
         with caplog.at_level("WARNING"):
             logs_module._unlink_temp_file(str(path))
         assert "Failed to remove temp log file" in caplog.text
@@ -725,7 +725,7 @@ class TestTempFileCleanup:
         def refuse(target: str, *args: Any) -> None:
             raise OSError("not empty")
 
-        monkeypatch.setattr(logs_module.os, "rmdir", refuse)
+        monkeypatch.setattr(os, "rmdir", refuse)
         logs_module._unlink_temp_file(str(path))
         assert not path.exists()
 
@@ -908,7 +908,7 @@ class TestDiskWritesDoNotStallTheLoop:
         path = str(tmp_path / "download.csv")
         chunks = ["a.com,blocked\n", "b.com,blocked\n", "c.com,blocked\n"]
         sink = _HoldingSink()
-        monkeypatch.setattr(logs_module.os, "fdopen", sink)
+        monkeypatch.setattr(os, "fdopen", sink)
 
         progress = threading.Event()
         watcher = _LoopStallWatcher(sink, progress)
@@ -1047,7 +1047,7 @@ class TestCancellationDuringAWrite:
     async def test_cancelling_during_a_raw_write_keeps_the_loop_running(self, tmp_path, monkeypatch):
         path = str(tmp_path / "download.csv")
         sink = _BlockingRawSink()
-        monkeypatch.setattr(logs_module.os, "fdopen", sink.open_over)
+        monkeypatch.setattr(os, "fdopen", sink.open_over)
 
         loop = asyncio.get_running_loop()
         cancel_requested = threading.Event()
@@ -1080,8 +1080,8 @@ class TestCancellationDuringAWrite:
             return made
 
         sink = _BlockingRawSink()
-        monkeypatch.setattr(logs_module.os, "fdopen", sink.open_over)
-        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(os, "fdopen", sink.open_over)
+        monkeypatch.setattr(tempfile, "mkdtemp", watch_mkdtemp)
         # The download resolves its client through the current owner (issue
         # #642): the key comes first, then an owner carrying the scripted
         # client is published around the whole flow.
@@ -1191,7 +1191,7 @@ class TestDownloadTool:
             created.append(made)
             return made
 
-        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(tempfile, "mkdtemp", watch_mkdtemp)
 
         signed = "https://storage.example/file.csv?Signature=deadbeef"
         with owned_api_client(
@@ -1313,7 +1313,7 @@ class TestDownloadTool:
             created.append(made)
             return made
 
-        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(tempfile, "mkdtemp", watch_mkdtemp)
         monkeypatch.setattr(client_module, "get_http_timeout", lambda: 0.0)
         # A fresh lock for this test: making the download *block* on the
         # module-level lock would bind it to this test's event loop and break
@@ -1342,7 +1342,7 @@ class TestDownloadTool:
             created.append(made)
             return made
 
-        monkeypatch.setattr(logs_module.tempfile, "mkdtemp", watch_mkdtemp)
+        monkeypatch.setattr(tempfile, "mkdtemp", watch_mkdtemp)
 
         class Boom:
             def stream(self, method, url, **kwargs):
