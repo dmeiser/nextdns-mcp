@@ -18,9 +18,9 @@ from fastmcp.apps.config import AppConfig, ResourceCSP, app_config_to_meta_dict
 from fastmcp.tools.base import ToolResult
 from fastmcp.utilities.mime import UI_MIME_TYPE
 from mcp.types import ToolAnnotations
-from prefab_ui.renderer import get_renderer_html
 
 from .catalog import (  # noqa: F401
+    composite_tool_names,
     enabled_generative_ui_tool_names,
     generative_ui_content_tool_names,
     generative_ui_data_tool_names,
@@ -50,9 +50,6 @@ from .spec_tools import (
     spec_routes,
     spec_tool_names,
 )
-from .tools.dashboard import overviewDashboard
-from .tools.doh import dohLookup
-from .tools.plots import plotAnalytics
 from .transport import is_error_payload
 from .typed_error_tool import TypedArgumentTool
 
@@ -76,12 +73,6 @@ class _CompositeTool(NamedTuple):
     tool: Callable[..., Any]
     app: bool | None
 
-
-_COMPOSITE_TOOLS = (
-    _CompositeTool(plotAnalytics, app=True),
-    _CompositeTool(dohLookup, app=None),
-    _CompositeTool(overviewDashboard, app=True),
-)
 
 # None of the composite tools mutate anything: dohLookup answers a DNS question and
 # plotAnalytics renders a chart from analytics already collected. The generated
@@ -113,6 +104,11 @@ def _register_composite_renderer(server: FastMCP) -> None:
         ),
     )
     def _bundled_renderer() -> str:
+        # Imported where the document is rendered, not at module import: reading
+        # the catalog must not pull the Prefab UI component tree into a process
+        # that renders nothing (issue #780).
+        from prefab_ui.renderer import get_renderer_html
+
         return get_renderer_html(mode="bundled")
 
 
@@ -128,6 +124,25 @@ class CompositeTool(TypedArgumentTool):
     integer ``profile_id`` becomes a string) and the published schema,
     enums included, is untouched.
     """
+
+
+def _composite_tools() -> tuple[_CompositeTool, ...]:
+    """Import the composite tools and pair each with its FastMCP ``app`` flag.
+
+    The imports live here, at the registration site, so that reading the
+    catalog (``published_tool_names``) never pulls the Prefab UI component
+    tree into a process that renders nothing (issue #780). Registration
+    asserts the imported functions still carry the names ``catalog`` publishes.
+    """
+    from .tools.dashboard import overviewDashboard
+    from .tools.doh import dohLookup
+    from .tools.plots import plotAnalytics
+
+    return (
+        _CompositeTool(plotAnalytics, app=True),
+        _CompositeTool(dohLookup, app=None),
+        _CompositeTool(overviewDashboard, app=True),
+    )
 
 
 def _with_error_flag(tool_fn: Any) -> Any:
@@ -150,6 +165,56 @@ def _with_error_flag(tool_fn: Any) -> Any:
         return payload
 
     return _wrapped
+
+
+def _register_composite_tools(server: FastMCP) -> None:
+    """Register the three hand-written composites, refusing catalog drift."""
+    composites = _composite_tools()
+    _assert_composite_catalog_parity(composites)
+    for composite in composites:
+        # FastMCP publishes only the first text section of a docstring as the tool
+        # description, so the accepted values and the worked example further down
+        # would never reach a caller — and for these three tools that is exactly the
+        # part a caller needs (a chart's interval range, a lookup's record types).
+        #
+        # Registered as CompositeTool (not through server.tool, which builds a
+        # plain FunctionTool) so enum/type violations answer the typed error
+        # contract instead of raising out of pydantic argument validation. The
+        # app config is folded into meta["ui"] with FastMCP's own helper, so
+        # the tools advertise the renderer _register_composite_renderer publishes,
+        # byte-identically to server.tool(app=...).
+        server.add_tool(
+            CompositeTool.from_function(
+                _with_error_flag(composite.tool),
+                name=composite.tool.__name__,
+                description=inspect.getdoc(composite.tool) or "",
+                annotations=_COMPOSITE_ANNOTATIONS,
+                meta=_composite_meta(composite),
+            )
+        )
+
+
+def _composite_meta(composite: _CompositeTool) -> dict[str, Any] | None:
+    """Point an app-flagged composite at the bundled renderer resource."""
+    if composite.app:
+        return {"ui": app_config_to_meta_dict(AppConfig(resource_uri=_COMPOSITE_RENDERER_URI))}
+    return None
+
+
+def _assert_composite_catalog_parity(composites: tuple[_CompositeTool, ...]) -> None:
+    """Refuse registration when the imported functions drift from the catalog.
+
+    The names in ``catalog`` drive the initialize instructions and the
+    validation scripts, so a registered function that no longer carries its
+    published name fails here instead of shipping a catalog that describes
+    tools the server never registered.
+    """
+    registered_names = [composite.tool.__name__ for composite in composites]
+    if registered_names != list(composite_tool_names()):
+        raise RuntimeError(
+            f"Composite tool registration drifted from the catalog: registered {registered_names}, "
+            f"catalog publishes {list(composite_tool_names())}"
+        )
 
 
 class McpServerOwner:
@@ -216,7 +281,7 @@ def published_tool_names(generative_ui_enabled: bool | None = None) -> list[str]
     """
     names = [
         *spec_tool_names(),
-        *(composite.tool.__name__ for composite in _COMPOSITE_TOOLS),
+        *composite_tool_names(),
         *enabled_generative_ui_tool_names(generative_ui_enabled),
     ]
     return names
@@ -256,31 +321,7 @@ def build_mcp_server(config: ServerConfig | None = None) -> FastMCP:
     )
     register_spec_tools(server, routes)
     _register_composite_renderer(server)
-    for composite in _COMPOSITE_TOOLS:
-        # FastMCP publishes only the first text section of a docstring as the tool
-        # description, so the accepted values and the worked example further down
-        # would never reach a caller — and for these three tools that is exactly the
-        # part a caller needs (a chart's interval range, a lookup's record types).
-        #
-        # Registered as CompositeTool (not through server.tool, which builds a
-        # plain FunctionTool) so enum/type violations answer the typed error
-        # contract instead of raising out of pydantic argument validation. The
-        # app config is folded into meta["ui"] with FastMCP's own helper, so
-        # the tools advertise the renderer _register_composite_renderer above
-        # publishes, byte-identically to server.tool(app=...).
-        server.add_tool(
-            CompositeTool.from_function(
-                _with_error_flag(composite.tool),
-                name=composite.tool.__name__,
-                description=inspect.getdoc(composite.tool) or "",
-                annotations=_COMPOSITE_ANNOTATIONS,
-                meta=(
-                    {"ui": app_config_to_meta_dict(AppConfig(resource_uri=_COMPOSITE_RENDERER_URI))}
-                    if composite.app
-                    else None
-                ),
-            )
-        )
+    _register_composite_tools(server)
     register_generative_ui_provider(server, snapshot.generative_ui_enabled)
     return server
 
@@ -329,12 +370,25 @@ def configure() -> FastMCP:
 
 
 def __getattr__(name: str) -> Any:
-    """Lazily expose the ``mcp_server``/``mcp`` server and ``api_client`` singletons for backward compatibility."""
+    """Lazily expose the ``mcp_server``/``mcp`` server and ``api_client`` singletons for backward compatibility.
+
+    The composite tool functions resolve lazily too: they used to be module
+    attributes through the eager imports, and ``server.plotAnalytics`` (and
+    siblings) is read that way. Resolving them here keeps that surface without
+    pulling the Prefab UI component tree into every catalog read (issue #780).
+    """
     if name in ("mcp_server", "mcp"):
         return get_mcp_server()
     if name == "api_client":
         return get_api_client()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return _composite_tool_attr(name)
+
+
+def _composite_tool_attr(name: str) -> Any:
+    """Resolve one composite tool function by name, or raise ``AttributeError``."""
+    if name not in composite_tool_names():
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return {composite.tool.__name__: composite.tool for composite in _composite_tools()}[name]
 
 
 def _run_server() -> None:
