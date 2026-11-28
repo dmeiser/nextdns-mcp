@@ -34,6 +34,7 @@ from nextdns_mcp.generative import (
     _build_renderer_resource,
     _parse_ui_data,
     _result_size_bytes,
+    _validate_generated_tree,
 )
 from nextdns_mcp.generative_sandbox import MAX_RESULT_BYTES, WirePayload
 
@@ -419,6 +420,22 @@ def _stub_worker() -> MagicMock:
     return worker
 
 
+def _passive_app() -> PrefabApp:
+    """A passive PrefabApp shaped like real execute output (from_json of a wire dict)."""
+    return PrefabApp.from_json(
+        {
+            "view": {
+                "type": "Column",
+                "children": [
+                    {"type": "Text", "content": "hello"},
+                    {"type": "Link", "content": "docs", "href": "https://nextdns.io"},
+                ],
+            },
+            "state": {"count": 1},
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_prefab_generative_ui_publishes_its_tools():
     gen_ui = PrefabGenerativeUI()
@@ -436,13 +453,14 @@ async def test_prefab_generative_ui_publishes_its_tools():
     assert comp_tool.annotations.destructive_hint is False
 
     worker = _stub_worker()
+    fake_app = _passive_app()
     with (
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
         patch.object(gen_ui, "_new_worker", return_value=worker),
     ):
-        mock_exec.return_value = "fake_app"
+        mock_exec.return_value = fake_app
         res = await gen_tool.fn(code="print('hi')", data='{"a": 1}')
-        assert res == "fake_app"
+        assert res is fake_app
         assert mock_exec.call_count == 1
         call_code = mock_exec.call_args[0][0]
         assert SANDBOX_PRELUDE in call_code
@@ -701,10 +719,17 @@ async def test_generate_ui_serializes_valid_dict_data_once():
         patch("nextdns_mcp.generative.json") as mock_json,
     ):
         mock_json.dumps.side_effect = real_json.dumps
-        mock_exec.return_value = "fake_app"
+        fake_app = _passive_app()
+        dumps_before_execute: list[int] = []
+
+        async def _record_dumps(*args, **kwargs):
+            dumps_before_execute.append(mock_json.dumps.call_count)
+            return fake_app
+
+        mock_exec.side_effect = _record_dumps
         res = await gen_tool.fn(code="print('hi')", data={"a": 1})
-        assert res == "fake_app"
-        assert mock_json.dumps.call_count == 1
+        assert res is fake_app
+        assert dumps_before_execute == [1]
         assert mock_exec.call_args[1]["data"] == {"a": 1}
 
 
@@ -784,9 +809,10 @@ def _resolver_double() -> Callable[..., Any]:
 async def test_generate_ui_serializes_the_response_payload_once():
     """The size guard and FastMCP's conversion share one serialized response (WORK-354).
 
-    ``to_json`` is counted on ``PrefabApp``, which is where both readers land: the
-    guard's measurement and the Prefab conversion FastMCP runs on the value the
-    tool returned. A second serialization of the same payload is what this pins.
+    ``to_json`` is counted on ``PrefabApp``, which is where all three readers
+    land: the size guard's measurement, the generated-tree validation, and the
+    Prefab conversion FastMCP runs on the value the tool returned. A second
+    serialization of the same payload is what this pins.
     """
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
@@ -913,6 +939,203 @@ async def test_result_cap_boundary_holds_for_a_rendered_app(delta: int, accepted
         else:
             with pytest.raises(ValueError, match="result exceeds maximum size"):
                 await gen_tool.fn(code="print(1)")
+
+
+# --- Generated-tree validation (SEC-3, nextdns-mcp#749) ---
+
+
+def _wire_app(wire: dict[str, Any]) -> PrefabApp:
+    """Build the app exactly the way execute does: from_json over a raw wire dict."""
+    return PrefabApp.from_json(wire)
+
+
+def test_sandbox_prelude_is_a_passive_allowlist():
+    """The prelude names every import and never exposes Embed to generated code."""
+    assert "import *" not in SANDBOX_PRELUDE
+    namespace: dict[str, Any] = {}
+    exec(SANDBOX_PRELUDE, namespace)  # noqa: S102 - the prelude is a module constant
+    assert "Embed" not in namespace
+    for name in ("PrefabApp", "Column", "Text", "DataTable", "BarChart", "ChartSeries", "ForEach", "If"):
+        assert name in namespace, f"prelude lost {name}"
+    # Upstream removed the shadcn tab shims; the native Tabs/Tab names remain.
+    assert "TabsList" not in namespace
+    assert "TabsTrigger" not in namespace
+    assert namespace["Tabs"] is not None
+    assert namespace["Tab"] is not None
+
+
+def test_validate_generated_tree_accepts_passive_app():
+    _validate_generated_tree(_passive_app())  # should not raise
+
+
+def test_validate_generated_tree_rejects_embed_anywhere_in_the_tree():
+    wire = {
+        "view": {
+            "type": "Column",
+            "children": [
+                {"type": "Text", "content": "ok"},
+                {"type": "Row", "children": [{"type": "Embed", "html": "<script>alert(1)</script>"}]},
+            ],
+        }
+    }
+    with pytest.raises(ValueError, match="'Embed' is not allowed"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+@pytest.mark.parametrize("action", ["toolCall", "sendMessage", "updateContext", "fetch"])
+def test_validate_generated_tree_rejects_bridge_actions(action: str):
+    wire = {"view": {"type": "Button", "label": "go", "onClick": {"action": action}}}
+    with pytest.raises(ValueError, match=f"action '{action}' is not allowed"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+@pytest.mark.parametrize("action", ["toolCall", "sendMessage", "updateContext", "fetch"])
+def test_validate_generated_tree_rejects_bridge_actions_on_mount(action: str):
+    """on_mount actions serialize onto the root view's onMount list and are caught there."""
+    wire = {
+        "view": {
+            "type": "Div",
+            "onMount": [{"action": action}],
+            "children": [{"type": "Text", "content": "ok"}],
+        }
+    }
+    with pytest.raises(ValueError, match=f"action '{action}' is not allowed"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+@pytest.mark.parametrize("href", ["javascript:alert(1)", "http://insecure.example", "data:text/html,x", "{{ link }}"])
+def test_validate_generated_tree_rejects_non_https_link_href(href: str):
+    wire = {"view": {"type": "Link", "content": "x", "href": href}}
+    with pytest.raises(ValueError, match="Link href must be an https:// URL"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+def test_validate_generated_tree_rejects_non_https_open_link_action():
+    wire = {"view": {"type": "Button", "label": "go", "onClick": {"action": "openLink", "url": "javascript:alert(1)"}}}
+    with pytest.raises(ValueError, match="openLink action url must be an https:// URL"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+def test_validate_generated_tree_accepts_https_open_link_action():
+    wire = {"view": {"type": "Button", "label": "go", "onClick": {"action": "openLink", "url": "https://nextdns.io"}}}
+    _validate_generated_tree(_wire_app(wire))  # should not raise
+
+
+def test_validate_generated_tree_rejects_stylesheets():
+    wire = {"view": {"type": "Text", "content": "ok"}, "stylesheets": ["https://evil.example/x.css"]}
+    with pytest.raises(ValueError, match="external stylesheets are not allowed"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+def test_validate_generated_tree_rejects_inline_css():
+    wire = {"view": {"type": "Text", "content": "ok"}, "css": ["body{display:none}"]}
+    with pytest.raises(ValueError, match="inline CSS is not allowed"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+def test_validate_generated_tree_rejects_theme_css():
+    """Theme CSS serializes into the wire css field, so it is rejected like inline CSS."""
+    wire = {"view": {"type": "Text", "content": "ok"}, "theme": {"light": "body{display:none}"}}
+    with pytest.raises(ValueError, match="inline CSS is not allowed"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+def test_validate_generated_tree_rejects_reserved_initial_state_keys():
+    wire = {"view": {"type": "Text", "content": "ok"}, "state": {"$internal": 1}}
+    with pytest.raises(ValueError, match=r"reserved '\$'-prefixed state key"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+def test_validate_generated_tree_rejects_reserved_action_state_key():
+    wire = {
+        "view": {"type": "Button", "label": "go", "onClick": {"action": "setState", "key": "$internal", "value": 1}}
+    }
+    with pytest.raises(ValueError, match=r"reserved '\$' state-key prefix"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+def test_validate_generated_tree_rejects_reserved_component_state_key():
+    wire = {"view": {"type": "Slider", "name": "$internal", "value": 5}}
+    with pytest.raises(ValueError, match=r"reserved '\$' state-key prefix"):
+        _validate_generated_tree(_wire_app(wire))
+
+
+def test_validate_generated_tree_rejects_non_app_results():
+    with pytest.raises(ValueError, match="expected the sandbox to return a Prefab app"):
+        _validate_generated_tree("not-an-app")
+
+
+def test_validate_generated_tree_tolerates_non_string_type_fields_in_data():
+    """Passive dashboards may carry list/dict "type" fields in state or rows.
+
+    The walker visits every dict in the wire envelope, so a DNS record-type
+    filter like {"type": ["A", "AAAA"]} must not crash the set-membership
+    check with an unhashable-type TypeError.
+    """
+    wire = {
+        "view": {
+            "type": "DataTable",
+            "columns": [{"key": "domain"}, {"key": "type"}],
+            "rows": [
+                {"domain": "example.com", "type": ["A", "AAAA"]},
+                {"domain": "example.org", "type": {"kind": "MX"}},
+            ],
+        },
+        "state": {"filters": {"type": ["A", "AAAA"]}},
+    }
+    _validate_generated_tree(_wire_app(wire))  # should not raise
+
+
+def test_validate_generated_tree_ignores_crafted_non_string_component_type():
+    """A crafted {"type": ["Embed"]} node is not a renderable component type.
+
+    The renderer schema-validates node.type as a string literal, so the
+    validator's contract is to neither crash nor misclassify it.
+    """
+    wire = {"view": {"type": "Column", "children": [{"type": ["Embed"]}, {"type": {"$ref": "Embed"}}]}}
+    _validate_generated_tree(_wire_app(wire))  # should not raise
+
+
+def test_validate_generated_tree_walks_deeply_nested_trees_without_recursion():
+    """A tree deeper than the recursion limit is validated iteratively, not crashed."""
+    node: dict[str, Any] = {"type": "Text", "content": "leaf"}
+    for _ in range(5000):
+        node = {"type": "Column", "children": [node]}
+    _validate_generated_tree(_wire_app({"view": node}))  # should not raise
+
+    poisoned: dict[str, Any] = {"type": "Embed", "url": "https://evil.example"}
+    for _ in range(5000):
+        poisoned = {"type": "Column", "children": [poisoned]}
+    with pytest.raises(ValueError, match="'Embed' is not allowed"):
+        _validate_generated_tree(_wire_app({"view": poisoned}))
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_rejects_active_tree_from_sandbox():
+    """The tool rejects a sandbox result carrying active content before returning it."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    active = _wire_app({"view": {"type": "Embed", "html": "<script>alert(1)</script>"}})
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
+    ):
+        mock_exec.return_value = active
+        with pytest.raises(ValueError, match="Generated UI rejected"):
+            await gen_tool.fn(code="print(1)")
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_returns_validated_passive_tree():
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    passive = _passive_app()
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
+    ):
+        mock_exec.return_value = passive
+        assert await gen_tool.fn(code="print(1)") is passive
 
 
 class _ChunkedRaw:
@@ -1407,6 +1630,11 @@ def test_result_size_bytes_serialization_failures_raise():
 
     with pytest.raises(ValueError, match="via model_dump_json failed"):
         _result_size_bytes(BrokenDumpApp())
+
+
+def test_result_size_bytes_falls_back_to_str_without_serializers():
+    """A result with neither serializer is measured by its string form."""
+    assert _result_size_bytes("fake_app") == len(b"fake_app")
 
 
 @pytest.mark.asyncio

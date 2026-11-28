@@ -581,6 +581,116 @@ def test_a_fchmod_failure_drops_the_row_rather_than_writing_permissively(tmp_pat
     assert any("call log write failed" in r.getMessage() for r in caplog.records)
 
 
+class TestLogPathIsNotFollowed:
+    """A pre-planted symlink or non-regular file at the log path is refused.
+
+    The path comes from the environment; whoever controls the directory it
+    names must not be able to redirect account data (or an ``fchmod``) onto a
+    file the log path merely points at. Writer and reader both fail closed:
+    ``O_NOFOLLOW`` at open, ``S_ISREG`` on the descriptor.
+    """
+
+    def test_the_writer_refuses_a_preplanted_symlink(self, tmp_path, caplog):
+        target = tmp_path / "elsewhere.jsonl"
+        target.write_text("not the log\n", encoding="utf-8")
+        os.chmod(target, 0o644)
+        link = tmp_path / "calls.jsonl"
+        link.symlink_to(target)
+        with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
+            _append_row(str(link), {"tool": "x", "ok": True})
+        # No append landed through the link, and the tightening fchmod never
+        # touched the file the link points at.
+        assert target.read_text(encoding="utf-8") == "not the log\n"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+        assert any("call log write failed" in r.getMessage() for r in caplog.records)
+
+    def test_the_writer_refuses_a_non_regular_file(self, caplog):
+        if not os.path.exists("/dev/null"):
+            pytest.skip("no character device to stand in for a non-regular file")
+        before = stat.S_IMODE(os.stat("/dev/null").st_mode)
+        with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
+            _append_row("/dev/null", {"tool": "x", "ok": True})
+        # The descriptor opens fine; the S_ISREG check is what refuses it,
+        # before any fchmod could change the device's mode.
+        assert stat.S_IMODE(os.stat("/dev/null").st_mode) == before
+        assert any("call log write failed" in r.getMessage() for r in caplog.records)
+
+    def test_the_reader_refuses_a_symlink(self, tmp_path):
+        from nextdns_mcp.call_log import read_call_log_rows
+
+        target = tmp_path / "elsewhere.jsonl"
+        target.write_text('{"tool": "x"}\n', encoding="utf-8")
+        link = tmp_path / "calls.jsonl"
+        link.symlink_to(target)
+        with pytest.raises(OSError):
+            read_call_log_rows(str(link))
+
+    def test_the_reader_refuses_a_non_regular_file(self, tmp_path):
+        from nextdns_mcp.call_log import read_call_log_rows
+
+        with pytest.raises(OSError):
+            read_call_log_rows(str(tmp_path))  # a directory
+
+    def test_a_fifo_is_refused_promptly_by_writer_and_reader(self, tmp_path, caplog):
+        """A FIFO without a reader used to block in os.open before S_ISREG ran.
+
+        Each call runs on a daemon thread joined with a 3s timeout, so a
+        regression fails in seconds instead of hanging the suite while holding
+        the module-wide append lock. Prompt rejection keeps tool responses
+        awaited on recording (``middleware.py``) from stalling.
+        """
+        import threading
+
+        from nextdns_mcp.call_log import read_call_log_rows
+
+        fifo = tmp_path / "calls.jsonl"
+        os.mkfifo(fifo)
+        finished: list[str] = []
+
+        def write() -> None:
+            _append_row(str(fifo), {"tool": "x", "ok": True})  # refuses with a warning
+            finished.append("write")
+
+        def read() -> None:
+            try:
+                read_call_log_rows(str(fifo))
+            except OSError:
+                pass
+            finished.append("read")
+
+        with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
+            for fn in (write, read):
+                worker = threading.Thread(target=fn, daemon=True)
+                worker.start()
+                worker.join(timeout=3.0)
+                assert not worker.is_alive(), "the FIFO blocked the open instead of failing promptly"
+        assert finished == ["write", "read"]
+        assert any("call log write failed" in r.getMessage() for r in caplog.records)
+
+    def test_get_call_log_degrades_a_symlink_to_empty(self, monkeypatch, tmp_path):
+        target = tmp_path / "elsewhere.jsonl"
+        target.write_text('{"tool": "x"}\n', encoding="utf-8")
+        link = tmp_path / "calls.jsonl"
+        link.symlink_to(target)
+        monkeypatch.setenv(CALL_LOG_ENV, str(link))
+        assert get_call_log() == []
+
+
+class TestProfileIdIsBounded:
+    """``profile_id`` is account data like every other id the row carries: capped."""
+
+    class _R:
+        is_error = False
+        structured_content = None
+
+    def test_an_over_long_profile_id_is_cut_at_the_evidence_cap(self):
+        from nextdns_mcp.call_log.evidence import EVIDENCE_MAX_ID_CHARS
+
+        mw = CallLogMiddleware(path="")
+        row = mw._record_row("getDenylist", {"profile_id": "p" * 500}, True, "", self._R())
+        assert row["profile_id"] == "p" * EVIDENCE_MAX_ID_CHARS
+
+
 def test_an_over_cap_result_is_a_valid_truncation_envelope():
     """The bound must never cut mid-document (the harness json.loads-es this)."""
     from nextdns_mcp.call_log.projection import RESULT_CHARS, _result_text
@@ -722,6 +832,43 @@ class TestEvidenceColumn:
         out = [{"id": f"id-{i}"} for i in range(EVIDENCE_MAX_ITEMS)]
         _walk_identities({"id": "too-late", "name": "late-entry"}, out, set())
         assert len(out) == EVIDENCE_MAX_ITEMS
+
+    def test_the_walk_is_iterative_and_capped_at_the_component_depth(self):
+        """A 5,000-deep payload cannot exhaust the stack, and nothing past
+        ``COMPONENT_MAX_DEPTH`` is collected.
+
+        The pre-fix walk recursed two frames per level (``_walk_identities`` <->
+        ``_walk_children``) with no depth cap, so a hostile payload raised
+        RecursionError long before its depth mattered.
+        """
+        from nextdns_mcp.call_log.evidence import COMPONENT_MAX_DEPTH, _walk_identities
+
+        bottomless: dict = {}
+        cur = bottomless
+        for _ in range(5000):
+            nxt: dict = {}
+            cur["wrap"] = nxt
+            cur = nxt
+        cur["id"] = "too-deep"
+        out: list[dict[str, str]] = []
+        _walk_identities(bottomless, out, set())  # must not raise
+        assert out == []
+
+        # Sparse ids so the depth cap, not the item bound, decides: one id
+        # just inside the cap, one just past it.
+        chain: dict = {}
+        cur = chain
+        for i in range(COMPONENT_MAX_DEPTH + 6):
+            nxt = {}
+            if i == COMPONENT_MAX_DEPTH - 5:
+                nxt["id"] = "within-cap"
+            if i == COMPONENT_MAX_DEPTH + 5:
+                nxt["id"] = "past-cap"
+            cur["wrap"] = nxt
+            cur = nxt
+        out = []
+        _walk_identities(chain, out, set())
+        assert out == [{"id": "within-cap"}]
 
     async def test_prefab_deep_nesting_completes_through_on_call_tool(self, tmp_path):
         """The reporter's oracle: a ~1,200-level Prefab document through the awaited path.
