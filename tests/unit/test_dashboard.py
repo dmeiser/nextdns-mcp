@@ -802,7 +802,7 @@ class TestDashboardToolsExecution:
     def test_build_queries_series_card_unexpected_error_propagates(self, monkeypatch):
         # Only payload-shape errors degrade to a missing card; anything else
         # is a programming error and must surface (FUNC-5 / WORK-324).
-        monkeypatch.setattr(ui, "validate_series_payload", MagicMock(side_effect=RuntimeError("unexpected failure")))
+        monkeypatch.setattr(ui, "extract_series_fields", MagicMock(side_effect=RuntimeError("unexpected failure")))
         with pytest.raises(RuntimeError, match="unexpected failure"):
             ui._build_queries_series_card({"meta": {}})
 
@@ -1478,6 +1478,17 @@ class TestViewTypeScope:
         counts = self._counts(res)
         # Resolved, Blocked, Root, Reasons, Devices, GAFAM, Countries; IPs has no chart form.
         assert counts["BarChart"] == 7
+        assert "PieChart" not in counts
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("view_type", ["auto", "table", "bar", "pie"])
+    async def test_ips_is_fixed_format_and_ignores_view_type(self, rows, view_type):
+        """The documented table-only card stays table-only for every format value."""
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="ips", view_type=view_type)
+        assert isinstance(res, ToolResult)
+        counts = self._counts(res)
+        assert counts["DataTable"] == 1
+        assert "BarChart" not in counts
         assert "PieChart" not in counts
 
 

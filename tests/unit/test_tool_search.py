@@ -1752,6 +1752,27 @@ class TestShapeRepairAnnouncesItself:
         shaped = _annotate_resolved_from(SimpleNamespace(structured_content={"ok": True}), ["x"], "realTool")
         assert shaped.structured_content["resolved_from"] == '["x"]'
 
+    def test_a_prefab_payload_keeps_its_wire_shape_and_gets_a_content_note(self):
+        """The re-target is still announced, but not inside the renderer's document.
+
+        A Prefab UI payload (``$prefab``) is the renderer's wire contract, not
+        this server's response shape: ``resolved_from``/``resolved_name``
+        injected there would be read as document content. The annotation moves
+        to the result content, beside the tool's own answer.
+        """
+        import mcp.types
+        from fastmcp.tools import ToolResult
+
+        from nextdns_mcp.tool_search import _annotate_resolved_from
+
+        payload = {"$prefab": {"version": "0.3"}, "view": {}}
+        result = ToolResult(content=[mcp.types.TextContent(type="text", text="Rendered")], structured_content=payload)
+        shaped = _annotate_resolved_from(result, "overview_dashboard", "overviewDashboard")
+        assert shaped.structured_content == payload
+        note = shaped.content[-1]
+        assert note.type == "text"
+        assert "overviewDashboard" in note.text and "overview_dashboard" in note.text
+
     async def test_the_description_says_a_write_headed_answer_is_refused_not_run(self, monkeypatch):
         from fastmcp import Client
 

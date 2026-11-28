@@ -625,8 +625,14 @@ class TestIgnoredArgumentsMerge:
         note = result.content[-1]
         assert note.type == "text" and "from" in note.text
 
-    def test_a_prefab_result_gets_both_content_note_and_structured_annotation(self):
-        """A Prefab UI result has a structured dict and also gets a visible content note."""
+    def test_a_prefab_result_gets_a_content_note_and_an_untouched_payload(self):
+        """A Prefab UI result carries its note in the content: the wire document keeps its keys.
+
+        The ``$prefab`` document is the renderer's contract, not this server's
+        response shape: adding ``ignored_arguments``/``hint`` to it would be
+        read by the renderer as document content. The drop is still reported -
+        in the content, beside the tool's own summary.
+        """
         result = ToolResult(
             content=[mcp.types.TextContent(type="text", text="Summary")],
             structured_content={"$prefab": {"version": "0.3"}, "view": {}},
@@ -634,8 +640,7 @@ class TestIgnoredArgumentsMerge:
         relaxation._report_ignored_arguments(result, ["from"], "from_time is this tool's name for it")
         assert len(result.content) == 2
         assert "from" in result.content[-1].text
-        assert result.structured_content["ignored_arguments"] == ["from"]
-        assert "from_time" in result.structured_content["ignored_arguments_hint"]
+        assert result.structured_content == {"$prefab": {"version": "0.3"}, "view": {}}
 
 
 class TestOwnerIndexUnderDisclosure:

@@ -14,12 +14,11 @@ from functools import wraps
 from typing import Any, NamedTuple
 
 from fastmcp import FastMCP
-from fastmcp.server.providers.prefab_synthesis import (
-    _build_resource_for_tool,
-    _walk_prefab_tools,
-)
+from fastmcp.apps.config import AppConfig, ResourceCSP
 from fastmcp.tools.base import ToolResult
+from fastmcp.utilities.mime import UI_MIME_TYPE
 from mcp.types import ToolAnnotations
+from prefab_ui.renderer import get_renderer_html
 
 from .catalog import (  # noqa: F401
     enabled_generative_ui_tool_names,
@@ -63,11 +62,12 @@ logger = logging.getLogger(__name__)
 class _CompositeTool(NamedTuple):
     """One composite operation, and the FastMCP `app` flag it is registered with.
 
-    `app` is handed straight to ``FastMCP.tool(app=...)``: ``True`` publishes the tool
-    as an interactive app, so its Prefab UI view reaches the caller beside the payload;
-    ``None`` keeps it a plain request/response tool. It is named per entry rather than
-    left to a positional slot so the difference between the chart and the lookup is
-    readable where the catalog is declared.
+    `app` marks which composites carry an interactive Prefab view beside their
+    payload; ``None`` keeps a tool plain request/response. ``build_mcp_server``
+    turns the flag into an ``AppConfig`` pointing at the bundled renderer resource
+    instead of letting FastMCP synthesize a CDN-backed one. It is named per entry
+    rather than left to a positional slot so the difference between the chart and
+    the lookup is readable where the catalog is declared.
     """
 
     tool: Callable[..., Any]
@@ -86,6 +86,31 @@ _COMPOSITE_TOOLS = (
 # no endpoint, so the hints are stated here — without them a caller scanning for
 # destructive tools gets no signal either way.
 _COMPOSITE_ANNOTATIONS = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True)
+
+# The composite tools point at this server-owned resource instead of FastMCP's
+# synthesized CDN renderer. The bundled document needs no external origin, and
+# generated Prefab Python executes in the guarded Deno sandbox, never here.
+_COMPOSITE_RENDERER_URI = "ui://nextdns/renderer.html"
+
+
+def _register_composite_renderer(server: FastMCP) -> None:
+    """Publish the self-contained renderer the app-flagged composite tools point at."""
+
+    @server.resource(
+        _COMPOSITE_RENDERER_URI,
+        name="NextDNS Prefab Renderer",
+        mime_type=UI_MIME_TYPE,
+        app=AppConfig(
+            csp=ResourceCSP(
+                resource_domains=[],
+                connect_domains=[],
+                frame_domains=[],
+                base_uri_domains=[],
+            )
+        ),
+    )
+    def _bundled_renderer() -> str:
+        return get_renderer_html(mode="bundled")
 
 
 def _with_error_flag(tool_fn: Any) -> Any:
@@ -199,6 +224,7 @@ def build_mcp_server() -> FastMCP:
     routes = spec_routes()
     server = create_mcp_server(tool_names=published_tool_names(), endpoints=endpoints_for_routes(routes))
     register_spec_tools(server, routes)
+    _register_composite_renderer(server)
     for composite in _COMPOSITE_TOOLS:
         # FastMCP publishes only the first text section of a docstring as the tool
         # description, so the accepted values and the worked example further down
@@ -207,41 +233,10 @@ def build_mcp_server() -> FastMCP:
         server.tool(
             description=inspect.getdoc(composite.tool) or "",
             annotations=_COMPOSITE_ANNOTATIONS,
-            app=composite.app,
+            app=AppConfig(resource_uri=_COMPOSITE_RENDERER_URI) if composite.app else None,
         )(_with_error_flag(composite.tool))
-    _register_composite_renderer_resources(server)
     register_generative_ui_provider(server)
     return server
-
-
-def _register_composite_renderer_resources(server: FastMCP) -> None:
-    """Register the composite app tools' Prefab renderer resource explicitly.
-
-    FastMCP synthesizes the ``ui://prefab/renderer/<digest>/renderer.html``
-    resource on demand from the tools a listing returns; under ``bm25``
-    disclosure the search transform hides every real tool from that listing,
-    so the synthesized set is empty and ``resources/read`` on the URI
-    ``plotAnalytics`` and ``overviewDashboard`` advertise fails with
-    ``Resource not found`` (issue #751). Registering the resource on the
-    server keeps ``resources/list`` and ``resources/read`` working under
-    disclosure; the tools advertised under ``off`` resolve through FastMCP's
-    own synthesis to the same URI, so both modes serve one renderer. The
-    resource is built by FastMCP's own synthesis helpers over the untransformed
-    tool storage, so its URI is byte-identical to the one the tools advertise
-    on the wire.
-    """
-    seen: set[str] = set()
-    for tool in _walk_prefab_tools(server):
-        resource = _build_resource_for_tool(tool)
-        if resource is None:  # pragma: no cover - only when prefab-ui is unimportable
-            continue
-        uri = str(resource.uri)
-        if uri in seen:
-            # The app tools share one renderer configuration, so they build
-            # the same resource; registering it twice would only warn.
-            continue
-        seen.add(uri)
-        server.add_resource(resource)
 
 
 def get_mcp_server() -> FastMCP:

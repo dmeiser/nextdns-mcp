@@ -169,6 +169,10 @@ def _report_ignored_arguments(
     merged set instead of concatenating the two passes' sentences: a name
     the inner pass and the outer pass both dropped would otherwise be
     attributed twice.
+
+    A Prefab result (``$prefab`` in the payload) is the renderer's wire
+    document, not this server's response shape: the note is said in the
+    content and the document is left exactly as the tool emitted it.
     """
     structured = getattr(result, "structured_content", None)
     if not isinstance(structured, dict):
@@ -176,6 +180,7 @@ def _report_ignored_arguments(
         return
     if "$prefab" in structured:
         _annotate_content_only(result, ignored, hint)
+        return
     _annotate_structured_ignored(structured, ignored, hint, hint_for)
 
 
@@ -208,27 +213,36 @@ def _merge_ignored_hints(structured: dict[str, Any], hint: str) -> None:
     _merge_result_hint(structured, hint)
 
 
+def _append_content_note(result: Any, text: str) -> None:
+    """Append a text note to the result's content, best-effort.
+
+    A middleware report whose payload cannot carry it - a Prefab wire
+    document, an image-only answer - says itself in the content instead,
+    beside what the tool produced. The append never raises: losing the note is
+    recoverable, replacing the tool's own answer with a failure because its
+    content is not a list is not. It lives here because this module owns the
+    ignored-arguments note; the call-shape middleware reuses it rather than
+    growing a second copy of the try.
+    """
+    try:
+        result.content.append(mcp.types.TextContent(type="text", text=text))
+    except Exception:
+        logger.debug("middleware note could not be appended to the result content", exc_info=True)
+
+
 def _annotate_content_only(result: ToolResult, ignored: list[str], hint: str) -> None:
     """Say the annotation in the content when no plain-dict payload can carry it.
 
-    Prefab answers (plotAnalytics, overviewDashboard) arrive as a model rather
-    than a dict, so the dict-merge path cannot touch them, and a result with
-    no structured payload at all has nothing else to carry the note; without
-    this the argument drop would be silent for exactly the tools whose names
-    (from/to on the series endpoints) differ from this one's
-    (from_time/to_time).
+    A Prefab answer (plotAnalytics, overviewDashboard) is the renderer's wire
+    document: its keys belong to that document, so a note added to it is not
+    this server's response shape. A result with no structured payload at all
+    has nothing else to carry the note either; without this the argument drop
+    would be silent for exactly the tools whose names (from/to on the series
+    endpoints) differ from this one's (from_time/to_time).
     """
     if not ignored:
         return
-    try:
-        result.content.append(
-            mcp.types.TextContent(
-                type="text",
-                text=f"Note: the server ignored argument(s) {', '.join(ignored)}; {hint}",
-            )
-        )
-    except Exception:
-        logger.debug("ignored-arguments annotation could not be appended", exc_info=True)
+    _append_content_note(result, f"Note: the server ignored argument(s) {', '.join(ignored)}; {hint}")
 
 
 def _merge_result_hint(structured: dict[str, Any], hint: str) -> None:

@@ -26,7 +26,7 @@ from fastmcp.tools import Tool
 from fastmcp.tools.base import ToolAnnotations
 from fastmcp.utilities.mime import UI_MIME_TYPE
 from prefab_ui.app import PrefabApp
-from prefab_ui.renderer import get_generative_renderer_csp, get_generative_renderer_html
+from prefab_ui.renderer import get_generative_renderer_html
 
 from .chart_placement import _validate_chart_placement
 from .generative_sandbox import (
@@ -177,11 +177,18 @@ def _result_size_bytes(result: Any) -> int:
 
 
 def _renderer_csp() -> ResourceCSP:
-    """CSP the renderer resource advertises, read from the renderer's own declaration."""
-    declared = get_generative_renderer_csp()
+    """CSP for the bundled renderer: generated Python runs server-side, not here.
+
+    The bundle carries a browser-side Pyodide streaming bridge, but no external
+    origin is needed to display a completed result. An empty CSP keeps that
+    bridge from fetching its loader, so partial tool input cannot execute Python
+    in the browser while the guarded Deno sandbox remains the only executor.
+    """
     return ResourceCSP(
-        resource_domains=declared.get("resource_domains"),
-        connect_domains=declared.get("connect_domains"),
+        resource_domains=[],
+        connect_domains=[],
+        frame_domains=[],
+        base_uri_domains=[],
     )
 
 
@@ -191,7 +198,7 @@ def _build_renderer_resource(csp: Any) -> TextResource:
     return TextResource(
         uri=prefab_generative.RESOURCE_URI,  # type: ignore[arg-type]
         name="Prefab Generative Renderer",
-        text=get_generative_renderer_html(),
+        text=get_generative_renderer_html(mode="bundled"),
         mime_type=UI_MIME_TYPE,
         meta={"ui": app_config_to_meta_dict(resource_config)},
     )
