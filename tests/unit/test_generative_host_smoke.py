@@ -85,6 +85,39 @@ def test_host_smoke_chart_sizing_guard_rejects_charts_in_tabs() -> None:
 
 @requires_deno
 @pytest.mark.asyncio
+async def test_host_smoke_rejects_active_generated_trees() -> None:
+    """SEC-3 (nextdns-mcp#749): active content is rejected at the server boundary.
+
+    The sandbox executes model code with full Python, so the code imports the
+    blocked names itself — the prelude allowlist is ergonomics, and this
+    server-side tree validation is the actual boundary.
+    """
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = await _generate_tool(gen_ui)
+
+    embed_code = 'from prefab_ui.components import Embed\nwith PrefabApp() as app:\n    Embed(html="<script>alert(1)</script>")\n'
+    with pytest.raises(ValueError, match="Generated UI rejected"):
+        await gen_tool.fn(code=embed_code)
+
+    bridge_code = (
+        "from prefab_ui.actions import CallTool\n"
+        "with PrefabApp() as app:\n"
+        "    Button(label='go', on_click=CallTool('list_profiles'))\n"
+    )
+    with pytest.raises(ValueError, match="Generated UI rejected"):
+        await gen_tool.fn(code=bridge_code)
+
+    stylesheet_code = "with PrefabApp(stylesheets=['https://evil.example/x.css']) as app:\n    Text('x')\n"
+    with pytest.raises(ValueError, match="Generated UI rejected"):
+        await gen_tool.fn(code=stylesheet_code)
+
+    # A passive tree through the same path still renders.
+    app = await gen_tool.fn(code=SMOKE_CODE)
+    assert app.model_dump(by_alias=True)["title"] == "Prefab"
+
+
+@requires_deno
+@pytest.mark.asyncio
 async def test_host_smoke_rejects_oversized_result_during_read(monkeypatch) -> None:
     """Regression (nextdns-mcp#538): a runaway view is rejected during the bounded stdout read.
 
