@@ -155,7 +155,9 @@ def test_dashboard_imports_no_private_name_from_a_sibling_dashboard_module():
     AGENT.md. This fails if a cited private import is restored, in any import
     form - relative or absolute (WORK-339).
     """
-    sibling_modules = {f"{DASHBOARD_PACKAGE}.{name}" for name in ("constants", "data", "components", "formatters", "tool")}
+    sibling_modules = {
+        f"{DASHBOARD_PACKAGE}.{name}" for name in ("constants", "data", "components", "formatters", "tool")
+    }
     for module_file in sorted(PACKAGE_DIR.glob("*.py")):
         for module, names in _absolute_imports(module_file):
             if module not in sibling_modules:

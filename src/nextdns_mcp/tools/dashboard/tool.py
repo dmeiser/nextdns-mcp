@@ -15,13 +15,10 @@ SPDX-License-Identifier: MIT
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, get_args
+from typing import Any, Literal, NamedTuple, Protocol, get_args
 
 from fastmcp.tools.base import ToolResult
-from prefab_ui.components import Column
-
-if TYPE_CHECKING:
-    from prefab_ui.components import Card
+from prefab_ui.components import Card, Column
 
 from ...chart_ui import bounded_app_result
 from ...charts import analytics_range_error
@@ -65,11 +62,6 @@ from .formatters import (
     ip_summary_items,
     overview_top_summary,
 )
-
-if TYPE_CHECKING:
-    # Annotation-only: ``Card`` types the card builders' results and nothing
-    # here constructs one, so the component library is not imported for it.
-    from prefab_ui.components import Card
 
 
 def _wrap_card_result(card: Card, summary_text: str) -> ToolResult | dict[str, Any]:
