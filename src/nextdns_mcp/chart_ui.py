@@ -14,15 +14,34 @@ time-series chart through ``build_timeseries_area_chart`` here. The dashboard
 package may not construct an ``AreaChart`` itself - ``tests/unit/test_dashboard_boundaries.py``
 holds that line.
 
+What is common to both surfaces but is not a chart - the ceiling on the whole
+rendered ``PrefabApp`` they answer with - is guarded here too, by
+``bounded_app_result``.
+
 SPDX-License-Identifier: MIT
 """
 
+import json
 from typing import Any
 
-from prefab_ui.app import Theme
+from fastmcp.tools.base import ToolResult
+from prefab_ui.app import PrefabApp, Theme
 from prefab_ui.components.charts import AreaChart, ChartSeries
 
+from .errors import ErrorCode, error_payload
 from .utils import sanitize_label
+
+# Byte ceiling on one rendered analytics result, however many cards it holds.
+# Both hand-written analytics surfaces answer with a whole ``PrefabApp`` in
+# ``structured_content``, and that document goes straight into the calling model's
+# context: the caps in ``charts`` bound what a single chart can hold, this bounds
+# what a page of them can cost. It is the same size the generative-UI sandbox
+# puts on a generated view (``MAX_RESULT_BYTES`` in ``generative_sandbox``) - one
+# rendered app is one rendered app, whatever produced it. A page that still
+# breaches it is refused with a typed payload rather than trimmed: a silently
+# shorter dashboard is one the caller cannot tell was cut (issue #789).
+MAX_RESULT_BYTES = 256 * 1024
+
 
 DASHBOARD_THEME = Theme(
     accent=220,
@@ -113,3 +132,38 @@ def build_timeseries_area_chart(
         showTooltip=True,
         showGrid=True,
     )
+
+
+def rendered_app_bytes(app: PrefabApp) -> int:
+    """UTF-8 size of a rendered app as the MCP wire carries it.
+
+    Measured on ``PrefabApp.to_json`` - the document ``structured_content``
+    holds once the tool result is built - serialized exactly as the stdio server
+    writes it: compact JSON with raw UTF-8, no ``\\uXXXX`` escapes. Escaping
+    non-ASCII labels charges up to six bytes per character and overstates the
+    ceiling decision; the MCP wire does not pay those bytes.
+    """
+    return len(json.dumps(app.to_json(), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def bounded_app_result(app: PrefabApp, summary: str, surface: str) -> ToolResult | dict[str, Any]:
+    """Wrap a rendered app in a ToolResult, or refuse it when it breaches the byte ceiling.
+
+    Both analytics surfaces end here, so the ceiling is one gate rather than a
+    check each surface remembers to write. Over it, the answer is the typed
+    ``response_too_large`` payload the transport already uses for an oversized
+    upstream document, naming the size and the limit; the caller lowers ``limit``
+    or renders one section instead of getting a page that was quietly cut down.
+    """
+    size = rendered_app_bytes(app)
+    if size > MAX_RESULT_BYTES:
+        return error_payload(
+            ErrorCode.RESPONSE_TOO_LARGE,
+            (
+                f"Rendered {surface} is {size:,} bytes, over the {MAX_RESULT_BYTES:,}-byte result ceiling; "
+                "request fewer rows or series, or render one section at a time"
+            ),
+            result_bytes=size,
+            max_result_bytes=MAX_RESULT_BYTES,
+        )
+    return ToolResult(content=summary, structured_content=app)

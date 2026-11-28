@@ -38,11 +38,14 @@ from prefab_ui.components.charts import BarChart, ChartSeries, PieChart
 
 from ...chart_ui import (
     DASHBOARD_THEME,
+    bounded_app_result,
     build_chart_series,
     build_timeseries_area_chart,
 )
 from ...charts import (
     build_chart_data,
+    cap_chart_categories,
+    cap_chart_series,
     downsample_chart_series,
     extract_series_fields,
 )
@@ -74,6 +77,31 @@ SHARE_COLUMN = DataTableColumn(key="share", header="Share", sortable=True)
 # row collections with the component's own element type instead of suppressing mypy.
 _TableRows = list[dict[str, Any] | ExpandableRow]
 
+# A ``DataTable`` serializes every row it is given, so ``limit`` (accepted up to
+# 500) was the only thing between a caller and 500 rows per card inside one
+# result: ``section="all"`` at ``limit=500`` embedded thousands of rows in the
+# document handed back to the model (issue #789). Tables render the busiest rows
+# and paginate them - a capped table and a paginated table are the same decision,
+# so they are written once, in ``_data_table``.
+MAX_TABLE_ROWS = 100
+TABLE_PAGE_SIZE = 25
+
+
+def _data_table(columns: list[DataTableColumn], rows: _TableRows) -> DataTable:
+    """Build one bounded, paginated dashboard table.
+
+    Every dashboard table is built here: the row cap, the page size and the
+    pagination flag are one decision shared by six cards, and spelling the
+    kwargs out per card is how the six would drift apart.
+    """
+    rendered = rows[:MAX_TABLE_ROWS]
+    return DataTable(
+        columns=columns,
+        rows=rendered,
+        paginated=len(rendered) > TABLE_PAGE_SIZE,
+        pageSize=TABLE_PAGE_SIZE,
+    )
+
 
 def _build_kpi_row(kpis: dict[str, Any]) -> Row:
     """Build the three top KPI metric cards with centered and aligned styling."""
@@ -96,12 +124,15 @@ def _build_queries_series_card(series_payload: dict[str, Any]) -> Card | None:
     The rendered rows are downsampled through the shared chart budget: a
     multi-year overview answers up to 1,999 intervals, and this card is one of
     many on the page, so full-resolution rows here bloat the whole
-    ``PrefabApp`` rather than one chart result (issue #550).
+    ``PrefabApp`` rather than one chart result (issue #550). The series count is
+    capped by the same kind of budget before those rows are built, with the
+    omitted series rolled up into one ``Other`` series (issue #789).
     """
     try:
         times, series_data = extract_series_fields(series_payload)
         if not times or not series_data:
             return None
+        series_data = cap_chart_series(series_data)
         chart_times, chart_series_data = downsample_chart_series(times, series_data)
         chart_data = build_chart_data(chart_times, chart_series_data)
         chart_series = build_chart_series(chart_series_data)
@@ -126,9 +157,9 @@ def _bar_color(color: str) -> str:
 
 
 def _bar_chart(chart_data: list[dict[str, Any]], label: str, color: str = DEFAULT_BAR_COLOR) -> BarChart:
-    """Build a horizontal bar chart with rounded pill bars."""
+    """Build a horizontal bar chart with rounded pill bars, capped to the chart budget."""
     return BarChart(
-        data=chart_data,
+        data=cap_chart_categories(chart_data),
         series=[ChartSeries(dataKey="queries", label=label, color=_bar_color(color))],
         xAxis="label",
         horizontal=True,
@@ -144,11 +175,13 @@ def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
 
     Upstream counts can arrive netted below zero, and the pie's aggregation
     validation rejects negative values, so every row's count is clamped to
-    zero or above here (issue FUNC-5 / WORK-324).
+    zero or above here (issue FUNC-5 / WORK-324). The clamp runs before the
+    render cap so a negative row cannot win a place in the top entries
+    (issue #789).
     """
     clamped = [{**row, "queries": max(row.get("queries", 0), 0)} for row in chart_data]
     return PieChart(
-        data=clamped,
+        data=cap_chart_categories(clamped),
         dataKey="queries",
         nameKey="label",
         innerRadius=60,
@@ -162,12 +195,12 @@ def _pie_chart(chart_data: list[dict[str, Any]]) -> PieChart:
 def _domain_table(data: list[dict[str, Any]], key_name: str) -> DataTable:
     """Build domain data table."""
     rows: _TableRows = [{"domain": domain_label(item, key_name), "queries": item_queries(item)} for item in data]
-    return DataTable(
-        columns=[
+    return _data_table(
+        [
             DataTableColumn(key="domain", header="Domain", sortable=True),
             QUERIES_COLUMN,
         ],
-        rows=rows,
+        rows,
     )
 
 
@@ -221,13 +254,13 @@ def _reasons_table(data: list[dict[str, Any]]) -> DataTable:
     """Build reasons data table."""
     total = sum(item_queries(item) for item in data)
     rows: _TableRows = [reason_row(item, total) for item in data]
-    return DataTable(
-        columns=[
+    return _data_table(
+        [
             DataTableColumn(key="name", header="Reason / Filter", sortable=True),
             QUERIES_COLUMN,
             SHARE_COLUMN,
         ],
-        rows=rows,
+        rows,
     )
 
 
@@ -257,14 +290,14 @@ def _devices_table(data: list[dict[str, Any]]) -> DataTable:
     """Build devices data table."""
     total = sum(item_queries(item) for item in data)
     rows: _TableRows = [device_row(item, total) for item in data]
-    return DataTable(
-        columns=[
+    return _data_table(
+        [
             DataTableColumn(key="device", header="Device", sortable=True),
             DataTableColumn(key="model", header="Model", sortable=True),
             QUERIES_COLUMN,
             SHARE_COLUMN,
         ],
-        rows=rows,
+        rows,
     )
 
 
@@ -299,14 +332,14 @@ def build_ips_card(data: list[dict[str, Any]]) -> Card:
             if not data:
                 Text("No IP queries recorded for this period.", css_class="text-sm text-muted-foreground py-4")
             else:
-                DataTable(
-                    columns=[
+                _data_table(
+                    [
                         DataTableColumn(key="ip", header="IP Address", sortable=True),
                         DataTableColumn(key="isp", header="ISP", sortable=True),
                         DataTableColumn(key="location", header="Location", sortable=True),
                         QUERIES_COLUMN,
                     ],
-                    rows=rows,
+                    rows,
                 )
     return card
 
@@ -314,13 +347,13 @@ def build_ips_card(data: list[dict[str, Any]]) -> Card:
 def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
     """Build GAFAM table."""
     rows: _TableRows = [*table_rows]
-    return DataTable(
-        columns=[
+    return _data_table(
+        [
             DataTableColumn(key="company", header="Company", sortable=True),
             QUERIES_COLUMN,
             SHARE_COLUMN,
         ],
-        rows=rows,
+        rows,
     )
 
 
@@ -380,14 +413,14 @@ def build_security_card(encryption_rate: tuple[int, int, float], dnssec_rate: tu
 def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
     """Build destinations table."""
     rows: _TableRows = [destination_row(item) for item in data]
-    return DataTable(
-        columns=[
+    return _data_table(
+        [
             DataTableColumn(key="country", header="Country", sortable=True),
             DataTableColumn(key="code", header="Code", sortable=True),
             QUERIES_COLUMN,
             DataTableColumn(key="sample_domains", header="Sample Domains"),
         ],
-        rows=rows,
+        rows,
     )
 
 
@@ -486,9 +519,8 @@ def build_kpi_app(kpis: dict[str, Any]) -> PrefabApp:
     return build_page_app(view)
 
 
-def wrap_card_result(card: Card, summary_text: str) -> ToolResult:
-    """Wrap a single visual card into a ToolResult."""
+def wrap_card_result(card: Card, summary_text: str) -> ToolResult | dict[str, Any]:
+    """Wrap a single visual card into a ToolResult, or refuse it over the result ceiling."""
     with Column(gap=4, css_class="p-6", children=[card]) as view:
         pass
-    app = build_page_app(view)
-    return ToolResult(content=summary_text, structured_content=app)
+    return bounded_app_result(build_page_app(view), summary_text, "dashboard card")
