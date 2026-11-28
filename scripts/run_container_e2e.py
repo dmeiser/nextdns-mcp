@@ -34,6 +34,7 @@ from nextdns_mcp.server import (
     generative_ui_tool_names,
 )
 from nextdns_mcp.tools.dashboard import DASHBOARD_SECTIONS
+from nextdns_mcp.transport import has_error_field
 from scripts import ai_e2e_common, validate_schema
 from scripts.validate_schema import (
     assert_operation_coverage,
@@ -662,7 +663,7 @@ class ContainerE2ERunner:
     @staticmethod
     def _payload_error(parsed_json: Any) -> str | None:
         """Return the error message carried by a JSON payload, or None when there is none."""
-        if isinstance(parsed_json, dict) and "error" in parsed_json:
+        if has_error_field(parsed_json):
             return str(parsed_json["error"])
         return None
 

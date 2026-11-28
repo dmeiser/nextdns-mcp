@@ -15,11 +15,13 @@ This module holds the deterministic building blocks used by the E2E harness
   server state via the raw NextDNS REST API (never via the MCP tool response).
 
 Nothing in this module opens a network connection, builds the MCP server, or
-starts a subprocess. The only package modules it imports from the server are
-``nextdns_mcp.config``, for the shared API-base resolver, and
+starts a subprocess. The package modules it imports from the server are
+``nextdns_mcp.config``, for the shared API-base resolver,
 ``nextdns_mcp.tools.metrics``, the typed literal the plot tool validates its
-metric against — values that would otherwise be copies of something the server
-already owns. It is importable both as a sibling of
+metric against, and - since issue #804 - ``nextdns_mcp.utils`` and
+``nextdns_mcp.transport``, the shared private-file open and error-field
+predicates - values and helpers that would otherwise be copies of something
+the server already owns. It is importable both as a sibling of
 ``ai_e2e_harness.py`` (the harness inserts ``scripts/`` onto ``sys.path``) and
 directly by file path from the unit tests.
 """
@@ -27,18 +29,17 @@ directly by file path from the unit tests.
 from __future__ import annotations
 
 import contextlib
-import errno
 import os
 import random
-import stat
 import string
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, get_args
 
 from nextdns_mcp.config import get_api_base
 from nextdns_mcp.tools.metrics import PlotMetric
+from nextdns_mcp.transport import error_field_text
+from nextdns_mcp.utils import open_private_file
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -244,25 +245,14 @@ def private_open(path: Any, mode: str = "w"):
 
     The report records tool names with profile ids and call payloads; the
     container's umask default would leave that readable by every user of the
-    CI host. The mode is applied through the fd so a pre-existing permissive
-    file is tightened too, not only a brand-new one made private. Fail closed:
-    if 0600 cannot be established the artifact is not written at all.
-
-    The descriptor is validated before the ``fchmod``: ``O_NOFOLLOW`` refuses
-    a symlink (ELOOP), ``O_NONBLOCK`` refuses a FIFO with no reader before
-    the open can hang, and ``fstat`` refuses anything that is not a regular
-    file.
+    CI host. The fail-closed open itself is the shared
+    ``utils.open_private_file`` (issue #804), which applies the mode through
+    the fd so a pre-existing permissive file is tightened too, not only a
+    brand-new one made private; if 0600 cannot be established the artifact is
+    not written at all. The shared open also refuses symlinks, FIFOs and
+    non-regular files before the mode change (issue #332).
     """
-    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC) | os.O_NOFOLLOW | os.O_NONBLOCK
-    fd = os.open(str(Path(path)), flags, 0o600)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(errno.EINVAL, "harness artifact is not a regular file", str(path))
-        os.fchmod(fd, 0o600)
-    except OSError:
-        os.close(fd)
-        raise
-    fh = os.fdopen(fd, mode, encoding="utf-8")
+    fh = open_private_file(path, mode)
     try:
         yield fh
     finally:
@@ -448,7 +438,7 @@ def _structured(res: Any) -> Any:
 
 def _is_error_body(res: Any) -> bool:
     s = _structured(res)
-    return isinstance(s, dict) and "error" in s and bool(s.get("error"))
+    return error_field_text(s) is not None
 
 
 def _error_body_text(res: Any) -> str:

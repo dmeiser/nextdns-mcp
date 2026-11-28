@@ -25,7 +25,7 @@ from .config import (
 )
 from .constants import LOOPBACK_HOSTS, SAFE_PROFILE_ID_PATTERN, escape_control_chars, is_write_operation
 from .errors import ErrorCode, StateOwnershipError
-from .state import request_resources
+from .state import publish_owner, resolve_owner
 
 logger = logging.getLogger(__name__)
 
@@ -328,44 +328,25 @@ def _check_destination(base_url: Any, method: str, url: Any, configured_base: st
     raise AccessDeniedError(error_msg, code=ErrorCode.ACCESS_DENIED)
 
 
-class AccessControlledClient:
-    """HTTP client that enforces profile access control (issue #639).
+class _WrappedHttpxClient:
+    """Shared surface of the wrappers that compose a private ``httpx.AsyncClient`` (issue #804).
 
-    Composition wrapper around a private ``httpx.AsyncClient`` — the ACL
-    client used to subclass the concrete httpx class, which leaked the
-    base's whole public transport surface (``send``, ``build_request``, ...)
-    past the ACL door. Here the wrapped client is private, and the only ways
-    to move a request through this class are :meth:`request` and
-    :meth:`stream` plus the method conveniences built on ``request()``;
-    every one of them runs the single :meth:`_authorize` decision, so the
-    ACL is the one doorway rather than an inheritance-narrowed one.
+    Both wrappers - :class:`AccessControlledClient` and :class:`RawProbeTransport` -
+    hold the real client privately and forward the same read-only views of it;
+    keeping the forwarding here is what stops the two copies from drifting.
+    Each wrapper keeps its own exposed extras and its own request checks.
     """
 
-    def __init__(
-        self,
-        *,
-        base_url: str | httpx.URL | None = None,
-        headers: dict[str, str] | None = None,
-        timeout: Any = None,
-        transport: Any = None,
-        follow_redirects: bool = False,
-        configured_base: str | None = None,
-    ) -> None:
-        kwargs: dict[str, Any] = {"headers": headers, "follow_redirects": follow_redirects}
-        if base_url is not None:
-            kwargs["base_url"] = base_url
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        if transport is not None:
-            kwargs["transport"] = transport
-        self._client = httpx.AsyncClient(**kwargs)
-        # The destination allowance is the API base this client was created on,
-        # so changing NEXTDNS_API_BASE later cannot move the guard off the host
-        # this client is still sending to. Pass configured_base alongside
-        # base_url whenever both come from one configuration read: resolving the
-        # environment a second time here could name a different base from the one
-        # the client is actually aimed at, which is the drift this field exists to
-        # prevent. Unset (a hand-built client) falls back to one read here.
+    def __init__(self, client: httpx.AsyncClient, configured_base: str | None = None) -> None:
+        self._client = client
+        # The destination allowance is the API base this client was created
+        # on, so changing NEXTDNS_API_BASE later cannot move the guard off the
+        # host this client is still sending to. Pass configured_base alongside
+        # base_url whenever both come from one configuration read: resolving
+        # the environment a second time here could name a different base from
+        # the one the client is actually aimed at, which is the drift this
+        # field exists to prevent. Unset (a hand-built client) falls back to
+        # one read here.
         self._configured_base = _configured_destination_base() if configured_base is None else configured_base
 
     async def __aenter__(self) -> Self:
@@ -395,6 +376,46 @@ class AccessControlledClient:
         return self._client.headers
 
     @property
+    def is_closed(self) -> bool:
+        """Whether the wrapped client has been closed."""
+        return self._client.is_closed
+
+
+class AccessControlledClient(_WrappedHttpxClient):
+    """HTTP client that enforces profile access control (issue #639).
+
+    Composition wrapper around a private ``httpx.AsyncClient`` — the ACL
+    client used to subclass the concrete httpx class, which leaked the
+    base's whole public transport surface (``send``, ``build_request``, ...)
+    past the ACL door. Here the wrapped client is private, and the only ways
+    to move a request through this class are :meth:`request` and
+    :meth:`stream` plus the method conveniences built on ``request()``;
+    every one of them runs the single :meth:`_authorize` decision, so the
+    ACL is the one doorway rather than an inheritance-narrowed one.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str | httpx.URL | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: Any = None,
+        transport: Any = None,
+        follow_redirects: bool = False,
+        configured_base: str | None = None,
+    ) -> None:
+        kwargs: dict[str, Any] = {"headers": headers, "follow_redirects": follow_redirects}
+        if base_url is not None:
+            kwargs["base_url"] = base_url
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if transport is not None:
+            kwargs["transport"] = transport
+        # The destination allowance (``configured_base``) is settled by the
+        # shared wrapper base; see ``_WrappedHttpxClient``.
+        super().__init__(httpx.AsyncClient(**kwargs), configured_base)
+
+    @property
     def timeout(self) -> httpx.Timeout:
         """The configured request timeout."""
         return self._client.timeout
@@ -403,11 +424,6 @@ class AccessControlledClient:
     def follow_redirects(self) -> bool:
         """Whether the wrapped client follows redirects (always False here)."""
         return self._client.follow_redirects
-
-    @property
-    def is_closed(self) -> bool:
-        """Whether the wrapped client has been closed."""
-        return self._client.is_closed
 
     def _check_write_access(self, profile_id: str, access: ProfileAccessControl) -> None:
         """Check write access against the request snapshot; raise AccessDeniedError if denied."""
@@ -650,7 +666,7 @@ def create_nextdns_client(config: ServerConfig | None = None) -> AccessControlle
     return AccessControlledClient(**_authenticated_client_kwargs(config))
 
 
-class RawProbeTransport:
+class RawProbeTransport(_WrappedHttpxClient):
     """ACL-free transport for server-level probes (the /health readiness check).
 
     Composition wrapper around a private ``httpx.AsyncClient``, kept separate
@@ -668,42 +684,7 @@ class RawProbeTransport:
 
     def __init__(self, **kwargs: Any) -> None:
         configured_base = kwargs.pop("configured_base", None)
-        self._client = httpx.AsyncClient(**kwargs)
-        # Same rule as AccessControlledClient: the allowance is the base this
-        # probe was created on, taken from the one configuration read that also
-        # set base_url when the factory built it.
-        self._configured_base = _configured_destination_base() if configured_base is None else configured_base
-
-    async def __aenter__(self) -> Self:
-        await self._client.__aenter__()
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        await self._client.__aexit__(exc_type, exc_value, traceback)
-
-    async def aclose(self) -> None:
-        """Close the wrapped httpx client."""
-        await self._client.aclose()
-
-    @property
-    def base_url(self) -> httpx.URL:
-        """The base URL the wrapped client resolves relative requests against."""
-        return self._client.base_url
-
-    @property
-    def headers(self) -> httpx.Headers:
-        """The client-level default headers, including the X-Api-Key credential."""
-        return self._client.headers
-
-    @property
-    def is_closed(self) -> bool:
-        """Whether the wrapped client has been closed."""
-        return self._client.is_closed
+        super().__init__(httpx.AsyncClient(**kwargs), configured_base)
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Send a request with NO profile ACL check; the destination allow-list still applies.
@@ -800,28 +781,23 @@ def current_api_client_owner() -> ApiClientOwner:
         StateOwnershipError: When no owner is active. Code reached outside a
             server lifespan must publish one with :func:`api_client_owned`.
     """
-    owner = api_client_owner.get()
-    if owner is None:
-        resources = request_resources()
-        if resources is not None:
-            owner = resources.api_client
-    if owner is None:
-        raise StateOwnershipError(
+    owner = resolve_owner(
+        api_client_owner,
+        "api_client",
+        StateOwnershipError(
             "No API client owner is active in this context. Server code runs inside a server "
             "lifespan, which publishes one; standalone callers must wrap the work in "
             "`with client_module.api_client_owned(client_module.ApiClientOwner()):`."
-        )
+        ),
+    )
     return owner
 
 
 @contextmanager
 def api_client_owned(owner: ApiClientOwner) -> Iterator[ApiClientOwner]:
     """Publish ``owner`` as the current context's API client owner for the block."""
-    token = api_client_owner.set(owner)
-    try:
-        yield owner
-    finally:
-        api_client_owner.reset(token)
+    with publish_owner(api_client_owner, owner) as published:
+        yield published
 
 
 _raw_probe_client: RawProbeTransport | None = None

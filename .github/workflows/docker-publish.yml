@@ -175,49 +175,34 @@ jobs:
         id: sha
         run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Extract metadata for Docker (slim)
-        if: matrix.variant == 'slim'
-        id: meta-slim
+      - name: Extract metadata for Docker (${{ matrix.variant }})
+        id: meta
+        env:
+          # One metadata configuration serves both variants (issue #804); the
+          # variant's tag names and suffix are the only differences. slim
+          # publishes latest/nightly and unsuffixed tags, alpine publishes
+          # alpine/nightly-alpine and -alpine-suffixed tags.
+          FLOATING_TAG: ${{ matrix.variant == 'alpine' && 'alpine' || 'latest' }}
+          NIGHTLY_TAG: ${{ matrix.variant == 'alpine' && 'nightly-alpine' || 'nightly' }}
+          TAG_SUFFIX: ${{ matrix.variant == 'alpine' && '-alpine' || '' }}
         uses: docker/metadata-action@v5
         with:
           images: |
             ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
             ghcr.io/${{ github.repository }}
           tags: |
-            # Floating 'latest' tag for release merges on main, scheduled, and manual rebuilds.
+            # Floating tag for release merges on main, scheduled, and manual rebuilds.
             # A no-release merge publishes no tags at all.
-            type=raw,value=latest,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ env.FLOATING_TAG }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             # Nightly tag for scheduled base-image rebuilds
-            type=raw,value=nightly,enable=${{ github.event_name == 'schedule' }}
+            type=raw,value=${{ env.NIGHTLY_TAG }},enable=${{ github.event_name == 'schedule' }}
             # Commit SHA tag used to identify the tested image
-            type=raw,value=${{ steps.sha.outputs.short }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ steps.sha.outputs.short }}${{ env.TAG_SUFFIX }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
             # Immutable version tags are only published for release merges on main
             # and manual rebuilds from refs/heads/main
-            type=raw,value=${{ steps.version.outputs.version }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-            type=raw,value=${{ steps.version.outputs.major }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-            type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-
-      - name: Extract metadata for Docker (alpine)
-        if: matrix.variant == 'alpine'
-        id: meta-alpine
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/nextdns-mcp
-            ghcr.io/${{ github.repository }}
-          tags: |
-            # Floating 'alpine' tag for release merges on main, scheduled, and manual rebuilds.
-            # A no-release merge publishes no tags at all.
-            type=raw,value=alpine,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-            # Nightly tag for scheduled Alpine base-image rebuilds
-            type=raw,value=nightly-alpine,enable=${{ github.event_name == 'schedule' }}
-            # Commit SHA tag used to identify the tested Alpine image
-            type=raw,value=${{ steps.sha.outputs.short }}-alpine,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-            # Immutable version tags are only published for release merges on main
-            # and manual rebuilds from refs/heads/main
-            type=raw,value=${{ steps.version.outputs.version }}-alpine,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-            type=raw,value=${{ steps.version.outputs.major }}-alpine,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-            type=raw,value=${{ steps.version.outputs.major_minor }}-alpine,enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+            type=raw,value=${{ steps.version.outputs.version }}${{ env.TAG_SUFFIX }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+            type=raw,value=${{ steps.version.outputs.major }}${{ env.TAG_SUFFIX }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}${{ env.TAG_SUFFIX }},enable=${{ (github.event_name == 'workflow_run' && needs.gate.outputs.is_release == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
 
       - name: Build and push Docker image (${{ matrix.variant }})
         uses: docker/build-push-action@v6
@@ -225,15 +210,15 @@ jobs:
           context: .
           file: ./Dockerfile${{ matrix.variant == 'alpine' && '.alpine' || '' }}
           push: true
-          tags: ${{ steps[format('meta-{0}', matrix.variant)].outputs.tags }}
-          labels: ${{ steps[format('meta-{0}', matrix.variant)].outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
           build-args: |
-            BUILDTIME=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.created'] }}
-            VERSION=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.version'] }}
-            REVISION=${{ fromJSON(steps[format('meta-{0}', matrix.variant)].outputs.json).labels['org.opencontainers.image.revision'] }}
+            BUILDTIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+            REVISION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
 
       - name: Determine published platforms
         if: always()
@@ -269,7 +254,7 @@ jobs:
             echo ""
             echo "**Tags Applied:**"
             echo '```'
-            echo "${{ steps[format('meta-{0}', matrix.variant)].outputs.tags }}"
+            echo "${{ steps.meta.outputs.tags }}"
             echo '```'
             echo ""
             echo "**Platforms:** ${{ steps.platforms.outputs.list }}"
