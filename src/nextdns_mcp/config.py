@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from httpx import URL, InvalidURL
+
 # DNS_STATUS_CODES and VALID_DNS_RECORD_TYPES are re-exported here: callers
 # already read them off this module, and the definitions live in
 # ``constants`` so the tool layer owns nothing that the base layer republishes.
@@ -124,6 +126,49 @@ logger = logging.getLogger(__name__)
 # new endpoint up on the next client creation without a reimport or restart.
 DEFAULT_API_BASE = "https://api.nextdns.io"
 
+_INVALID_API_BASE_MESSAGE = "NEXTDNS_API_BASE must use https:// with a host and no userinfo, query, or fragment"
+
+
+def _parse_api_base(base_url: str) -> URL:
+    """Parse the configured base URL, turning malformed URLs into configuration errors."""
+    try:
+        return URL(base_url)
+    except InvalidURL:
+        raise ConfigurationError(_INVALID_API_BASE_MESSAGE) from None
+
+
+def _authority_has_userinfo(base_url: str) -> bool:
+    """Return whether the raw URL authority carries an ``@`` userinfo delimiter."""
+    authority = base_url.partition("://")[2]
+    for delimiter in ("/", "?", "#"):
+        authority = authority.partition(delimiter)[0]
+    return "@" in authority
+
+
+def _validate_api_base_parts(base_url: str, parsed: URL) -> None:
+    """Reject URL components that could leak credentials or change the request target.
+
+    ``httpx.URL`` reports an absent and an empty query or fragment alike, so the
+    raw value is checked for the delimiters as well. The same applies to an empty
+    userinfo component: HTTPX normalizes an explicit ``@`` to the same value as
+    absent userinfo, so the authority is inspected directly.
+    """
+    if parsed.userinfo or _authority_has_userinfo(base_url):
+        raise ConfigurationError(_INVALID_API_BASE_MESSAGE)
+    if "?" in base_url:
+        raise ConfigurationError(_INVALID_API_BASE_MESSAGE)
+    if "#" in base_url:
+        raise ConfigurationError(_INVALID_API_BASE_MESSAGE)
+
+
+def _validate_api_base(base_url: str) -> None:
+    """Validate the scheme and host before the base URL is used or logged."""
+    parsed = _parse_api_base(base_url)
+    if parsed.scheme != "https" or not parsed.host:
+        raise ConfigurationError(_INVALID_API_BASE_MESSAGE)
+    _validate_api_base_parts(base_url, parsed)
+
+
 # Default HTTP request timeout in seconds
 DEFAULT_HTTP_TIMEOUT: float = 30.0
 
@@ -149,15 +194,15 @@ def get_api_base(environ: Mapping[str, str] | None = None) -> str:
             (default ``https://api.nextdns.io``).
 
     Raises:
-        ConfigurationError: If NEXTDNS_API_BASE does not use https://. The
-            scheme check runs on every read, not only at startup validation,
-            so a runtime change cannot silently redirect the API key to a
-            plaintext endpoint.
+        ConfigurationError: If NEXTDNS_API_BASE is malformed, does not use
+            https:// with a host, or carries userinfo, a query, or a fragment.
+            Validation runs on every read, not only at startup validation, so
+            a runtime change cannot silently redirect the API key or expose it
+            in a log line.
     """
     env = _effective_environ(environ)
     base_url = env.get("NEXTDNS_API_BASE", DEFAULT_API_BASE).rstrip("/")
-    if not base_url.lower().startswith("https://"):
-        raise ConfigurationError("NEXTDNS_API_BASE must use https://")
+    _validate_api_base(base_url)
     return base_url
 
 

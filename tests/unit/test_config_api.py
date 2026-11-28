@@ -42,6 +42,46 @@ def test_api_url_rejects_non_https(patch_env):
         config.get_api_base()
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://user:pass@api.nextdns.io",
+        "https://@api.nextdns.io",
+        "https://:@api.nextdns.io",
+        "https://api.nextdns.io?token=secret",
+        "https://api.nextdns.io?",
+        "https://api.nextdns.io#fragment",
+        "https://api.nextdns.io#",
+        "https://",
+        "https:///v1",
+        "https://api.nextdns.io:bad-port",
+    ],
+)
+def test_api_url_rejects_unsafe_components(patch_env, base_url):
+    """Userinfo, query, fragment, an absent host and malformed URLs never reach logging or a client."""
+    from nextdns_mcp import config
+
+    patch_env("NEXTDNS_API_BASE", base_url)
+    with pytest.raises(config.ConfigurationError, match="NEXTDNS_API_BASE must use https://"):
+        config.get_api_base()
+
+
+def test_api_url_accepts_at_in_path(patch_env):
+    """An ``@`` in the path is not userinfo and remains accepted."""
+    from nextdns_mcp import config
+
+    patch_env("NEXTDNS_API_BASE", "https://api.nextdns.io/v1@resource")
+    assert config.get_api_base() == "https://api.nextdns.io/v1@resource"
+
+
+def test_api_url_accepts_host_port_and_path(patch_env):
+    """A valid https base with a host, port and path is returned unchanged apart from its trailing slash."""
+    from nextdns_mcp import config
+
+    patch_env("NEXTDNS_API_BASE", "https://proxy.internal.example:8443/v1/")
+    assert config.get_api_base() == "https://proxy.internal.example:8443/v1"
+
+
 def test_default_api_key_empty(patch_env):
     """Test empty API key."""
     from nextdns_mcp import config
