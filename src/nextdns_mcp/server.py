@@ -14,8 +14,7 @@ from functools import wraps
 from typing import Any, NamedTuple
 
 from fastmcp import FastMCP
-from fastmcp.apps.config import AppConfig, ResourceCSP
-from fastmcp.server.server import app_config_to_meta_dict
+from fastmcp.apps.config import AppConfig, ResourceCSP, app_config_to_meta_dict
 from fastmcp.tools.base import ToolResult
 from fastmcp.utilities.mime import UI_MIME_TYPE
 from mcp.types import ToolAnnotations
