@@ -145,29 +145,18 @@ def _name_word_sets(names: Sequence[str], catalog: _CatalogWords | None) -> Mapp
     return {candidate: _words(candidate) for candidate in names}
 
 
-def _flat_equal_matches(name: str, names: Sequence[str], catalog: _CatalogWords | None = None) -> list[str]:
-    """Catalog entries equal to the typed name once separators and case are gone.
+def _equal_matches(query_key: object, candidate_keys: Mapping[str, object], names: Sequence[str]) -> list[str]:
+    """The candidates whose comparison key equals the typed name's key, in candidate order.
 
-    The per-candidate flat keys are a constant of the catalog and live in its
-    word memo; a caller holding the memo (the shape middleware does) passes it
-    so a repeated unknown name re-normalizes nothing catalog-side. Without the
-    memo each candidate is normalized here.
+    One filter for both name readings: the caller supplies the comparison data
+    for each side, so the flat reading passes flat keys and the word reading
+    passes word sets. The per-candidate side is a constant of the catalog and
+    lives in its word memo; a caller holding the memo (the shape middleware
+    does) passes it so a repeated unknown name re-normalizes nothing
+    catalog-side, and without the memo each candidate is normalized by the
+    caller before the filter runs.
     """
-    flat = _flat_key(name)
-    flat_keys = _flat_name_keys(names, catalog)
-    return [candidate for candidate in names if flat_keys.get(candidate) == flat]
-
-
-def _word_equal_matches(name: str, names: Sequence[str], catalog: _CatalogWords | None = None) -> list[str]:
-    """Catalog entries whose word set equals the typed name's word set.
-
-    The candidate word sets live in the catalog's word memo when the caller
-    holds it (the shape middleware does); without the memo each candidate is
-    tokenized here.
-    """
-    words = _words(name)
-    word_sets = _name_word_sets(names, catalog)
-    return [candidate for candidate in names if word_sets.get(candidate) == words]
+    return [candidate for candidate in names if candidate_keys.get(candidate) == query_key]
 
 
 def _match_tool_name(name: str, names: Sequence[str], catalog: _CatalogWords | None = None) -> str:
@@ -185,10 +174,10 @@ def _match_tool_name(name: str, names: Sequence[str], catalog: _CatalogWords | N
     """
     if not name or name in names:
         return ""
-    flat_matches = _flat_equal_matches(name, names, catalog)
+    flat_matches = _equal_matches(_flat_key(name), _flat_name_keys(names, catalog), names)
     if len(flat_matches) == 1:
         return flat_matches[0]
-    word_matches = _word_equal_matches(name, names, catalog)
+    word_matches = _equal_matches(_words(name), _name_word_sets(names, catalog), names)
     return word_matches[0] if len(word_matches) == 1 else ""
 
 
