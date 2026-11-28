@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..constants import is_write_operation
-from .evidence import _result_evidence
+from .evidence import EVIDENCE_MAX_ID_CHARS, _result_evidence
 from .projection import ARGS_CHARS, ERROR_CHARS, _project_result, _result_text
 
 logger = logging.getLogger(__name__)
@@ -71,10 +71,13 @@ def build_row(
     # was named. The local composite operations (plotAnalytics, dashboard tools, dohLookup)
     # have no endpoint and answer questions, so they are reads.
     write = is_write_operation(endpoint[0]) if endpoint else False
+    # An unbounded profile_id must not land in the log whole (#766); None
+    # still answers empty (#833).
+    raw_pid = arguments.get("profile_id")
     row = {
         "ts": time.time(),
         "tool": tool,
-        "profile_id": "" if arguments.get("profile_id") is None else str(arguments["profile_id"]),
+        "profile_id": ("" if raw_pid is None else str(raw_pid))[:EVIDENCE_MAX_ID_CHARS],
         # Enough of the arguments to match the call the harness asked for
         # (which endpoint, which entry), bounded before serialization by
         # the same projection the result uses. Serialized once, without

@@ -1458,6 +1458,50 @@ def test_private_open_refuses_when_the_mode_cannot_be_established(tmp_path, monk
     assert not path.exists() or path.stat().st_size == 0
 
 
+def test_private_open_refuses_a_preplanted_symlink(tmp_path):
+    """O_NOFOLLOW: neither the append nor the tightening fchmod lands through a link."""
+    import os
+    import stat
+
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text("not an artifact\n", encoding="utf-8")
+    os.chmod(target, 0o644)
+    link = tmp_path / "report.jsonl"
+    link.symlink_to(target)
+    with pytest.raises(OSError), ai_e2e_common.private_open(link, "a"):
+        pass
+    assert target.read_text(encoding="utf-8") == "not an artifact\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_private_open_refuses_a_fifo_without_blocking(tmp_path):
+    """O_NONBLOCK: a FIFO with no reader is refused, not waited on forever.
+
+    The attempt runs on a daemon thread joined with a 3s timeout, so the old
+    blocking open fails this test in seconds instead of hanging the suite.
+    """
+    import os
+    import threading
+
+    fifo = tmp_path / "report.jsonl"
+    os.mkfifo(fifo)
+    finished: list[bool] = []
+
+    def attempt() -> None:
+        try:
+            with ai_e2e_common.private_open(fifo, "a"):
+                pass
+        except OSError:
+            pass
+        finished.append(True)
+
+    worker = threading.Thread(target=attempt, daemon=True)
+    worker.start()
+    worker.join(timeout=3.0)
+    assert not worker.is_alive(), "private_open blocked on a FIFO instead of refusing it"
+    assert finished == [True]
+
+
 class TestRateLimitPacingAndFullBackoff:
     """Default retries walk all RATE_LIMIT_BACKOFF entries and pace read/write bursts."""
 
