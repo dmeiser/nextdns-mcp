@@ -1882,10 +1882,28 @@ class TestLabelAndSeriesInjectionHardening:
         _, out_series = charts_module.downsample_chart_series(times, [{"queries": [huge, 1]}], max_points=1)
         assert out_series[0]["queries"] == [huge + 1]
 
+    def test_downsample_overflowing_mixed_numeric_bucket_falls_back_to_zero(self):
+        times = ["2024-01-01T00:00:00Z"] * 2
+        out_times, out_series = charts_module.downsample_chart_series(
+            times, [{"queries": [10**400, 1.5]}], max_points=1
+        )
+        assert out_series[0]["queries"] == [0]
+        assert charts_module.build_chart_data(out_times, out_series)[0]["series_0"] == 0
+
+    def test_downsample_finite_float_bucket_that_overflows_falls_back_to_zero(self):
+        times = ["2024-01-01T00:00:00Z"] * 2
+        out_times, out_series = charts_module.downsample_chart_series(
+            times, [{"queries": [1e308, 1e308]}], max_points=1
+        )
+        assert out_series[0]["queries"] == [0]
+        assert charts_module.build_chart_data(out_times, out_series)[0]["series_0"] == 0
+
     def test_queries_card_renders_only_finite_numbers(self):
         times = ["2024-01-01T00:00:00Z"] * 3
         series_data = [{"name": "blocked", "queries": [5, "5", float("inf")]}]
-        card = ui._build_queries_series_card({"meta": {"series": {"times": times}}, "data": series_data})
+        prepared = data_mod.prepare_queries_series({"meta": {"series": {"times": times}}, "data": series_data})
+        assert prepared is not None
+        card = ui._build_queries_series_card(*prepared)
         chart = _find_component(card, "AreaChart")
         assert chart is not None
         assert [row["series_0"] for row in chart.data] == [5, 0, 0]

@@ -160,10 +160,30 @@ def build_chart_data(
     return [_build_chart_point(t, idx, query_lists, series_keys) for idx, t in enumerate(times)]
 
 
+def _sum_query_bucket(values: list[int | float]) -> int | float:
+    """Sum one downsample bucket, falling back to 0 when the aggregate is unplottable.
+
+    Valid individual counts may include Python integers beyond the C-double
+    range. Adding such an integer to a float can raise during conversion, and a
+    bucket of finite floats can aggregate to infinity. Neither is plottable, so
+    the whole bucket falls back to zero instead of crashing or retaining an
+    infinite total (issue #763).
+    """
+    total: int | float = 0
+    for value in values:
+        try:
+            total += value
+        except OverflowError:
+            return 0
+        if isinstance(total, float) and not math.isfinite(total):
+            return 0
+    return total
+
+
 def _bucket_series_queries(queries: list[Any] | None, n: int, bucket_size: int) -> list[int | float]:
     """Sum a single series' valid query counts into chunks of ``bucket_size``."""
     q = [_finite_query_count(value) for value in (queries or [])]
-    return [sum(q[start : min(start + bucket_size, n)]) for start in range(0, n, bucket_size)]
+    return [_sum_query_bucket(q[start : min(start + bucket_size, n)]) for start in range(0, n, bucket_size)]
 
 
 def _bucket_single_series(series: dict[str, Any], n: int, bucket_size: int) -> dict[str, Any]:
