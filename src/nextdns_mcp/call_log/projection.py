@@ -11,6 +11,9 @@ caps and the omission key a call-log row applies.
 """
 
 import json
+from collections.abc import Mapping
+from hashlib import sha256
+from types import SimpleNamespace
 from typing import Any
 
 from ..json_bounds import BoundSpec, bound_json
@@ -64,7 +67,7 @@ def _project_result(structured: Any) -> Any:
     return _project_value(structured)
 
 
-def _result_text(result: Any) -> str:
+def _result_text(result: Any, cap: int = RESULT_CHARS) -> str:
     """Bounded text form of a tool result, for matching read outcomes.
 
     Always valid JSON, even when bounded: a slice cut mid-document is what a
@@ -78,13 +81,31 @@ def _result_text(result: Any) -> str:
         # whole row once, so sorting this intermediate dump would serialize
         # twice for nothing (same reasoning as the ``args`` column).
         raw = json.dumps(_project_result(structured), default=str)
-        if len(raw) <= RESULT_CHARS:
+        if len(raw) <= cap:
             return raw
         # json.dumps of a string can double it (quote/backslash escaping), so
         # the head takes at most half the budget minus the envelope.
-        return json.dumps({"truncated": True, "head": raw[: (RESULT_CHARS - 64) // 2]}, sort_keys=True)
+        return json.dumps({"truncated": True, "head": raw[: (cap - 64) // 2]}, sort_keys=True)
     # No structured payload (e.g. a call that raised before answering is recorded
     # with no result at all): record the shape of what came back rather than the bytes.
     blocks = getattr(result, "content", None) or []
     kinds = [getattr(b, "type", type(b).__name__) for b in blocks]
-    return json.dumps({"content": kinds}, sort_keys=True)[:RESULT_CHARS]
+    return json.dumps({"content": kinds}, sort_keys=True)[:cap]
+
+
+def _code_sha256(arguments: Mapping[str, Any]) -> str:
+    """Digest of submitted code, '' when the call carried none. No code in the row."""
+    code = arguments.get("code")
+    if not isinstance(code, str):
+        return ""
+    return sha256(code.encode("utf-8")).hexdigest()
+
+
+def _args_text(arguments: Mapping[str, Any], digest: str) -> str:
+    """Bounded, always-parseable args JSON; the digest leads so a cut keeps it.
+
+    Slicing a finished dump used to cut inside a string and produce invalid
+    JSON; the shared truncation envelope keeps the row readable instead.
+    """
+    projected = {"code_sha256": digest, **arguments} if digest else dict(arguments)
+    return _result_text(SimpleNamespace(structured_content=projected), ARGS_CHARS)

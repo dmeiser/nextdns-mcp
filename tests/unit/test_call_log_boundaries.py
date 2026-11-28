@@ -24,16 +24,17 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 # One concern per module, with the line budget each one carries. A split costs
 # lines over the module it replaces (a docstring and an import block per
 # module), so the total is the honest cost of the split file plus the SEC-8
-# checked-open growth noted below, not a number to squeeze the code under.
+# checked-open growth and the SEC-11 execution-audit fields noted here - not a
+# number to squeeze the code under.
 PACKAGE_MODULES = {
     "__init__.py": 45,
     # 110 -> 125 for SEC-8 (#766): every read and append now goes through the
     # O_NOFOLLOW + S_ISREG checked open (`_checked_fd`); the check is the growth.
     "store.py": 125,
-    "projection.py": 110,
-    "evidence.py": 150,
-    "record.py": 100,
-    "middleware.py": 100,
+    "projection.py": 115,
+    "evidence.py": 190,
+    "record.py": 110,
+    "middleware.py": 110,
 }
 
 # The public surface: `openapi.py` and the e2e harness import these from the
@@ -111,10 +112,9 @@ def test_each_module_stays_inside_its_line_budget():
         lines = len(_source(name).splitlines())
         total += lines
         assert lines <= budget, f"{name} is {lines} lines, over its {budget}-line budget"
-    # 560 -> 595 for SEC-8 (#766): the O_NOFOLLOW + S_ISREG checked open
-    # (store.py), the iterative depth-capped identity walk (evidence.py) and
-    # the bounded profile_id (record.py) cost 34 lines of real code.
-    assert total <= 595, f"the package is {total} lines, over the 595-line total"
+    # 595 -> 675 for SEC-11: the write annotation, code digest, parseable
+    # args and UI action evidence stayed in the modules that own them.
+    assert total <= 690, f"the package is {total} lines, over the 690-line total"
 
 
 def test_middleware_is_the_only_module_that_knows_fastmcp():

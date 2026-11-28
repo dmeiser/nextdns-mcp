@@ -18,7 +18,7 @@ no longer branches on ``is_generative_ui_enabled()`` itself.
 
 from fastmcp import FastMCP
 
-from .config import is_generative_ui_enabled
+from .config import is_generative_ui_enabled, is_read_only
 
 _GENERATIVE_UI_CONTENT_TOOLS = ("generate_prefab_ui",)
 _GENERATIVE_UI_DATA_TOOLS = ("search_prefab_components",)
@@ -61,10 +61,17 @@ def enabled_generative_ui_tool_names() -> tuple[str, ...]:
     the names join the catalog only when generative UI is enabled, so a
     server built with the feature off publishes exactly the spec and
     composite tools and nothing generative.
+
+    ``NEXTDNS_READ_ONLY`` is an access-control input like every other write
+    gate: executing generated code is not a read, so the content tool is
+    withheld while the component search — annotated ``read_only_hint=True`` —
+    stays published.
     """
-    if is_generative_ui_enabled():
-        return _GENERATIVE_UI_TOOLS
-    return ()
+    if not is_generative_ui_enabled():
+        return ()
+    if is_read_only():
+        return _GENERATIVE_UI_DATA_TOOLS
+    return _GENERATIVE_UI_TOOLS
 
 
 def register_generative_ui_provider(server: FastMCP) -> None:
@@ -75,8 +82,13 @@ def register_generative_ui_provider(server: FastMCP) -> None:
     enabled, so the heavy generative stack is never pulled in for a server
     that will not use it. The import stays inside the gate for the same
     reason.
-    """
-    if is_generative_ui_enabled():
-        from .generative import PrefabGenerativeUI
 
-        server.add_provider(PrefabGenerativeUI())
+    In read-only mode the provider is still registered — component search is
+    a read — but without its code-execution tool, so the tool the ACL withholds
+    from the catalog is not reachable through the provider either.
+    """
+    if not is_generative_ui_enabled():
+        return
+    from .generative import PrefabGenerativeUI
+
+    server.add_provider(PrefabGenerativeUI(include_generate_tool=not is_read_only()))
