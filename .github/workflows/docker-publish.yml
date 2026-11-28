@@ -112,6 +112,16 @@ jobs:
           # For schedule events, checkout main (stable release code)
           ref: ${{ github.event.workflow_run.head_sha || (github.event_name == 'schedule' && 'main') || github.sha }}
 
+      # A workflow_run uses this workflow from the default branch but checks out
+      # the triggering commit, which can predate scripts/version_sync.py. Load
+      # the helper from the revision supplying the workflow (github.sha) while
+      # pyproject.toml keeps coming from the release tree at the workspace root.
+      - name: Checkout workflow revision (version helper)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: workflow-ref
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -134,7 +144,7 @@ jobs:
       - name: Extract project version
         id: version
         run: |
-          VERSION=$(python3 scripts/version_sync.py get)
+          VERSION=$(python3 workflow-ref/scripts/version_sync.py get --root .)
           if [ -z "$VERSION" ]; then
             echo "Error: Could not extract version from pyproject.toml"
             exit 1
