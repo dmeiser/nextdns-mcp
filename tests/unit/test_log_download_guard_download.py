@@ -922,7 +922,7 @@ class TestSuccessfulDownloadLifecycle:
     def test_a_never_written_path_is_removed_without_a_trace(self, tmp_path):
         """FileNotFoundError means there is nothing to remove and nothing to report."""
         missing = str(tmp_path / "nope" / "download.csv")
-        assert logs_module._remove_downloaded_file(missing) is True
+        assert logs_module._remove_temp_file(missing) is True
 
     def test_a_shared_parent_directory_survives_removal(self, tmp_path):
         """The mkdtemp parent is removed only when empty; a parent another file
@@ -932,7 +932,7 @@ class TestSuccessfulDownloadLifecycle:
         registered = parent / "download.csv"
         registered.write_text("csv")
         (parent / "other").write_text("still here")
-        assert logs_module._remove_downloaded_file(str(registered)) is True
+        assert logs_module._remove_temp_file(str(registered)) is True
         assert not registered.exists()
         assert parent.exists(), "a parent another file lives in must survive"
 

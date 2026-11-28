@@ -66,8 +66,7 @@ from .retention import (
     MissingDownloadRegistryError,
     _download_registry,  # noqa: F401
     _note_successful_download,  # noqa: F401
-    _remove_downloaded_file,  # noqa: F401
-    _unlink_temp_file,  # noqa: F401
+    _remove_temp_file,  # noqa: F401
     cleanup_successful_downloads,
     current_download_registry,
     download_registry,
