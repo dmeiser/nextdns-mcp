@@ -13,7 +13,6 @@ from nextdns_mcp.openapi import create_mcp_server
 from nextdns_mcp.relaxation import StripExtraFieldsMiddleware
 from nextdns_mcp.tools import doh as doh_module
 from nextdns_mcp.tools import logs as logs_module
-from nextdns_mcp.tools.logs import redirects as logs_redirects
 
 
 class TestCreateMcpServer:
@@ -236,8 +235,6 @@ class TestServerLifespan:
     async def test_server_lifespan_closes_http_clients(self, mock_api_key, monkeypatch):
         """Server lifespan exit must close every long-lived client owned by the server."""
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
-        client_module._set_raw_probe_client_singleton_for_tests(None)
-        monkeypatch.setattr(logs_redirects, "_redirect_client", None)
 
         from nextdns_mcp import lifespan as lifespan_module
 
@@ -250,9 +247,9 @@ class TestServerLifespan:
         ):
             async with server._lifespan_manager():
                 api_client = client_module.get_api_client()
-                probe_client = client_module.get_raw_probe_client()
+                probe_client = resources.probe_client.get()
                 doh_client = doh_module.current_doh_client_owner().get()
-                redirect_client = logs_redirects._get_redirect_client()
+                redirect_client = resources.redirect_client.get()
                 assert not api_client.is_closed
                 assert not probe_client.is_closed
                 assert not doh_client.is_closed
@@ -263,9 +260,51 @@ class TestServerLifespan:
         assert doh_client.is_closed
         assert redirect_client.is_closed, "_server_lifespan left the download redirect client open"
         assert resources.api_client._client is None
-        assert client_module._get_raw_probe_client_singleton_for_tests() is None
+        assert resources.probe_client._client is None
         assert resources.doh_client._client is None
-        assert logs_redirects._redirect_client is None
+        assert resources.redirect_client._client is None
+
+    @pytest.mark.asyncio
+    async def test_lifespan_cleanup_continues_after_a_close_fails(self, mock_api_key, monkeypatch):
+        """A close that raises must not skip the closes after it (issue #774).
+
+        The teardown runs through ``ServerResources.aclose()``'s
+        ``AsyncExitStack``: every close is attempted, the first failure is
+        re-raised only after the last close has run, and the lifespan's
+        ``finally`` still resets the owner context vars.
+        """
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+
+        from nextdns_mcp import lifespan as lifespan_module
+
+        server = create_mcp_server()
+        resources = lifespan_module.server_resources(server)
+
+        async def boom() -> None:
+            raise RuntimeError("injected probe close failure")
+
+        monkeypatch.setattr(resources.probe_client, "aclose", boom)
+
+        ambient_redirect_owner = logs_module._redirect_client_owner.get()
+        with pytest.raises(RuntimeError, match="injected probe close failure"):
+            async with server._lifespan_manager():
+                api_client = resources.api_client.get()
+                doh_client = resources.doh_client.get()
+                redirect_client = resources.redirect_client.get()
+                # The lifespan published the server's owners into this context;
+                # the resets in its finally must run even though aclose raised.
+                assert client_module.api_client_owner.get() is resources.api_client
+                assert doh_module.doh_client_owner.get() is resources.doh_client
+                assert logs_module._download_registry.get() is resources.downloads
+                assert logs_module._redirect_client_owner.get() is resources.redirect_client
+
+        assert api_client.is_closed, "the close before the failure must still have run"
+        assert doh_client.is_closed, "a failed probe close skipped the DoH client close"
+        assert redirect_client.is_closed, "a failed probe close skipped the redirect client close"
+        assert client_module.api_client_owner.get() is None
+        assert doh_module.doh_client_owner.get() is None
+        assert logs_module._download_registry.get() is None
+        assert logs_module._redirect_client_owner.get() is ambient_redirect_owner
 
     @pytest.mark.asyncio
     async def test_real_client_session_closes_http_clients_on_disconnect(self, mock_api_key, monkeypatch):
@@ -277,8 +316,6 @@ class TestServerLifespan:
         """
         monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
 
-        monkeypatch.setattr(logs_redirects, "_redirect_client", None)
-
         from nextdns_mcp import lifespan as lifespan_module
 
         server = create_mcp_server()
@@ -288,7 +325,7 @@ class TestServerLifespan:
             await mcp_client.list_tools()
             api_client = resources.api_client.get()
             doh_client = resources.doh_client.get()
-            redirect_client = logs_redirects._get_redirect_client()
+            redirect_client = resources.redirect_client.get()
             assert not api_client.is_closed
             assert not doh_client.is_closed
             assert not redirect_client.is_closed
@@ -297,7 +334,7 @@ class TestServerLifespan:
         assert doh_client.is_closed
 
         assert redirect_client.is_closed, "the Client session did not close the download redirect client"
-        assert logs_redirects._redirect_client is None
+        assert resources.redirect_client._client is None
 
     @pytest.mark.asyncio
     async def test_a_sibling_servers_shutdown_leaves_this_servers_clients_open(self, mock_api_key, monkeypatch):
@@ -313,15 +350,27 @@ class TestServerLifespan:
 
         async with server_a._lifespan_manager():
             a_api_client = resources_a.api_client.get()
+            a_probe_client = resources_a.probe_client.get()
+            a_redirect_client = resources_a.redirect_client.get()
             # Server B starts and finishes WHILE server A is live:
             async with server_b._lifespan_manager():
                 b_api_client = resources_b.api_client.get()
+                b_probe_client = resources_b.probe_client.get()
+                b_redirect_client = resources_b.redirect_client.get()
                 assert a_api_client is not b_api_client
-            # B's shutdown closed only B's client:
+                assert a_probe_client is not b_probe_client, "two servers shared one probe transport"
+                assert a_redirect_client is not b_redirect_client, "two servers shared one redirect client"
+            # B's shutdown closed only B's clients:
             assert b_api_client.is_closed
+            assert b_probe_client.is_closed
+            assert b_redirect_client.is_closed
             assert not a_api_client.is_closed, "a sibling server's shutdown closed this server's client"
+            assert not a_probe_client.is_closed, "a sibling server's shutdown closed this server's probe transport"
+            assert not a_redirect_client.is_closed, "a sibling server's shutdown closed this server's redirect client"
 
         assert a_api_client.is_closed
+        assert a_probe_client.is_closed
+        assert a_redirect_client.is_closed
 
 
 class TestCompositeErrorResultsAreFlagged:

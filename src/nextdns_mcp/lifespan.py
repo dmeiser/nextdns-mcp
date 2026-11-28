@@ -1,12 +1,15 @@
 """Server lifespan and the per-server state it owns.
 
 ``create_mcp_server`` (``nextdns_mcp.openapi``) attaches one
-``ServerResources`` — the API client owner, DoH client owner, and download
-registry — to each ``FastMCP`` instance and hands ``server_lifespan`` to
-FastMCP as the server's lifespan. The lifespan publishes the resources two
-ways, both explicit: into each module's owner context var for same-task
-callers, and into the lifespan context FastMCP hands every request this
-server serves (issue #642). Shutdown releases everything the server owns.
+``ServerResources`` — the API client owner, probe transport owner, DoH
+client owner, download registry, and redirect client owner — to each
+``FastMCP`` instance and hands ``server_lifespan`` to FastMCP as the
+server's lifespan. The lifespan publishes the resources two ways, both
+explicit: into each module's owner context var for same-task callers, and
+into the lifespan context FastMCP hands every request this server serves
+(issue #642). Shutdown releases everything the server owns through
+``ServerResources.aclose()``, which attempts every close even when one
+fails (issue #774).
 
 This module has no dependency on the optional ``generative`` module: the
 lazily-started Pyodide/Deno sandbox subprocess (issue #408) is stopped by
@@ -18,51 +21,59 @@ SPDX-License-Identifier: MIT
 """
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 from fastmcp import FastMCP
 
-from .client import ApiClientOwner, api_client_owner, close_raw_probe_client
+from .client import ApiClientOwner, ProbeClientOwner, api_client_owner
 from .config import ServerConfig
 from .state import RESOURCES_LIFESPAN_KEY, server_config
 from .tools.doh import DohClientOwner, doh_client_owner
-from .tools.logs import DownloadRegistry, close_redirect_client, download_registry
+from .tools.logs import DownloadRegistry, RedirectClientOwner, _redirect_client_owner, download_registry
 
 
 class ServerResources:
     """One server instance's explicitly owned state.
 
-    Owns the immutable configuration snapshot, API client owner, DoH client
-    owner, and download registry a server serves: the state that used to live
-    in process-global module singletons any caller could reach. Every client
-    and download consumer reads the snapshot this server was created with rather
-    than the process environment. ``create_mcp_server()`` builds one per
-    ``FastMCP`` instance and attaches it to the instance, so two embedded
-    servers never read or reset each other's state. :meth:`aclose` closes the
-    clients and reclaims the downloads - one server's shutdown cannot reach
-    into a sibling server's connections or tracked CSVs.
+    Owns the immutable configuration snapshot, API client owner, probe
+    transport owner, DoH client owner, download registry, and redirect client
+    owner a server serves: the state that used to live in process-global
+    module singletons any caller could reach. Every client and download
+    consumer reads the snapshot this server was created with rather than the
+    process environment. ``create_mcp_server()`` builds one per ``FastMCP``
+    instance and attaches it to the instance, so two embedded servers never
+    read or reset each other's state. :meth:`aclose` closes the clients and
+    reclaims the downloads - one server's shutdown cannot reach into a
+    sibling server's connections or tracked CSVs.
     """
 
     def __init__(self, config: ServerConfig | None = None) -> None:
         snapshot = config if config is not None else ServerConfig.from_env()
         self.config = snapshot
         self.api_client = ApiClientOwner(config=snapshot)
+        self.probe_client = ProbeClientOwner()
         self.doh_client = DohClientOwner(config=snapshot)
         self.downloads = DownloadRegistry()
+        self.redirect_client = RedirectClientOwner(config=snapshot)
 
     async def aclose(self) -> None:
-        """Release everything this server owns: clients first, then the downloads.
+        """Release everything this server owns, attempting every step.
 
-        Matches the shutdown order the lifespan has always used: close the
-        API client even when the DoH close or the download cleanup fails,
-        and never leave this server's tracked CSVs behind.
+        Matches the shutdown order the lifespan has always used - API client,
+        probe transport, DoH client, downloads, redirect client - but every
+        close is pushed onto an ``AsyncExitStack``, so a close that raises
+        cannot skip the ones after it: the stack runs every callback and
+        re-raises the failure only after the last one has run. Never leave
+        this server's tracked CSVs behind because an unrelated client close
+        failed (issue #774).
         """
-        try:
-            await self.api_client.aclose()
-        finally:
-            await self.doh_client.aclose()
-            self.downloads.cleanup()
+        async with AsyncExitStack() as stack:
+            stack.push_async_callback(self.redirect_client.aclose)
+            stack.callback(self.downloads.cleanup)
+            stack.push_async_callback(self.doh_client.aclose)
+            stack.push_async_callback(self.probe_client.aclose)
+            stack.push_async_callback(self.api_client.aclose)
 
 
 def server_resources(mcp: FastMCP) -> ServerResources:
@@ -82,8 +93,9 @@ def server_resources(mcp: FastMCP) -> ServerResources:
 async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage server lifespan: own the server's state explicitly, release it on shutdown.
 
-    Own the state THIS server hands out: the API client, DoH client, and
-    download registry attached to the instance by ``create_mcp_server``. The
+    Own the state THIS server hands out: the API client, probe transport, DoH
+    client, download registry, and redirect client attached to the instance
+    by ``create_mcp_server``. The
     lifespan publishes them two ways, both explicit: into each module's owner
     context var for same-task callers, and into the lifespan context FastMCP
     hands every request this server serves (issue #642: the lifespan task
@@ -99,25 +111,15 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     api_token = api_client_owner.set(resources.api_client)
     doh_token = doh_client_owner.set(resources.doh_client)
     registry_token = download_registry.set(resources.downloads)
+    redirect_token = _redirect_client_owner.set(resources.redirect_client)
     config_token = server_config.set(resources.config)
     try:
         yield {RESOURCES_LIFESPAN_KEY: resources}
     finally:
         try:
-            await resources.api_client.aclose()
+            await resources.aclose()
         finally:
-            await close_raw_probe_client()
-            await resources.doh_client.aclose()
-            resources.downloads.cleanup()
-            # The downloadLogs redirect chain reuses one persistent unauthenticated
-            # client for keep-alive reuse (issue #656); like the transport above
-            # it is closed at shutdown.
-            await close_redirect_client()
-            # The lazily-started Pyodide/Deno sandbox subprocess (issue #408) is
-            # stopped by PrefabGenerativeUI.lifespan(), which FastMCP unwinds
-            # before this lifespan: this module has no dependency on the optional
-            # generative module, and one server's shutdown no longer reaches into
-            # its siblings' sandboxes (issue #542).
+            _redirect_client_owner.reset(redirect_token)
             download_registry.reset(registry_token)
             doh_client_owner.reset(doh_token)
             api_client_owner.reset(api_token)

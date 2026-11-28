@@ -16,7 +16,6 @@ import logging
 import httpx
 
 from nextdns_mcp import client as client_module
-from nextdns_mcp import health
 from nextdns_mcp.config import ConfigurationError
 from nextdns_mcp.health import (
     HEALTH_CACHE_TTL,
@@ -56,10 +55,15 @@ def _response(status_code: int, body: str = '{"error":"Forbidden"}') -> httpx.Re
 
 
 def _install_client(monkeypatch, *outcomes: httpx.Response | Exception) -> FakeProbeTransport:
-    """Point the health probe at a fake transport, bypassing the shared singleton."""
+    """Point the health probe at a fake transport by patching the lazy build.
+
+    The prober resolves its transport through the server-owned
+    ``ProbeClientOwner``, whose lazy build calls ``create_raw_probe_client``
+    at call time - patching the factory routes every owner (the standalone
+    probers here and the one a created server registers) at the fake.
+    """
     client = FakeProbeTransport(*outcomes)
-    monkeypatch.setattr(health, "get_raw_probe_client", lambda: client)
-    client_module._set_raw_probe_client_singleton_for_tests(None)
+    monkeypatch.setattr(client_module, "create_raw_probe_client", lambda: client)
     return client
 
 
@@ -159,7 +163,6 @@ async def test_health_never_leaks_key_material_or_the_probe_body(monkeypatch, mo
 
 async def test_health_returns_503_when_no_api_key_is_usable():
     """A missing or empty API key is reported as 503, not a 500 — and says no more."""
-    client_module._set_raw_probe_client_singleton_for_tests(None)
     status_code, body = await _call_health(create_mcp_server().http_app())
 
     assert status_code == 503
@@ -170,7 +173,6 @@ async def test_an_invalid_http_timeout_is_reported_as_unready_without_naming_it(
     """An invalid NEXTDNS_HTTP_TIMEOUT still yields 503, without leaking the cause."""
     monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
     monkeypatch.setenv("NEXTDNS_HTTP_TIMEOUT", "not-a-number")
-    client_module._set_raw_probe_client_singleton_for_tests(None)
 
     status_code, body = await _call_health(create_mcp_server().http_app())
 
@@ -183,7 +185,6 @@ async def test_an_invalid_api_base_is_logged_as_the_api_base(monkeypatch, mock_a
     """An invalid NEXTDNS_API_BASE names that setting in the warning, not NEXTDNS_HTTP_TIMEOUT."""
     monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
     monkeypatch.setenv("NEXTDNS_API_BASE", "http://api.nextdns.io")
-    client_module._set_raw_probe_client_singleton_for_tests(None)
 
     with caplog.at_level(logging.WARNING, logger="nextdns_mcp.health"):
         status_code, body = await _call_health(create_mcp_server().http_app())
@@ -343,7 +344,6 @@ async def test_concurrent_pollers_share_one_probe(monkeypatch, mock_api_key):
         calls.append(1)
         await asyncio.sleep(0.05)  # let the other poller arrive and wait on the lock
 
-    monkeypatch.setattr(health, "get_raw_probe_client", lambda: FakeProbeTransport(_response(200, "[]")))
     prober = ReadinessProber()
     monkeypatch.setattr(prober, "_probe", slow_probe)
 

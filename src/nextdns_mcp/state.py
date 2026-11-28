@@ -1,9 +1,9 @@
 """Shared resolution for explicitly owned server state (issue #642).
 
-The server's mutable state - the API client, the DoH client, and the download
-registry - belongs to a per-server ``ServerResources`` owner (see
-``nextdns_mcp.openapi``). A state holder is reachable from a request in two
-ways, and both are explicit:
+The server's mutable state - the API client, the probe transport, the DoH
+client, the download registry, and the redirect client - belongs to a
+per-server ``ServerResources`` owner (see ``nextdns_mcp.openapi``). A state
+holder is reachable from a request in two ways, and both are explicit:
 
 - a caller published an owner into the current context with the owning
   module's ``*_owned()`` context manager (standalone scripts and tests), or

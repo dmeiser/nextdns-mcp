@@ -64,9 +64,10 @@ def create_mcp_server(
     generated ones and the three composite operations. What happens here is the machinery
     around them: disclosure, argument relaxation, the call log, the health
     endpoint, and ownership of the server's long-lived state — one
-    ``ServerResources`` (the API client, DoH client, and download registry)
-    is built here and attached to the instance, so every server owns its state
-    explicitly and embedded servers never share it.
+    ``ServerResources`` (the API client, probe transport, DoH client,
+    download registry, and redirect client) is built here and attached to the
+    instance, so every server owns its state explicitly and embedded servers
+    never share it.
 
         Args:
         tool_names: The names of the tools registered after this call, so the

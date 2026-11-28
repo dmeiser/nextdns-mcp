@@ -22,6 +22,7 @@ import os
 import socket
 import tempfile
 import threading
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Self
@@ -392,12 +393,223 @@ class TestUnauthenticatedFollowUp:
         assert client.closed is False, "a completed download must not close the shared client"
         await logs_module.close_redirect_client()
         assert client.closed is True
-        assert redirects._redirect_client is None, "closing must reset the singleton"
+        owner = redirects.current_redirect_client_owner()
+        assert owner._client is None, "closing must reset the owner's client"
 
     async def test_close_before_any_download_is_a_noop(self):
         """The shutdown close is safe when no download ever created the client."""
         await logs_module.close_redirect_client()
-        assert redirects._redirect_client is None
+        assert redirects.current_redirect_client_owner()._client is None
+
+    async def test_close_waits_for_an_active_fetch(self):
+        """The shutdown close runs under the fetch lock (issue #774): it must wait
+        for a chain holding the lock rather than close the client mid-fetch."""
+        async with logs_module._PIN_FETCH_LOCK:  # stands in for an in-flight chain
+            close_task = asyncio.create_task(logs_module.close_redirect_client())
+            await asyncio.sleep(0.05)
+            assert not close_task.done(), "close completed while a fetch held the lock"
+        await asyncio.wait_for(close_task, timeout=5)
+
+    async def test_two_owners_never_share_a_redirect_client(self):
+        """Per-server ownership: one server's redirect client is not its sibling's."""
+        first = redirects.RedirectClientOwner()
+        second = redirects.RedirectClientOwner()
+        try:
+            assert first.get() is not second.get()
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+    def test_the_fetch_lock_contends_in_two_event_loops(self):
+        """The pinned-resolver lock is process-global, so it must contend cleanly
+        from more than one event loop (issue #774): an import-time asyncio.Lock
+        binds to the first loop and raises ``bound to a different event loop``
+        the moment a second loop contends it."""
+
+        async def contend() -> None:
+            async def hold() -> None:
+                async with logs_module._PIN_FETCH_LOCK:
+                    await asyncio.sleep(0.02)
+
+            await asyncio.gather(hold(), hold())
+
+        asyncio.run(contend())
+        asyncio.run(contend())  # a loop-bound lock raises RuntimeError here
+
+    async def test_a_cancelled_waiter_never_leaks_the_lock(self):
+        """A waiter cancelled while queued (the download's overall timeout can
+        fire while a chain waits behind another) must not leave the
+        process-global lock held forever: the orphaned acquire's release is
+        tied to its completion."""
+        async with logs_module._PIN_FETCH_LOCK:
+            waiter = asyncio.create_task(logs_module._PIN_FETCH_LOCK.__aenter__())
+            await asyncio.sleep(0.05)  # the waiter is blocked in its worker thread
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        # The orphaned acquire completes once the holder releases, and the
+        # handoff gives the lock straight back: a fresh acquire must not hang.
+        async with asyncio.timeout(5):
+            async with logs_module._PIN_FETCH_LOCK:
+                pass
+
+    def test_a_teardown_cancelled_waiter_never_leaks_the_lock(self):
+        """Loop teardown cancels the shielded task itself - which the shield
+        cannot protect against - while its worker is blocked in ``acquire``.
+        The orphaned acquire still completes, and must hand the process-global
+        lock back instead of stranding every later fetch and close."""
+        lock = guard._CrossLoopLock()
+
+        def hold_section() -> None:
+            lock._lock.acquire()  # another server's download chain
+            time.sleep(0.5)
+            lock._lock.release()
+
+        holder = threading.Thread(target=hold_section, daemon=True)
+        holder.start()
+        time.sleep(0.05)
+
+        async def torn_down_loop() -> None:
+            asyncio.ensure_future(lock.__aenter__())
+            await asyncio.sleep(0.15)  # the waiter is queued in its worker thread
+            # returning makes asyncio.run cancel every pending task, the
+            # shielded acquire included, and then join the worker
+
+        asyncio.run(torn_down_loop())
+        holder.join()
+        time.sleep(0.1)  # let the orphaned worker finish its acquire
+
+        assert not lock._lock.locked()
+        assert lock._lock.acquire(blocking=False) is True
+        lock._lock.release()
+
+    async def test_an_abandoned_waiter_releases_what_the_worker_took(self):
+        """Race: the worker finishes the acquire just before the waiter is
+        cancelled, so it never sees the abandonment. The waiter must release
+        what the worker took - once, and not again when the task completes."""
+        lock = guard._CrossLoopLock()
+        release_holder = threading.Event()
+
+        def hold_section() -> None:
+            lock._lock.acquire()
+            release_holder.wait(5)
+            lock._lock.release()
+
+        holder = threading.Thread(target=hold_section, daemon=True)
+        holder.start()
+        time.sleep(0.05)  # noqa: ASYNC251 - a thread holds the section, not this loop
+
+        waiter = asyncio.ensure_future(lock.__aenter__())
+        await asyncio.sleep(0.1)  # the waiter's worker is blocked in acquire
+        release_holder.set()
+        # Hold the loop: the worker takes the freed section and its result
+        # queues up undelivered, so the waiter is cancelled with the lock
+        # already in the worker's hands and the handoff still unrecorded here.
+        time.sleep(0.2)  # noqa: ASYNC251 - blocking the loop IS the setup
+        holder.join()
+        assert lock._lock.locked(), "the worker never took the freed section: nothing to hand back"
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await asyncio.sleep(0)  # reap the completed acquire task
+        assert not lock._lock.locked()
+
+    async def test_an_acquire_that_failed_releases_nothing(self, monkeypatch):
+        """An executor refusal during teardown ends the acquire with an
+        exception rather than cancellation: nothing was acquired, so another
+        server's hold on the section must survive untouched."""
+        lock = guard._CrossLoopLock()
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            async def fail() -> None:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+
+            return fail()
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(asyncio, "to_thread", refuse)
+            assert lock._lock.acquire(blocking=False)  # a sibling's in-flight chain
+            try:
+                with pytest.raises(RuntimeError, match="cannot schedule new futures"):
+                    await lock.__aenter__()
+                assert lock._lock.locked()
+            finally:
+                lock._lock.release()
+        async with asyncio.timeout(5):
+            async with lock:
+                pass
+
+    def test_a_teardown_cancelled_close_does_not_strand_a_sibling(self):
+        """The same leak through the public path: one server's shutdown close
+        queued behind another's in-flight chain, cancelled by loop teardown,
+        must not block the live sibling's own shutdown close."""
+        live = redirects.RedirectClientOwner()
+        doomed = redirects.RedirectClientOwner()
+        live_client = live.get()
+        doomed.get()
+        release_chain = threading.Event()
+
+        def hold_like_a_chain() -> None:
+            guard._PIN_FETCH_LOCK._lock.acquire()
+            release_chain.wait(5)
+            guard._PIN_FETCH_LOCK._lock.release()
+
+        holder = threading.Thread(target=hold_like_a_chain, daemon=True)
+        holder.start()
+        time.sleep(0.1)
+
+        async def torn_down_shutdown() -> None:
+            asyncio.ensure_future(doomed.aclose())
+            await asyncio.sleep(0.15)  # the close is queued behind the chain
+            # returning cancels the close task, as loop teardown does
+
+        asyncio.run(torn_down_shutdown())
+        release_chain.set()
+        holder.join()
+
+        outcomes: list[str] = []
+
+        def run_live_shutdown() -> None:
+            async def close() -> None:
+                async with asyncio.timeout(5):
+                    await live.aclose()
+
+            try:
+                asyncio.run(close())
+                outcomes.append("closed")
+            except RuntimeError as exc:
+                outcomes.append(str(exc))
+
+        # A leaked lock blocks inside a worker thread that asyncio.run joins,
+        # so observe the close off-loop rather than hanging the whole suite.
+        shutdown = threading.Thread(target=run_live_shutdown, daemon=True)
+        shutdown.start()
+        shutdown.join(6)
+        assert not shutdown.is_alive(), "the live sibling's close is stuck on a leaked lock"
+        assert outcomes == ["closed"]
+        assert live_client.is_closed
+
+    def test_the_fetch_lock_excludes_a_second_loop(self):
+        """Serialization is process-wide, not per loop: two loops in two threads
+        must never hold the pinned-resolver section at the same time."""
+        events: list[str] = []
+
+        def run_loop(tag: str) -> None:
+            async def work() -> None:
+                async with logs_module._PIN_FETCH_LOCK:
+                    events.append(f"{tag}-in")
+                    await asyncio.sleep(0.05)
+                    events.append(f"{tag}-out")
+
+            asyncio.run(work())
+
+        threads = [threading.Thread(target=run_loop, args=(tag,)) for tag in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(events) == 4
+        assert events[0][:-3] == events[1][:-4], f"the two loops interleaved inside the section: {events}"
 
     async def test_a_cookie_from_one_download_does_not_reach_the_next(self, tmp_path, unauthenticated):
         """The persistent client shares one cookie jar, so each chain must start from
