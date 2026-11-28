@@ -265,9 +265,12 @@ def validate_chart_placement(code: str) -> None:
     except SyntaxError:
         return
     if _chart_in_tab(tree):
+        # Both rejected tab forms are named, derived from the same set the walk matches on
+        # (WORK-386).
+        tab_names = " or ".join(sorted(_TAB_NAMES))
         raise ValueError(
             f"Recharts chart components ({', '.join(CHART_COMPONENT_NAMES)}) cannot be placed "
-            "inside Tab components because tab panels initialize with 0px width, causing charts to "
+            f"inside {tab_names} components because tab panels initialize with 0px width, causing charts to "
             "render completely invisible. Place the chart outside of Tabs in a Column, Row, Card, or Grid."
         )
 

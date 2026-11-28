@@ -210,6 +210,18 @@ def test_with_tabstrigger_chart_is_rejected():
         validate_chart_placement(code)
 
 
+def test_placement_error_names_every_rejected_tab_form():
+    """The diagnostic names the tab form it rejected, not only ``Tab`` (WORK-386)."""
+    code = "with TabsTrigger('Charts'):\n    DonutChart(data=[])\n"
+    with pytest.raises(ValueError) as excinfo:
+        validate_chart_placement(code)
+    message = str(excinfo.value)
+    assert "DonutChart" in message
+    assert "TabsTrigger" in message
+    # The chart list stays derived from CHART_COMPONENT_NAMES.
+    assert all(name in message for name in chart_placement_module.CHART_COMPONENT_NAMES)
+
+
 def test_tab_functional_children_chart_is_rejected():
     """Functional Tab(children=[...]) nesting bypasses `with` matching."""
     code = "Tab(children=[AreaChart(data=[], series=[])])\n"
