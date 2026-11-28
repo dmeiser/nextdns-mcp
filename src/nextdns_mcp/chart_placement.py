@@ -10,6 +10,7 @@ SPDX-License-Identifier: MIT
 
 import ast
 from bisect import bisect_left
+from dataclasses import dataclass
 
 _CHART_NAMES = {
     "AreaChart",
@@ -26,7 +27,27 @@ _TAB_NAMES = {"Tab", "TabsTrigger"}
 
 _Position = tuple[int, int]
 _BindingEvent = tuple[_Position, bool]  # (where the name is bound, whether it receives a Tab call)
-_Bindings = dict[str, list[_BindingEvent]]
+_Bindings = dict[ast.AST, dict[str, list[_BindingEvent]]]  # scope -> name -> events
+_SCOPE_NODES = (
+    ast.Module,
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+
+
+@dataclass(frozen=True)
+class _PlacementContext:
+    """Name bindings grouped by lexical scope, with each scope's enclosing scope."""
+
+    scopes: dict[ast.AST, ast.AST]  # node -> innermost scope that owns it
+    enclosing: dict[ast.AST, ast.AST | None]  # scope -> enclosing scope
+    bindings: _Bindings
 
 
 def _unwrap_named(node: ast.AST | None) -> ast.AST | None:
@@ -60,9 +81,9 @@ def _call_children(node: ast.Call) -> list[ast.AST]:
     return children
 
 
-def _call_visits(node: ast.Call, in_tab: bool, bindings: _Bindings) -> list[tuple[ast.AST, bool]]:
+def _call_visits(node: ast.Call, in_tab: bool, ctx: _PlacementContext) -> list[tuple[ast.AST, bool]]:
     """Child visits for a call: a Tab, or a call attached to one, opens tab scope."""
-    if _opens_tab_scope(node, bindings):
+    if _opens_tab_scope(node, ctx):
         return [(child, True) for child in _call_children(node)]
     return [(child, in_tab) for child in ast.iter_child_nodes(node)]
 
@@ -99,27 +120,52 @@ def _binding_for_node(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> tuple[_
     return None
 
 
-def _sort_events(bindings: _Bindings) -> _Bindings:
+def _sort_events(bindings: dict[str, list[_BindingEvent]]) -> dict[str, list[_BindingEvent]]:
     """Order each name's bindings by source position so a lookup can bisect."""
     for bound in bindings.values():
         bound.sort()
     return bindings
 
 
-def _collect_bindings(tree: ast.AST) -> _Bindings:
-    """Every name binding in the module, with whether it binds a Tab call.
+def _scope_map(tree: ast.AST, parents: dict[ast.AST, ast.AST]) -> dict[ast.AST, ast.AST]:
+    """Associate every node with the innermost Python scope that owns it."""
+    scopes: dict[ast.AST, ast.AST] = {tree: tree}
+    stack: list[ast.AST] = [tree]
+    while stack:
+        parent = stack.pop()
+        for child in ast.iter_child_nodes(parent):
+            scopes[child] = child if isinstance(child, _SCOPE_NODES) else scopes[parent]
+            stack.append(child)
+    return scopes
 
-    One linear pass over Store-context names and parameter declarations. The
-    binding closest before a use decides, so a rebinding to a non-Tab value or
-    a same-named parameter ends an earlier Tab binding's reach.
+
+def _enclosing_scopes(scopes: dict[ast.AST, ast.AST], parents: dict[ast.AST, ast.AST]) -> dict[ast.AST, ast.AST | None]:
+    """Map each scope node to its lexically enclosing scope."""
+    return {node: scopes[parent] for node, parent in parents.items() if scopes[node] is node}
+
+
+def _collect_bindings(tree: ast.AST, parents: dict[ast.AST, ast.AST], scopes: dict[ast.AST, ast.AST]) -> _Bindings:
+    """Bindings by lexical scope: a name bound in one function cannot affect another.
+
+    One linear pass over Store-context names and parameter declarations; each
+    name keeps its bindings in source position order within its own scope.
     """
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     bindings: _Bindings = {}
     for node in ast.walk(tree):
         binding = _binding_for_node(node, parents)
         if binding is not None:
-            bindings.setdefault(binding[1], []).append((binding[0], binding[2]))
-    return _sort_events(bindings)
+            position, name, is_tab = binding
+            bindings.setdefault(scopes[node], {}).setdefault(name, []).append((position, is_tab))
+    for names in bindings.values():
+        _sort_events(names)
+    return bindings
+
+
+def _build_context(tree: ast.AST) -> _PlacementContext:
+    """Index the module's scopes and their name bindings in one pass."""
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    scopes = _scope_map(tree, parents)
+    return _PlacementContext(scopes, _enclosing_scopes(scopes, parents), _collect_bindings(tree, parents, scopes))
 
 
 def _last_binding_is_tab(bound: list[_BindingEvent], used_at: _Position) -> bool:
@@ -128,44 +174,58 @@ def _last_binding_is_tab(bound: list[_BindingEvent], used_at: _Position) -> bool
     return bound[index][1] if index >= 0 else False
 
 
-def _is_tab_ref(node: ast.AST | None, bindings: _Bindings) -> bool:
-    """True for a Tab call, or a name whose nearest earlier binding is one."""
+def _resolve_binding(ctx: _PlacementContext, name: str, scope: ast.AST, used_at: _Position) -> bool:
+    """Resolve a bare name in its own scope first, then enclosing scopes."""
+    current: ast.AST | None = scope
+    while current is not None:
+        # Methods do not close over class-body names, so class scopes are skipped
+        # when the use is in a nested function.
+        if not isinstance(current, ast.ClassDef) or current is scope:
+            bound = ctx.bindings.get(current, {}).get(name, [])
+            if bound:
+                return _last_binding_is_tab(bound, used_at)
+        current = ctx.enclosing.get(current)
+    return False
+
+
+def _is_tab_ref(node: ast.AST | None, ctx: _PlacementContext) -> bool:
+    """True for a Tab call, or a name resolving to a Tab binding in its scope."""
     if _is_tab_call(node):
         return True
     if not isinstance(node, ast.Name):
         return False
-    return _last_binding_is_tab(bindings.get(node.id, []), _position(node))
+    return _resolve_binding(ctx, node.id, ctx.scopes[node], _position(node))
 
 
-def _attaches_to_tab(node: ast.AST, bindings: _Bindings) -> bool:
+def _attaches_to_tab(node: ast.AST, ctx: _PlacementContext) -> bool:
     """True if the call attaches itself to a Tab via its parent= keyword."""
     if not isinstance(node, ast.Call):
         return False
     for keyword in node.keywords:
-        if keyword.arg == "parent" and _is_tab_ref(_unwrap_named(keyword.value), bindings):
+        if keyword.arg == "parent" and _is_tab_ref(_unwrap_named(keyword.value), ctx):
             return True
     return False
 
 
-def _opens_tab_scope(node: ast.AST, bindings: _Bindings) -> bool:
+def _opens_tab_scope(node: ast.AST, ctx: _PlacementContext) -> bool:
     """True when a chart inside this expression would land in a 0px tab panel."""
-    return _is_tab_call(node) or _attaches_to_tab(node, bindings)
+    return _is_tab_call(node) or _attaches_to_tab(node, ctx)
 
 
-def _with_visits(node: ast.With | ast.AsyncWith, in_tab: bool, bindings: _Bindings) -> list[tuple[ast.AST, bool]]:
+def _with_visits(node: ast.With | ast.AsyncWith, in_tab: bool, ctx: _PlacementContext) -> list[tuple[ast.AST, bool]]:
     """Child visits for a `with`: items keep the current scope; the body opens tab scope."""
     visits: list[tuple[ast.AST, bool]] = [(item.context_expr, in_tab) for item in node.items]
-    body_scope = in_tab or any(_opens_tab_scope(item.context_expr, bindings) for item in node.items)
+    body_scope = in_tab or any(_opens_tab_scope(item.context_expr, ctx) for item in node.items)
     visits.extend((stmt, body_scope) for stmt in node.body)
     return visits
 
 
-def _node_visits(node: ast.AST, in_tab: bool, bindings: _Bindings) -> list[tuple[ast.AST, bool]]:
+def _node_visits(node: ast.AST, in_tab: bool, ctx: _PlacementContext) -> list[tuple[ast.AST, bool]]:
     """Return the (node, scope) pairs to visit for one node's children."""
     if isinstance(node, ast.With | ast.AsyncWith):
-        return _with_visits(node, in_tab, bindings)
+        return _with_visits(node, in_tab, ctx)
     if isinstance(node, ast.Call):
-        return _call_visits(node, in_tab, bindings)
+        return _call_visits(node, in_tab, ctx)
     return [(child, in_tab) for child in ast.iter_child_nodes(node)]
 
 
@@ -174,20 +234,23 @@ def _chart_in_tab(root: ast.AST) -> bool:
 
     A chart is nested when it is reached under tab scope (`with Tab(...):`,
     Tab children, or the children of a container whose `parent=` resolves to a
-    Tab) or when the chart itself carries `parent=` resolving to a Tab. A
-    `parent=` name resolves through the binding nearest before its use, so a
-    rebinding or a shadowing parameter ends the Tab's reach. Iterative stack
-    walk: each `with` item's context expression is visited, each `with` body
-    is visited once regardless of item count, and node depth costs no stack
-    frames, so deeply nested expressions cannot raise RecursionError.
+    Tab) or when the chart itself carries `parent=` resolving to a Tab. A bare
+    `parent=` name resolves in its own lexical scope first, then through
+    enclosing scopes, using the binding nearest before the use within that
+    scope: a local in an unrelated function cannot change the meaning of a
+    module-level name, while a real closure still sees the enclosing binding.
+    Iterative stack walk: each `with` item's context expression is visited,
+    each `with` body is visited once regardless of item count, and node depth
+    costs no stack frames, so deeply nested expressions cannot raise
+    RecursionError.
     """
-    bindings = _collect_bindings(root)
+    ctx = _build_context(root)
     stack: list[tuple[ast.AST, bool]] = [(root, False)]
     while stack:
         node, in_tab = stack.pop()
-        if _is_chart_call(node) and (in_tab or _attaches_to_tab(node, bindings)):
+        if _is_chart_call(node) and (in_tab or _attaches_to_tab(node, ctx)):
             return True
-        stack.extend(_node_visits(node, in_tab, bindings))
+        stack.extend(_node_visits(node, in_tab, ctx))
     return False
 
 

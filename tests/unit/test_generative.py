@@ -136,9 +136,9 @@ def test_repeated_tab_blocks_scale_subquadratically(monkeypatch):
         examinations = {"n": 0}
         original = chart_placement_module._node_visits
 
-        def counting(node, in_tab, bindings):
+        def counting(node, in_tab, ctx):
             examinations["n"] += 1
-            return original(node, in_tab, bindings)
+            return original(node, in_tab, ctx)
 
         monkeypatch.setattr(chart_placement_module, "_node_visits", counting)
         code = "".join(f"with Tab('T{i}'):\n    pass\n" for i in range(blocks))
@@ -303,6 +303,19 @@ def test_chart_parent_outer_tab_binding_in_function_is_rejected():
         _validate_chart_placement(code)
 
 
+def test_chart_parent_never_bound_name_is_accepted():
+    """A parent= name with no binding anywhere resolves to no Tab."""
+    code = "AreaChart(data=[], series=[], parent=unknown)\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_method_parent_skips_class_scope_and_sees_enclosing_tab():
+    """Methods do not close over class-body names; the enclosing module Tab applies."""
+    code = "t = Tab('Charts')\nclass Panel:\n    t = Column()\n    def build(self):\n        return AreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
 def test_chart_parent_attribute_is_accepted():
     """Only bare names get binding lookups; an attribute is not a known Tab binding."""
     code = "AreaChart(data=[], series=[], parent=container.tab)\n"
@@ -313,6 +326,26 @@ def test_chart_parent_loop_target_is_accepted():
     """A loop target rebinds the name to an unknown value, not the earlier Tab."""
     code = "t = Tab('Charts')\nfor t in rows:\n    AreaChart(data=[], series=[], parent=t)\n"
     _validate_chart_placement(code)  # should not raise
+
+
+def test_module_chart_parent_is_not_overridden_by_local_in_uncalled_function():
+    """A local Tab in an uncalled function does not change a module-level Column."""
+    code = "t = Column()\ndef unused():\n    t = Tab('Charts')\n    return t\nAreaChart(data=[], series=[], parent=t)\n"
+    _validate_chart_placement(code)  # should not raise
+
+
+def test_module_tab_parent_is_not_shadowed_by_parameter_in_uncalled_function():
+    """A parameter in an uncalled function does not hide a module-level Tab."""
+    code = "t = Tab('Charts')\ndef unused(t):\n    return t\nAreaChart(data=[], series=[], parent=t)\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
+
+
+def test_nested_function_closes_over_tab_binding():
+    """A real closure still resolves the enclosing scope's Tab binding."""
+    code = "def outer():\n    t = Tab('Charts')\n    def inner():\n        return AreaChart(data=[], series=[], parent=t)\n    return inner\n"
+    with pytest.raises(ValueError, match="Recharts chart components"):
+        _validate_chart_placement(code)
 
 
 def test_chart_parent_comprehension_target_is_accepted():
