@@ -14,7 +14,7 @@ Reduce risk when operating on real NextDNS profiles.
 
 ## Scope of global tools
 - `dohLookup` is not exempt: it queries a separate DoH endpoint, but it still enforces the per-profile read check, so the queried profile must be in `NEXTDNS_READABLE_PROFILES` or `NEXTDNS_WRITABLE_PROFILES` (write implies read), or one of them must be "ALL". See configuration.md.
-- The collection profile tools `listProfiles` and `createProfile` respect the global read/write denials; under the deny-all default (both profile sets unset) the list is denied, and the create is denied in read-only mode or when `NEXTDNS_WRITABLE_PROFILES` is unset. See configuration.md.
+- The collection profile tools `listProfiles` and `createProfile` respect the global read/write denials; under the deny-all default (both profile sets unset) the list is denied, and the create is denied in read-only mode, when `NEXTDNS_WRITABLE_PROFILES` is unset, or when every profile in it is also protected. See configuration.md.
 
 ## Protected profiles
 - `NEXTDNS_PROTECTED_PROFILES` is a write-only denylist. Every write against a listed profile is refused — including `deleteProfile` — even under `NEXTDNS_WRITABLE_PROFILES=ALL`: the check runs before the `ALL` branch, so the setting cannot re-open it. Ids are matched case-insensitively, like the other profile lists, and there is no `ALL` sentinel: an entry is one profile id.

@@ -43,7 +43,7 @@ x-mcp-divergences:
   delegated-operations:
     # Served by a guarded implementation instead of the raw redirect: signed
     # URL chain, unauthenticated follow-up fetch, size cap, SSRF checks
-    # (nextdns_mcp.tools.logs; spec_tools.DELEGATED_HANDLERS).
+    # (nextdns_mcp.tools.logs; server._DELEGATED_HANDLERS, supplied to register_spec_tools).
     downloadLogs: nextdns_mcp.tools.logs
   destructive-hint-overrides:
     # Operations the spec declares irreversible regardless of HTTP method;

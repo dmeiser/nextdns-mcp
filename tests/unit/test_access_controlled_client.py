@@ -259,6 +259,43 @@ class TestAccessControlledClientWriteAccess:
         mock_super_request.assert_called_once()
         assert response.status_code == 200
 
+    @pytest.mark.asyncio
+    async def test_denies_create_profile_when_every_writable_profile_is_protected(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """A writable set fully covered by the denylist leaves nowhere to create.
+
+        The decision is the ACL layer's, on the one path every write takes, so
+        no generated tool has to read the environment for itself - and the
+        request never goes upstream to fail there.
+        """
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "abc123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await client.request("POST", "/profiles", json={"name": "New Profile"})
+
+        mock_super_request.assert_not_called()
+        assert exc_info.value.code == "invalid_argument"
+        assert "no writable profile available" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_allows_create_profile_when_one_writable_profile_is_unprotected(
+        self, mock_super_request: Any, clean_env: Callable[[str, str], None]
+    ) -> None:
+        """One writable, unprotected profile is enough: the refusal is only for an empty field."""
+        clean_env("NEXTDNS_READABLE_PROFILES", "ALL")
+        clean_env("NEXTDNS_WRITABLE_PROFILES", "abc123,def456")
+        clean_env("NEXTDNS_PROTECTED_PROFILES", "abc123")
+
+        async with AccessControlledClient(base_url="https://api.nextdns.io") as client:
+            response = await client.request("POST", "/profiles", json={"name": "New Profile"})
+
+        mock_super_request.assert_called_once()
+        assert response.status_code == 200
+
 
 class TestAccessControlledClientStreaming:
     """Test that stream() enforces the same access control as request()."""

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 
+from nextdns_mcp import server as server_module
 from nextdns_mcp import spec_arguments, spec_series, spec_tools, spec_validation, transport
 
 # Operations in nextdns-openapi.yaml, the one that is not offered, and the
@@ -187,7 +188,10 @@ class TestToolCall:
 
     def _tool(self, monkeypatch, calls, operation_id: str, payload: dict | None = None):
         monkeypatch.setattr(spec_tools, "api_request_payload", _fake_api(payload or {"data": []}, calls))
-        return spec_tools.SpecApiTool({route.operation_id: route for route in spec_tools.spec_routes()}[operation_id])
+        return spec_tools.SpecApiTool(
+            {route.operation_id: route for route in spec_tools.spec_routes()}[operation_id],
+            delegated_handler=server_module._DELEGATED_HANDLERS.get(operation_id),
+        )
 
     async def test_a_read_sends_the_endpoint_it_declares(self, monkeypatch, calls):
         tool = self._tool(monkeypatch, calls, "getAnalyticsDomains")
@@ -375,6 +379,27 @@ class TestRegistration:
             "/profiles/{profile_id}/analytics/devices;series",
         )
         assert names == spec_tools.spec_tool_names()
+
+    async def test_registration_wires_the_supplied_handler_onto_its_own_operation_only(self, monkeypatch):
+        """The handler comes from the composer; a route without one is generated as usual."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "k")
+        probe = FastMCP("probe")
+
+        async def handler(profile_id: str) -> dict[str, Any]:
+            return {"profile_id": profile_id}
+
+        spec_tools.register_spec_tools(probe, spec_tools.spec_routes(), {"downloadLogs": handler})
+        download = await probe.get_tool("downloadLogs")
+        listing = await probe.get_tool("getLogs")
+        assert download is not None and download._delegated_handler is handler
+        assert listing is not None and listing._delegated_handler is None
+
+    async def test_a_registration_without_handlers_delegates_nothing(self, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", "k")
+        probe = FastMCP("probe")
+        spec_tools.register_spec_tools(probe, spec_tools.spec_routes())
+        download = await probe.get_tool("downloadLogs")
+        assert download is not None and download._delegated_handler is None
 
     async def test_the_record_carries_the_endpoint_and_a_method_derived_write(self, tmp_path):
         from nextdns_mcp.call_log import CallLogMiddleware
@@ -662,7 +687,10 @@ class TestDelegationGuardsRunFirst:
             return {"ok": True}
 
         monkeypatch.setattr(logs_module, "_download_logs_to_tempfile", fake_download)
-        return spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"])
+        return spec_tools.SpecApiTool(
+            {r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"],
+            delegated_handler=server_module._DELEGATED_HANDLERS["downloadLogs"],
+        )
 
     async def test_an_unsafe_profile_id_never_reaches_the_downloader(self, monkeypatch, calls):
         tool = self._downloader(monkeypatch, calls)
@@ -697,7 +725,10 @@ class TestDelegationGuardsRunFirst:
             return {"code": "http_error", "error": "HTTP error while downloading logs"}
 
         monkeypatch.setattr(logs_module, "_download_logs_to_tempfile", failing_download)
-        tool = spec_tools.SpecApiTool({r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"])
+        tool = spec_tools.SpecApiTool(
+            {r.operation_id: r for r in spec_tools.spec_routes()}["downloadLogs"],
+            delegated_handler=server_module._DELEGATED_HANDLERS["downloadLogs"],
+        )
         result = await tool.run({"profile_id": "abc123"})
         assert result.is_error is True
         assert result.structured_content["code"] == "http_error"
@@ -882,21 +913,26 @@ class TestSeriesStreamCeilingWiring:
         assert payload["max_response_bytes"] == spec_tools.MAX_SERIES_RESPONSE_BYTES
         assert "response_bytes" not in payload, "a mid-stream refusal has no measured size to claim"
 
-    def test_only_the_shipped_transport_is_credited_with_measuring_the_body(self):
-        """The cap kwarg says what was asked; the callable says who was asked.
+    def test_only_the_transport_that_declares_enforcement_is_credited_with_measuring_the_body(self):
+        """The cap kwarg says what was asked; the transport's claim says who measured.
 
         An injected transport can name ``max_response_bytes`` in its signature
         and ignore it, so being handed the cap is not proof the body came in
-        under it. Only this package's own transport streams under the ceiling,
-        so only its answer is credited with a measurement already made.
+        under it. Only a transport that declares the capability streams under
+        the ceiling, so only its answer is credited with a measurement made.
         """
 
         async def injected(method, url, params=None, json_body=None, max_response_bytes=None): ...
 
+        shipped = spec_series.transport_capabilities(spec_tools.api_request_payload)
+        other = spec_series.transport_capabilities(injected)
+        assert shipped == (True, True)
+        assert other == (True, False)
+
         cap = {"max_response_bytes": spec_tools.MAX_SERIES_RESPONSE_BYTES}
-        assert spec_series.ceiling_measured_on_the_wire(spec_tools.api_request_payload, cap)
-        assert not spec_series.ceiling_measured_on_the_wire(injected, cap)
-        assert not spec_series.ceiling_measured_on_the_wire(spec_tools.api_request_payload, {})
+        assert spec_series.ceiling_measured_on_the_wire(shipped, cap)
+        assert not spec_series.ceiling_measured_on_the_wire(other, cap)
+        assert not spec_series.ceiling_measured_on_the_wire(shipped, {})
 
 
 def test_a_wire_measured_series_answer_is_not_priced_again_at_the_generator_door():
@@ -1021,13 +1057,14 @@ class TestLegacyInjectedTransportCompatibility:
         assert not spec_series._transport_accepts_cap(iter)  # builtin whose signature() raises ValueError
 
 
-class TestTransportCapabilityProbeIsMemoized:
-    """One signature inspection per transport callable, whatever the dispatch count.
+class TestTransportCapabilityProbeIsPerTool:
+    """One signature inspection per tool, whatever the dispatch count.
 
     The capability probe inspected the transport's signature on every
     ``;series`` dispatch, for an answer that cannot change while the callable
     lives. These tests count the inspections themselves and check that each
-    transport still receives the arguments it received before the memo.
+    transport still receives the arguments it received before the change, and
+    that no process-wide registry holds the callables it has seen.
     """
 
     @staticmethod
@@ -1060,7 +1097,7 @@ class TestTransportCapabilityProbeIsMemoized:
         await tool.run({"profile_id": "abc123", "from": "-1d"})
         await tool.run({"profile_id": "abc123", "from": "-1d"})
 
-        assert inspections == [capped_transport], "the second dispatch reads the memo, not the signature"
+        assert inspections == [capped_transport], "the second dispatch reuses this tool's probed answer"
         assert [(call["method"], call["cap"]) for call in calls] == [("GET", spec_tools.MAX_SERIES_RESPONSE_BYTES)] * 2
 
     async def test_two_series_dispatches_inspect_a_legacy_transport_once(self, monkeypatch):
@@ -1078,19 +1115,30 @@ class TestTransportCapabilityProbeIsMemoized:
         assert inspections == [legacy_transport]
         assert len(calls) == 2, "the legacy transport keeps its old four-argument call shape every time"
 
-    def test_each_callable_keeps_its_own_answer(self, monkeypatch):
-        """No transport inherits another's capability, so the memo may not key on equality."""
+    async def test_a_transport_replaced_after_construction_is_probed_again(self, monkeypatch):
+        """The tool resolves the default transport at call time, so its answer follows that callable."""
         inspections = self._inspect_calls(monkeypatch)
+        calls: list[dict[str, Any]] = []
 
-        async def legacy_transport(method, url, params=None, json_body=None): ...
+        async def original(method, url, params=None, json_body=None, max_response_bytes=None):
+            calls.append({"transport": "original", "cap": max_response_bytes})
+            return {"data": []}
 
-        async def capped_transport(method, url, params=None, json_body=None, max_response_bytes=None): ...
+        async def replacement(method, url, params=None, json_body=None):
+            calls.append({"transport": "replacement", "cap": "not passed"})
+            return {"data": []}
 
-        assert not spec_series._transport_accepts_cap(legacy_transport)
-        assert spec_series._transport_accepts_cap(capped_transport)
-        assert not spec_series._transport_accepts_cap(legacy_transport)
-        assert spec_series._transport_accepts_cap(capped_transport)
-        assert inspections == [legacy_transport, capped_transport]
+        monkeypatch.setattr(spec_tools, "api_request_payload", original)
+        tool = spec_tools.SpecApiTool(self._series_route())
+        monkeypatch.setattr(spec_tools, "api_request_payload", replacement)
+        await tool.run({"profile_id": "abc123", "from": "-1d"})
+
+        assert calls == [{"transport": "replacement", "cap": "not passed"}]
+        assert inspections == [original, replacement], "the replacement is a different callable and must be probed"
+
+    def test_no_process_wide_capability_registry(self):
+        """A tool owns its transport answer; the module holds no callable-keyed memo."""
+        assert not hasattr(spec_series, "_CAP_SUPPORT_BY_REQUEST")
 
 
 def test_a_big_non_series_payload_is_not_refused_by_the_series_backstop():
@@ -1142,80 +1190,6 @@ def test_empty_write_refusal_branches():
     assert tool._empty_write_refusal("GET", None) is None
 
 
-def test_create_profile_guard_all_protected(monkeypatch):
-
-    from nextdns_mcp import config, spec_tools
-
-    monkeypatch.setattr(
-        config,
-        "load_profile_access_control",
-        lambda: config.ProfileAccessControl(
-            read_only=False, readable=frozenset({"p1"}), writable=frozenset({"p1"}), protected=frozenset({"p1"})
-        ),
-    )
-    from types import SimpleNamespace
-
-    route = SimpleNamespace(
-        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
-    )
-    tool = spec_tools.SpecApiTool(route=route)
-    res = tool._create_profile_guard()
-    assert res is not None and res.is_error
-
-
-def test_create_profile_guard_not_all_protected(monkeypatch):
-
-    from nextdns_mcp import config, spec_tools
-
-    monkeypatch.setattr(
-        config,
-        "load_profile_access_control",
-        lambda: config.ProfileAccessControl(
-            read_only=False,
-            readable=frozenset({"p1", "p2"}),
-            writable=frozenset({"p1", "p2"}),
-            protected=frozenset({"p1"}),
-        ),
-    )
-    from types import SimpleNamespace
-
-    route = SimpleNamespace(
-        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
-    )
-    tool = spec_tools.SpecApiTool(route=route)
-    assert tool._create_profile_guard() is None
-
-
-def test_create_profile_guard_reads_protected_profiles_once(monkeypatch):
-    """One guard invocation takes a single snapshot: the denylist is read once."""
-
-    from nextdns_mcp import profile_access, spec_tools
-
-    monkeypatch.setenv("NEXTDNS_READ_ONLY", "")
-    monkeypatch.setenv("NEXTDNS_READABLE_PROFILES", "")
-    monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abcdef,fedcba")
-    monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "abcdef")
-
-    calls = 0
-    real_get_protected_profiles = profile_access.get_protected_profiles
-
-    def counting_get_protected_profiles() -> frozenset[str]:
-        nonlocal calls
-        calls += 1
-        return real_get_protected_profiles()
-
-    monkeypatch.setattr(profile_access, "get_protected_profiles", counting_get_protected_profiles)
-
-    from types import SimpleNamespace
-
-    route = SimpleNamespace(
-        method="POST", operation_id="createProfile", description="", path="/x", flat_param_schema={}, summary=""
-    )
-    tool = spec_tools.SpecApiTool(route=route)
-    assert tool._create_profile_guard() is None
-    assert calls == 1
-
-
 import asyncio
 
 
@@ -1227,34 +1201,6 @@ def test_split_body_drops_none():
     body = spec_arguments._split_body_arguments(located, args)
     # should be None (no body props)
     assert body is None
-
-
-def test_create_profile_guard_run_path(monkeypatch):
-    from types import SimpleNamespace
-
-    from nextdns_mcp import spec_tools
-    from nextdns_mcp.tools import logs as _logs  # noqa
-
-    route = SimpleNamespace(
-        method="POST",
-        operation_id="createProfile",
-        description="",
-        path="/profiles",
-        flat_param_schema={"type": "object", "properties": {}},
-        summary="",
-        parameter_map={},
-    )
-    tool = spec_tools.SpecApiTool(route=route)
-    tool._request_refusal = lambda args: None
-    tool._create_profile_guard = lambda: spec_tools.ToolResult(
-        structured_content={"code": "invalid_argument", "error": "x"}, is_error=True
-    )
-
-    async def main():
-        res = await tool.run({})
-        assert res.is_error
-
-    asyncio.run(main())
 
 
 def test_empty_write_run_path():
@@ -1273,7 +1219,6 @@ def test_empty_write_run_path():
     )
     tool = spec_tools.SpecApiTool(route=route)
     tool._request_refusal = lambda args: None
-    tool._create_profile_guard = lambda: None
 
     async def main():
         res = await tool.run({})

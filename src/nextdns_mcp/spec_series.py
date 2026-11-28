@@ -15,14 +15,13 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastmcp.utilities.openapi import HTTPRoute
 
-from . import transport as _transport
 from .charts import current_time, resolve_time_point, series_budget_error
 from .errors import ErrorCode, error_payload
-from .transport import MAX_SERIES_RESPONSE_BYTES
+from .transport import MAX_SERIES_RESPONSE_BYTES, RESPONSE_CAP_ENFORCEMENT_ATTRIBUTE
 
 # The endpoint's adaptive series-interval default, priced for calls that state
 # no interval. Probed live 2026-11: windows over 7 days answer at 86400s with
@@ -103,35 +102,53 @@ def _default_interval_estimate(from_time: Any, to_time_raw: Any) -> int | None:
     )
 
 
-def capped_transport_kwargs(route: HTTPRoute, request: Callable[..., Any]) -> dict[str, Any]:
+class TransportCapabilities(NamedTuple):
+    """What one transport callable can be trusted with a response byte ceiling.
+
+    ``accepts_cap`` is the call shape: whether the transport can be handed
+    ``max_response_bytes`` at all. ``enforces_cap`` is who measured the body:
+    only a transport that declares the capability (see
+    ``transport.RESPONSE_CAP_ENFORCEMENT_ATTRIBUTE``) streams under the ceiling,
+    so a callable that names the keyword and ignores it keeps the serialized
+    backstop in :func:`_series_response_ceiling_error`.
+
+    Both answers belong to the callable and cannot change while it lives, so a
+    tool reads them once instead of on every dispatch.
+    """
+
+    accepts_cap: bool
+    enforces_cap: bool
+
+
+def transport_capabilities(request: Callable[..., Any]) -> TransportCapabilities:
+    """Read both capabilities out of one transport callable."""
+    return TransportCapabilities(_transport_accepts_cap(request), _transport_enforces_cap(request))
+
+
+def _transport_enforces_cap(request: Callable[..., Any]) -> bool:
+    """Whether the transport declares that it holds the response under the ceiling itself."""
+    return bool(getattr(request, RESPONSE_CAP_ENFORCEMENT_ATTRIBUTE, False))
+
+
+def capped_transport_kwargs(route: HTTPRoute, capabilities: TransportCapabilities) -> dict[str, Any]:
     """The transport kwargs a call needs: the cap only for routes that want it and transports that take it."""
-    if ";series" in route.path and _transport_accepts_cap(request):
+    if ";series" in route.path and capabilities.accepts_cap:
         return {"max_response_bytes": MAX_SERIES_RESPONSE_BYTES}
     return {}
 
 
-# A capability answer belongs to one transport object, so the memo is keyed on
-# identity rather than equality: a transport whose class defines __eq__ would
-# otherwise let one transport answer for another. The callable is kept beside
-# its answer so the key's id cannot be recycled while the entry lives.
-_CAP_SUPPORT_BY_REQUEST: dict[int, tuple[Callable[..., Any], bool]] = {}
-
-
-def ceiling_measured_on_the_wire(request: Callable[..., Any], transport_kwargs: dict[str, Any]) -> bool:
+def ceiling_measured_on_the_wire(capabilities: TransportCapabilities, transport_kwargs: dict[str, Any]) -> bool:
     """Whether the transport that answered already held the body under the ceiling.
 
-    Only the transport this package ships enforces the cap: it streams under
-    ``max_response_bytes`` and refuses the overshoot (see
-    ``transport._request_capped``), so the byte count of anything it hands back
-    is a fact established on the wire, and re-serializing that payload to price
-    it again measures a bound the wire already proved. A signature is not that
-    evidence - :func:`_transport_accepts_cap` decides only how the call is
-    *shaped*, and an injected callable can name ``max_response_bytes`` and
-    ignore it - so the serialized backstop in
-    :func:`_series_response_ceiling_error` stays in charge of every other
-    transport, and of this one when a test replaces it by attribute.
+    Two facts have to hold: the call was actually given the cap, and the
+    transport answers for enforcing it. A signature is not the second fact -
+    :func:`_transport_accepts_cap` decides only how the call is *shaped*, and an
+    injected callable can name ``max_response_bytes`` and ignore it - so the
+    serialized backstop in :func:`_series_response_ceiling_error` stays in
+    charge of every transport that does not declare the capability, including
+    this package's own when a test replaces it by attribute.
     """
-    return bool(transport_kwargs) and request is _transport.api_request_payload
+    return bool(transport_kwargs) and capabilities.enforces_cap
 
 
 def _transport_accepts_cap(request: Callable[..., Any]) -> bool:
@@ -148,16 +165,11 @@ def _transport_accepts_cap(request: Callable[..., Any]) -> bool:
     reason - the unpriced path still enforces the ceiling, the priced one
     must not guess.
 
-    The transport is fixed per route and a callable's signature cannot change
-    while the callable lives, so the answer is memoized per callable: reading
-    the signature again on every dispatch can only return what was just read.
+    This is a pure read of one callable, not a memo: the answer is taken once
+    per tool, where the transport is fixed, instead of being cached for the
+    whole process against a key that keeps every transport callable alive.
     """
-    cached = _CAP_SUPPORT_BY_REQUEST.get(id(request))
-    if cached is not None and cached[0] is request:
-        return cached[1]
-    accepted = _probe_transport_cap(request)
-    _CAP_SUPPORT_BY_REQUEST[id(request)] = (request, accepted)
-    return accepted
+    return _probe_transport_cap(request)
 
 
 def _probe_transport_cap(request: Callable[..., Any]) -> bool:

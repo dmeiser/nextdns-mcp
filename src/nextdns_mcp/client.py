@@ -24,7 +24,7 @@ from .config import (
     load_profile_access_control,
 )
 from .constants import LOOPBACK_HOSTS, SAFE_PROFILE_ID_PATTERN, escape_control_chars, is_write_operation
-from .errors import ErrorCode, StateOwnershipError
+from .errors import ErrorCode, StateOwnershipError, error_payload
 from .state import request_resources
 
 logger = logging.getLogger(__name__)
@@ -241,13 +241,25 @@ class AccessDeniedError(Exception):
     synthetic 403 ``httpx.Response`` the ACL used to return, which had no
     transport or stream and made an ACL denial indistinguishable from a real
     upstream 403.
+
+    ``payload`` is set only for a refusal whose caller-facing shape predates the
+    typed 403 denial (the collection-create refusal): the transport passes it
+    through, so the ACL layer owns both the decision and its exact contract.
     """
 
-    def __init__(self, message: str, *, code: str = ErrorCode.ACCESS_DENIED, profile_id: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = ErrorCode.ACCESS_DENIED,
+        profile_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.profile_id = profile_id
         self.message = message
+        self.payload = payload
 
 
 def _is_unclassifiable_profiles_path(path: str) -> bool:
@@ -439,6 +451,12 @@ class AccessControlledClient:
         Collection endpoints such as POST /profiles create resources that belong to a
         profile, so they must respect read-only mode and the writable-profile set even
         though the URL carries no profile_id.
+
+        The writable set is checked against the protected denylist here rather than at
+        the tool door: a write the ACL layer would refuse must stay refused on the one
+        path every request takes. Its refusal keeps the ``invalid_argument`` /
+        "no writable profile available" payload callers already branch on; only the
+        owner of the decision moved, not the contract.
         """
         if access.read_only:
             error_msg = "Write operation denied: server is in read-only mode"
@@ -449,6 +467,15 @@ class AccessControlledClient:
             error_msg = "Write access denied: no profiles are writable"
             logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
+
+        if access.writable and access.writable.issubset(access.protected):
+            error_msg = "no writable profile available"
+            logger.warning(error_msg)
+            raise AccessDeniedError(
+                error_msg,
+                code=ErrorCode.INVALID_ARGUMENT,
+                payload=error_payload(ErrorCode.INVALID_ARGUMENT, error_msg),
+            )
 
     def _check_collection_read_access(self, access: ProfileAccessControl) -> None:
         """Enforce global read denials for collection endpoints (no profile_id in URL).
