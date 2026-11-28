@@ -28,7 +28,7 @@ from fastmcp.utilities.mime import UI_MIME_TYPE
 from prefab_ui.app import PrefabApp
 from prefab_ui.renderer import get_generative_renderer_html
 
-from .chart_placement import validate_chart_placement
+from .chart_placement import CHART_COMPONENT_NAMES, validate_chart_placement
 from .errors import ErrorCode, error_payload
 from .generative_sandbox import (
     EXECUTION_TIMEOUT,
@@ -95,9 +95,14 @@ MAX_DATA_BYTES = 128 * 1024
 # it (issue #793).
 MAX_CONCURRENT_SANDBOXES = 2
 
+# The chart lists below come from the same constant the tab-placement validator
+# reads, so guidance and validation name one set of components (WORK-369 / DRY-4).
+_CHART_NAMES = ", ".join(CHART_COMPONENT_NAMES)
+_CHART_PLACEMENT_NOTE = f"\n\nNote: Place charts ({_CHART_NAMES}) outside Tabs so their container width is measurable."
+
 GENERATE_DOC = (
     "Execute Prefab Python code in a sandbox and render the result.\n\n"
-    "CRITICAL CHART SIZING RULE: NEVER place charts (AreaChart, LineChart, BarChart, PieChart) "
+    f"CRITICAL CHART SIZING RULE: NEVER place charts ({_CHART_NAMES}) "
     "inside Tabs or Tab components. Tab panels initialize with 0px width, which causes Recharts "
     "to render completely blank/invisible. Always place charts in Column, Row, Grid, or Card "
     "containers outside of Tabs.\n\n"
@@ -545,10 +550,7 @@ def _build_generate_tool(
 
 def _build_components_tool(name: str) -> Tool:
     """The search_prefab_components tool."""
-    doc = (
-        (prefab_generative.search_components.__doc__ or "")
-        + "\n\nNote: Place charts (AreaChart, BarChart, LineChart, PieChart) outside Tabs so their container width is measurable."
-    )
+    doc = (prefab_generative.search_components.__doc__ or "") + _CHART_PLACEMENT_NOTE
     return Tool.from_function(
         prefab_generative.search_components,
         name=name,

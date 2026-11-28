@@ -494,6 +494,25 @@ def test_generate_doc_names_the_native_tab_and_data_table_forms():
     assert "DataTable(columns=[...], rows=[...])" in doc
 
 
+def test_chart_names_come_from_one_shared_constant():
+    """Validation and model guidance read one ``CHART_COMPONENT_NAMES`` (issue #803 / DRY-4).
+
+    The chart names were re-typed in the validator, in ``GENERATE_DOC``, and in the
+    component-search note, so a chart type added to one list could be missing from
+    the instructions a model writes its code from.
+    """
+    names = chart_placement_module.CHART_COMPONENT_NAMES
+    joined = ", ".join(names)
+
+    assert chart_placement_module._CHART_NAMES == frozenset(names)
+
+    with pytest.raises(ValueError, match=joined):
+        validate_chart_placement("with Tab('Charts'):\n    PieChart(data=[])")
+
+    assert f"charts ({joined})" in generative_module.GENERATE_DOC
+    assert f"charts ({joined})" in generative_module._CHART_PLACEMENT_NOTE
+
+
 def test_build_renderer_resource():
     resource = _build_renderer_resource({"resourceDomains": ["example.com"]})
     assert resource.name == "Prefab Generative Renderer"

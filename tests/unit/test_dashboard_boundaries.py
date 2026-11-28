@@ -240,6 +240,38 @@ def test_timeseries_area_chart_is_built_in_one_place():
                 pytest.fail(f"{module_file.name} constructs AreaChart instead of calling the shared factory")
 
 
+def test_public_card_builders_use_the_shared_shell():
+    """No published card builder re-opens the card shell by hand (issue #803 / DRY-4).
+
+    ``build_ips_card``, ``build_gafam_card`` and ``build_security_card`` each inlined the
+    ``Card``/header/content wrapper ``_build_analytics_card`` already owns, so a shell
+    change had to be made in four places. Every published ``build_*_card`` delegates
+    to that one shell; only the private helpers construct a ``Card`` themselves.
+    """
+    tree = ast.parse((PACKAGE_DIR / "components.py").read_text(encoding="utf-8"))
+    builders = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("build_") and node.name.endswith("_card")
+    ]
+    assert {node.name for node in builders} == {
+        "build_domains_card",
+        "build_reasons_card",
+        "build_devices_card",
+        "build_ips_card",
+        "build_gafam_card",
+        "build_destinations_card",
+        "build_security_card",
+    }, "a published card builder appeared or disappeared"
+
+    for builder in builders:
+        calls = {
+            node.func.id for node in ast.walk(builder) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "_build_analytics_card" in calls, f"{builder.name} does not use the shared card shell"
+        assert "Card" not in calls, f"{builder.name} opens its own card shell again"
+
+
 def test_package_public_surface():
     """Callers import the tool from the package, so the package must export it."""
     assert dashboard.overviewDashboard.__module__.startswith("nextdns_mcp.tools.dashboard")
