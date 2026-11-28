@@ -239,10 +239,7 @@ def _series_response_ceiling_error(route: HTTPRoute, payload: Any) -> dict[str, 
     separators), which is why this is a backstop and the streamed cap is the
     layer that bounds a normal call.
     """
-    try:
-        size = len(json.dumps(payload, default=str))
-    except (TypeError, ValueError):  # pragma: no cover - transport payloads are JSON-shaped
-        size = len(str(payload))
+    size = len(json.dumps(payload, default=str))
     if size <= MAX_SERIES_RESPONSE_BYTES:
         return None
     return _series_ceiling_payload(str(route.operation_id), size)

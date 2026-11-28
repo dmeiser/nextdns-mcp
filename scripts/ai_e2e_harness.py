@@ -156,11 +156,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-try:
-    from dotenv import load_dotenv as _load_dotenv
-except (ImportError, OSError):  # pragma: no cover - optional dependency
-    _load_dotenv = None  # type: ignore[assignment]
-
 # --------------------------------------------------------------------------- #
 # Make the in-tree ``nextdns_mcp`` package importable when running as a script
 # (``uv run python scripts/ai_e2e_harness.py``) without needing an install.

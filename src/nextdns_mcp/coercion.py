@@ -13,11 +13,7 @@ SPDX-License-Identifier: MIT
 
 from typing import Annotated
 
-# Pydantic import for BeforeValidator
-try:
-    from pydantic import BeforeValidator
-except ImportError:  # pragma: no cover
-    BeforeValidator = None  # type: ignore
+from pydantic import BeforeValidator
 
 
 # Profile IDs from CLI or MCP clients may arrive as integers when an accepted ID
@@ -34,5 +30,5 @@ def _coerce_profile_id(v: object) -> object:
     return v
 
 
-_coerce_to_str = BeforeValidator(_coerce_profile_id) if BeforeValidator is not None else lambda x: x
+_coerce_to_str = BeforeValidator(_coerce_profile_id)
 OptionalProfileId = Annotated[str | None, _coerce_to_str]
