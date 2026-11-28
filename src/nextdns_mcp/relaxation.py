@@ -40,7 +40,7 @@ from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
-from .constants import SYNTHETIC_TOOL_NAMES
+from .constants import SYNTHETIC_TOOL_NAMES, escape_control_chars
 from .utils import BARE_NEGATIVE_RE, NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
@@ -465,7 +465,10 @@ class StripExtraFieldsMiddleware(Middleware):
         except Exception as e:
             # Schema fetch/parse failure: fail closed so callers get a clear error
             # instead of downstream validation failures from unstripped args.
-            logger.exception(f"Failed to prepare arguments for tool '{tool_name}'; aborting call")
+            logger.exception(
+                "Failed to prepare arguments for tool '%s'; aborting call",
+                escape_control_chars(tool_name),
+            )
             raise ToolError(
                 f"Tool call for '{tool_name}' failed closed: could not fetch its parameter "
                 f"schema to validate arguments (root cause: {e})"

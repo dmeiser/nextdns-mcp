@@ -7,9 +7,13 @@ control layer (``client``), the API transport (``transport``), the call log
 (``call_log``) and the run-options module (``run_options``) all read these
 definitions, and none of them has to import another to say what a profile id
 looks like, which HTTP methods change state, which tool names belong to the
-disclosure transform, or which hosts count as loopback. A shared home breaks
-the old ``utils`` -> ``client`` edge and keeps the synthetic-tool name set a
-single definition shared by the log and the transform. The DoH answer
+disclosure transform, which hosts count as loopback, or which bytes may not
+appear in a log line. A shared home breaks the old ``utils`` -> ``client`` edge
+and keeps the synthetic-tool name set a single definition shared by the log and
+the transform. The control-character class lives here rather than in ``utils``
+because the logging layer cannot reach ``utils``: ``utils`` imports ``config``
+and ``config`` imports ``logging_config``, so that edge would close a cycle.
+The DoH answer
 vocabulary (``VALID_DNS_RECORD_TYPES``, ``DNS_STATUS_CODES``) lives here for the
 same reason: ``config`` publishes those names to its callers and must never
 reach up into the tool layer to spell them, and this module imports nothing from
@@ -81,6 +85,36 @@ DNS_STATUS_CODES = {
     4: "NOTIMP - Not implemented",
     5: "REFUSED - Query refused",
 }
+
+
+# The characters a log record may not carry: CR/LF end one record and start
+# another that reads like the server's own output, and the C0/C1 bytes are the
+# terminal's formatting commands - a raw ESC turns caller data into display
+# state (issue #767). One definition, read by every layer that writes a record:
+# ``utils.sanitize_label`` strips them from upstream labels, ``client._redacted``
+# and ``client._log_safe_error`` escape them in the URL and error text the
+# transport logs, and ``logging_config.SanitizingFormatter`` escapes them in
+# every record the server composes. Keeping one class here is what stops the
+# label path and the log path from drifting to two different definitions.
+CONTROL_CHARS_PATTERN = re.compile(r"[\r\n\x00-\x1f\x7f-\x9f]")
+
+
+def _escape_one_control_char(match: re.Match[str]) -> str:
+    """Render one matched control character as the visible escape a reader can check."""
+    return match.group(0).encode("unicode_escape").decode("ascii")
+
+
+def escape_control_chars(value: object) -> str:
+    """Return ``value`` as text with every control character written out as a visible escape.
+
+    Escaped rather than removed: silently deleting the bytes would merge the
+    injected text into the real record and erase the one piece of evidence that
+    a caller tried to forge a log line. The escapes keep it readable
+    (``\n`` -> ``\\n``, ESC -> ``\\x1b``) and are idempotent, because a backslash
+    is not in the class - a value that passes through this helper twice, once at
+    the call site and once in the formatter, comes out the same either way.
+    """
+    return CONTROL_CHARS_PATTERN.sub(_escape_one_control_char, str(value))
 
 
 def is_write_operation(method: str) -> bool:
