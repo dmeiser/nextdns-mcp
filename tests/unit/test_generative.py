@@ -105,6 +105,47 @@ def test_parse_ui_data_accepts_nesting_at_the_cap():
     assert _parse_ui_data(_nested_containers(MAX_JSON_DEPTH - 1)) == _nested_containers(MAX_JSON_DEPTH - 1)
 
 
+def test_parse_ui_data_rejects_cycles_in_a_dict():
+    """A branching cycle is refused on the first descent, not queued generation by generation."""
+    root: dict[str, Any] = {}
+    for key in "abcdefghij":
+        branch: dict[str, Any] = {}
+        for sub in "abcdefghij":
+            branch[sub] = root
+        root[key] = branch
+
+    start = time.perf_counter()
+    with pytest.raises(ValueError, match="circular reference"):
+        _parse_ui_data(root)
+    assert time.perf_counter() - start < 1
+
+    self_cycle: dict[str, Any] = {}
+    self_cycle["self"] = self_cycle
+    with pytest.raises(ValueError, match="circular reference"):
+        _parse_ui_data(self_cycle)
+
+    holder: list[Any] = []
+    holder.append((holder,))
+    with pytest.raises(ValueError, match="circular reference"):
+        _parse_ui_data({"a": holder})
+
+
+def test_parse_ui_data_accepts_shared_subobjects():
+    """An object reachable through two sibling branches is not a cycle."""
+    shared = {"x": [1, 2]}
+    assert _parse_ui_data({"a": shared, "b": [shared]}) == {"a": {"x": [1, 2]}, "b": [{"x": [1, 2]}]}
+
+
+def test_parse_ui_data_handles_tuples():
+    """json.dumps encodes a tuple as an array, so tuple chains get the same depth bound."""
+    assert _parse_ui_data({"a": (1, "two")}) == {"a": (1, "two")}
+    value: Any = 1
+    for _ in range(MAX_JSON_DEPTH + 1):
+        value = (value,)
+    with pytest.raises(ValueError, match="maximum nesting depth"):
+        _parse_ui_data({"a": value})
+
+
 def test_decode_ui_json_reports_a_decoder_stack_blowout_as_a_validation_error():
     """A decoder stack blowout is reported as a validation error, not leaked as RecursionError.
 
@@ -1006,6 +1047,23 @@ async def test_generate_ui_rejects_deeply_nested_data_before_the_sandbox():
         pytest.raises(ValueError, match="maximum nesting depth"),
     ):
         await gen_tool.fn(code="print('hi')", data=f'{{"v": {deep}}}')
+    mock_exec.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_rejects_deep_tuples_in_dict_data_before_the_sandbox():
+    """The tuple path QA probed is refused by the tool, not by the worker's RecursionError."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    value: Any = 1
+    for _ in range(MAX_JSON_DEPTH + 1):
+        value = (value,)
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_get_worker", return_value=_stub_worker()),
+        pytest.raises(ValueError, match="maximum nesting depth"),
+    ):
+        await gen_tool.fn(code="print('hi')", data={"v": value})
     mock_exec.assert_not_called()
 
 

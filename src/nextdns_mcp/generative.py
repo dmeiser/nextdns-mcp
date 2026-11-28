@@ -14,7 +14,6 @@ import asyncio
 import json
 import logging
 import math
-from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
@@ -156,44 +155,72 @@ def _parse_ui_string(data: str) -> dict[str, Any] | None:
 
 
 def _json_children(node: Any) -> Iterable[Any]:
-    """The values one JSON container holds; an empty tuple for a scalar."""
+    """The values a JSON container holds; an empty tuple for a scalar.
+
+    Tuples count as containers because ``json.dumps`` encodes them as arrays: a
+    tuple chain reaching the serializer is just as deep as a list chain.
+    """
     if isinstance(node, dict):
         return node.values()
-    if isinstance(node, list):
+    if isinstance(node, (list, tuple)):
         return node
     return ()
 
 
-def _guard_json_node(node: Any, level: int) -> Iterable[Any]:
-    """Validate one document node and return its children.
-
-    A non-finite float and a container open past the depth cap are both refused
-    here, so the walk never descends into either.
-    """
+def _guard_json_number(node: Any) -> None:
+    """Refuse a non-finite float, which the worker's ``JSON.parse`` cannot read."""
     if isinstance(node, float) and not math.isfinite(node):
         raise ValueError("data contains a number JSON.parse cannot read: NaN or Infinity")
+
+
+def _guard_json_children(node: Any, level: int, active: set[int]) -> Iterable[Any]:
+    """Return a node's children, refusing a too-deep or cyclic container first.
+
+    ``active`` holds the ids of containers on the current descent path: a
+    repeated id is a cycle, while an object shared by two sibling branches is
+    fine because its id is released when that branch is left.
+    """
     children = _json_children(node)
-    if children and level >= MAX_JSON_DEPTH:
+    if not children:
+        return ()
+    if level >= MAX_JSON_DEPTH:
         raise ValueError(f"data exceeds maximum nesting depth of {MAX_JSON_DEPTH}")
+    ident = id(node)
+    if ident in active:
+        raise ValueError("data contains a circular reference")
+    active.add(ident)
     return children
 
 
 def _check_json_limits(value: Any) -> None:
-    """Bound nesting depth and reject non-finite numbers in a decoded UI document.
+    """Bound nesting depth and reject non-finite numbers and cycles in UI data.
 
-    The walk is iterative on purpose: a recursive guard would raise
-    ``RecursionError`` at exactly the depth it exists to report. Depth is counted
-    in container levels — the document root is level 1, and a value may sit no
-    deeper than level ``MAX_JSON_DEPTH``. Both limits protect the worker: the
-    runner parses this document with ``JSON.parse``, which rejects
-    ``NaN``/``Infinity`` outright and deepens its own parse stack with every
-    level. The string path rejects non-finite numbers at parse time; a dict the
-    host handed over never passed a parser, so the value itself is walked here.
+    The walk is iterative and depth-first on purpose. Recursion would raise
+    ``RecursionError`` at exactly the depth it exists to report; breadth-first
+    traversal would queue an entire generation before checking it, which a
+    branching cycle can grow without bound. The stack holds only the current
+    path plus its siblings, and an active-path id set rejects a cycle as soon
+    as a branch reaches an ancestor while still allowing shared subobjects.
+    Depth is counted in container levels — the document root is level 1, and a
+    value may sit no deeper than level ``MAX_JSON_DEPTH``. Both limits protect
+    the worker: the runner parses this document with ``JSON.parse``, which
+    rejects ``NaN``/``Infinity`` outright and deepens its own parse stack with
+    every level. The string path rejects non-finite numbers at parse time; a
+    dict the host handed over never passed a parser, so the value itself is
+    walked here.
     """
-    pending: deque[tuple[Any, int]] = deque([(value, 1)])
-    while pending:
-        node, level = pending.popleft()
-        pending.extend((child, level + 1) for child in _guard_json_node(node, level))
+    active: set[int] = set()
+    stack: list[tuple[Any, int, bool]] = [(value, 1, False)]
+    while stack:
+        node, level, leaving = stack.pop()
+        if leaving:
+            active.discard(id(node))
+            continue
+        _guard_json_number(node)
+        children = _guard_json_children(node, level, active)
+        if children:
+            stack.append((node, level, True))
+            stack.extend((child, level + 1, False) for child in reversed(tuple(children)))
 
 
 def _parse_ui_data(data: str | dict[str, Any] | None) -> dict[str, Any] | None:
