@@ -1023,16 +1023,17 @@ async def test_generate_ui_data_size_limit():
 
 @pytest.mark.asyncio
 async def test_generate_ui_rejects_non_finite_data_before_the_sandbox():
-    """A NaN in either data form is a validation error; the worker never sees the frame (issue #764)."""
+    """A NaN in either data form is a typed validation error, and no worker starts (issue #764)."""
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
-    for payload in ('{"v": NaN}', {"v": float("nan")}):
-        with (
-            patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-            pytest.raises(ValueError, match="NaN or Infinity|not a valid JSON number"),
-        ):
-            await gen_tool.fn(code="print('hi')", data=payload)
-        mock_exec.assert_not_called()
+    for payload, message_part in (
+        ('{"v": NaN}', "not a valid JSON number"),
+        ({"v": float("nan")}, "NaN or Infinity"),
+    ):
+        with patch.object(gen_ui, "_new_worker") as mock_worker:
+            result = await gen_tool.fn(code="print('hi')", data=payload)
+        _assert_typed_generation_error(result, "invalid_argument", message_part)
+        mock_worker.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1040,12 +1041,10 @@ async def test_generate_ui_rejects_deeply_nested_data_before_the_sandbox():
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     deep = "[" * (MAX_JSON_DEPTH + 1) + "]" * (MAX_JSON_DEPTH + 1)
-    with (
-        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-        pytest.raises(ValueError, match="maximum nesting depth"),
-    ):
-        await gen_tool.fn(code="print('hi')", data=f'{{"v": {deep}}}')
-    mock_exec.assert_not_called()
+    with patch.object(gen_ui, "_new_worker") as mock_worker:
+        result = await gen_tool.fn(code="print('hi')", data=f'{{"v": {deep}}}')
+    _assert_typed_generation_error(result, "invalid_argument", "maximum nesting depth")
+    mock_worker.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1056,12 +1055,10 @@ async def test_generate_ui_rejects_deep_tuples_in_dict_data_before_the_sandbox()
     value: Any = 1
     for _ in range(MAX_JSON_DEPTH + 1):
         value = (value,)
-    with (
-        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
-        pytest.raises(ValueError, match="maximum nesting depth"),
-    ):
-        await gen_tool.fn(code="print('hi')", data={"v": value})
-    mock_exec.assert_not_called()
+    with patch.object(gen_ui, "_new_worker") as mock_worker:
+        result = await gen_tool.fn(code="print('hi')", data={"v": value})
+    _assert_typed_generation_error(result, "invalid_argument", "maximum nesting depth")
+    mock_worker.assert_not_called()
 
 
 @pytest.mark.asyncio
