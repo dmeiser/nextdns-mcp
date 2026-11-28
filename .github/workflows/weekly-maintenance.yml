@@ -54,8 +54,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - name: Set up Python and uv
+        uses: ./.github/actions/setup-python-uv
 
       - name: Detect changes
         id: detect
@@ -135,13 +135,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - name: Set up Python and uv
+        uses: ./.github/actions/setup-python-uv
         with:
-          activate-environment: "true"
-
-      - name: Set up Python
-        run: uv python install 3.15
+          python-version: '3.15'
+          activate-environment: 'true'
 
       # The Prefab sandbox shells out to the Deno binary, so the smoke tests in
       # tests/unit/test_generative_host_smoke.py need it here too. Without it
