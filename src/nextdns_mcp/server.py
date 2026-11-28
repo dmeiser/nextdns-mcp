@@ -238,6 +238,7 @@ def build_mcp_server() -> FastMCP:
     register_generative_ui_provider(server)
     return server
 
+
 def get_mcp_server() -> FastMCP:
     """Return the current owner's shared MCP server instance, creating it on first use."""
     return current_mcp_server_owner().get()
