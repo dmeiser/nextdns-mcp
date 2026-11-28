@@ -110,6 +110,35 @@ async def _resolve_public_addresses(host: str) -> list[Any] | None:
 # at import time binds to the first loop that contends it and raises
 # ``RuntimeError: ... is bound to a different event loop`` when a second
 # loop (another embedded server, another thread) contends it later.
+class _Handoff:
+    """Who releases a lock whose acquire was abandoned mid-flight.
+
+    A cancelled waiter's worker thread can still finish the acquire after the
+    waiter is gone - including when the whole event loop is torn down and
+    cancels the shielded task itself, which the shield cannot protect against.
+    The worker and the abandoning waiter decide under one mutex, one at a
+    time: whichever decision comes second releases, so the process-global lock
+    can neither leak nor have a hold released that this waiter never took.
+    """
+
+    def __init__(self) -> None:
+        self._mutex = threading.Lock()
+        self._abandoned = False
+        self._held = False
+
+    def worker_took_the_lock(self) -> bool:
+        """Record the worker's acquire; report whether it must give it back."""
+        with self._mutex:
+            self._held = True
+            return self._abandoned
+
+    def abandon(self) -> bool:
+        """Record the waiter's abandonment; report whether it must release."""
+        with self._mutex:
+            self._abandoned = True
+            return self._held
+
+
 class _CrossLoopLock:
     """An async lock with no event-loop affinity, safe from any loop or thread.
 
@@ -124,22 +153,31 @@ class _CrossLoopLock:
     def __init__(self) -> None:
         self._lock = threading.Lock()
 
+    def _acquire_and_hand_off(self, handoff: _Handoff) -> None:
+        self._lock.acquire()
+        if handoff.worker_took_the_lock():
+            # The waiter was abandoned - cancelled by its caller, or by the
+            # event loop tearing down around it - before this acquire
+            # completed, so nobody is left to use the section: give it back.
+            self._lock.release()
+
     async def __aenter__(self) -> Self:
-        acquiring = asyncio.ensure_future(asyncio.to_thread(self._lock.acquire))
+        handoff = _Handoff()
+        acquiring = asyncio.ensure_future(asyncio.to_thread(self._acquire_and_hand_off, handoff))
         try:
             await asyncio.shield(acquiring)
         except BaseException:
-            # Cancelled (or timed out) while waiting: the worker thread still
-            # completes the acquire, so tie the release to its completion
-            # rather than leak the lock. A task cancelled before its thread
-            # started never acquires, and has nothing to release.
-            acquiring.add_done_callback(self._release_if_acquired)
+            # Cancelled (by the caller's timeout or by loop teardown) or the
+            # acquire failed before its worker started. Pair the abandonment
+            # with the worker under the handoff's mutex: if the worker already
+            # took the lock it never saw the abandonment, so the waiter
+            # releases it here; otherwise the worker self-releases when its
+            # acquire completes. A waiter whose acquire never ran holds
+            # nothing and releases nothing - including another server's hold.
+            if handoff.abandon():
+                self._lock.release()
             raise
         return self
-
-    def _release_if_acquired(self, acquiring: "asyncio.Task[bool]") -> None:
-        if not acquiring.cancelled():
-            self._lock.release()
 
     async def __aexit__(self, *exc_info: object) -> None:
         self._lock.release()
