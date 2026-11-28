@@ -12,7 +12,6 @@ catalog is untouched, and that the registered URI is the one the tools
 advertise on the wire.
 """
 
-import re
 
 import pytest
 from fastmcp import Client
