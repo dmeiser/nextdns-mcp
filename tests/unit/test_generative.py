@@ -27,6 +27,7 @@ from nextdns_mcp import lifespan as lifespan_module
 from nextdns_mcp.chart_placement import _validate_chart_placement
 from nextdns_mcp.generative import (
     MAX_CODE_BYTES,
+    MAX_CONCURRENT_SANDBOXES,
     MAX_DATA_BYTES,
     SANDBOX_PRELUDE,
     PrefabGenerativeUI,
@@ -1240,6 +1241,111 @@ async def test_generate_ui_returns_validated_passive_tree():
     ):
         mock_exec.return_value = passive
         assert await gen_tool.fn(code="print(1)") is passive
+
+
+# --- Concurrent renders (issue #793 / PERF-7) ---
+
+
+def _blocking_worker(name: str, entered: threading.Event, release: threading.Event) -> MagicMock:
+    """A worker double whose reap blocks until released, as the real ~5s reap does."""
+    worker = MagicMock(name=name)
+    worker.start = AsyncMock()
+
+    def blocking_stop() -> None:
+        entered.set()
+        assert release.wait(timeout=10), "test never released the reap"
+
+    worker.stop.side_effect = blocking_stop
+    return worker
+
+
+@pytest.mark.asyncio
+async def test_a_render_executes_while_a_peer_render_is_paused_in_its_reap():
+    """The PERF-7 acceptance probe: a slow reap never serializes the next render.
+
+    Render A is paused inside its worker's reap; render B must enter execution
+    on a different single-use worker before A's reap is released, both calls
+    return their own results, and both workers are reaped.
+    """
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+
+    reap_a_entered = threading.Event()
+    release_reap_a = threading.Event()
+    worker_a = _blocking_worker("worker-a", reap_a_entered, release_reap_a)
+    worker_b = _stub_worker()
+
+    app_a = _passive_app()
+    app_b = _passive_app()
+
+    def _exec_result(code, *, data=None, sandbox=None):
+        return app_a if "print('a')" in code else app_b
+
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_new_worker", side_effect=[worker_a, worker_b]),
+    ):
+        mock_exec.side_effect = _exec_result
+
+        render_a = asyncio.create_task(gen_tool.fn(code="print('a')"))
+        # A has executed and is now blocked reaping its worker:
+        assert await asyncio.to_thread(reap_a_entered.wait, 10)
+
+        render_b = asyncio.create_task(gen_tool.fn(code="print('b')"))
+        # B enters execution on its own worker while A's reap is still blocked:
+        result_b = await asyncio.wait_for(render_b, timeout=10)
+        assert result_b is app_b
+        assert not release_reap_a.is_set()
+
+        release_reap_a.set()
+        result_a = await asyncio.wait_for(render_a, timeout=10)
+        assert result_a is app_a
+
+    assert worker_a is not worker_b
+    assert mock_exec.call_args_list[0].kwargs["sandbox"] is worker_a
+    assert mock_exec.call_args_list[1].kwargs["sandbox"] is worker_b
+    worker_a.stop.assert_called_once()
+    worker_b.stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_render_concurrency_is_bounded_by_the_worker_capacity():
+    """A render beyond MAX_CONCURRENT_SANDBOXES waits for a permit to free."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+
+    release_reaps = threading.Event()
+    reaps_entered = [threading.Event() for _ in range(MAX_CONCURRENT_SANDBOXES)]
+    blocked_workers = [
+        _blocking_worker(f"worker-{index}", entered, release_reaps) for index, entered in enumerate(reaps_entered)
+    ]
+    free_worker = _stub_worker()
+
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_new_worker", side_effect=[*blocked_workers, free_worker]),
+    ):
+        mock_exec.side_effect = lambda code, *, data=None, sandbox: _passive_app()
+
+        renders = [
+            asyncio.create_task(gen_tool.fn(code=f"print({index})")) for index in range(MAX_CONCURRENT_SANDBOXES)
+        ]
+        for entered in reaps_entered:
+            assert await asyncio.to_thread(entered.wait, 10)
+
+        waiting_render = asyncio.create_task(gen_tool.fn(code="print('waiting')"))
+        await asyncio.sleep(0.1)
+        assert mock_exec.await_count == MAX_CONCURRENT_SANDBOXES  # the extra render has not executed
+
+        release_reaps.set()
+        waiting_result = await asyncio.wait_for(waiting_render, timeout=10)
+        assert isinstance(waiting_result, PrefabApp)
+        for index, render in enumerate(renders):
+            result = await asyncio.wait_for(render, timeout=10)
+            assert isinstance(result, PrefabApp)
+
+    free_worker.stop.assert_called_once()
+    assert gen_ui._active_workers == set()
 
 
 class _ChunkedRaw:
