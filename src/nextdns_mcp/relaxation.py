@@ -40,7 +40,7 @@ from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
-from .constants import SYNTHETIC_TOOL_NAMES
+from .constants import SYNTHETIC_TOOL_NAMES, escape_control_chars
 from .utils import BARE_NEGATIVE_RE, NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
@@ -415,16 +415,19 @@ class StripExtraFieldsMiddleware(Middleware):
     def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
         """Coerce a value using its property schema.
 
-        Top-level values are coerced according to the declared schema. Nested
-        dict/list values are recursed without schema context to avoid coercing
-        identifier-like strings inside opaque objects.
+        A value with no schema comes back as it went in: there is nothing to
+        coerce against, and rebuilding its nested dicts/lists allocated deep
+        copies of containers the caller already held. Top-level values are
+        coerced according to the declared schema. A dict is returned
+        untouched - nested values carry no schema context, so identifier-like
+        strings inside opaque objects were never coerced anyway.
         """
+        if prop_schema is None:
+            return value
         if isinstance(value, str):
             return self._coerce_string_value(value, self._get_schema_property_types(prop_schema))
         if isinstance(value, list):
             return self._coerce_list_value(value, prop_schema)
-        if isinstance(value, dict):
-            return {k: self._coerce_value(v, None) for k, v in value.items()}
         return value
 
     def _coerce_list_value(self, value: list[Any], prop_schema: dict[str, Any] | None) -> list[Any]:
@@ -465,7 +468,10 @@ class StripExtraFieldsMiddleware(Middleware):
         except Exception as e:
             # Schema fetch/parse failure: fail closed so callers get a clear error
             # instead of downstream validation failures from unstripped args.
-            logger.exception(f"Failed to prepare arguments for tool '{tool_name}'; aborting call")
+            logger.exception(
+                "Failed to prepare arguments for tool '%s'; aborting call",
+                escape_control_chars(tool_name),
+            )
             raise ToolError(
                 f"Tool call for '{tool_name}' failed closed: could not fetch its parameter "
                 f"schema to validate arguments (root cause: {e})"

@@ -22,7 +22,7 @@ from .config import (
     get_http_timeout,
     load_profile_access_control,
 )
-from .constants import LOOPBACK_HOSTS, SAFE_PROFILE_ID_PATTERN, is_write_operation
+from .constants import LOOPBACK_HOSTS, SAFE_PROFILE_ID_PATTERN, escape_control_chars, is_write_operation
 from .errors import ErrorCode, StateOwnershipError
 from .state import request_resources
 
@@ -115,8 +115,12 @@ def _redacted(url: str) -> str:
     Query strings can carry sensitive data (DNS search terms, device IDs, cursor
     tokens), so every log site that runs at INFO or above must use this helper
     instead of the raw URL. Use the full URL only at DEBUG.
+
+    The remaining path is escaped too: a caller can put CR/LF or an ANSI escape
+    in a profile id, and removing only the query would still let one record
+    print as several lines or move the operator's terminal (issue #767).
     """
-    return str(url).split("?", 1)[0]
+    return escape_control_chars(str(url).split("?", 1)[0])
 
 
 def _log_safe_error(error: Exception) -> str:
@@ -127,9 +131,11 @@ def _log_safe_error(error: Exception) -> str:
     wording but goes through :func:`_redacted`, because an exception raised by
     the ACL layer names the URL the caller asked for verbatim. The exception
     itself is never rewritten: the caller still receives the full text.
+    The status branch escapes the reason phrase as well: it comes from the
+    upstream response line, not from a value this server controls.
     """
     if isinstance(error, httpx.HTTPStatusError):
-        return f"{error.response.status_code} {error.response.reason_phrase}"
+        return escape_control_chars(f"{error.response.status_code} {error.response.reason_phrase}")
     return _redacted(str(error))
 
 
@@ -395,7 +401,7 @@ class AccessControlledClient:
         """Whether the wrapped client has been closed."""
         return self._client.is_closed
 
-    def _check_write_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_write_access(self, profile_id: str, access: ProfileAccessControl) -> None:
         """Check write access against the request snapshot; raise AccessDeniedError if denied."""
         if access.can_write(profile_id):
             return
@@ -410,7 +416,7 @@ class AccessControlledClient:
         logger.warning(error_msg)
         raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED, profile_id=profile_id)
 
-    def _check_read_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_read_access(self, profile_id: str, access: ProfileAccessControl) -> None:
         """Check read access against the request snapshot; raise AccessDeniedError if denied."""
         if access.can_read(profile_id):
             return
@@ -419,7 +425,7 @@ class AccessControlledClient:
         logger.warning(error_msg)
         raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED, profile_id=profile_id)
 
-    def _check_collection_write_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_collection_write_access(self, access: ProfileAccessControl) -> None:
         """Enforce global write denials for collection endpoints (no profile_id in URL).
 
         Collection endpoints such as POST /profiles create resources that belong to a
@@ -436,7 +442,7 @@ class AccessControlledClient:
             logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.WRITE_ACCESS_DENIED)
 
-    def _check_collection_read_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_collection_read_access(self, access: ProfileAccessControl) -> None:
         """Enforce global read denials for collection endpoints (no profile_id in URL).
 
         Collection endpoints such as GET /profiles list profile-scoped resources, so
@@ -448,19 +454,19 @@ class AccessControlledClient:
             logger.warning(error_msg)
             raise AccessDeniedError(error_msg, code=ErrorCode.READ_ACCESS_DENIED)
 
-    def _check_access(self, profile_id: str, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_access(self, profile_id: str, method: str, access: ProfileAccessControl) -> None:
         """Check access control for profile operations; raise AccessDeniedError if denied."""
         if is_write_operation(method):
-            self._check_write_access(profile_id, method, url, access)
+            self._check_write_access(profile_id, access)
         else:
-            self._check_read_access(profile_id, method, url, access)
+            self._check_read_access(profile_id, access)
 
-    def _check_collection_access(self, method: str, url: str, access: ProfileAccessControl) -> None:
+    def _check_collection_access(self, method: str, access: ProfileAccessControl) -> None:
         """Check access control for collection operations; raise AccessDeniedError if denied."""
         if is_write_operation(method):
-            self._check_collection_write_access(method, url, access)
+            self._check_collection_write_access(access)
         else:
-            self._check_collection_read_access(method, url, access)
+            self._check_collection_read_access(access)
 
     def _authorize(self, method: str, url: Any) -> None:
         """Apply the destination allow-list and the profile ACL to one request.
@@ -481,7 +487,7 @@ class AccessControlledClient:
         access = load_profile_access_control()
 
         if profile_id:
-            self._check_access(profile_id, method, url_str, access)
+            self._check_access(profile_id, method, access)
         elif _unmatchable_profile_url(request_path):
             # Fail closed: a URL whose profile cannot be classified is denied
             # instead of being allowed to bypass the profile ACL check. The log
@@ -491,7 +497,7 @@ class AccessControlledClient:
             logger.warning("Forbidden URL: request could not be classified against the profile ACL")
             raise AccessDeniedError(f"Forbidden URL: {url_str}", code=ErrorCode.ACCESS_DENIED, profile_id="")
         else:
-            self._check_collection_access(method, url_str, access)
+            self._check_collection_access(method, access)
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Make an HTTP request with access control checks.

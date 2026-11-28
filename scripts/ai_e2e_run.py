@@ -412,16 +412,13 @@ async def _run_one_step(state: _RunState, m: Any, i: int, step: Any) -> None:
     attempts_by_kind = {kind: 0 for kind in harness.TRANSIENT_ATTEMPTS}
     transients: list[str] = []
     attempt = 0
-    att: _Attempt | None = None
+    att: _Attempt
     while True:
         attempt += 1
         harness._progress(f"[{i}/{state.total}] {step.id}" + (f" (retry {attempt - 1})" if attempt > 1 else ""))
         att = await _attempt_step(state, m, step, prompt, prompt_pid, transients, attempts_by_kind)
         if not att.transient:
             break
-
-    if att is None:  # pragma: no cover - defensive
-        att = _Attempt(harness.ActorRun(command=list(state.step_cfg.command)), "failed", "", "", {}, False, "", [])
 
     _note_outage(state, att.run)
     _note_instrument_read(state, att.run)

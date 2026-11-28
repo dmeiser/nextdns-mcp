@@ -114,6 +114,7 @@ class Step:
     run: str | None
     script: str | None
     condition: str | None
+    env: dict[str, Any] = field(default_factory=dict)
     outputs: dict[str, Any] = field(default_factory=dict)
     exit_code: int = 0
     stdout: str = ""
@@ -153,6 +154,7 @@ def load_workflow(path: Path) -> Workflow:
                 run=step.get("run"),
                 script=((step.get("with") or {}).get("script")),
                 condition=step.get("if"),
+                env=dict(step.get("env") or {}),
             )
             for step in job.get("steps", [])
         ]
@@ -498,6 +500,9 @@ def _run_shell_step(
         "GH_ENDPOINTS": json.dumps({k: list(v) for k, v in ENDPOINTS.items()}),
         "GH_SCOPE_MAP": json.dumps([[list(prefix), scope, level] for prefix, scope, level in SCOPES_GH_CLI]),
         "GH_TOKEN": "ghs_fake_token_for_simulation",
+        # GitHub resolves expressions in a step's env block before handing the
+        # environment to bash, exactly as it does for the run body above.
+        **{name: _substitute_expressions(str(value), context, outputs) for name, value in step.env.items()},
     }
     proc = subprocess.run(
         ["bash", "-e", "-c", body], capture_output=True, text=True, timeout=60, env=env, cwd=tmp, check=False
@@ -520,6 +525,7 @@ def _resolve(expression: str, context: dict, outputs: dict) -> Any:
         "github.repository": context["repo"]["owner"] + "/" + context["repo"]["repo"],
         "github.actor": context["actor"],
         "github.event.pull_request.number": str(context["issueNumber"]),
+        "secrets.GITHUB_TOKEN": "ghs_fake_token_for_simulation",
     }
     for key, value in replacements.items():
         expression = expression.replace(key, json.dumps(value))
