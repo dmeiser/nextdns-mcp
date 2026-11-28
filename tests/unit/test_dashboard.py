@@ -1836,3 +1836,74 @@ class TestSanitizeLabel:
         capped = utils_mod.sanitize_label("x" * 300)  # 200 x's plus the ellipsis
         out = fmt._format_top_items([(capped, 5)])
         assert f"{capped} (5)" in out
+
+
+class TestLabelAndSeriesInjectionHardening:
+    """Upstream labels are plain data; upstream query counts are plottable numbers."""
+
+    def test_sanitize_label_strips_bidi_and_separator_controls(self):
+        label = "a\u200eb\u200fc\u202ad\u202be\u202cf\u2066g\u2067h\u2068i\u2069j\u2028k\u2029l"
+        assert utils_mod.sanitize_label(label) == "abcdefghijkl"
+
+    def test_sanitize_label_neutralizes_prefab_template_delimiters(self):
+        assert utils_mod.sanitize_label("{{ secret }}") == "{ { secret } }"
+        assert utils_mod.sanitize_label("a}}b{{c") == "a} }b{ {c"
+        assert utils_mod.sanitize_label("{ { literal } }") == "{ { literal } }"
+
+    def test_sanitize_label_neutralizes_brace_runs_of_any_length(self):
+        assert utils_mod.sanitize_label("{{{x}}}") == "{ { {x} } }"
+        assert utils_mod.sanitize_label("{{{{a:1}}}}") == "{ { { {a:1} } } }"
+        long_run = utils_mod.sanitize_label("{{" * 20)
+        assert "{{" not in long_run and "}}" not in long_run
+
+    def test_summaries_escape_bracket_delimiters(self):
+        summary = fmt.format_items_summary("Devices", "devices", [("Office [Guest]", 5), ("Lab", 2)], 7)
+        assert summary == r"[Rendered Devices (2 devices, 7 queries): Office \[Guest\] (5), Lab (2)]"
+        overview = fmt.overview_top_summary([{"domain": "Office [Guest]", "queries": 3}], [])
+        assert overview == r"Top resolved: Office \[Guest\] (3); Top blocked: none"
+
+    def test_build_chart_data_keeps_only_finite_numbers(self):
+        times = ["2024-01-01T00:00:00Z"] * 6
+        values = [5, 7.5, "5", True, float("inf"), float("nan")]
+        rows = charts_module.build_chart_data(times, [{"queries": values}])
+        assert [row["series_0"] for row in rows] == [5, 7.5, 0, 0, 0, 0]
+
+    def test_downsample_validates_counts_before_summing(self):
+        times = ["2024-01-01T00:00:00Z"] * 3
+        series_data = [{"queries": [2, "3", float("inf")]}]
+        _, out_series = charts_module.downsample_chart_series(times, series_data, max_points=1)
+        assert out_series[0]["queries"] == [2]
+
+    def test_arbitrarily_large_json_integers_stay_finite(self):
+        huge = 10**400
+        times = ["2024-01-01T00:00:00Z"] * 2
+        rows = charts_module.build_chart_data(times, [{"queries": [huge, 1]}])
+        assert [row["series_0"] for row in rows] == [huge, 1]
+        _, out_series = charts_module.downsample_chart_series(times, [{"queries": [huge, 1]}], max_points=1)
+        assert out_series[0]["queries"] == [huge + 1]
+
+    def test_downsample_overflowing_mixed_numeric_bucket_falls_back_to_zero(self):
+        times = ["2024-01-01T00:00:00Z"] * 2
+        out_times, out_series = charts_module.downsample_chart_series(
+            times, [{"queries": [10**400, 1.5]}], max_points=1
+        )
+        assert out_series[0]["queries"] == [0]
+        assert charts_module.build_chart_data(out_times, out_series)[0]["series_0"] == 0
+
+    def test_downsample_finite_float_bucket_that_overflows_falls_back_to_zero(self):
+        times = ["2024-01-01T00:00:00Z"] * 2
+        out_times, out_series = charts_module.downsample_chart_series(
+            times, [{"queries": [1e308, 1e308]}], max_points=1
+        )
+        assert out_series[0]["queries"] == [0]
+        assert charts_module.build_chart_data(out_times, out_series)[0]["series_0"] == 0
+
+    def test_queries_card_renders_only_finite_numbers(self):
+        times = ["2024-01-01T00:00:00Z"] * 3
+        series_data = [{"name": "blocked", "queries": [5, "5", float("inf")]}]
+        prepared = data_mod.prepare_queries_series({"meta": {"series": {"times": times}}, "data": series_data})
+        assert prepared is not None
+        card = ui._build_queries_series_card(*prepared)
+        chart = _find_component(card, "AreaChart")
+        assert chart is not None
+        assert [row["series_0"] for row in chart.data] == [5, 0, 0]

@@ -92,19 +92,43 @@ def _parse_series_timestamp(value: str) -> datetime:
     return parsed
 
 
-def _extract_series_queries(series_data: list[dict[str, Any]]) -> list[list[Any]]:
-    """Read each series' query list once, in series order.
+def _finite_query_count(value: Any) -> int | float:
+    """Return a finite numeric query count, or 0 for anything else.
+
+    Non-numeric strings and NaN/Infinity are upstream data, not plottable
+    counts. Coalescing them to 0 keeps the series shape intact without handing
+    a value the chart renderer cannot draw (issue #763).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    # Python ints are finite even beyond the C-double range; math.isfinite
+    # would overflow them during conversion (issue #763).
+    if isinstance(value, int):
+        return value
+    return value if math.isfinite(value) else 0
+
+
+def _query_values(series: dict[str, Any]) -> list[Any]:
+    """Return a series' query entries as a list, tolerating a missing/null field."""
+    queries = series.get("queries")
+    return list(queries) if isinstance(queries, (list, tuple)) else []
+
+
+def _extract_series_queries(series_data: list[dict[str, Any]]) -> list[list[int | float]]:
+    """Read and validate each series' query list once, in series order.
 
     A missing or null ``queries`` value becomes an empty list here, which is the
     same coalescing the per-point build used to repeat for every timestamp.
+    Every retained entry is a finite number so neither this builder nor the
+    bucketer downstream can put an unplottable value in the chart.
     """
-    return [series.get("queries") or [] for series in series_data]
+    return [[_finite_query_count(value) for value in _query_values(series)] for series in series_data]
 
 
 def _build_chart_point(
     time_str: str,
     time_index: int,
-    query_lists: list[list[Any]],
+    query_lists: list[list[int | float]],
     series_keys: list[str],
 ) -> dict[str, Any]:
     """Validate timestamp and return a single time-aligned data point.
@@ -116,7 +140,8 @@ def _build_chart_point(
     _parse_series_timestamp(time_str)
     point: dict[str, Any] = {"time": time_str}
     for key, queries in zip(series_keys, query_lists, strict=True):
-        point[key] = queries[time_index] if time_index < len(queries) else 0
+        value = queries[time_index] if time_index < len(queries) else 0
+        point[key] = _finite_query_count(value)
     return point
 
 
@@ -135,10 +160,30 @@ def build_chart_data(
     return [_build_chart_point(t, idx, query_lists, series_keys) for idx, t in enumerate(times)]
 
 
-def _bucket_series_queries(queries: list[int] | None, n: int, bucket_size: int) -> list[int]:
-    """Sum a single series' query counts into chunks of ``bucket_size``."""
-    q = queries or []
-    return [sum(q[start : min(start + bucket_size, n)]) for start in range(0, n, bucket_size)]
+def _sum_query_bucket(values: list[int | float]) -> int | float:
+    """Sum one downsample bucket, falling back to 0 when the aggregate is unplottable.
+
+    Valid individual counts may include Python integers beyond the C-double
+    range. Adding such an integer to a float can raise during conversion, and a
+    bucket of finite floats can aggregate to infinity. Neither is plottable, so
+    the whole bucket falls back to zero instead of crashing or retaining an
+    infinite total (issue #763).
+    """
+    total: int | float = 0
+    for value in values:
+        try:
+            total += value
+        except OverflowError:
+            return 0
+        if isinstance(total, float) and not math.isfinite(total):
+            return 0
+    return total
+
+
+def _bucket_series_queries(queries: list[Any] | None, n: int, bucket_size: int) -> list[int | float]:
+    """Sum a single series' valid query counts into chunks of ``bucket_size``."""
+    q = [_finite_query_count(value) for value in (queries or [])]
+    return [_sum_query_bucket(q[start : min(start + bucket_size, n)]) for start in range(0, n, bucket_size)]
 
 
 def _bucket_single_series(series: dict[str, Any], n: int, bucket_size: int) -> dict[str, Any]:

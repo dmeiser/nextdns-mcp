@@ -14,14 +14,21 @@ from ...utils import sanitize_label
 from .data import domain_label, item_queries
 
 
+def _escape_summary_delimiters(name: str) -> str:
+    """Distinguish square brackets in a label from the summary's own brackets."""
+    return name.replace("[", r"\[").replace("]", r"\]")
+
+
 def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
     """Format top items as 'name (count)' list.
 
     Names are sanitized at extraction/shaping time by the row and label
-    helpers, so this only formats: a second ``sanitize_label`` pass would
-    re-cap the ellipsis the first pass appended.
+    helpers, so this does not sanitize them again: a second ``sanitize_label``
+    pass would re-cap the ellipsis the first pass appended. Escaping the
+    summary's own bracket delimiter here keeps label punctuation readable to
+    a model without changing the UI label (issue #763).
     """
-    formatted = [f"{name} ({q:,})" for name, q in items[:limit]]
+    formatted = [f"{_escape_summary_delimiters(name)} ({q:,})" for name, q in items[:limit]]
     return ", ".join(formatted)
 
 

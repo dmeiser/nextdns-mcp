@@ -394,21 +394,37 @@ def schema_required(schema: dict[str, Any] | None) -> list[str]:
     return [str(name) for name in ((schema or {}).get("required") or [])]
 
 
+# Bidi controls can reorder text without changing its bytes, and U+2028/U+2029
+# render as line breaks in some clients. Both are data in an upstream label,
+# not formatting the dashboard is allowed to honour (issue #763). The shared
+# pattern covers ordinary controls; labels additionally strip these ranges.
+_LABEL_BIDI_CHARS_RE = re.compile(r"[\u200e-\u200f\u202a-\u202e\u2028-\u2029\u2066-\u2069]")
+# Collapse each maximal brace run in one pass: inserting a space between every
+# adjacent pair is idempotent, while replace("{{", ...) can re-form a delimiter
+# from the trailing brace of its own replacement on a run of three or more.
+_BRACE_RUN_RE = re.compile(r"\{+|\}+")
 _MAX_LABEL_LENGTH = 200
 _LABEL_TRUNCATION_MARKER = "…"
 
 
 def sanitize_label(value: Any) -> str:
-    """Strip control characters and bound the length of an upstream-controlled label.
+    """Render an upstream-controlled label as plain, bounded text.
 
     Dashboard rows, model-readable summaries, and chart series labels all carry
     strings from the analytics API, so every extraction point routes through
-    this one helper instead of trusting the payload. Values longer than
-    ``_MAX_LABEL_LENGTH`` are capped with an ellipsis. Sanitizing must happen
+    this one helper instead of trusting the payload. Control and bidi characters
+    are removed, and Prefab's ``{{ ... }}`` delimiters are split so an upstream
+    label is never evaluated as a client-side template expression. Values longer
+    than ``_MAX_LABEL_LENGTH`` are capped with an ellipsis. Sanitizing must happen
     exactly once, at extraction/shaping time: the cap appends a character, so
     a second pass would see a 201-character label and cut it again.
     """
     text = CONTROL_CHARS_PATTERN.sub("", str(value))
+    text = _LABEL_BIDI_CHARS_RE.sub("", text)
+    # Any string prop can carry a Prefab expression. Splitting every brace run
+    # preserves the visible characters while making the string inert as a
+    # template; no client-side escaping convention is relied upon.
+    text = _BRACE_RUN_RE.sub(lambda match: " ".join(match.group()), text)
     # errors.body.cap_with_marker holds the one cap-and-marker implementation,
     # borrowed from the package root by public name; re-inlining the comparison
     # here is the second copy of the cut both callers must make identically.
