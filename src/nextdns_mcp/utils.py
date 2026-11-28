@@ -229,11 +229,12 @@ def build_series_params(
 ) -> dict[str, Any]:
     """Build the query-param dict shared by the analytics ``;series`` endpoints.
 
-    Both ``queryAnalytics(series=True)`` and ``plotAnalytics`` read the same
-    ``/analytics/{metric};series`` endpoint, so they build the same parameter
-    set through this one helper and cannot drift (issue #267). The ``;series``
-    endpoints take no ``limit``, so callers that expose one (as the plot tool
-    does) keep it out of this set and validate it on its own.
+    The ``/analytics/{metric};series`` endpoints (``getAnalyticsStatusSeries``
+    and its metric-specific peers) are read by both ``plotAnalytics`` and the
+    dashboard code, so they build the same parameter set through this one
+    helper and cannot drift (issue #267). The ``;series`` endpoints take no
+    ``limit``, so callers that expose one (as the plot tool does) keep it out
+    of this set and validate it on its own.
     """
     return build_query_params(
         **{
