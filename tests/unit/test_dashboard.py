@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastmcp.tools.base import ToolResult
-from prefab_ui.components import Card, Column, DataTableColumn
+from prefab_ui.components import Card, CardContent, CardDescription, CardHeader, CardTitle, Column, DataTableColumn, P
 
 from nextdns_mcp import chart_ui as chart_ui_module
 from nextdns_mcp import charts as charts_module
@@ -51,6 +51,65 @@ class TestDashboardHelpers:
         assert child["type"] == "Card"
         # The wrap builds a fresh view around the card; the card itself is untouched.
         assert card.model_dump(exclude={"id"}) == snapshot
+
+    def test_wrap_card_result_wire_document_matches_pre_refactor_base(self):
+        """The rendered document equals the one captured before the Column refactor."""
+        # Golden captured before the refactor; revalidated after the wrapper moved into tool.py.
+        card = Card(
+            children=[
+                CardHeader(children=[CardTitle(content="Title"), CardDescription(content="Description")]),
+                CardContent(children=[P("Body")]),
+            ]
+        )
+        result = tool_mod._wrap_card_result(card, "Summary text")
+        assert result.structured_content == {
+            "$prefab": {"version": "0.3"},
+            "view": {
+                "cssClass": "pf-app-root",
+                "type": "Div",
+                "children": [
+                    {
+                        "cssClass": "gap-4 p-6",
+                        "type": "Column",
+                        "children": [
+                            {
+                                "type": "Card",
+                                "children": [
+                                    {
+                                        "type": "CardHeader",
+                                        "children": [
+                                            {"type": "CardTitle", "content": "Title"},
+                                            {"type": "CardDescription", "content": "Description"},
+                                        ],
+                                    },
+                                    {
+                                        "type": "CardContent",
+                                        "children": [{"type": "P", "content": "Body"}],
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+            "css": [
+                (
+                    ":root {\n"
+                    "  --accent-hue: 220.0;\n"
+                    "}\n"
+                    ".dark {\n"
+                    "  --accent-hue: 220.0;\n"
+                    "}\n"
+                    ":root, .dark {\n"
+                    "  --chart-1: #3b82f6;\n"
+                    "  --chart-2: #10b981;\n"
+                    "  --chart-3: #f59e0b;\n"
+                    "  --chart-4: #ef4444;\n"
+                    "  --chart-5: #8b5cf6;\n"
+                    "}\n"
+                )
+            ],
+        }
 
     def test_build_analytics_params(self):
         p = data_mod.build_analytics_params("-1d", "now", limit=5, extra_key="val", none_key=None)

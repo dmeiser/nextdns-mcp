@@ -65,8 +65,7 @@ from .formatters import (
 
 def _wrap_card_result(card: Card, summary_text: str) -> ToolResult | dict[str, Any]:
     """Wrap a single visual card into the ToolResult the MCP surface answers with."""
-    with Column(gap=4, css_class="p-6", children=[card]) as view:
-        pass
+    view = Column(gap=4, css_class="p-6", children=[card])
     return bounded_app_result(build_page_app(view), summary_text, "dashboard card")
 
 
