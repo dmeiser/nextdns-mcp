@@ -34,6 +34,7 @@ from .generative_sandbox import (
     MAX_RESULT_BYTES,
     SANDBOX_START_TIMEOUT,
     DenoPyodideSandbox,
+    WirePayload,
 )
 
 logger = logging.getLogger(__name__)
@@ -121,13 +122,19 @@ def _guard_string_data(data: str) -> dict[str, Any] | None:
 
 
 def _guard_object_data(data: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Validate the type before serializing so non-dict values raise ValueError, not TypeError from json.dumps."""
+    """Validate the type before serializing so non-dict values raise ValueError, not TypeError from json.dumps.
+
+    The serialization that measures ``MAX_DATA_BYTES`` is the one the request
+    frame needs, so it is handed on instead of measured and thrown away; see
+    :class:`WirePayload`.
+    """
     parsed_data = _parse_ui_data(data)
     if parsed_data is None:
         return None
-    if len(json.dumps(parsed_data).encode("utf-8")) > MAX_DATA_BYTES:
+    data_json = json.dumps(parsed_data)
+    if len(data_json.encode("utf-8")) > MAX_DATA_BYTES:
         raise ValueError(f"data exceeds maximum size of {MAX_DATA_BYTES} bytes")
-    return parsed_data
+    return WirePayload(parsed_data, data_json)
 
 
 def _validated_payload(code: str, data: str | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -143,10 +150,20 @@ def _validated_payload(code: str, data: str | dict[str, Any] | None) -> dict[str
 def _result_size_bytes(result: Any) -> int:
     """Measure the serialized byte size of a sandbox result.
 
+    This cap is not the bounded stdout read's cap. That one limits the worker's
+    whole answer line, in the worker's own compact wire form, to stop the host
+    buffering a runaway view; this one limits the JSON the client is handed. The
+    two measures are not equivalent, so both stay — folding them would move a
+    user-visible cap.
+
     JSON is measured as UTF-8, not as ASCII-escaped text, so multibyte output is
     not charged six bytes per character. A serializer that fails is an error:
     falling back to ``str(result)`` let short representations sneak an
     otherwise unserializable result past the size guard.
+
+    The app a render returns is a :class:`RenderedApp`, so the payload measured
+    here is the same payload FastMCP's Prefab conversion hands to the client: the
+    response is serialized once per render, not once per reader.
     """
     to_json = getattr(result, "to_json", None)
     if callable(to_json):
@@ -161,6 +178,50 @@ def _result_size_bytes(result: Any) -> int:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"result serialization via model_dump_json failed: {exc}") from exc
     return len(str(result).encode("utf-8"))
+
+
+class RenderedApp(PrefabApp):
+    """The app one render produced, holding the payload its size guard serialized.
+
+    ``generate_prefab_ui`` serializes the rendered app to measure
+    ``MAX_RESULT_BYTES``; FastMCP's Prefab conversion then asks that same app for
+    the same payload to build the tool result. This class keeps the payload from
+    the first serialization, so the two readers share one serialized response
+    instead of each asking for its own.
+
+    Prefab's serializer consults ``tool_resolver`` for callable tool references.
+    Instances are made only by :func:`_rendered_app`, from the app prefab-ui built
+    out of the worker's wire frame — every value in it was parsed out of JSON, so
+    no callable reference is there for a resolver to rewrite, and the cached
+    payload is what ``to_json`` would have returned with one. That premise is
+    pinned by ``test_wire_built_payload_ignores_the_tool_resolver``.
+
+    The cache is a slot rather than a model field so it reaches neither
+    ``model_dump`` nor the wire payload, and it stays unset — not empty — for an
+    instance copied out of this class, which then serializes normally.
+    """
+
+    __slots__ = ("_wire_payload",)
+
+    def to_json(self, *, tool_resolver: Callable[..., Any] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] | None = getattr(self, "_wire_payload", None)
+        if payload is None:
+            payload = super().to_json()
+            self._wire_payload = payload
+        return payload
+
+
+def _rendered_app(app: PrefabApp) -> PrefabApp:
+    """Tag the app one render produced, so its payload is serialized once.
+
+    Field values move by reference — no second walk of the view — and the tag
+    only records that this app came off the worker's wire frame. Anything that is
+    not a plain :class:`PrefabApp` (a stub injected by a test, or an app already
+    tagged) is handed on untouched.
+    """
+    if type(app) is not PrefabApp:
+        return app
+    return RenderedApp.model_construct(_fields_set=app.model_fields_set, **app.__dict__)
 
 
 def _renderer_csp() -> ResourceCSP:
@@ -200,9 +261,14 @@ async def _start_within_budget(worker: DenoPyodideSandbox) -> None:
 
 
 async def _execute_within_budget(code: str, data: dict[str, Any] | None, worker: DenoPyodideSandbox) -> PrefabApp:
-    """Run the generated code on the execution timeout."""
+    """Run the generated code on the execution timeout, and tag the app it rendered.
+
+    The tag anchors the render's single response serialization: the app prefab-ui
+    returns is the one it built from the worker's wire frame, which is what
+    :class:`RenderedApp` requires (see there).
+    """
     try:
-        return await asyncio.wait_for(
+        app = await asyncio.wait_for(
             prefab_generative.execute(code, data=data, sandbox=worker),
             timeout=EXECUTION_TIMEOUT,
         )
@@ -210,6 +276,7 @@ async def _execute_within_budget(code: str, data: dict[str, Any] | None, worker:
         # asyncio.wait_for cancels the inner task; DenoPyodideSandbox.run
         # discards the worker on CancelledError, so the lock is released.
         raise TimeoutError(f"generate_prefab_ui execution exceeded {EXECUTION_TIMEOUT}s") from None
+    return _rendered_app(app)
 
 
 class PrefabGenerativeUI(Provider):

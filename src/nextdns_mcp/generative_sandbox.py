@@ -339,6 +339,42 @@ class _WorkerGone(RuntimeError):
     """
 
 
+class WirePayload(dict[str, Any]):
+    """The parsed ``data`` payload carrying the JSON text already serialized for it.
+
+    ``generate_prefab_ui`` measures ``MAX_DATA_BYTES`` against a serialization of
+    the payload and then needs that same text again for the request frame, so the
+    payload carries it: the frame is assembled from the buffer the guard already
+    produced instead of walking the same object twice.
+
+    Subclassing ``dict`` keeps the ``dict[str, Any] | None`` value that
+    :func:`prefab_ui.generative.execute` forwards to :meth:`DenoPyodideSandbox.run`
+    inside its declared type, and it compares equal to the plain dict it wraps, so
+    nothing between the tool and the wire can tell the difference. Only
+    :func:`_request_frame` reads :attr:`json_text`; re-serializing an instance
+    yields the same JSON, so a payload that never reaches the wire costs nothing.
+    """
+
+    __slots__ = ("json_text",)
+
+    def __init__(self, data: dict[str, Any], json_text: str) -> None:
+        super().__init__(data)
+        self.json_text = json_text
+
+
+def _request_frame(request_id: str, code: str, data: dict[str, Any] | None) -> bytes:
+    """Serialize one request frame, serializing the payload at most once.
+
+    A payload the size guard already serialized arrives as a :class:`WirePayload`
+    and its text is spliced in. The literal key order and separators reproduce
+    what ``json.dumps`` emits for the whole frame, so the worker is handed a
+    byte-identical request; only the second pass over ``data`` is gone.
+    """
+    data_json = data.json_text if isinstance(data, WirePayload) else json.dumps(data or {})
+    frame = '{"id": ' + json.dumps(request_id) + ', "code": ' + json.dumps(code) + ', "data": ' + data_json + "}"
+    return (frame + "\n").encode("utf-8")
+
+
 def _round_trip(stdin: Any, stdout: Any, frame: bytes) -> bytes:
     """Write one request frame and read the worker's answer line (blocking I/O, off the loop).
 
@@ -441,7 +477,7 @@ class DenoPyodideSandbox:
         stdin, stdout = process.stdin, process.stdout
         if stdin is None or stdout is None:
             raise _WorkerGone("Sandbox failed to start")
-        frame = (json.dumps({"id": request_id, "code": code, "data": data or {}}) + "\n").encode()
+        frame = _request_frame(request_id, code, data)
         try:
             return await asyncio.get_running_loop().run_in_executor(None, _round_trip, stdin, stdout, frame)
         except OSError:

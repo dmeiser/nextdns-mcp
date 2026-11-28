@@ -13,11 +13,13 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp import FastMCP
+from prefab_ui.app import PrefabApp
 
 from nextdns_mcp import chart_placement as chart_placement_module
 from nextdns_mcp import generative as generative_module
@@ -33,7 +35,7 @@ from nextdns_mcp.generative import (
     _parse_ui_data,
     _result_size_bytes,
 )
-from nextdns_mcp.generative_sandbox import MAX_RESULT_BYTES
+from nextdns_mcp.generative_sandbox import MAX_RESULT_BYTES, WirePayload
 
 
 def test_parse_ui_data():
@@ -706,6 +708,19 @@ async def test_generate_ui_serializes_valid_dict_data_once():
         assert mock_exec.call_args[1]["data"] == {"a": 1}
 
 
+def test_guard_object_data_hands_on_the_buffer_it_measured():
+    """The measured serialization is the one the request frame needs, not a throwaway.
+
+    Pre-fix the guard serialized the payload, counted it, and discarded the text,
+    so the sandbox serialized the same object again for the wire frame.
+    """
+    payload = {"k": "v", "nested": {"n": [1, 2]}}
+    guarded = generative_module._validated_payload("print(1)", payload)
+    assert isinstance(guarded, WirePayload)
+    assert guarded == payload, "the payload must stay equal to the dict the tool was given"
+    assert guarded.json_text == json.dumps(payload)
+
+
 @pytest.mark.asyncio
 async def test_generate_ui_data_size_limit():
     gen_ui = PrefabGenerativeUI()
@@ -749,6 +764,115 @@ async def test_generate_ui_accepts_utf8_result_under_cap():
     ):
         mock_exec.return_value = app
         assert await gen_tool.fn(code="print(1)") is app
+
+
+_WIRE_VIEW = {"type": "Text", "props": {"text": "hello"}}
+
+
+def _resolver_double() -> Callable[..., Any]:
+    """A tool_resolver double that records every reference it was asked about."""
+
+    def resolve(ref: Any) -> Any:
+        resolve.seen.append(ref)  # type: ignore[attr-defined]
+        return SimpleNamespace(name="__h_peer", local_name="peer", unwrap_result=False)
+
+    resolve.seen = []  # type: ignore[attr-defined]
+    return resolve
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_serializes_the_response_payload_once():
+    """The size guard and FastMCP's conversion share one serialized response (WORK-354).
+
+    ``to_json`` is counted on ``PrefabApp``, which is where both readers land: the
+    guard's measurement and the Prefab conversion FastMCP runs on the value the
+    tool returned. A second serialization of the same payload is what this pins.
+    """
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    real_to_json = PrefabApp.to_json
+    calls: list[bool] = []
+
+    def counting_to_json(self: PrefabApp, *, tool_resolver: Any = None) -> dict[str, Any]:
+        calls.append(tool_resolver is not None)
+        return real_to_json(self, tool_resolver=tool_resolver)
+
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
+        patch.object(PrefabApp, "to_json", counting_to_json),
+    ):
+        mock_exec.return_value = PrefabApp.from_json({"view": _WIRE_VIEW})
+        rendered = await gen_tool.fn(code="print(1)")
+        result = gen_tool.convert_result(rendered)
+
+    assert len(calls) == 1, f"the response payload serialized {len(calls)} times"
+    assert isinstance(rendered, generative_module.RenderedApp)
+    assert result.structured_content == rendered.to_json()
+    assert result.structured_content["view"]["children"][0]["type"] == "Text"
+
+
+def test_wire_built_payload_ignores_the_tool_resolver():
+    """The shortcut RenderedApp takes rests here: nothing in a wire-built app resolves.
+
+    The app a render returns carries tool-call references and app tools, all of
+    them parsed out of the worker's frame, so Prefab's ``tool_resolver`` — which
+    rewrites *callable* references during serialization — has nothing to rewrite.
+    A resolver therefore cannot change the payload the guard measured.
+    """
+    wire = {
+        "view": {"type": "Button", "props": {"label": "go", "action": {"action": "toolCall", "tool": "peer"}}},
+        "tools": [{"name": "peer", "description": "d", "result": {"type": "string"}}],
+    }
+    app = generative_module._rendered_app(PrefabApp.from_json(wire))
+    resolve = _resolver_double()
+
+    resolved = app.to_json(tool_resolver=resolve)
+
+    assert resolved == app.to_json()
+    assert resolve.seen == [], "a wire-built app handed the resolver something to rewrite"
+    assert resolved["tools"][0]["name"] == "peer"
+
+
+def test_rendered_app_tags_the_rendered_app_and_hands_on_anything_else():
+    """The tag carries the app's fields by reference, and is taken only by a rendered app."""
+    app = PrefabApp.from_json({"view": _WIRE_VIEW, "title": "dash", "state": {"n": 1}, "mode": "dark"})
+
+    tagged = generative_module._rendered_app(app)
+
+    assert tagged.model_dump(by_alias=True) == app.model_dump(by_alias=True)
+    assert tagged.model_fields_set == app.model_fields_set
+    assert generative_module._rendered_app(tagged) is tagged
+    stub = object()
+    assert generative_module._rendered_app(stub) is stub  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("delta", "accepted"), [(0, True), (1, False)])
+async def test_result_cap_boundary_holds_for_a_rendered_app(delta: int, accepted: bool):
+    """The shared payload does not move MAX_RESULT_BYTES: at the cap passes, one byte over fails.
+
+    This uses the app shape a render really returns (``PrefabApp.from_json``),
+    unlike the size-guard tests that feed the tool a stub object.
+    """
+    probe = PrefabApp.from_json({"view": {"type": "Text", "props": {"text": "x"}}})
+    overhead = len(json.dumps(probe.to_json(), ensure_ascii=False).encode("utf-8")) - 1
+    text = "x" * (MAX_RESULT_BYTES - overhead + delta)
+    app = PrefabApp.from_json({"view": {"type": "Text", "props": {"text": text}}})
+    assert len(json.dumps(app.to_json(), ensure_ascii=False).encode("utf-8")) == MAX_RESULT_BYTES + delta
+
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
+    ):
+        mock_exec.return_value = app
+        if accepted:
+            assert isinstance(await gen_tool.fn(code="print(1)"), generative_module.RenderedApp)
+        else:
+            with pytest.raises(ValueError, match="result exceeds maximum size"):
+                await gen_tool.fn(code="print(1)")
 
 
 class _ChunkedRaw:
@@ -854,13 +978,16 @@ class _StubProcess:
     """A worker stand-in that speaks the sandbox wire protocol.
 
     Answers are built from the request being answered, so a test can pin the
-    request framing (id/code/data) while the answer's id still matches. The
-    lifecycle methods record what the sandbox did to the worker.
+    request framing (id/code/data) while the answer's id still matches. The raw
+    frames are kept next to the decoded ones, so a test can pin the exact bytes
+    written to the worker. The lifecycle methods record what the sandbox did to
+    the worker.
     """
 
     def __init__(self, responder: Callable[[dict[str, Any]], bytes] | None = None) -> None:
         self._responder = responder or _result_answer
         self.requests: list[dict[str, Any]] = []
+        self.frames: list[bytes] = []
         self._answered = 0
         self._pending = b""
         self.stdin = _StubStream(self)
@@ -871,6 +998,7 @@ class _StubProcess:
         self.terminate_calls = 0
 
     def add_request(self, frame: bytes) -> None:
+        self.frames.append(frame)
         self._pending += frame
         while b"\n" in self._pending:
             line, self._pending = self._pending.split(b"\n", 1)
@@ -927,6 +1055,43 @@ async def test_run_frames_one_request_per_execution_and_discards_the_worker():
     # The worker is discarded after the execution: a fresh one starts next time.
     assert sandbox._process is None
     assert proc.terminated
+
+
+@pytest.mark.parametrize(
+    "data",
+    [None, {"k": "v"}, WirePayload({"k": "v"}, json.dumps({"k": "v"}))],
+)
+def test_request_frame_bytes_are_unchanged_by_the_reused_payload(data: dict[str, Any] | None) -> None:
+    """Splicing the payload's text into the frame changes the passes, not the wire bytes."""
+    request_id = "0" * 32
+    code = "print('hi')"
+    legacy = (json.dumps({"id": request_id, "code": code, "data": data or {}}) + "\n").encode()
+    assert sandbox_module._request_frame(request_id, code, data) == legacy
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_serialize_a_guarded_payload_a_second_time(monkeypatch) -> None:
+    """Oracle: the request path serializes `data` once, in the size guard.
+
+    Pre-fix, ``_exchange`` walked the payload again to build the frame, so a
+    ``json.dumps`` over the payload dict was unavoidable on every request. With the
+    guard's buffer carried on the payload, any dict serialization on this path is
+    the duplicate this ticket names.
+    """
+    real_dumps = json.dumps
+
+    def _no_dict_dumps(obj: Any, *args: Any, **kwargs: Any) -> str:
+        assert not isinstance(obj, dict), "the data payload was serialized a second time"
+        return real_dumps(obj, *args, **kwargs)
+
+    monkeypatch.setattr(sandbox_module, "json", SimpleNamespace(dumps=_no_dict_dumps, loads=json.loads))
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    proc = _StubProcess()
+    sandbox._process = proc
+
+    assert await sandbox.run("print(1)", data=WirePayload({"k": "v"}, '{"k": "v"}')) == {"view": "ok"}
+    (frame,) = proc.frames
+    assert b'", "data": {"k": "v"}}\n' in frame
 
 
 @pytest.mark.asyncio
