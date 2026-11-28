@@ -82,73 +82,100 @@ class _Attempt:
     transient: bool = False
 
 
+def _check_teardown_receipt(state: _RunState) -> str:
+    """The id this run may delete, or "" when it holds no createProfile receipt.
+
+    Every path that set ``pid`` (harness provisioning via createProfile,
+    self-heal from a create response, a receipt-backed adoption) put the id
+    in created_ids; an id that got there any other way is not this run's to
+    delete, and the run says so in its notes instead of destroying it.
+    """
+    pid = state.pid
+    if pid and not harness._deletable_by_this_run(pid, state.created_ids):
+        note = f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
+        state.report.notes.append(note)
+        harness._progress(f"  NOTE    : {note}")
+        state.pid = ""
+        return ""
+    return pid
+
+
+def _cleanup_verdict(state: _RunState, pid: str, gone: bool) -> None:
+    state.report.cleanup = (
+        "clean: profile deleted and verified gone via REST" if gone else "FAILED (profile still present)"
+    )
+    state.report.profile_id = pid
+
+
+async def _delete_via_mcp(state: _RunState, m: Any, pid: str) -> bool:
+    try:
+        err = await harness._harness_delete_profile(state.config, pid)
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    gone, _verdict = await harness._profile_gone(m, pid, state.targets)
+    if gone:
+        harness._progress("targeted teardown: test profile deleted via deleteProfile")
+    else:
+        harness._progress(f"targeted teardown incomplete via MCP ({err or 'profile still present'})")
+    return gone
+
+
+async def _delete_via_rest(state: _RunState, m: Any, pid: str) -> bool:
+    harness._progress("safety cleanup: deleting the test profile via REST")
+    for attempt in range(4):
+        resp = await m.rest_delete(f"/profiles/{pid}")
+        if isinstance(resp, dict) and resp.get("ok"):
+            break
+        await asyncio.sleep(5 * (attempt + 1))
+    gone, _verdict = await harness._profile_gone(m, pid, state.targets)
+    return gone
+
+
+async def _teardown_owned_profile(state: _RunState, m: Any) -> None:
+    # Safety net: if the model deleted the profile, verify; if not, the
+    # harness owns cleanup. For a targeted range that excludes
+    # profiles.delete the teardown is harness-owned from the start, so it
+    # goes through the same MCP tool the actor would have used.
+    pid = _check_teardown_receipt(state)
+    if not pid:
+        state.report.cleanup = "skipped (test profile not found on the server)"
+        return
+    gone, _verdict = await harness._profile_gone(m, pid, state.targets)
+    if not gone and harness.needs_harness_teardown(state.selected):
+        gone = await _delete_via_mcp(state, m, pid)
+    if not gone:
+        gone = await _delete_via_rest(state, m, pid)
+    _cleanup_verdict(state, pid, gone)
+
+
+async def _sweep_created_extras(state: _RunState, m: Any) -> None:
+    # Remove any extra profiles THIS run created beyond the test profile,
+    # so they do not accumulate in the account between runs. Only ids with
+    # a createProfile receipt are candidates; if the account listing fails
+    # the sweep stands down and says so in the report.
+    sweep_note = await harness._sweep_stray_profiles(m, state.created_ids, {state.pid} if state.pid else set())
+    if sweep_note:
+        harness._progress(f"  NOTE    : {sweep_note}")
+        state.report.notes.append(sweep_note)
+
+
 async def _teardown_profiles(state: _RunState, m: Any) -> None:
     """Delete the profiles this run proved it created; record the cleanup verdict."""
-    targets = state.targets
-    report = state.report
     # Runs from a finally, so a mid-run crash or Ctrl-C still deletes the
     # profiles this run holds a create receipt for.
     crashing = sys.exc_info()[0] is not None
     try:
-        pid = state.pid
-        # Safety net: if the model deleted the profile, verify; if not, the
-        # harness owns cleanup. For a targeted range that excludes
-        # profiles.delete the teardown is harness-owned from the start, so it
-        # goes through the same MCP tool the actor would have used.
-        # Deletion requires the receipt: every path that set ``pid`` (harness
-        # provisioning via createProfile, self-heal from a create response, a
-        # receipt-backed adoption) put the id in created_ids; an id that got
-        # there any other way is not this run's to delete, and the run says
-        # so in its notes instead of destroying it.
-        if pid and not harness._deletable_by_this_run(pid, state.created_ids):
-            note = f"test profile {pid} has no createProfile receipt from this run: teardown refuses to delete it"
-            report.notes.append(note)
-            harness._progress(f"  NOTE    : {note}")
-            state.pid = ""
-            pid = ""
-        if pid:
-            gone, _verdict = await harness._profile_gone(m, pid, targets)
-            if not gone and harness.needs_harness_teardown(state.selected):
-                try:
-                    err = await harness._harness_delete_profile(state.config, pid)
-                except Exception as e:  # noqa: BLE001
-                    err = f"{type(e).__name__}: {e}"
-                gone, _verdict = await harness._profile_gone(m, pid, targets)
-                if gone:
-                    harness._progress("targeted teardown: test profile deleted via deleteProfile")
-                else:
-                    harness._progress(f"targeted teardown incomplete via MCP ({err or 'profile still present'})")
-            if not gone:
-                harness._progress("safety cleanup: deleting the test profile via REST")
-                for attempt in range(4):
-                    resp = await m.rest_delete(f"/profiles/{pid}")
-                    if isinstance(resp, dict) and resp.get("ok"):
-                        break
-                    await asyncio.sleep(5 * (attempt + 1))
-                gone, _verdict = await harness._profile_gone(m, pid, targets)
-            report.cleanup = (
-                "clean: profile deleted and verified gone via REST" if gone else "FAILED (profile still present)"
-            )
-            report.profile_id = pid
-        else:
-            report.cleanup = "skipped (test profile not found on the server)"
-
-        # Remove any extra profiles THIS run created beyond the test profile,
-        # so they do not accumulate in the account between runs. Only ids with
-        # a createProfile receipt are candidates; if the account listing fails
-        # the sweep stands down and says so in the report.
-        sweep_note = await harness._sweep_stray_profiles(m, state.created_ids, {pid} if pid else set())
-        if sweep_note:
-            harness._progress(f"  NOTE    : {sweep_note}")
-            report.notes.append(sweep_note)
+        await _teardown_owned_profile(state, m)
+        await _sweep_created_extras(state, m)
     except BaseException as e:
         # A teardown site that explodes must not replace the crash already
         # unwinding: the original exception propagates and the teardown failure
         # is recorded instead.
         if not crashing:
             raise
-        harness._progress(f"teardown interrupted while a mid-run crash was unwinding: {e!r}")
-        report.notes.append(f"teardown interrupted while a mid-run crash was unwinding: {e!r}")
+        note = f"teardown interrupted while a mid-run crash was unwinding: {e!r}"
+        harness._progress(note)
+        state.report.notes.append(note)
 
 
 async def _setup_test_profile(state: _RunState, m: Any) -> None:
@@ -167,17 +194,11 @@ async def _setup_test_profile(state: _RunState, m: Any) -> None:
         harness._progress(f"targeted setup: {note}")
 
 
-async def _resolve_plot_profile(state: _RunState, m: Any) -> None:
-    """Resolve the data-bearing profile the read-only steps run against."""
-    # Read-only plot/log steps target NEXTDNS_PLOT_PROFILE; when it is unset
-    # they would all read the empty test profile and skip as data-starved,
-    # so resolve a data-bearing one up front and say so in the report.
-    if not any(step.section in {"plots", "dashboard"} or step.id == "logs.download" for _, step in state.selected):
-        return
-    if not (plot_note := await harness._ensure_plot_profile(m, state.pid)):
-        return
-    state.report.notes.append(plot_note)
-    harness._progress(f"plot profile: {plot_note}")
+def _needs_plot_profile(state: _RunState) -> bool:
+    return any(step.section in {"plots", "dashboard"} or step.id == "logs.download" for _, step in state.selected)
+
+
+def _reprotect_plot_profile(state: _RunState) -> None:
     # The fallback selection must reach the child server's protected
     # set too: the explicit NEXTDNS_PLOT_PROFILE is protected when the
     # config is built, but a fallback resolved after that point was
@@ -186,6 +207,20 @@ async def _resolve_plot_profile(state: _RunState, m: Any) -> None:
     if chosen := os.environ.get("NEXTDNS_PLOT_PROFILE", "").strip():
         harness._protect_server_profile(state.config, chosen)
         harness.write_mcp_config(state.config, state.workdir)
+
+
+async def _resolve_plot_profile(state: _RunState, m: Any) -> None:
+    """Resolve the data-bearing profile the read-only steps run against."""
+    # Read-only plot/log steps target NEXTDNS_PLOT_PROFILE; when it is unset
+    # they would all read the empty test profile and skip as data-starved,
+    # so resolve a data-bearing one up front and say so in the report.
+    if not _needs_plot_profile(state):
+        return
+    if not (plot_note := await harness._ensure_plot_profile(m, state.pid)):
+        return
+    state.report.notes.append(plot_note)
+    harness._progress(f"plot profile: {plot_note}")
+    _reprotect_plot_profile(state)
 
 
 async def _heal_profile(state: _RunState, m: Any) -> None:
@@ -220,6 +255,59 @@ def _render_step_prompt(state: _RunState, step: Any) -> tuple[str, str]:
     return step.prompt.replace("{profile_id}", prompt_pid), prompt_pid
 
 
+def _call_log_offset(state: _RunState) -> int:
+    return state.call_log.stat().st_size if state.call_log.exists() else 0
+
+
+def _record_attempt(state: _RunState, run: Any, log_offset: int) -> list[dict[str, Any]]:
+    state.total_events += len(run.tool_calls)
+    for tool in run.tools_used():
+        if tool not in state.tools_used:
+            state.tools_used.append(tool)
+    if run.stderr:
+        state.last_stderr = run.stderr
+    state.all_raw.extend(run.raw_lines)
+    server_calls = harness._read_new_calls(state.call_log, log_offset)
+    # A successful createProfile row is this run's receipt that a
+    # profile is its own to clean up (the model sometimes creates
+    # extras beyond the test profile).
+    state.created_ids |= harness._created_ids_from_records(server_calls)
+    return server_calls
+
+
+def _call_result_texts(run: Any) -> list[str]:
+    return [call.result_text or "" for call in run.tool_calls]
+
+
+def _server_error_texts(server_calls: list[dict[str, Any]]) -> list[str]:
+    return [str(record.get("error") or "") for record in server_calls]
+
+
+def _final_text_part(run: Any) -> list[str]:
+    return [run.final_text] if run.final_text else []
+
+
+def _attempt_text(error: str, reason: str, run: Any, server_calls: list[dict[str, Any]]) -> str:
+    return " ".join(
+        [error, reason]
+        + harness._extract_error_events(run)
+        + _call_result_texts(run)
+        + _server_error_texts(server_calls)
+        + _final_text_part(run)
+    ).lower()
+
+
+def _transient_decision(kind: str, why: str, attempts_by_kind: dict[str, int], transients: list[str]) -> bool:
+    if not kind:
+        return False
+    if attempts_by_kind[kind] >= harness.TRANSIENT_ATTEMPTS[kind]:
+        return False
+    attempts_by_kind[kind] += 1
+    transients.append(f"{kind}: {why}")
+    harness._progress(f"  RETRY   : transient actor failure ({why}); retrying")
+    return True
+
+
 async def _attempt_step(
     state: _RunState,
     m: Any,
@@ -232,7 +320,7 @@ async def _attempt_step(
     """Run one attempt of one step: the actor, then both halves of its verdict."""
     # Where the server's call log stands before this attempt; the
     # lines after it are this attempt's authoritative record.
-    log_offset = state.call_log.stat().st_size if state.call_log.exists() else 0
+    log_offset = _call_log_offset(state)
     # One subprocess per attempt: run_actor's own internal retry is
     # off here because it would silently double the window this
     # step's call-log slice covers. Observed: a step whose first
@@ -241,19 +329,7 @@ async def _attempt_step(
     # were real, they just came from both attempts. The step loop
     # already retries transients, with the bookkeeping.
     run = await harness.run_actor(state.step_cfg, prompt, state.workdir, retries=0)
-    state.total_events += len(run.tool_calls)
-    for t in run.tools_used():
-        if t not in state.tools_used:
-            state.tools_used.append(t)
-    if run.stderr:
-        state.last_stderr = run.stderr
-    state.all_raw.extend(run.raw_lines)
-    server_calls = harness._read_new_calls(state.call_log, log_offset)
-    # A successful createProfile row is this run's receipt that a
-    # profile is its own to clean up (the model sometimes creates
-    # extras beyond the test profile).
-    state.created_ids |= harness._created_ids_from_records(server_calls)
-
+    server_calls = _record_attempt(state, run, log_offset)
     status, error, reason, rest_v = await harness._verify_step(m, state.targets, state.pid, step, run)
     # REST says what the state is, not who produced it, and for a
     # read it cannot see the call at all. So the server's own record
@@ -264,24 +340,10 @@ async def _attempt_step(
     if status == "passed" and not call_ok:
         status = "failed"
         error = call_why
-    kind, why = harness._transient_actor_failure(
-        run,
-        " ".join(
-            [error, reason]
-            + harness._extract_error_events(run)
-            + [c.result_text or "" for c in run.tool_calls]
-            + [str(r.get("error") or "") for r in server_calls]
-            + ([run.final_text] if run.final_text else [])
-        ).lower(),
-    )
+    kind, why = harness._transient_actor_failure(run, _attempt_text(error, reason, run, server_calls))
     # Attempt loop: infrastructure transients re-run the step (see
     # _transient_actor_failure), each kind with its own cap.
-    transient = False
-    if status == "failed" and kind and attempts_by_kind[kind] < harness.TRANSIENT_ATTEMPTS[kind]:
-        attempts_by_kind[kind] += 1
-        transients.append(f"{kind}: {why}")
-        harness._progress(f"  RETRY   : transient actor failure ({why}); retrying")
-        transient = True
+    transient = status == "failed" and _transient_decision(kind, why, attempts_by_kind, transients)
     return _Attempt(run, status, error, reason, rest_v, call_ok, call_why, server_calls, transient)
 
 
@@ -392,29 +454,40 @@ async def _adopt_profile_id(state: _RunState, m: Any) -> None:
         state.report.profile_id = pid
 
 
-async def _run_one_step(state: _RunState, m: Any, i: int, step: Any) -> None:
-    """The per-step body: skip checks, heal, attempts, verdict assembly."""
-    if state.aborted_reason:
-        state.report.results.append(_skipped_result(step, state.aborted_reason))
-        return
-    if time.monotonic() - state.started > state.budget:
-        state.report.results.append(_skipped_result(step, f"overall time budget ({state.budget:.0f}s) exhausted"))
-        return
+def _needs_profile_id(step: Any) -> bool:
+    """Whether the step can only run once this run holds a profile id."""
     # A step whose prompt names {profile_id} — profiles.delete included —
     # cannot run without one: it used to launch the actor on a prompt with the
     # placeholder rendered empty, and the deletion verifier then false-passed
-    # on the empty id. Skip it before the actor is ever launched.
-    if not state.pid and (step.section != "profiles" or "{profile_id}" in step.prompt):
+    # on the empty id.
+    return step.section != "profiles" or "{profile_id}" in step.prompt
+
+
+def _skip_step(state: _RunState, step: Any) -> bool:
+    """Whether the step is skipped before any attempt, recording the row."""
+    if state.aborted_reason:
+        state.report.results.append(_skipped_result(step, state.aborted_reason))
+        return True
+    if time.monotonic() - state.started > state.budget:
+        state.report.results.append(_skipped_result(step, f"overall time budget ({state.budget:.0f}s) exhausted"))
+        return True
+    if not state.pid and _needs_profile_id(step):
         state.report.results.append(_skipped_result(step, "test profile was not provisioned"))
-        return
+        return True
+    return False
 
-    if step.section != "profiles" and state.pid:
-        await _heal_profile(state, m)
 
-    prompt, prompt_pid = _render_step_prompt(state, step)
-
-    attempts_by_kind = {kind: 0 for kind in harness.TRANSIENT_ATTEMPTS}
-    transients: list[str] = []
+async def _attempt_all(
+    state: _RunState,
+    m: Any,
+    i: int,
+    step: Any,
+    prompt: str,
+    prompt_pid: str,
+    transients: list[str],
+    attempts_by_kind: dict[str, int],
+) -> tuple[_Attempt, int]:
+    """Attempt the step until it passes or the transient budget is spent."""
     attempt = 0
     att: _Attempt
     while True:
@@ -423,10 +496,10 @@ async def _run_one_step(state: _RunState, m: Any, i: int, step: Any) -> None:
         att = await _attempt_step(state, m, step, prompt, prompt_pid, transients, attempts_by_kind)
         if not att.transient:
             break
+    return att, attempt
 
-    _note_outage(state, att.run)
-    _note_instrument_read(state, att.run)
 
+def _report_step(state: _RunState, step: Any, att: _Attempt, prompt: str, attempt: int, transients: list[str]) -> None:
     # Verdict comes from the task outcome (REST verification), not from
     # how many tool calls the model needed to get there.
     fb = harness._feedback_block(
@@ -441,11 +514,28 @@ async def _run_one_step(state: _RunState, m: Any, i: int, step: Any) -> None:
     )
     for ln in fb:
         harness._progress(ln)
-
     state.report.results.append(_step_result(state, step, att, prompt, attempt, transients, fb))
 
+
+async def _adopt_after_step(state: _RunState, m: Any, step: Any) -> None:
     if not state.pid and step.verify in ("profile_exists", "profile_renamed"):
         await _adopt_profile_id(state, m)
+
+
+async def _run_one_step(state: _RunState, m: Any, i: int, step: Any) -> None:
+    """The per-step body: skip checks, heal, attempts, verdict assembly."""
+    if _skip_step(state, step):
+        return
+    if step.section != "profiles" and state.pid:
+        await _heal_profile(state, m)
+    prompt, prompt_pid = _render_step_prompt(state, step)
+    attempts_by_kind = {kind: 0 for kind in harness.TRANSIENT_ATTEMPTS}
+    transients: list[str] = []
+    att, attempt = await _attempt_all(state, m, i, step, prompt, prompt_pid, transients, attempts_by_kind)
+    _note_outage(state, att.run)
+    _note_instrument_read(state, att.run)
+    _report_step(state, step, att, prompt, attempt, transients)
+    await _adopt_after_step(state, m, step)
 
 
 def _select_reported(selection: list[tuple[int, Any]]) -> str:
@@ -455,6 +545,44 @@ def _select_reported(selection: list[tuple[int, Any]]) -> str:
         if len(selection) <= 12
         else f"{selection[0][1].id} .. {selection[-1][1].id}"
     )
+
+
+async def _run_steps_with_client(state: _RunState, api_key: str) -> None:
+    async with harness.MeasureClient(api_key) as m:
+        try:
+            # No startup deletion of same-name profiles: a name this run did not
+            # create has no proven link to it, and deleting it would destroy a
+            # concurrent user's or another run's profile. The default profile name
+            # is now run-unique (common._resolve_profile_name), so an interrupted
+            # earlier run cannot leave a name collision here either; everything
+            # this run deletes it first proved it created (created_ids below).
+            await _setup_test_profile(state, m)
+            await _resolve_plot_profile(state, m)
+            for i, step in state.selected:
+                await _run_one_step(state, m, i, step)
+        finally:
+            await _teardown_profiles(state, m)
+
+
+def _restore_temp_environment(
+    scratch: Path, had_tmpdir: bool, old_tmpdir: str | None, old_tempfile_tempdir: Any
+) -> None:
+    # The scratch dir is gone; a TMPDIR still pointing at it breaks every
+    # later mktemp in this process (run-scoped tests drive run_harness
+    # in-process). Restore the ambient value - but only if nothing else
+    # moved TMPDIR after we set it.
+    if os.environ.get("TMPDIR") == str(scratch):
+        if had_tmpdir:
+            os.environ["TMPDIR"] = old_tmpdir  # type: ignore[index]
+        else:
+            os.environ.pop("TMPDIR", None)
+    # Also restore the resolved-cache tempfile pinned at the scratch: it
+    # takes precedence over TMPDIR, so leaving it dangling would keep
+    # routing later mktemp calls at the deleted directory. Restore the
+    # value that was in force before this run - not unconditionally None,
+    # which silently dropped a pre-existing explicit tempdir.
+    if tempfile.tempdir == str(scratch):
+        tempfile.tempdir = old_tempfile_tempdir
 
 
 async def run_harness_scoped(api_key: str, config: Any) -> Any:
@@ -498,39 +626,11 @@ async def run_harness_scoped(api_key: str, config: Any) -> Any:
 
         state = _RunState(config, targets, report, workdir, call_log, step_cfg, selected, total)
 
-        async with harness.MeasureClient(api_key) as m:
-            try:
-                # No startup deletion of same-name profiles: a name this run did not
-                # create has no proven link to it, and deleting it would destroy a
-                # concurrent user's or another run's profile. The default profile name
-                # is now run-unique (common._resolve_profile_name), so an interrupted
-                # earlier run cannot leave a name collision here either; everything
-                # this run deletes it first proved it created (created_ids below).
-                await _setup_test_profile(state, m)
-                await _resolve_plot_profile(state, m)
-                for i, step in selected:
-                    await _run_one_step(state, m, i, step)
-            finally:
-                await _teardown_profiles(state, m)
+        await _run_steps_with_client(state, api_key)
 
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-        # The scratch dir is gone; a TMPDIR still pointing at it breaks every
-        # later mktemp in this process (run-scoped tests drive run_harness
-        # in-process). Restore the ambient value - but only if nothing else
-        # moved TMPDIR after we set it.
-        if os.environ.get("TMPDIR") == str(scratch):
-            if had_tmpdir:
-                os.environ["TMPDIR"] = old_tmpdir  # type: ignore[index]
-            else:
-                os.environ.pop("TMPDIR", None)
-        # Also restore the resolved-cache tempfile pinned at the scratch: it
-        # takes precedence over TMPDIR, so leaving it dangling would keep
-        # routing later mktemp calls at the deleted directory. Restore the
-        # value that was in force before this run - not unconditionally None,
-        # which silently dropped a pre-existing explicit tempdir.
-        if tempfile.tempdir == str(scratch):
-            tempfile.tempdir = old_tempfile_tempdir
+        _restore_temp_environment(scratch, had_tmpdir, old_tmpdir, old_tempfile_tempdir)
 
     report.actor_tool_calls = state.total_events
     report.actor_tools_used = state.tools_used

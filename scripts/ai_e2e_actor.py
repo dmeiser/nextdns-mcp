@@ -89,6 +89,54 @@ def _flatten_text(res: Any) -> str:
     return str(res)[:5000]
 
 
+# A generic wrapper tool: the real MCP tool name is only inside its ``input.code``.
+_GENERIC_WRAPPER_TOOLS = ("execute", "bash", "run", "")
+
+# opencode invokes MCP tools as tools.nextdns["<tool>"](...), while other
+# harnesses use a nextdns_<tool> prefix or a generic
+# tools.mcp.call_tool({name: "<tool>", ...}) wrapper. The wrapper is tried FIRST
+# so a progressive-disclosure call (tools.nextdns.call_tool({name:
+# "addToDenylist", ...})) resolves to the proxied tool rather than to the
+# synthetic "call_tool" itself.
+_WRAPPER_CODE_PATTERNS = (
+    re.compile(r'call_tool\(\s*\{[^}]*?name["\']?\s*:\s*["\']([A-Za-z0-9_]+)'),
+    re.compile(r'nextdns["\']?\s*\[\s*["\']([A-Za-z0-9_]+)'),
+    re.compile(r"nextdns[._]([A-Za-z_][A-Za-z0-9_]*)"),
+    re.compile(r'["\']nextdns_([A-Za-z][A-Za-z0-9_]*)["\']'),
+)
+
+
+def _event_code(part: dict[str, Any]) -> str:
+    """The code a wrapper-tool event ran, or "" when the event carries none."""
+    state = part.get("state")
+    if not isinstance(state, dict):
+        return ""
+    return str(_or_dict(state.get("input"), {}).get("code", ""))
+
+
+def _tool_name_in_code(code: str) -> str:
+    """The MCP tool a wrapper's code names, by the first spelling that matches."""
+    for pattern in _WRAPPER_CODE_PATTERNS:
+        match = pattern.search(code)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _normalize_tool_name(name: str) -> str:
+    return name.removeprefix("nextdns_").removeprefix("tools.nextdns.")
+
+
+def _or_dict(value: Any, default: dict[str, Any]) -> dict[str, Any]:
+    """A value read out of an event, kept only when it is really a mapping."""
+    return value if isinstance(value, dict) else default
+
+
+def _nonempty_str(value: Any) -> str:
+    """A string field of an event, or "" when absent, non-string, or blank."""
+    return value if isinstance(value, str) and value.strip() else ""
+
+
 def _tool_event_name(part: dict[str, Any]) -> str:
     """Best-effort tool name from a harness tool event.
 
@@ -98,31 +146,115 @@ def _tool_event_name(part: dict[str, Any]) -> str:
     both so coverage (an *observational*, non-verdicting signal) is useful.
     """
     tool = str(part.get("tool") or "")
-    name = tool
-    if tool in ("execute", "bash", "run", ""):
-        code = (
-            str((part.get("state") or {}).get("input", {}).get("code", ""))
-            if isinstance(part.get("state"), dict)
-            else ""
-        )
-        # opencode invokes MCP tools as tools.nextdns["<tool>"](...), while
-        # other harnesses use a nextdns_<tool> prefix or a generic
-        # tools.mcp.call_tool({name: "<tool>", ...}) wrapper. Try each form.
-        # The wrapper is tried FIRST so a progressive-disclosure call
-        # (tools.nextdns.call_tool({name: "addToDenylist", ...})) resolves to the
-        # proxied tool rather than to the synthetic "call_tool" itself.
-        m = re.search(r'call_tool\(\s*\{[^}]*?name["\']?\s*:\s*["\']([A-Za-z0-9_]+)', code)
-        if not m:
-            m = re.search(r'nextdns["\']?\s*\[\s*["\']([A-Za-z0-9_]+)', code)
-        if not m:
-            m = re.search(r"nextdns[._]([A-Za-z_][A-Za-z0-9_]*)", code)
-        if not m:
-            m = re.search(r'["\']nextdns_([A-Za-z][A-Za-z0-9_]*)["\']', code)
-        if m:
-            name = m.group(1)
-        else:
-            name = tool
-    return name.removeprefix("nextdns_").removeprefix("tools.nextdns.")
+    if tool not in _GENERIC_WRAPPER_TOOLS:
+        return _normalize_tool_name(tool)
+    return _normalize_tool_name(_tool_name_in_code(_event_code(part)) or tool)
+
+
+# A tool call the client itself reported as finished: opencode spells the
+# success status "completed", other harnesses spell it the way they print it.
+_OK_STATUSES = ("completed", "success", "succeeded")
+
+
+def _iter_events(lines: list[str]) -> Any:
+    """The JSON-object events of a raw stream, skipping anything unparseable."""
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(ev, dict):
+            yield ev
+
+
+def _tool_call(name: str, raw_args: Any, result_text: str, status: str) -> ToolCall:
+    return ToolCall(
+        name=name,
+        args=_or_dict(raw_args, {}),
+        is_error=status not in _OK_STATUSES,
+        result_text=result_text,
+    )
+
+
+def _tool_use_event(ev: dict[str, Any]) -> tuple[list[ToolCall], str]:
+    part = _or_dict(ev.get("part"), {})
+    state = _or_dict(part.get("state"), {})
+    call = _tool_call(
+        _tool_event_name(part),
+        state.get("input"),
+        _state_output(state),
+        str(state.get("status", "completed")),
+    )
+    return [call], ""
+
+
+def _state_output(state: dict[str, Any]) -> str:
+    # opencode reports a failed call's reason in state.error. Without it, a
+    # provider-side drop ("OpenAI Chat stream ended without finish_reason") is
+    # invisible to the verdict, and the step gets judged as though the model
+    # chose to emit an empty call.
+    output = _flatten_text(state.get("output"))
+    if output or not state.get("error"):
+        return output
+    return _flatten_text(state["error"])
+
+
+def _block_text(block: dict[str, Any]) -> str:
+    """The text a content block carries, or "" for any other block kind."""
+    if block.get("type") != "text":
+        return ""
+    return _nonempty_str(block.get("text"))
+
+
+def _content_blocks(content: Any) -> Any:
+    """The mapping content blocks of a message, in order, nothing else."""
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict):
+            yield block
+
+
+def _block_event(block: dict[str, Any]) -> tuple[list[ToolCall], str]:
+    if block.get("type") != "tool_use":
+        return [], _block_text(block)
+    return [_tool_call(str(block.get("name") or ""), block.get("input"), "", "completed")], ""
+
+
+def _message_event(ev: dict[str, Any]) -> tuple[list[ToolCall], str]:
+    # Claude Code ``stream-json``: assistant ``message`` events carry the
+    # ``tool_use`` content blocks and the answer text.
+    calls: list[ToolCall] = []
+    final_text = ""
+    for block in _content_blocks(_or_dict(ev.get("message"), {}).get("content")):
+        new_calls, text = _block_event(block)
+        calls.extend(new_calls)
+        final_text = text or final_text
+    return calls, final_text
+
+
+def _result_event(ev: dict[str, Any]) -> tuple[list[ToolCall], str]:
+    return [], _nonempty_str(ev.get("result"))
+
+
+def _part_text_event(ev: dict[str, Any]) -> tuple[list[ToolCall], str]:
+    return [], _nonempty_str(_or_dict(ev.get("part"), {}).get("text"))
+
+
+def _no_event(_ev: dict[str, Any]) -> tuple[list[ToolCall], str]:
+    return [], ""
+
+
+# One handler per event shape; an event type with no handler is ignored, exactly
+# as the chain of ``elif``s it replaces did.
+_EVENT_HANDLERS: dict[str, Any] = {
+    "tool_use": _tool_use_event,
+    "message": _message_event,
+    "assistant": _message_event,
+    "result": _result_event,
+    "text": _part_text_event,
+}
 
 
 def parse_actor_events(lines: list[str]) -> tuple[list[ToolCall], str]:
@@ -140,75 +272,17 @@ def parse_actor_events(lines: list[str]) -> tuple[list[ToolCall], str]:
     """
     calls: list[ToolCall] = []
     final_text = ""
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            ev = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(ev, dict):
-            continue
-        etype = ev.get("type")
-
-        if etype == "tool_use":
-            part = ev.get("part") or {}
-            state = part.get("state") or {}
-            inp = state.get("input") or {}
-            output = _flatten_text(state.get("output"))
-            if not output and state.get("error"):
-                # opencode reports a failed call's reason in state.error. Without
-                # it, a provider-side drop ("OpenAI Chat stream ended without
-                # finish_reason") is invisible to the verdict, and the step gets
-                # judged as though the model chose to emit an empty call.
-                output = _flatten_text(state["error"])
-            calls.append(
-                ToolCall(
-                    name=_tool_event_name(part),
-                    args=inp if isinstance(inp, dict) else {},
-                    is_error=str(state.get("status", "completed"))
-                    not in (
-                        "completed",
-                        "success",
-                        "succeeded",
-                    ),
-                    result_text=output,
-                )
-            )
-
-        elif etype in ("message", "assistant"):
-            msg = ev.get("message") or {}
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if isinstance(content, list):
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    btype = block.get("type")
-                    if btype == "tool_use":
-                        inp = block.get("input")
-                        calls.append(
-                            ToolCall(
-                                name=str(block.get("name") or ""),
-                                args=inp if isinstance(inp, dict) else {},
-                                is_error=False,
-                            )
-                        )
-                    elif btype == "text" and isinstance(block.get("text"), str) and block["text"].strip():
-                        final_text = block["text"]
-
-        elif etype == "result":
-            text = ev.get("result")
-            if isinstance(text, str) and text.strip():
-                final_text = text
-
-        elif etype == "text":
-            part = ev.get("part") or {}
-            if isinstance(part.get("text"), str) and part["text"].strip():
-                final_text = part["text"]
-
+    for ev in _iter_events(lines):
+        new_calls, text = _handler_for(ev.get("type"))(ev)
+        calls.extend(new_calls)
+        final_text = text or final_text
     return calls, final_text
+
+
+def _handler_for(event_type: Any) -> Any:
+    if not isinstance(event_type, str):
+        return _no_event
+    return _EVENT_HANDLERS.get(event_type, _no_event)
 
 
 # =========================================================================== #
@@ -288,14 +362,17 @@ async def _collect_streams(proc: asyncio.subprocess.Process, timeout_s: float) -
     return out, err, timed_out
 
 
-async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: int = 1) -> ActorRun:
-    """Launch the actor harness in ``workdir`` and capture its event stream.
+def _is_transient(err: str) -> bool:
+    """Whether an actor error names a provider/transport drop rather than a verdict."""
+    low = (err or "").lower()
+    return any(tok in low for tok in _TRANSIENT_TOKENS)
 
-    Retries on transient provider/transport failures (e.g. ``ECONNRESET`` from a
-    flaky model endpoint) up to ``retries`` times, so a single dropped
-    connection does not doom the whole run.
-    """
-    values = {
+
+_TRANSIENT_TOKENS = ("econnreset", "transport:", "timed out", "connection reset", "socket hang up")
+
+
+def _argv_values(config: HarnessConfig, prompt: str, workdir: Path) -> dict[str, str]:
+    return {
         PLACEHOLDER_PROMPT: prompt,
         PLACEHOLDER_MODEL: config.model,
         PLACEHOLDER_WORKDIR: str(workdir),
@@ -306,7 +383,9 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
         # the reference expands inside the child, from the child's environment.
         PLACEHOLDER_SERVER_ENV: json.dumps(_redacted_server_env(config.server)),
     }
-    argv = config.render_argv(values)
+
+
+def _child_env(workdir: Path) -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("NO_COLOR", "1")
     # asyncio's cwd= sets the child's working directory but NOT the $PWD env
@@ -315,91 +394,114 @@ async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: 
     # the MCP server. OPENCODE_CONFIG pins the generated config explicitly.
     env["PWD"] = str(workdir)
     env["OPENCODE_CONFIG"] = str(Path(workdir) / "opencode.json")
+    return env
 
-    def _is_transient(err: str) -> bool:
-        low = (err or "").lower()
-        return any(
-            tok in low for tok in ("econnreset", "transport:", "timed out", "connection reset", "socket hang up")
-        )
 
-    last_run: ActorRun | None = None
+async def run_actor(config: HarnessConfig, prompt: str, workdir: Path, retries: int = 1) -> ActorRun:
+    """Launch the actor harness in ``workdir`` and capture its event stream.
+
+    Retries on transient provider/transport failures (e.g. ``ECONNRESET`` from a
+    flaky model endpoint) up to ``retries`` times, so a single dropped
+    connection does not doom the whole run.
+    """
+    argv = config.render_argv(_argv_values(config, prompt, workdir))
+    env = _child_env(workdir)
+    last_run = ActorRun(command=argv)
     for attempt in range(retries + 1):
-        run = ActorRun(command=argv)
-        if not argv or shutil.which(argv[0]) is None:
-            run.error = f"actor harness command not found on PATH: {argv[0] if argv else '(empty)'}"
-            return run
-
-        started = time.monotonic()
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(workdir),
-                env=env,
-                start_new_session=True,
-                # The default 64 KiB StreamReader limit aborts readline() on a
-                # single long JSONL event (LimitOverrunError), and the drain
-                # gather swallows the dead task: the run then reported zero
-                # captured events with an empty error. 16 MiB covers any event
-                # the actor can plausibly emit on one line.
-                limit=16 * 1024 * 1024,
-            )
-        except Exception as e:  # noqa: BLE001
-            run.error = f"failed to spawn actor harness: {type(e).__name__}: {e}"
-            run.duration_ms = int((time.monotonic() - started) * 1000)
-            last_run = run
-            if attempt < retries:
-                await asyncio.sleep(2)
-                continue
-            return run
-
-        # Read the event stream as it arrives rather than buffering to the end.
-        # A timed-out attempt used to discard every event the actor had already
-        # produced, so the one question that matters most on a timeout - where
-        # did the model stop? - was the one the report could not answer.
-        out_lines, err_chunks, timed_out = await _collect_streams(proc, config.timeout_s)
-        # Nothing the actor spawned outlives the attempt - on EVERY exit shape,
-        # not only abnormal ones. Reproduced live: an actor that exits 0 can
-        # leave the MCP server it spawned running, and the nonzero-exit-only
-        # cleanup below used to let that whole process group leak; a
-        # cancellation arriving mid-drain was swallowed by _suppress the same
-        # way. killpg on an already-gone group is a no-op (ProcessLookupError),
-        # so unconditional teardown costs nothing on the clean path.
-        _kill_process_group(proc)
-
-        err_text = b"".join(err_chunks).decode("utf-8", errors="replace").strip()
-        run.stderr = err_text
-        raw = [line.decode("utf-8", errors="replace").rstrip("\r\n") for line in out_lines]
-        lines = raw
-        run.raw_lines = raw
-        calls, final_text = parse_actor_events(lines)
-        run.tool_calls = calls
-        run.final_text = final_text
-        run.duration_ms = int((time.monotonic() - started) * 1000)
+        run, retryable = await _actor_attempt(argv, env, workdir, config.timeout_s)
         last_run = run
-
-        if timed_out:
-            run.error = f"actor harness timed out after {config.timeout_s:.0f}s"
-            if attempt < retries and _is_transient(run.error):
-                await asyncio.sleep(2)
-                continue
+        if not retryable or attempt >= retries:
             return run
+        await asyncio.sleep(2)
+    return last_run
 
-        run.exit_code = proc.returncode
-        run.ok = proc.returncode == 0
-        if not run.ok and not run.error:
-            run.error = err_text[-1500:] if err_text else f"actor harness exited with code {proc.returncode}"
 
-        if run.ok:
-            return run
-        # Retry on transient provider/transport failures.
-        if attempt < retries and _is_transient(run.error + " " + run.stderr):
-            await asyncio.sleep(2)
-            continue
-        return run
+def _missing_actor_error(argv: list[str]) -> str:
+    return f"actor harness command not found on PATH: {argv[0] if argv else '(empty)'}"
 
-    return last_run if last_run is not None else ActorRun(command=argv)
+
+async def _actor_attempt(
+    argv: list[str], env: dict[str, str], workdir: Path, timeout_s: float
+) -> tuple[ActorRun, bool]:
+    """One actor attempt: returns ``(run, would_a_retry_help)``."""
+    run = ActorRun(command=argv)
+    if not argv or shutil.which(argv[0]) is None:
+        run.error = _missing_actor_error(argv)
+        return run, False
+
+    started = time.monotonic()
+    proc = await _spawn_actor(argv, env, workdir, run, started)
+    if proc is None:
+        # The spawn failed; only the caller knows whether an attempt is left.
+        return run, True
+
+    timed_out = await _record_event_stream(run, proc, timeout_s, started)
+    if not timed_out:
+        _settle_exit(run, proc)
+    return run, _retry_after_attempt(run)
+
+
+async def _spawn_actor(
+    argv: list[str], env: dict[str, str], workdir: Path, run: ActorRun, started: float
+) -> asyncio.subprocess.Process | None:
+    try:
+        return await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(workdir),
+            env=env,
+            start_new_session=True,
+            # The default 64 KiB StreamReader limit aborts readline() on a
+            # single long JSONL event (LimitOverrunError), and the drain
+            # gather swallows the dead task: the run then reported zero
+            # captured events with an empty error. 16 MiB covers any event
+            # the actor can plausibly emit on one line.
+            limit=16 * 1024 * 1024,
+        )
+    except Exception as e:  # noqa: BLE001
+        run.error = f"failed to spawn actor harness: {type(e).__name__}: {e}"
+        run.duration_ms = int((time.monotonic() - started) * 1000)
+        return None
+
+
+async def _record_event_stream(
+    run: ActorRun, proc: asyncio.subprocess.Process, timeout_s: float, started: float
+) -> bool:
+    # Read the event stream as it arrives rather than buffering to the end.
+    # A timed-out attempt used to discard every event the actor had already
+    # produced, so the one question that matters most on a timeout - where
+    # did the model stop? - was the one the report could not answer.
+    out_lines, err_chunks, timed_out = await _collect_streams(proc, timeout_s)
+    # Nothing the actor spawned outlives the attempt - on EVERY exit shape,
+    # not only abnormal ones. Reproduced live: an actor that exits 0 can
+    # leave the MCP server it spawned running, and the nonzero-exit-only
+    # cleanup below used to let that whole process group leak; a
+    # cancellation arriving mid-drain was swallowed by _suppress the same
+    # way. killpg on an already-gone group is a no-op (ProcessLookupError),
+    # so unconditional teardown costs nothing on the clean path.
+    _kill_process_group(proc)
+
+    run.stderr = b"".join(err_chunks).decode("utf-8", errors="replace").strip()
+    run.raw_lines = [line.decode("utf-8", errors="replace").rstrip("\r\n") for line in out_lines]
+    run.tool_calls, run.final_text = parse_actor_events(run.raw_lines)
+    run.duration_ms = int((time.monotonic() - started) * 1000)
+    if timed_out:
+        run.error = f"actor harness timed out after {timeout_s:.0f}s"
+    return timed_out
+
+
+def _settle_exit(run: ActorRun, proc: asyncio.subprocess.Process) -> None:
+    run.exit_code = proc.returncode
+    run.ok = proc.returncode == 0
+    if run.ok or run.error:
+        return
+    run.error = run.stderr[-1500:] if run.stderr else f"actor harness exited with code {proc.returncode}"
+
+
+def _retry_after_attempt(run: ActorRun) -> bool:
+    # Retry on transient provider/transport failures.
+    return not run.ok and _is_transient(run.error + " " + run.stderr)
 
 
 class _suppress:

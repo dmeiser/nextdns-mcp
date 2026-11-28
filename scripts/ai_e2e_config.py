@@ -174,11 +174,17 @@ class HarnessConfig:
     start_step: str = ""
     end_step: str = ""
 
+    def _range_part(self, total: int) -> str:
+        """The start_step/end_step shorthand as a range, or "" when unused."""
+        if not (self.start_step or self.end_step):
+            return ""
+        return f"{self.start_step or 1}-{self.end_step or total}"
+
     def step_selection(self, total: int) -> str:
         """The selection string for a checklist of ``total`` steps."""
         parts = [self.steps] if self.steps.strip() else []
-        if self.start_step or self.end_step:
-            parts.append(f"{self.start_step or 1}-{self.end_step or total}")
+        if part := self._range_part(total):
+            parts.append(part)
         return ",".join(parts)
 
     @classmethod
@@ -186,71 +192,11 @@ class HarnessConfig:
         """Build a HarnessConfig from a JSON file (if given) layered over env."""
         cfg = cls()
         if path:
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-            if "command" in data:
-                cfg.command = _as_argv(data["command"])
-            if "model" in data:
-                cfg.model = str(data["model"])
-            if "prompt" in data:
-                cfg.prompt = str(data["prompt"])
-            if "profile_name" in data:
-                cfg.profile_name = str(data["profile_name"])
-            if "workdir" in data:
-                cfg.workdir = str(data["workdir"])
-            if "timeout_s" in data:
-                cfg.timeout_s = float(data["timeout_s"])
-            if "step_timeout_s" in data:
-                cfg.step_timeout_s = float(data["step_timeout_s"])
-            if "start_step" in data:
-                cfg.start_step = str(data["start_step"])
-            if "end_step" in data:
-                cfg.end_step = str(data["end_step"])
-            if "steps" in data:
-                cfg.steps = str(data["steps"])
-            if isinstance(data.get("server"), dict):
-                srv = data["server"]
-                if "command" in srv:
-                    cfg.server["command"] = str(srv["command"])
-                if "args" in srv:
-                    cfg.server["args"] = [str(a) for a in srv["args"]]
-                if "cwd" in srv:
-                    cfg.server["cwd"] = str(srv["cwd"])
-                if "env" in srv and isinstance(srv["env"], dict):
-                    cfg.server["env"] = {str(k): str(v) for k, v in srv["env"].items()}
+            _apply_config_file(cfg, json.loads(Path(path).read_text(encoding="utf-8")))
         # Environment overrides (explicit and documented).
-        if cmd := os.environ.get("NEXTDNS_E2E_HARNESS_CMD"):
-            cfg.command = _as_argv(cmd)
-        if env_model := os.environ.get("NEXTDNS_E2E_MODEL"):
-            cfg.model = env_model
-        if env_profile := os.environ.get("NEXTDNS_E2E_PROFILE_NAME"):
-            cfg.profile_name = env_profile
-        if srv_python := os.environ.get("NEXTDNS_MCP_PYTHON"):
-            cfg.server["command"] = srv_python
-        if srv_args := os.environ.get("NEXTDNS_MCP_ARGS"):
-            cfg.server["args"] = srv_args.split()
-        if srv_cwd := os.environ.get("NEXTDNS_MCP_CWD"):
-            cfg.server["cwd"] = str(srv_cwd)
-        # The API key (and its base) are handed to the MCP server via its env;
-        # the actor itself never needs the key (the server uses it). The key
-        # goes in as a `{env:...}` reference, never the value: this env dict is
-        # serialized into the actor's `{server_env}` placeholder and the run
-        # report, and the actor's own config loader (and the harness's
-        # `_expand_env_refs`) resolve the reference at launch time.
-        cfg.server["env"] = dict(cfg.server["env"])
-        if os.environ.get("NEXTDNS_API_KEY"):
-            cfg.server["env"].setdefault("NEXTDNS_API_KEY", ENV_REF_API_KEY)
-        cfg.server["env"].setdefault("NEXTDNS_API_BASE", common.api_base())
-        # The MCP server applies its own read/write ACLs from these; without
-        # them every tool call is denied ("no profiles are readable").
-        for var in (
-            "NEXTDNS_READABLE_PROFILES",
-            "NEXTDNS_WRITABLE_PROFILES",
-            "NEXTDNS_DEFAULT_PROFILE",
-            "NEXTDNS_TOOL_SEARCH",
-            "NEXTDNS_PROTECTED_PROFILES",
-        ):
-            if val := os.environ.get(var):
-                cfg.server["env"].setdefault(var, val)
+        _apply_harness_env_overrides(cfg)
+        _apply_server_env_overrides(cfg)
+        _apply_server_env_defaults(cfg)
         # The data-bearing profile used for plots/log-download steps is only
         # ever read by the actor; protect it against hallucinated writes
         # (e.g. deleteProfile with the wrong id) even under ALL.
@@ -270,6 +216,94 @@ class HarnessConfig:
         return render_argv(self.command, values)
 
 
+# The JSON file's scalar fields, applied with the named conversion.
+_FILE_STR_FIELDS = ("model", "prompt", "profile_name", "workdir", "start_step", "end_step", "steps")
+_FILE_FLOAT_FIELDS = ("timeout_s", "step_timeout_s")
+# The MCP server's own read/write ACLs and protected set, passed through from
+# the environment; without them every tool call is denied ("no profiles are
+# readable").
+_SERVER_ACL_VARS = (
+    "NEXTDNS_READABLE_PROFILES",
+    "NEXTDNS_WRITABLE_PROFILES",
+    "NEXTDNS_DEFAULT_PROFILE",
+    "NEXTDNS_TOOL_SEARCH",
+    "NEXTDNS_PROTECTED_PROFILES",
+)
+
+
+def _apply_file_strings(cfg: HarnessConfig, data: dict[str, Any]) -> None:
+    for name in _FILE_STR_FIELDS:
+        if name in data:
+            setattr(cfg, name, str(data[name]))
+
+
+def _apply_file_floats(cfg: HarnessConfig, data: dict[str, Any]) -> None:
+    for name in _FILE_FLOAT_FIELDS:
+        if name in data:
+            setattr(cfg, name, float(data[name]))
+
+
+def _apply_server_env_field(cfg: HarnessConfig, srv: dict[str, Any]) -> None:
+    if "env" not in srv or not isinstance(srv["env"], dict):
+        return
+    cfg.server["env"] = {str(k): str(v) for k, v in srv["env"].items()}
+
+
+def _apply_server_file_values(cfg: HarnessConfig, srv: dict[str, Any]) -> None:
+    if "command" in srv:
+        cfg.server["command"] = str(srv["command"])
+    if "args" in srv:
+        cfg.server["args"] = [str(a) for a in srv["args"]]
+    if "cwd" in srv:
+        cfg.server["cwd"] = str(srv["cwd"])
+    _apply_server_env_field(cfg, srv)
+
+
+def _apply_config_file(cfg: HarnessConfig, data: dict[str, Any]) -> None:
+    """The JSON file's values, layered over the defaults."""
+    if "command" in data:
+        cfg.command = _as_argv(data["command"])
+    _apply_file_strings(cfg, data)
+    _apply_file_floats(cfg, data)
+    if isinstance(data.get("server"), dict):
+        _apply_server_file_values(cfg, data["server"])
+
+
+def _apply_harness_env_overrides(cfg: HarnessConfig) -> None:
+    if cmd := os.environ.get("NEXTDNS_E2E_HARNESS_CMD"):
+        cfg.command = _as_argv(cmd)
+    if env_model := os.environ.get("NEXTDNS_E2E_MODEL"):
+        cfg.model = env_model
+    if env_profile := os.environ.get("NEXTDNS_E2E_PROFILE_NAME"):
+        cfg.profile_name = env_profile
+
+
+def _apply_server_env_overrides(cfg: HarnessConfig) -> None:
+    if srv_python := os.environ.get("NEXTDNS_MCP_PYTHON"):
+        cfg.server["command"] = srv_python
+    if srv_args := os.environ.get("NEXTDNS_MCP_ARGS"):
+        cfg.server["args"] = srv_args.split()
+    if srv_cwd := os.environ.get("NEXTDNS_MCP_CWD"):
+        cfg.server["cwd"] = str(srv_cwd)
+
+
+def _apply_server_env_defaults(cfg: HarnessConfig) -> None:
+    """The child server's env: key reference, API base, and the ACL passthrough."""
+    # The API key (and its base) are handed to the MCP server via its env;
+    # the actor itself never needs the key (the server uses it). The key
+    # goes in as a `{env:...}` reference, never the value: this env dict is
+    # serialized into the actor's `{server_env}` placeholder and the run
+    # report, and the actor's own config loader (and the harness's
+    # `_expand_env_refs`) resolve the reference at launch time.
+    cfg.server["env"] = dict(cfg.server["env"])
+    if os.environ.get("NEXTDNS_API_KEY"):
+        cfg.server["env"].setdefault("NEXTDNS_API_KEY", ENV_REF_API_KEY)
+    cfg.server["env"].setdefault("NEXTDNS_API_BASE", common.api_base())
+    for var in _SERVER_ACL_VARS:
+        if val := os.environ.get(var):
+            cfg.server["env"].setdefault(var, val)
+
+
 def _as_argv(value: Any) -> list[str]:
     """Accept either a JSON array or a shell-ish string and return an argv list."""
     if isinstance(value, list):
@@ -279,6 +313,25 @@ def _as_argv(value: Any) -> list[str]:
         # this is for convenience/documentation only).
         return value.split()
     return list(DEFAULT_HARNESS_COMMAND)
+
+
+def _expand_tokens(template: list[str], values: dict[str, str]) -> list[str]:
+    pattern = re.compile("|".join(re.escape(key) for key in values)) if values else None
+    return [pattern.sub(lambda m: values[m.group(0)], tok) if pattern else tok for tok in template]
+
+
+def _is_dangling_flag(rendered: list[str], index: int) -> bool:
+    return rendered[index].startswith("-") and index + 1 < len(rendered) and rendered[index + 1] == ""
+
+
+def _drop_empty_flags(rendered: list[str]) -> list[str]:
+    """Drop tokens that rendered empty, and any flag left without its value."""
+    argv: list[str] = []
+    for index, tok in enumerate(rendered):
+        if tok == "" or _is_dangling_flag(rendered, index):
+            continue
+        argv.append(tok)
+    return argv
 
 
 def render_argv(template: list[str], values: dict[str, str]) -> list[str]:
@@ -294,18 +347,8 @@ def render_argv(template: list[str], values: dict[str, str]) -> list[str]:
     not be re-scanned as a template, or a prompt spelling ``{server_env}``
     would smuggle the server environment into the rendered argv.
     """
-    rendered: list[str] = []
-    pattern = re.compile("|".join(re.escape(key) for key in values)) if values else None
-    for tok in template:
-        rendered.append(pattern.sub(lambda m: values[m.group(0)], tok) if pattern else tok)
-    argv: list[str] = []
-    for i, tok in enumerate(rendered):
-        if tok == "":
-            continue
-        if tok.startswith("-") and i + 1 < len(rendered) and rendered[i + 1] == "":
-            continue
-        argv.append(tok)
-    return argv
+    rendered = _expand_tokens(template, values)
+    return _drop_empty_flags(rendered)
 
 
 # No harness-side prompt of any kind. The harness sends the task and nothing
@@ -330,6 +373,55 @@ class HarnessAbortError(RuntimeError):
 _MAX_PROFILE_PAGES = 10_000
 
 
+def _probe_httpx() -> Any:
+    try:
+        import httpx as httpx_module
+    except ImportError as exc:
+        raise HarnessAbortError(
+            "profile-protection probe requires httpx, which is not importable; "
+            "refusing to start a key-bearing run without pre-existing profile protection"
+        ) from exc
+    return httpx_module
+
+
+def _probe_page(client: Any, api_key: str, cursor: str | None) -> tuple[list[dict[str, Any]], str | None]:
+    # api_base() validates https before any request is built (see
+    # ai_e2e_common.api_base); the ValueError it raises on a plaintext
+    # base propagates unchanged — it is the same loud refusal.
+    params = {"cursor": cursor} if cursor else {}
+    resp = client.get(f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, params=params, timeout=10.0)
+    resp.raise_for_status()
+    return _validated_profile_page(resp.json())
+
+
+def _profile_rows_from_listing(client: Any, api_key: str) -> list[dict[str, Any]]:
+    """Every row of the account's profile listing, following its cursor."""
+    # The ProfileList contract paginates, so one GET protects only the first
+    # page and every pre-existing profile on later pages stays writable. Follow
+    # the cursor to exhaustion; any page's transport/HTTP/JSON/shape failure
+    # aborts, the same fail-closed contract the first page is held to.
+    rows: list[dict[str, Any]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    for _page in range(_MAX_PROFILE_PAGES):
+        page_rows, cursor = _probe_page(client, api_key, cursor)
+        rows.extend(page_rows)
+        if cursor is None:
+            return rows
+        if cursor in seen_cursors:
+            raise HarnessAbortError(
+                f"profile-protection probe pagination looped (cursor {cursor!r} repeated); refusing to "
+                "run with an unknown pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES "
+                "explicitly or fix the API"
+            )
+        seen_cursors.add(cursor)
+    raise HarnessAbortError(
+        f"profile-protection probe did not exhaust the listing within {_MAX_PROFILE_PAGES} pages; "
+        "refusing to run with an unknown pre-existing profile set — set "
+        "NEXTDNS_PROTECTED_PROFILES explicitly or fix the API"
+    )
+
+
 def _profile_protection_probe(cfg: HarnessConfig) -> None:
     """Protect every profile that already exists on the account; FAIL CLOSED.
 
@@ -348,47 +440,9 @@ def _profile_protection_probe(cfg: HarnessConfig) -> None:
     api_key = os.environ.get("NEXTDNS_API_KEY")
     if not api_key:
         return
+    client = _probe_httpx()
     try:
-        import httpx as _httpx
-    except ImportError as exc:
-        raise HarnessAbortError(
-            "profile-protection probe requires httpx, which is not importable; "
-            "refusing to start a key-bearing run without pre-existing profile protection"
-        ) from exc
-    # The ProfileList contract paginates, so one GET protects only the first
-    # page and every pre-existing profile on later pages stays writable. Follow
-    # the cursor to exhaustion; any page's transport/HTTP/JSON/shape failure
-    # aborts, the same fail-closed contract the first page is held to.
-    rows: list[dict[str, Any]] = []
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
-    try:
-        for _page in range(_MAX_PROFILE_PAGES):
-            # api_base() validates https before any request is built (see
-            # ai_e2e_common.api_base); the ValueError it raises on a plaintext
-            # base propagates unchanged — it is the same loud refusal.
-            params = {"cursor": cursor} if cursor else {}
-            resp = _httpx.get(
-                f"{common.api_base()}/profiles", headers={"X-Api-Key": api_key}, params=params, timeout=10.0
-            )
-            resp.raise_for_status()
-            page_rows, cursor = _validated_profile_page(resp.json())
-            rows.extend(page_rows)
-            if cursor is None:
-                break
-            if cursor in seen_cursors:
-                raise HarnessAbortError(
-                    f"profile-protection probe pagination looped (cursor {cursor!r} repeated); refusing to "
-                    "run with an unknown pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES "
-                    "explicitly or fix the API"
-                )
-            seen_cursors.add(cursor)
-        else:
-            raise HarnessAbortError(
-                f"profile-protection probe did not exhaust the listing within {_MAX_PROFILE_PAGES} pages; "
-                "refusing to run with an unknown pre-existing profile set — set "
-                "NEXTDNS_PROTECTED_PROFILES explicitly or fix the API"
-            )
+        rows = _profile_rows_from_listing(client, api_key)
     except HarnessAbortError:
         raise
     except Exception as exc:
@@ -401,16 +455,7 @@ def _profile_protection_probe(cfg: HarnessConfig) -> None:
         _protect_server_profile(cfg, str(row["id"]))
 
 
-def _validated_profile_page(payload: object) -> tuple[list[dict[str, Any]], str | None]:
-    """One ProfileList page, shape-validated; malformed pages abort the probe.
-
-    A page whose ``data`` is missing, null, or not a list, or whose rows are
-    not all objects carrying an ``id``, cannot be trusted to enumerate the
-    account's pre-existing profiles: accepting it silently (skipping the odd
-    row) would leave whatever it hid writable. Raises :class:`HarnessAbortError`
-    on any malformed shape. Returns ``(rows, next_cursor)`` where ``next_cursor``
-    is None when the listing ended.
-    """
+def _profile_page_data(payload: object) -> tuple[dict[str, Any], list[Any]]:
     if not isinstance(payload, dict):
         raise HarnessAbortError(
             f"profile-protection probe got a non-object ProfileList page ({type(payload).__name__}); refusing "
@@ -422,6 +467,10 @@ def _validated_profile_page(payload: object) -> tuple[list[dict[str, Any]], str 
             "profile-protection probe got a ProfileList page whose 'data' is missing, null, or not a list; "
             "refusing to run with an unknown pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES explicitly"
         )
+    return payload, data
+
+
+def _validated_profile_rows(data: list[Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for row in data:
         if not isinstance(row, dict) or not row.get("id"):
@@ -430,7 +479,39 @@ def _validated_profile_page(payload: object) -> tuple[list[dict[str, Any]], str 
                 "to run with an unknown pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES explicitly"
             )
         rows.append(row)
-    return rows, _profile_list_cursor(payload)
+    return rows
+
+
+def _validated_profile_page(payload: object) -> tuple[list[dict[str, Any]], str | None]:
+    """One ProfileList page, shape-validated; malformed pages abort the probe.
+
+    A page whose ``data`` is missing, null, or not a list, or whose rows are
+    not all objects carrying an ``id``, cannot be trusted to enumerate the
+    account's pre-existing profiles: accepting it silently (skipping the odd
+    row) would leave whatever it hid writable. Raises :class:`HarnessAbortError`
+    on any malformed shape. Returns ``(rows, next_cursor)`` where ``next_cursor``
+    is None when the listing ended.
+    """
+    page, data = _profile_page_data(payload)
+    return _validated_profile_rows(data), _profile_list_cursor(page)
+
+
+def _cursor_candidates(payload: dict[str, Any]) -> list[Any]:
+    candidates: list[Any] = [payload.get("cursor")]
+    meta = payload.get("meta")
+    pagination = meta.get("pagination") if isinstance(meta, dict) else None
+    if isinstance(pagination, dict):
+        candidates.append(pagination.get("cursor"))
+    return candidates
+
+
+def _checked_cursor(value: Any) -> str:
+    if isinstance(value, str) and value:
+        return value
+    raise HarnessAbortError(
+        f"profile-protection probe got a malformed cursor ({value!r}); refusing to run with an unknown "
+        "pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES explicitly"
+    )
 
 
 def _profile_list_cursor(payload: dict[str, Any]) -> str | None:
@@ -441,20 +522,10 @@ def _profile_list_cursor(payload: dict[str, Any]) -> str | None:
     masquerading as the end of the list (a 0 that silently ended pagination
     would leave every later page's profiles writable).
     """
-    candidates: list[Any] = [payload.get("cursor")]
-    meta = payload.get("meta")
-    pagination = meta.get("pagination") if isinstance(meta, dict) else None
-    if isinstance(pagination, dict):
-        candidates.append(pagination.get("cursor"))
-    for value in candidates:
+    for value in _cursor_candidates(payload):
         if value is None:
             continue
-        if isinstance(value, str) and value:
-            return value
-        raise HarnessAbortError(
-            f"profile-protection probe got a malformed cursor ({value!r}); refusing to run with an unknown "
-            "pre-existing profile set — set NEXTDNS_PROTECTED_PROFILES explicitly"
-        )
+        return _checked_cursor(value)
     return None
 
 

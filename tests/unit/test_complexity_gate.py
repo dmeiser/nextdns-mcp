@@ -13,6 +13,7 @@ here; only the `uv` launcher is shimmed so it can run against a temporary
 source tree with the interpreter running the test suite.
 """
 
+import re
 import shutil
 import stat
 import subprocess
@@ -46,11 +47,17 @@ def _function(name: str, branches: int) -> str:
 
 
 def _run_gate(tmp_path: Path, sources: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    """Run the real CI gate script against a throwaway source tree."""
-    src = tmp_path / "src"
-    src.mkdir()
+    """Run the real CI gate script against a throwaway source tree.
+
+    The gate walks both gated roots, so the tree carries both: a source keyed
+    with a directory prefix lands there, a bare name lands in ``src/``.
+    """
+    for root in ("src", "scripts"):
+        (tmp_path / root).mkdir()
     for filename, body in sources.items():
-        (src / filename).write_text(body)
+        target = tmp_path / (filename if "/" in filename else f"src/{filename}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body)
 
     # Shim `uv run xenon ...` onto the interpreter that has xenon installed, so
     # the gate script runs unmodified against the throwaway tree.
@@ -104,9 +111,32 @@ def test_gate_blocks_method_above_grade_a_inside_class(tmp_path):
     assert "inside_class.py:2 method" in output, f"gate did not report the offending method:\n{output}"
 
 
+def test_gate_blocks_function_above_grade_a_under_scripts(tmp_path):
+    """``scripts/`` is inside the gate, not next to it: a helper script at grade B fails CI.
+
+    This is the assertion that a narrowed path list — ``src/`` only, or ``src/``
+    plus one named script — cannot come back quietly.
+    """
+    result = _run_gate(tmp_path, {"scripts/helper.py": _function("stray_helper", 5)})
+    assert result.returncode != 0, "gate accepted a grade B function under scripts/"
+    output = result.stdout + result.stderr
+    assert "stray_helper" in output, f"gate did not report the offending helper:\n{output}"
+    assert "rank of B" in output, f"gate did not grade the offending block:\n{output}"
+
+
 def test_gate_command_pins_grade_a():
     """The gate command itself is the contract; loosening it to B must fail here."""
     script = _gate_script()
     assert "--max-absolute A" in script
     assert "--max-modules A" in script
     assert "--max-average A" in script
+
+
+def test_gate_command_pins_the_gated_paths():
+    """Both roots are gated by directory, so no file leaves the gate by name.
+
+    A list of individual script paths would let a new ``scripts/`` file join the
+    repo ungated, and let a gated file escape by being dropped from the list.
+    """
+    script = _gate_script()
+    assert re.search(r"xenon\b.*\bsrc/\s+scripts/\s*$", script, re.MULTILINE), script

@@ -374,6 +374,56 @@ class Report:
         }
 
 
+def _tool_error_verdict(mcp_response: Any) -> tuple[str, str, str] | None:
+    tool_error = _extract_tool_error(mcp_response)
+    if tool_error is None:
+        return None
+    return "failed", "", f"MCP tool error: {tool_error}"
+
+
+def _unsupported_verdict(mcp_response: Any) -> tuple[str, str, str] | None:
+    if not _is_not_supported(mcp_response):
+        return None
+    return "skipped", f"unsupported by the server: {_not_supported_reason(mcp_response)}", ""
+
+
+def _skip_verdict(mcp_response: Any) -> tuple[str, str, str] | None:
+    if not _is_skip(mcp_response):
+        return None
+    return "skipped", _skip_reason(mcp_response), ""
+
+
+def _error_body_verdict(mcp_response: Any) -> tuple[str, str, str] | None:
+    if not _is_error_body(mcp_response):
+        return None
+    return "failed", "", f"MCP returned error body: {_error_body_text(mcp_response)}"
+
+
+def _raised_error_verdict(mcp_response: Any) -> tuple[str, str, str] | None:
+    if not _is_raised_error(mcp_response):
+        return None
+    return "failed", "", f"MCP tool raised an error: {_raised_error_text(mcp_response)}"
+
+
+# Ordered: the first verdict a response matches is the one the step gets.
+_RESPONSE_VERDICTS = (
+    _tool_error_verdict,
+    _unsupported_verdict,
+    _skip_verdict,
+    _error_body_verdict,
+    _raised_error_verdict,
+)
+
+
+def _verdict_from_response(mcp_response: Any) -> tuple[str, str, str]:
+    """The (status, reason, error) a captured tool result earns, in order of strength."""
+    for verdict in _RESPONSE_VERDICTS:
+        result = verdict(mcp_response)
+        if result is not None:
+            return result
+    return "passed", "", ""
+
+
 def check_from_call(
     cid: str,
     section: str,
@@ -394,27 +444,7 @@ def check_from_call(
     * a raised tool error (``is_error`` True)            -> failed
     * otherwise                                          -> passed
     """
-    status = "passed"
-    reason = ""
-    error = ""
-
-    tool_error = _extract_tool_error(mcp_response)
-    if tool_error is not None:
-        status = "failed"
-        error = f"MCP tool error: {tool_error}"
-    elif _is_not_supported(mcp_response):
-        status = "skipped"
-        reason = f"unsupported by the server: {_not_supported_reason(mcp_response)}"
-    elif _is_skip(mcp_response):
-        status = "skipped"
-        reason = _skip_reason(mcp_response)
-    elif _is_error_body(mcp_response):
-        status = "failed"
-        error = f"MCP returned error body: {_error_body_text(mcp_response)}"
-    elif _is_raised_error(mcp_response):
-        status = "failed"
-        error = f"MCP tool raised an error: {_raised_error_text(mcp_response)}"
-
+    status, reason, error = _verdict_from_response(mcp_response)
     return CheckResult(
         id=cid,
         section=section,
@@ -463,41 +493,60 @@ def _is_skip(res: Any) -> bool:
     return isinstance(s, dict) and s.get("skipped") is True
 
 
+# The structured keys a payload can carry an "unsupported..." explanation in.
+_UNSUPPORTED_DETAIL_KEYS = ("detail", "detailMessage", "error")
+
+
+def _structured_unsupported(res: Any) -> bool:
+    s = _structured(res)
+    if not isinstance(s, dict):
+        return False
+    if s.get("unsupported") is True:
+        return True
+    return any(isinstance(s.get(key), str) and s[key].startswith("unsupported") for key in _UNSUPPORTED_DETAIL_KEYS)
+
+
+def _payload_unsupported(res: Any) -> bool:
+    if not isinstance(res, dict) or not res.get("is_error"):
+        return False
+    text = res.get("text", "")
+    return isinstance(text, str) and text.lower().startswith("unsupported")
+
+
 def _is_not_supported(res: Any) -> bool:
     """The server explicitly reports the operation is not supported / not enabled."""
-    s = _structured(res)
-    if isinstance(s, dict) and s.get("unsupported") is True:
-        return True
-    if isinstance(s, dict):
-        for key in ("detail", "detailMessage", "error"):
-            v = s.get(key)
-            if isinstance(v, str) and v.startswith("unsupported"):
-                return True
-    if isinstance(res, dict) and res.get("is_error"):
-        text = res.get("text", "")
-        if isinstance(text, str) and text.lower().startswith("unsupported"):
-            return True
-    return False
+    return _structured_unsupported(res) or _payload_unsupported(res)
+
+
+def _structured_skip_reason(s: dict[str, Any], res: Any) -> str:
+    if s.get("skip_reason"):
+        return str(s["skip_reason"])
+    if s.get("skipped") is True:
+        return str(s.get("reason") or "skipped")
+    if s.get("unsupported") is True:
+        return _not_supported_reason(res)
+    return ""
 
 
 def _skip_reason(res: Any) -> str:
     s = _structured(res)
     if isinstance(s, dict):
-        if s.get("skip_reason"):
-            return str(s["skip_reason"])
-        if s.get("skipped") is True:
-            return str(s.get("reason") or "skipped")
-        if s.get("unsupported") is True:
-            return _not_supported_reason(res)
+        reason = _structured_skip_reason(s, res)
+        if reason:
+            return reason
     if isinstance(res, dict) and res.get("is_error"):
         return str(res.get("text", "skipped"))
     return "skipped"
 
 
+def _structured_unsupported_reason(s: dict[str, Any]) -> str:
+    return str(s.get("detail") or s.get("detailMessage") or "unsupported")
+
+
 def _not_supported_reason(res: Any) -> str:
     s = _structured(res)
     if isinstance(s, dict):
-        return str(s.get("detail") or s.get("detailMessage") or "unsupported")
+        return _structured_unsupported_reason(s)
     if isinstance(res, dict) and res.get("is_error"):
         return str(res.get("text", "unsupported"))
     return "unsupported"
@@ -569,22 +618,29 @@ def _resp_status(resp: Any) -> Any:
     return resp.get("status") if isinstance(resp, dict) else None
 
 
+def _ok_body(rest_resp: Any) -> dict[str, Any] | None:
+    """The ``body`` of a successful REST read, or None when the read proves nothing."""
+    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
+        return None
+    body = rest_resp.get("body")
+    return body if isinstance(body, dict) else None
+
+
+def _field_matches(body: dict[str, Any], key: str, want: Any) -> bool:
+    """Whether ``body`` carries the expected value for ``key``, top-level or under ``data``."""
+    if key in body and body[key] == want:
+        return True
+    inner = body.get("data")
+    return isinstance(inner, dict) and key in inner and inner[key] == want
+
+
 def _verify_settings_assert(rest_resp: Any, expected: dict[str, Any]) -> bool:
     """Check every field in ``expected`` is present (nested or top-level) in the
     REST body with the expected value."""
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
+    body = _ok_body(rest_resp)
+    if body is None:
         return False
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
-        return False
-    for key, want in expected.items():
-        if key in body and body[key] == want:
-            continue
-        inner = body.get("data")
-        if isinstance(inner, dict) and key in inner and inner[key] == want:
-            continue
-        return False
-    return True
+    return all(_field_matches(body, key, want) for key, want in expected.items())
 
 
 def _list_values(name: str, tag: str) -> list[str]:
@@ -629,14 +685,17 @@ def _list_added(name: str, tag: str) -> str | None:
     return None
 
 
+def _row_ids(rows: Any) -> set[str]:
+    """The ``id`` of every row that carries one, as the string callers compare."""
+    return {str((row or {}).get("id", "")) for row in rows}
+
+
 def _list_contains(rest_resp: Any, values: list[str]) -> bool:
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
+    body = _ok_body(rest_resp)
+    if body is None:
         return False
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
-        return False
-    ids = {str((r or {}).get("id", "")) for r in body.get("data", [])}
-    return all(str(v) in ids for v in values)
+    ids = _row_ids(body.get("data", []))
+    return all(str(value) in ids for value in values)
 
 
 # The three verdicts an absence check can reach. Only ``absent`` is a fact about
@@ -674,6 +733,11 @@ def _confirmed_gone(rest_resp: Any) -> bool:
     return isinstance(rest_resp, dict) and rest_resp.get("status") == 404
 
 
+def _present_keys(rows: list[Any], key: str) -> set[str]:
+    """The identifying value of every well-formed row of a list answer."""
+    return {str((row or {}).get(key, "")) for row in rows if isinstance(row, dict)}
+
+
 def _absent_verdict(rest_resp: Any, wanted: list[str], key: str) -> tuple[bool, str]:
     """Shared shape of the two absence checks: 404 or a readable list without them.
 
@@ -688,7 +752,7 @@ def _absent_verdict(rest_resp: Any, wanted: list[str], key: str) -> tuple[bool, 
         return _indeterminate(
             f"the {key} read answered HTTP {status!r} without a list body, which proves nothing about it"
         )
-    present = {str((row or {}).get(key, "")) for row in rows if isinstance(row, dict)}
+    present = _present_keys(rows, key)
     if any(str(value) in present for value in wanted):
         return False, PRESENT
     return True, ABSENT
@@ -730,40 +794,43 @@ def _entry_active(rest_resp: Any, value: str) -> tuple[Any, str]:
 
 
 def _entry_ids(rest_resp: Any) -> list[str]:
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
+    body = _ok_body(rest_resp)
+    if body is None:
         return []
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
-        return []
-    return [str(r.get("id")) for r in body.get("data", []) if isinstance(r, dict) and r.get("id")]
+    return [str(row.get("id")) for row in body.get("data", []) if isinstance(row, dict) and row.get("id")]
 
 
 def _rewrites_contains(rest_resp: Any, names: list[str]) -> bool:
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
+    body = _ok_body(rest_resp)
+    if body is None:
         return False
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
-        return False
-    have = {(r or {}).get("name") for r in body.get("data", [])}
-    return all(n in have for n in names)
+    have = {(row or {}).get("name") for row in body.get("data", [])}
+    return all(name in have for name in names)
+
+
+def _row_has_count(row: dict[str, Any]) -> bool:
+    """Whether a row carries a positive numeric count."""
+    return any(isinstance(value, (int, float)) and value > 0 for value in row.values())
+
+
+# The scalar counters the analytics endpoints put directly on the body.
+_COUNT_KEYS = ("queries", "blockedQueries", "total")
+
+
+def _body_has_count(body: dict[str, Any]) -> bool:
+    return any(isinstance(body.get(key), (int, float)) and body[key] > 0 for key in _COUNT_KEYS)
+
+
+def _rows_have_counts(rows: list[Any]) -> bool:
+    return any(_row_has_count(row) for row in rows if isinstance(row, dict))
 
 
 def _analytics_has_data(rest_resp: Any) -> bool:
     """Heuristic: does the profile have any real query history to chart?"""
-    if not isinstance(rest_resp, dict) or not rest_resp.get("ok"):
-        return False
-    body = rest_resp.get("body")
-    if not isinstance(body, dict):
+    body = _ok_body(rest_resp)
+    if body is None:
         return False
     data = body.get("data")
     if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                for v in item.values():
-                    if isinstance(v, (int, float)) and v > 0:
-                        return True
-        return False
-    for key in ("queries", "blockedQueries", "total"):
-        if isinstance(body.get(key), (int, float)) and body[key] > 0:
-            return True
-    return False
+        return _rows_have_counts(data)
+    return _body_has_count(body)

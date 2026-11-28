@@ -430,8 +430,8 @@ _DASHBOARD_SPECS = (
 _DASHBOARD_EXCLUDED = {"all"}
 
 
-def _dashboard_steps() -> list[harness.Step]:
-    """dashboard: overview and specialized widgets."""
+def _assert_dashboard_table_complete() -> None:
+    """The prompt table must cover every dashboard section but the excluded one."""
     from nextdns_mcp.tools.dashboard import DASHBOARD_SECTIONS
 
     covered = {spec[1] for spec in _DASHBOARD_SPECS}
@@ -441,6 +441,11 @@ def _dashboard_steps() -> list[harness.Step]:
         f"missing={set(DASHBOARD_SECTIONS) - covered - _DASHBOARD_EXCLUDED}, "
         f"extra={covered - set(DASHBOARD_SECTIONS)}"
     )
+
+
+def _dashboard_steps() -> list[harness.Step]:
+    """dashboard: overview and specialized widgets."""
+    _assert_dashboard_table_complete()
     steps: list[harness.Step] = []
     for step_id, section, task_prompt in _DASHBOARD_SPECS:
         expect_args = () if section == "overview" else (section,)

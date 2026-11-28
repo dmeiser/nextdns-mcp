@@ -102,7 +102,7 @@ jobs:
           # Every block must be grade A (cyclomatic complexity <= 5), and the
           # project average must be grade A. xenon fails on any block above the
           # max-absolute grade, so no function can sit at grade B or worse.
-          uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/run_container_e2e.py
+          uv run xenon --max-absolute A --max-modules A --max-average A src/ scripts/
 
   unit-tests:
     runs-on: ubuntu-latest

@@ -15,27 +15,50 @@ import json
 import os
 from typing import Any
 
-from ai_e2e_actor import ActorRun
+from ai_e2e_actor import ActorRun, ToolCall
 from ai_e2e_checklist import Step, _server_calls_text
 from ai_e2e_config import _known_tools, allowed_tools
 
 
-def _extract_error_events(run: ActorRun) -> list[str]:
-    """Pull provider/actor error messages out of the raw event stream."""
-    errs: list[str] = []
-    for line in run.raw_lines:
+def _parsed_dicts(lines: Any) -> list[dict[str, Any]]:
+    """The JSON-object lines of a raw stream, skipping anything unparseable."""
+    out: list[dict[str, Any]] = []
+    for line in lines:
         try:
             ev = json.loads(line)
         except (ValueError, TypeError):
             continue
-        if isinstance(ev, dict) and ev.get("type") == "error":
-            e = ev.get("error") or {}
-            msg = e.get("message") if isinstance(e, dict) else str(e)
-            if msg:
-                errs.append(str(msg))
+        if isinstance(ev, dict):
+            out.append(ev)
+    return out
+
+
+def _error_events(raw_lines: list[str]) -> list[dict[str, Any]]:
+    """The ``{"type": "error"}`` events of a raw event stream."""
+    return [ev for ev in _parsed_dicts(raw_lines) if ev.get("type") == "error"]
+
+
+def _error_message(ev: dict[str, Any]) -> Any:
+    error = ev.get("error") or {}
+    return error.get("message") if isinstance(error, dict) else str(error)
+
+
+def _extract_error_events(run: ActorRun) -> list[str]:
+    """Pull provider/actor error messages out of the raw event stream."""
+    errs = [str(message) for message in map(_error_message, _error_events(run.raw_lines)) if message]
     if run.error:
         errs.append(run.error)
     return errs
+
+
+def _call_blob(call: ToolCall) -> str:
+    """The call's arguments as one searchable string."""
+    return json.dumps(call.args, default=str).lower()
+
+
+def _instrument_tokens(path: str) -> list[str]:
+    """The strings that mean the call log was touched: the path or its file name."""
+    return [token for token in (path.lower(), os.path.basename(path).lower()) if token]
 
 
 def _actor_read_the_instrument(run: ActorRun, call_log: str | os.PathLike[str]) -> bool:
@@ -43,16 +66,10 @@ def _actor_read_the_instrument(run: ActorRun, call_log: str | os.PathLike[str]) 
     # MCP config the actor can read, so the subject can see the instrument the
     # verdict is made from. Detection is by path or file name in any call's
     # arguments, whichever tool it used to get there.
-    path = str(call_log or "")
-    if not path:
+    tokens = _instrument_tokens(str(call_log or ""))
+    if not tokens:
         return False
-    sent = path.lower()
-    name = os.path.basename(path).lower()
-    for call in run.tool_calls:
-        blob = json.dumps(call.args, default=str).lower()
-        if sent in blob or (name and name in blob):
-            return True
-    return False
+    return any(any(token in _call_blob(call) for token in tokens) for call in run.tool_calls)
 
 
 def _summarize_calls(run: ActorRun) -> list[dict[str, Any]]:
@@ -93,17 +110,33 @@ def _transient_actor_failure(run: ActorRun, blob: str) -> tuple[str, str]:
     # narration: a model that writes "the tool is not available" without making
     # a call has refused to act, which is a verdict, not a retry.
     client = _client_reported_errors(run)
-    if any(marker in client for marker in _CODE_MODE_TOOL_PATH_MARKERS):
-        return "wrong-tool-path", "actor called the code-mode tool name directly"
-    if any(marker in client for marker in _LAZY_REGISTRATION_MARKERS):
-        return "unknown-tool", "MCP tool not registered yet"
+    matched = _match_client_error(client)
+    if matched is not None:
+        return matched
     if "timed out" in run.error.lower() and not run.tool_calls:
         return "stall", run.error
-    if any(marker in blob for marker in _PROVIDER_STREAM_MARKERS):
+    return _match_blob_transient(run, blob)
+
+
+def _match_client_error(client: str) -> tuple[str, str] | None:
+    """The lazy-registration or wrong-path classification of what the client said."""
+    for markers, kind, reason in _CLIENT_ERROR_MODES:
+        if any(marker in client for marker in markers):
+            return kind, reason
+    return None
+
+
+def _match_blob_transient(run: ActorRun, blob: str) -> tuple[str, str]:
+    """The provider-drop classification visible in the whole attempt's text."""
+    if _mode_seen(blob, _PROVIDER_STREAM_MARKERS):
         return "provider-stream", "model provider ended the response mid tool call"
-    if not run.tool_calls and any(marker in blob for marker in _PROVIDER_OUTAGE_MARKERS):
+    if not run.tool_calls and _mode_seen(blob, _PROVIDER_OUTAGE_MARKERS):
         return "provider-unavailable", "model provider is not serving this model"
     return "", ""
+
+
+def _mode_seen(blob: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in blob for marker in markers)
 
 
 def _client_reported_errors(run: ActorRun) -> str:
@@ -144,6 +177,13 @@ PROVIDER_OUTAGE_STEPS = 3
 # tool as `<server>_<tool>`, so `tools.<server>.<tool>` is not a name it has.
 _CODE_MODE_TOOL_PATH_MARKERS = ('no tool named "tools.', "no tool named 'tools.")
 
+# What the client says about a name it could not resolve. Ordered: the first
+# matching mode wins.
+_CLIENT_ERROR_MODES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (_CODE_MODE_TOOL_PATH_MARKERS, "wrong-tool-path", "actor called the code-mode tool name directly"),
+    (_LAZY_REGISTRATION_MARKERS, "unknown-tool", "MCP tool not registered yet"),
+)
+
 
 def _provider_outage(run: ActorRun) -> bool:
     # Distinct from a bad answer: the attempt produced no tool call at all, so
@@ -176,6 +216,98 @@ TRANSIENT_ATTEMPTS = {
 }
 
 
+# The ACTOR lines are a fixed chain: what was called, what was not, and why.
+_ACTOR_SAMPLE = 4
+_DISCOVERY_TOOLS = ("search_tools", "call_tool")
+_STATUS_TAG = {"passed": "PASS", "failed": "FAIL", "skipped": "SKIP"}
+
+
+def _mcp_calls(run: ActorRun) -> list[ToolCall]:
+    return [call for call in run.tool_calls if call.name in allowed_tools()]
+
+
+def _discovery_calls(run: ActorRun) -> list[ToolCall]:
+    return [call for call in run.tool_calls if call.name in _DISCOVERY_TOOLS]
+
+
+def _visible_calls(run: ActorRun) -> list[ToolCall]:
+    """The calls the ACTOR lines show: real operations first, discovery second."""
+    return _mcp_calls(run) or _discovery_calls(run)
+
+
+def _actor_call_line(call: ToolCall) -> str:
+    return f"  ACTOR   : called {call.name}({json.dumps(call.args)[:120]})" + (
+        "" if call.ok else f"  -> ERROR: {(call.result_text or '')[:200]}"
+    )
+
+
+def _no_call_lines(run: ActorRun) -> list[str]:
+    errs = _extract_error_events(run)
+    if errs:
+        return [f"  ACTOR   : no tool call — {errs[0][:250]}"]
+    if run.exit_code not in (0, None):
+        return [
+            f"  ACTOR   : no tool call — harness exited code {run.exit_code}"
+            + (f", stderr: {run.stderr[:200]}" if run.stderr else "")
+        ]
+    return [f"  ACTOR   : no tool call — replied: {(run.final_text or '')[:200]!r}"]
+
+
+def _invisible_call_lines(run: ActorRun) -> list[str]:
+    if not run.tool_calls:
+        return _no_call_lines(run)
+    return [f"  ACTOR   : no MCP operation observed ({len(run.tool_calls)} built-in/discovery call(s))"]
+
+
+def _actor_lines(run: ActorRun) -> tuple[list[str], set[int]]:
+    """The ACTOR lines and the ids of the calls they already display."""
+    visible = _visible_calls(run)
+    shown = {id(call) for call in visible[:_ACTOR_SAMPLE]}
+    if not visible:
+        return _invisible_call_lines(run), shown
+    lines = [_actor_call_line(call) for call in visible[:_ACTOR_SAMPLE]]
+    extra = len(_mcp_calls(run)) - _ACTOR_SAMPLE
+    if extra > 0:
+        lines.append(f"  ACTOR   : ... {extra} more MCP call(s)")
+    return lines, shown
+
+
+def _is_hidden_attempt(call: ToolCall, shown: set[int]) -> bool:
+    return id(call) not in shown and (call.is_error or call.name not in _known_tools())
+
+
+def _attempt_line(call: ToolCall) -> str:
+    return f"  ATTEMPT : {call.name}({json.dumps(call.args)[:100]})" + (
+        f"  -> ERROR: {(call.result_text or '')[:150]}" if not call.ok else "  -> not an advertised tool"
+    )
+
+
+def _attempt_lines(run: ActorRun, shown: set[int]) -> list[str]:
+    # Failed calls and attempts at tools outside the advertised catalog
+    # (hallucinated names, first-class MCP calls outside execute, wrong
+    # session ids): invisible to the verdict, but they explain retries.
+    attempts = [call for call in run.tool_calls if _is_hidden_attempt(call, shown)]
+    lines = [_attempt_line(call) for call in attempts[:4]]
+    if len(attempts) > 4:
+        lines.append(f"  ATTEMPT : ... {len(attempts) - 4} more attempt(s)")
+    return lines
+
+
+def _verify_detail(rest_v: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in rest_v.items() if k != "endpoint" and v not in (None, "", {}, [])}
+
+
+def _verify_line(rest_v: dict[str, Any]) -> str:
+    endpoint = rest_v.get("endpoint", "")
+    detail = _verify_detail(rest_v)
+    return f"  VERIFY  : {endpoint or '(no REST endpoint)'}" + (f"  {json.dumps(detail)[:200]}" if detail else "")
+
+
+def _result_line(status: str, error: str, reason: str) -> str:
+    why = error or reason
+    return f"  RESULT  : {_STATUS_TAG[status]}" + (f"  — {why}" if why else "")
+
+
 def _feedback_block(
     step: Step,
     run: ActorRun,
@@ -188,56 +320,14 @@ def _feedback_block(
 ) -> list[str]:
     """Render the command -> actor -> verify -> result chain for one step."""
     out = [f"  COMMAND : {step.description}"]
-    mcp_calls = [c for c in run.tool_calls if c.name in allowed_tools()]
-    discovery = [c for c in run.tool_calls if c.name in ("search_tools", "call_tool")]
-    if mcp_calls:
-        for c in mcp_calls[:4]:
-            out.append(
-                f"  ACTOR   : called {c.name}({json.dumps(c.args)[:120]})"
-                + ("" if c.ok else f"  -> ERROR: {(c.result_text or '')[:200]}")
-            )
-        if len(mcp_calls) > 4:
-            out.append(f"  ACTOR   : ... {len(mcp_calls) - 4} more MCP call(s)")
-    elif discovery:
-        for c in discovery[:4]:
-            out.append(
-                f"  ACTOR   : called {c.name}({json.dumps(c.args)[:120]})"
-                + ("" if c.ok else f"  -> ERROR: {(c.result_text or '')[:200]}")
-            )
-    elif run.tool_calls:
-        out.append(f"  ACTOR   : no MCP operation observed ({len(run.tool_calls)} built-in/discovery call(s))")
-    else:
-        errs = _extract_error_events(run)
-        if errs:
-            out.append(f"  ACTOR   : no tool call — {errs[0][:250]}")
-        elif run.exit_code not in (0, None):
-            out.append(
-                f"  ACTOR   : no tool call — harness exited code {run.exit_code}"
-                + (f", stderr: {run.stderr[:200]}" if run.stderr else "")
-            )
-        else:
-            out.append(f"  ACTOR   : no tool call — replied: {(run.final_text or '')[:200]!r}")
+    lines, shown = _actor_lines(run)
+    out.extend(lines)
     if verbose:
-        # Failed calls and attempts at tools outside the advertised catalog
-        # (hallucinated names, first-class MCP calls outside execute, wrong
-        # session ids): invisible to the verdict, but they explain retries.
-        shown = {id(c) for c in (mcp_calls or discovery)[:4]}
-        attempts = [c for c in run.tool_calls if id(c) not in shown and (c.is_error or c.name not in _known_tools())]
-        for c in attempts[:4]:
-            out.append(
-                f"  ATTEMPT : {c.name}({json.dumps(c.args)[:100]})"
-                + (f"  -> ERROR: {(c.result_text or '')[:150]}" if not c.ok else "  -> not an advertised tool")
-            )
-        if len(attempts) > 4:
-            out.append(f"  ATTEMPT : ... {len(attempts) - 4} more attempt(s)")
+        out.extend(_attempt_lines(run, shown))
     if server_calls is not None:
         # The server's own account of the attempt — the only evidence a read
         # step leaves anywhere.
         out.append(f"  SERVER  : {_server_calls_text(server_calls)}")
-    endpoint = rest_v.get("endpoint", "")
-    detail = {k: v for k, v in rest_v.items() if k not in ("endpoint",) and v not in (None, "", {}, [])}
-    out.append(f"  VERIFY  : {endpoint or '(no REST endpoint)'}" + (f"  {json.dumps(detail)[:200]}" if detail else ""))
-    tag = {"passed": "PASS", "failed": "FAIL", "skipped": "SKIP"}[status]
-    why = error or reason
-    out.append(f"  RESULT  : {tag}" + (f"  — {why}" if why else ""))
+    out.append(_verify_line(rest_v))
+    out.append(_result_line(status, error, reason))
     return out
