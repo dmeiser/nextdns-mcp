@@ -109,10 +109,12 @@ GENERATE_DOC = (
     "Execute Prefab Python code in a sandbox and render the result.\n\n"
     "Arguments:\n"
     "- `code`: Python code that builds a Prefab component tree. It runs in a Pyodide "
-    "WASM sandbox; import everything you use, and use PrefabApp as the outermost "
-    "context manager so the UI streams as the code builds it.\n"
+    "WASM sandbox; import everything you use, and use `PrefabApp` as the outermost "
+    "container. The tool returns once the whole tree is built and validated: the "
+    "renderer displays the completed result, it does not stream partial output.\n"
     "- `data`: optional dict, or a JSON object string, of values injected as global "
-    "variables in the sandbox namespace.\n\n"
+    "variables in the sandbox namespace. `data` is not client-side state; see the "
+    "`PrefabApp(state=...)` note below.\n\n"
     "Use the `search_prefab_components` tool to look up available components, their "
     "import paths, argument names, and examples before writing code.\n\n"
     f"CRITICAL CHART SIZING RULE: NEVER place charts ({_CHART_NAMES}) "
@@ -131,8 +133,11 @@ GENERATE_DOC = (
     "Charts live in `prefab_ui.components.charts`. Import and build them with their own "
     "`data` and `series` arguments, e.g. `BarChart(data=[...], "
     'series=[ChartSeries(data_key="rev", label="Revenue")], x_axis="month")`.\n\n'
-    "For interactive UIs, pass initial state in `data` and use `.rx` on stateful "
-    'components for reactive bindings: `Text(f"{slider.rx}")` renders a client-side '
+    "INTERACTIVE UIs: client-side state is set by `PrefabApp(state=...)`, not by "
+    "`data`, which only seeds Python globals in the sandbox. A value that comes from "
+    "`data` still has to be handed to `state`: "
+    '`with PrefabApp(state={"threshold": threshold}) as app:`. Then `.rx` on a '
+    'stateful component binds it: `Text(f"{slider.rx}")` renders a client-side '
     "`{{ threshold }}` expression.\n\n"
     "Layout: prefer `Grid(columns=N, gap=4)` for equal-width panels; `Row` and `Column` "
     "accept `gap`, `align`, and `justify` props; Card sub-components (CardHeader, "

@@ -805,6 +805,25 @@ async def test_the_generate_tool_doc_describes_this_servers_parameters():
 
 
 @pytest.mark.asyncio
+async def test_the_generate_doc_matches_what_the_server_actually_does():
+    """Two claims the description has to keep honest (maintainer review, WORK-353).
+
+    The renderer CSP disables browser-side execution and the tool awaits and
+    validates the completed tree, so nothing streams; and the pinned Prefab
+    runner uses ``data`` for Python globals while ``PrefabApp(state=...)`` is
+    what sets client-side state an ``.rx`` binding reads.
+    """
+    gen_ui = PrefabGenerativeUI()
+
+    description = (await _tool_map(gen_ui))["generate_prefab_ui"].description or ""
+    assert "does not stream partial output" in description
+    assert "streams as the code builds" not in description
+    assert "completed result" in description
+    assert "PrefabApp(state=" in description
+    assert "pass initial state in `data`" not in description
+
+
+@pytest.mark.asyncio
 async def test_prefab_generative_ui_tool_lookup():
     """Compatibility: registered tools are retrievable via the provider lookup."""
     gen_ui = PrefabGenerativeUI()
