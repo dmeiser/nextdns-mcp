@@ -1050,6 +1050,57 @@ class TestMeasureState:
         assert gone2 is False
         assert verdict2.startswith(h.INDETERMINATE)
 
+    def test_profile_gone_checks_every_page_of_the_listing(self, h):
+        """A by-id 404 plus the renamed profile on page 2 is PRESENT, not ABSENT.
+
+        The listing half of the check used to read only the first page, so a
+        renamed test profile living on page 2 confirmed a deletion that never
+        happened.
+        """
+        import asyncio
+
+        class _Paged:
+            async def rest_get(self, path, params=None):
+                if path == "/profiles/pid1":
+                    return {"status": 404, "ok": False, "body": {}}
+                if (params or {}).get("cursor") == "c2":
+                    return {"status": 200, "ok": True, "body": {"data": [{"id": "pid1", "name": "P-renamed"}]}}
+                return {"status": 200, "ok": True, "body": {"data": [{"id": "a1", "name": "Other"}], "cursor": "c2"}}
+
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        assert asyncio.run(h._profile_gone(_Paged(), "pid1", t)) == (False, h.PRESENT)
+
+    def test_profile_gone_is_indeterminate_on_a_malformed_cursor(self, h):
+        """The malformed-cursor raise must degrade to a verdict, not a crash."""
+        import asyncio
+
+        class _MalformedListing:
+            async def rest_get(self, path, params=None):
+                if path == "/profiles/pid1":
+                    return {"status": 404, "ok": False, "body": {}}
+                return {"status": 200, "ok": True, "body": {"data": [], "cursor": 0}}
+
+        t = h.TaskTargets(profile_name="P", tag="abc")
+        gone, verdict = asyncio.run(h._profile_gone(_MalformedListing(), "pid1", t))
+        assert gone is False
+        assert verdict.startswith(h.INDETERMINATE)
+
+    def test_find_profile_paginates_the_listing(self, h):
+        """A one-page lookup missed a profile that lived on page 2."""
+        import asyncio
+
+        m = h.MeasureClient("k")
+
+        async def _paged(path, params=None):
+            assert path == "/profiles"
+            if (params or {}).get("cursor") == "c2":
+                return {"status": 200, "ok": True, "body": {"data": [{"id": "b2", "name": "Two"}]}}
+            return {"status": 200, "ok": True, "body": {"data": [{"id": "a1", "name": "One"}], "cursor": "c2"}}
+
+        m.rest_get = _paged
+        assert asyncio.run(m.find_profile("Two")) == {"id": "b2", "name": "Two"}
+        assert asyncio.run(m.find_profile("Missing")) is None
+
     def test_self_heal_noop_when_profile_alive(self, h):
         t = h.TaskTargets(profile_name="P", tag="abc")
         import asyncio
@@ -1763,6 +1814,61 @@ class TestStraySweep:
                 return {"status": 200, "ok": True, "body": {"data": [{"id": "a1"}], "cursor": "c2"}}
 
         assert asyncio.run(h._all_profile_ids(_Paged())) is None
+
+    def test_all_profile_ids_is_none_on_a_cursor_cycle(self, h):
+        """A repeated cursor is a server-side cycle, not the end of the list.
+
+        The loop used to break on the repeat and return the rows gathered so
+        far as a complete map — a partial inventory the stray sweep then
+        trusted. It must fail closed instead.
+        """
+        import asyncio
+
+        class _Cyclic:
+            async def rest_get(self, path, params=None):
+                if (params or {}).get("cursor") == "c2":
+                    return {"status": 200, "ok": True, "body": {"data": [{"id": "b2"}], "cursor": "c2"}}
+                return {"status": 200, "ok": True, "body": {"data": [{"id": "a1"}], "cursor": "c2"}}
+
+        assert asyncio.run(h._all_profile_ids(_Cyclic())) is None
+
+    def test_all_profile_ids_is_none_on_a_malformed_cursor(self, h):
+        """A present-but-invalid cursor is a failed page, not a crash.
+
+        ``_profile_list_cursor`` raises ``HarnessAbortError`` — fatal for the
+        startup probe — but mid-run that raise used to escape the step loop
+        and kill the harness with a traceback and no report, where the
+        pre-pagination code returned a plain verdict.
+        """
+        import asyncio
+
+        class _Malformed:
+            async def rest_get(self, path, params=None):
+                return {"status": 200, "ok": True, "body": {"data": [{"id": "a1"}], "cursor": 0}}
+
+        assert asyncio.run(h._all_profile_ids(_Malformed())) is None
+
+    def test_all_profile_ids_is_none_when_the_listing_never_ends(self, h):
+        """Fresh unique cursors forever are a runaway loop, not a huge account.
+
+        Unbounded, quickly-answered pages never trip the per-request timeout
+        and the step budget is only checked between steps, so the run would
+        hang mid-step with no report. The loop is capped like the probe's.
+        """
+        import asyncio
+
+        class _Endless:
+            def __init__(self):
+                self.calls = 0
+
+            async def rest_get(self, path, params=None):
+                self.calls += 1
+                body = {"data": [{"id": f"p{self.calls}"}], "cursor": f"c{self.calls}"}
+                return {"status": 200, "ok": True, "body": body}
+
+        m = _Endless()
+        assert asyncio.run(h._all_profile_ids(m)) is None
+        assert m.calls == h._MAX_PROFILE_PAGES
 
     def test_created_ids_come_from_successful_create_receipts(self, h):
         records = [
@@ -2694,6 +2800,21 @@ class TestVerifyStepVerdicts:
     def _run(self, h):
         return h.ActorRun(command=["x"])
 
+    def test_profile_gone_never_confirms_an_empty_id(self, h):
+        """A failed profiles.create left pid == "": the verifier used to answer
+        (True, ABSENT) and report the deletion verified with zero REST reads."""
+        import asyncio
+
+        targets = h.TaskTargets(profile_name="P", tag="tg")
+        client = _FakeClient()
+        status, err, _, rest = asyncio.run(
+            h._verify_step(client, targets, "", self._step(h, "profile_gone"), self._run(h))
+        )
+        assert status == "failed"
+        assert "no profile id" in err
+        assert rest["verified_gone"] is False and rest["verdict"] == h.INDETERMINATE
+        assert client.got == [] and client.deleted == []  # nothing was read or deleted
+
     def test_list_update_requires_the_entry_read_back_inactive(self, h):
         import asyncio
 
@@ -2825,6 +2946,64 @@ class TestVerifyStepVerdicts:
         )
         named = {s.verify for s in all_steps}
         assert named - implemented == set(), f"catalog verifiers with no branch: {sorted(named - implemented)}"
+
+
+class TestMissingProfileIdNeverLaunchesTheActor:
+    """profiles.delete used to run with state.pid == "" after a failed create:
+    the actor got ``Delete the profile ''.`` and the verifier confirmed the
+    deletion of nothing. Profile-id-dependent steps are now skipped before
+    the actor is launched; profiles.create names no id and still runs.
+    """
+
+    def _state(self, h, tmp_path, step):
+        run_mod = sys.modules["ai_e2e_run"]
+        targets = h.TaskTargets(profile_name="P", tag="t0")
+        cfg = h.HarnessConfig()
+        return run_mod._RunState(
+            config=cfg,
+            targets=targets,
+            report=h.Report(),
+            workdir=tmp_path,
+            call_log=tmp_path / "calls.jsonl",
+            step_cfg=cfg,
+            selected=[(1, step)],
+            total=1,
+        )
+
+    def test_delete_step_is_skipped_before_the_actor_runs(self, h, tmp_path, monkeypatch):
+        import asyncio
+
+        run_mod = sys.modules["ai_e2e_run"]
+        step = next(s for s in h.build_steps(h.TaskTargets(profile_name="P", tag="t0")) if s.id == "profiles.delete")
+        state = self._state(h, tmp_path, step)
+        assert state.pid == ""
+
+        async def _boom(*args, **kwargs):
+            raise AssertionError("the actor must not be launched without a profile id")
+
+        monkeypatch.setattr(run_mod, "_attempt_step", _boom)
+        asyncio.run(run_mod._run_one_step(state, None, 1, step))
+        [row] = state.report.results
+        assert row.id == "profiles.delete" and row.status == "skipped"
+
+    def test_create_step_is_not_caught_by_the_skip(self, h, tmp_path, monkeypatch):
+        """profiles.create names no {profile_id}: it must still reach the actor."""
+        import asyncio
+
+        run_mod = sys.modules["ai_e2e_run"]
+        step = next(s for s in h.build_steps(h.TaskTargets(profile_name="P", tag="t0")) if s.id == "profiles.create")
+        state = self._state(h, tmp_path, step)
+
+        class _Reached(Exception):
+            pass
+
+        async def _sentinel(*args, **kwargs):
+            raise _Reached
+
+        monkeypatch.setattr(run_mod, "_attempt_step", _sentinel)
+        with pytest.raises(_Reached):
+            asyncio.run(run_mod._run_one_step(state, None, 1, step))
+        assert state.report.results == []  # not skipped: the attempt was made
 
 
 # =========================================================================== #
@@ -3553,6 +3732,26 @@ class TestActorStreamCollection:
         cfg = self._config(h, script, timeout_s=30)
         run = await h.run_actor(cfg, "do the thing", tmp_path, retries=0)
         assert run.ok, run.error
+        assert [call.name for call in run.tool_calls] == ["call_tool"]
+        assert run.final_text == "done"
+
+    async def test_a_long_event_line_is_captured_not_dropped(self, h, tmp_path):
+        """A >64 KiB single-line event used to abort the drain silently.
+
+        readline() on the default 64 KiB StreamReader limit raised
+        LimitOverrunError, the drain gather swallowed the dead task, and the
+        run reported zero captured events with an empty error.
+        """
+        script = (
+            "import json;"
+            "print(json.dumps({'type':'tool_use','part':{'tool':'call_tool',"
+            "'state':{'status':'completed','input':{},'output':'x'*70000}}}));"
+            "print(json.dumps({'type':'text','part':{'text':'done'}}))"
+        )
+        cfg = self._config(h, script, timeout_s=30)
+        run = await h.run_actor(cfg, "do the thing", tmp_path, retries=0)
+        assert run.ok, run.error
+        assert len(run.raw_lines) == 2, [len(ln) for ln in run.raw_lines]
         assert [call.name for call in run.tool_calls] == ["call_tool"]
         assert run.final_text == "done"
 
