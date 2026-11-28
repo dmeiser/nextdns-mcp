@@ -14,7 +14,7 @@ from functools import wraps
 from typing import Any, NamedTuple
 
 from fastmcp import FastMCP
-from fastmcp.apps.config import AppConfig, ResourceCSP
+from fastmcp.apps.config import AppConfig, ResourceCSP, app_config_to_meta_dict
 from fastmcp.tools.base import ToolResult
 from fastmcp.utilities.mime import UI_MIME_TYPE
 from mcp.types import ToolAnnotations
@@ -52,6 +52,7 @@ from .tools.dashboard import overviewDashboard
 from .tools.doh import dohLookup
 from .tools.plots import plotAnalytics
 from .transport import is_error_payload
+from .typed_error_tool import TypedArgumentTool
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,20 @@ def _register_composite_renderer(server: FastMCP) -> None:
     )
     def _bundled_renderer() -> str:
         return get_renderer_html(mode="bundled")
+
+
+class CompositeTool(TypedArgumentTool):
+    """A composite tool whose argument failures keep the typed JSON error contract.
+
+    A ``Literal`` enum or type violation raises from the signature's pydantic
+    model before ``_with_error_flag`` can answer, so the caller would get a
+    bare message with no structured content and the middleware reporting
+    ``ignored_arguments``/``resolved_from`` would never see a result to
+    annotate. ``TypedArgumentTool`` converts that refusal into the flagged
+    typed payload; the signature's own model still applies its coercions (an
+    integer ``profile_id`` becomes a string) and the published schema,
+    enums included, is untouched.
+    """
 
 
 def _with_error_flag(tool_fn: Any) -> Any:
@@ -230,11 +245,26 @@ def build_mcp_server() -> FastMCP:
         # description, so the accepted values and the worked example further down
         # would never reach a caller — and for these three tools that is exactly the
         # part a caller needs (a chart's interval range, a lookup's record types).
-        server.tool(
-            description=inspect.getdoc(composite.tool) or "",
-            annotations=_COMPOSITE_ANNOTATIONS,
-            app=AppConfig(resource_uri=_COMPOSITE_RENDERER_URI) if composite.app else None,
-        )(_with_error_flag(composite.tool))
+        #
+        # Registered as CompositeTool (not through server.tool, which builds a
+        # plain FunctionTool) so enum/type violations answer the typed error
+        # contract instead of raising out of pydantic argument validation. The
+        # app config is folded into meta["ui"] with FastMCP's own helper, so
+        # the tools advertise the renderer _register_composite_renderer above
+        # publishes, byte-identically to server.tool(app=...).
+        server.add_tool(
+            CompositeTool.from_function(
+                _with_error_flag(composite.tool),
+                name=composite.tool.__name__,
+                description=inspect.getdoc(composite.tool) or "",
+                annotations=_COMPOSITE_ANNOTATIONS,
+                meta=(
+                    {"ui": app_config_to_meta_dict(AppConfig(resource_uri=_COMPOSITE_RENDERER_URI))}
+                    if composite.app
+                    else None
+                ),
+            )
+        )
     register_generative_ui_provider(server)
     return server
 
