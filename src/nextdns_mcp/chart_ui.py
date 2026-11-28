@@ -96,7 +96,7 @@ def _series_color(series: dict[str, Any]) -> str | None:
 
 
 def build_chart_series(series_data: list[dict[str, Any]]) -> list[ChartSeries]:
-    """Build the series metadata list for the Prefab LineChart."""
+    """Build the series metadata list for the Prefab AreaChart."""
     return [
         ChartSeries(
             dataKey=f"series_{idx}",
