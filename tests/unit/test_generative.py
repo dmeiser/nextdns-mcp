@@ -847,6 +847,34 @@ def test_rendered_app_tags_the_rendered_app_and_hands_on_anything_else():
     assert generative_module._rendered_app(stub) is stub  # type: ignore[arg-type]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("delta", "accepted"), [(0, True), (1, False)])
+async def test_result_cap_boundary_holds_for_a_rendered_app(delta: int, accepted: bool):
+    """The shared payload does not move MAX_RESULT_BYTES: at the cap passes, one byte over fails.
+
+    This uses the app shape a render really returns (``PrefabApp.from_json``),
+    unlike the size-guard tests that feed the tool a stub object.
+    """
+    probe = PrefabApp.from_json({"view": {"type": "Text", "props": {"text": "x"}}})
+    overhead = len(json.dumps(probe.to_json(), ensure_ascii=False).encode("utf-8")) - 1
+    text = "x" * (MAX_RESULT_BYTES - overhead + delta)
+    app = PrefabApp.from_json({"view": {"type": "Text", "props": {"text": text}}})
+    assert len(json.dumps(app.to_json(), ensure_ascii=False).encode("utf-8")) == MAX_RESULT_BYTES + delta
+
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
+    ):
+        mock_exec.return_value = app
+        if accepted:
+            assert isinstance(await gen_tool.fn(code="print(1)"), generative_module.RenderedApp)
+        else:
+            with pytest.raises(ValueError, match="result exceeds maximum size"):
+                await gen_tool.fn(code="print(1)")
+
+
 class _ChunkedRaw:
     """Raw stream stub returning fixed-size chunks across read calls."""
 
