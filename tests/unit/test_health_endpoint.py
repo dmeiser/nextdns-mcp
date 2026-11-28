@@ -39,10 +39,12 @@ class FakeProbeTransport:
 
     async def request(self, method: str, url: str, **kwargs) -> httpx.Response:
         self.calls.append((method, url, kwargs))
-        outcome = self._outcomes.pop(0) if self._outcomes else self._outcomes
+        if not self._outcomes:
+            raise AssertionError("no probe outcome queued")
+        outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
-        assert outcome is not None
+        assert isinstance(outcome, httpx.Response)
         return outcome
 
 

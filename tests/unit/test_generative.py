@@ -2123,7 +2123,7 @@ class _SpyFuture(asyncio.Future):
 
     def __init__(self) -> None:
         super().__init__()
-        self.recorded_callbacks = []
+        self.recorded_callbacks: list[Callable[[Any], Any]] = []
 
     def add_done_callback(self, fn, *, context=None):
         self.recorded_callbacks.append(fn)

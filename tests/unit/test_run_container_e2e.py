@@ -395,7 +395,7 @@ async def test_check_endpoint_readiness_failure(runner: ContainerE2ERunner):
 async def test_run_preflight_fails_on_missing_tools(runner: ContainerE2ERunner):
     """Test that runner fails preflight when tools are missing."""
     mock_tools_res = MagicMock()
-    mock_tools_res.tools = [Tool(name="dohLookup", description="", inputSchema={})]
+    mock_tools_res.tools = [Tool(name="dohLookup", description="", input_schema={})]
 
     mock_session = AsyncMock()
     mock_session.list_tools.return_value = mock_tools_res
@@ -425,7 +425,7 @@ async def test_run_success_read_only(runner: ContainerE2ERunner):
     that never executed certifies nothing), so this run gets one.
     """
     runner.plot_profile = "analytics-profile"
-    tools_list = [Tool(name=t, description="", inputSchema={}) for t in EXPECTED_TOOLS]
+    tools_list = [Tool(name=t, description="", input_schema={}) for t in EXPECTED_TOOLS]
     mock_tools_res = MagicMock()
     mock_tools_res.tools = tools_list
 
@@ -831,6 +831,7 @@ async def test_run_write_checks_issues_the_documented_sequence(runner: Container
         assert arguments["profile_id"] == "profile-123", name
         if entry_name is None:
             continue
+        assert pattern is not None
         value = arguments[entry_name]
         assert re.fullmatch(pattern, value), f"{name}: {value!r} does not match {pattern}"
 

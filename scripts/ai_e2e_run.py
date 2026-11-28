@@ -19,10 +19,14 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import ai_e2e_common as common
-import ai_e2e_harness as harness
+if TYPE_CHECKING:
+    from scripts import ai_e2e_common as common
+    from scripts import ai_e2e_harness as harness
+else:
+    import ai_e2e_common as common
+    import ai_e2e_harness as harness
 
 
 class _RunState:
@@ -478,7 +482,6 @@ async def run_harness_scoped(api_key: str, config: Any) -> Any:
     # reclaims it - atexit alone left a 500 MB log CSV behind on any path
     # that unwound without process exit (cancellation, Ctrl-C, a mid-run
     # exception).
-    had_tmpdir = "TMPDIR" in os.environ
     old_tmpdir = os.environ.get("TMPDIR")
     # Save tempfile's own resolved-dir cache too: restoring it to None on
     # cleanup lost a pre-existing explicit tempdir an earlier caller had set.
@@ -520,8 +523,8 @@ async def run_harness_scoped(api_key: str, config: Any) -> Any:
         # in-process). Restore the ambient value - but only if nothing else
         # moved TMPDIR after we set it.
         if os.environ.get("TMPDIR") == str(scratch):
-            if had_tmpdir:
-                os.environ["TMPDIR"] = old_tmpdir  # type: ignore[index]
+            if old_tmpdir is not None:
+                os.environ["TMPDIR"] = old_tmpdir
             else:
                 os.environ.pop("TMPDIR", None)
         # Also restore the resolved-cache tempfile pinned at the scratch: it

@@ -208,7 +208,7 @@ ENDPOINTS: dict[str, tuple[str, str, str]] = {
     "git.createCommit": ("POST", "/repos/{owner}/{repo}/git/commits", "contents:write"),
 }
 
-SCOPES_GH_CLI: list[tuple[tuple[str, ...], str, str]] = [
+SCOPES_GH_CLI: list[tuple[tuple[str, ...], str | None, str | None]] = [
     (("pr", "review"), "pull-requests", "write"),
     (("pr", "merge"), "pull-requests", "write"),
     (("pr", "comment"), "pull-requests", "write"),

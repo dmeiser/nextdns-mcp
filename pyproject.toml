@@ -57,7 +57,8 @@ extend-select = ["I"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src"]
+files = ["src", "scripts", "tests"]
+mypy_path = "src"
 
 [tool.uv]
 # Rolling 7-day dependency cooldown: ignore releases published within the

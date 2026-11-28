@@ -13,11 +13,16 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ai_e2e_actor import ActorRun
-from ai_e2e_checklist import Step, _server_calls_text
-from ai_e2e_config import _known_tools, allowed_tools
+if TYPE_CHECKING:
+    from scripts.ai_e2e_actor import ActorRun
+    from scripts.ai_e2e_checklist import Step, _server_calls_text
+    from scripts.ai_e2e_config import _known_tools, allowed_tools
+else:
+    from ai_e2e_actor import ActorRun
+    from ai_e2e_checklist import Step, _server_calls_text
+    from ai_e2e_config import _known_tools, allowed_tools
 
 
 def _extract_error_events(run: ActorRun) -> list[str]:

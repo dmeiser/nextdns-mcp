@@ -21,7 +21,7 @@ class _FakeServer(SimpleNamespace):
     """
 
     __slots__ = ("__weakref__",)
-    __hash__ = object.__hash__  # identity, like the real FastMCP server key
+    __hash__ = object.__hash__  # type: ignore[assignment]  # identity, like the real FastMCP server key
     __eq__ = object.__eq__
 
 

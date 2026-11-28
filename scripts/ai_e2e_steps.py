@@ -12,10 +12,14 @@ keeps the thin delegator and the shared primitives (``Step``, ``_expect``,
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import ai_e2e_common as common
-import ai_e2e_harness as harness
+if TYPE_CHECKING:
+    from scripts import ai_e2e_common as common
+    from scripts import ai_e2e_harness as harness
+else:
+    import ai_e2e_common as common
+    import ai_e2e_harness as harness
 
 
 def _profile_steps(targets: harness.TaskTargets) -> list[harness.Step]:

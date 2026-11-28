@@ -17,7 +17,7 @@ SPDX-License-Identifier: MIT
 from collections.abc import Callable, Iterator
 from datetime import UTC
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -93,7 +93,7 @@ def _assert_error_contract(result: Any) -> None:
 
 
 def _http_error(status_code: int) -> httpx.HTTPError:
-    exc = httpx.HTTPError("boom")
+    exc = cast(httpx.HTTPStatusError, httpx.HTTPError("boom"))
     exc.response = MagicMock(
         status_code=status_code,
         text=f"server said {status_code}",

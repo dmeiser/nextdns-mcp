@@ -30,10 +30,14 @@ import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import ai_e2e_common as common
-from ai_e2e_checklist import CALL_LOG_NAME
+if TYPE_CHECKING:
+    from scripts import ai_e2e_common as common
+    from scripts.ai_e2e_checklist import CALL_LOG_NAME
+else:
+    import ai_e2e_common as common
+    from ai_e2e_checklist import CALL_LOG_NAME
 
 # --------------------------------------------------------------------------- #
 # Make the in-tree ``nextdns_mcp`` package importable when running as a script

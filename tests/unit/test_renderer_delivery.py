@@ -16,9 +16,10 @@ import pytest
 from fastmcp import Client
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import TextResourceContents
 
 _UI_TOOLS = ("overviewDashboard", "plotAnalytics", "generate_prefab_ui")
-_EMPTY_CSP = {
+_EMPTY_CSP: dict[str, list[str]] = {
     "resourceDomains": [],
     "connectDomains": [],
     "frameDomains": [],
@@ -133,9 +134,13 @@ def test_bundled_resources_read_over_streamable_http() -> None:
             await session.initialize()
             tools = {tool.name: tool for tool in (await session.list_tools()).tools}
             for name in _UI_TOOLS:
-                uri = str(tools[name].meta["ui"]["resourceUri"])
+                tool_meta = tools[name].meta
+                assert tool_meta is not None
+                uri = str(tool_meta["ui"]["resourceUri"])
                 resource = (await session.read_resource(uri)).contents[0]
+                assert isinstance(resource, TextResourceContents)
                 assert len(resource.text.encode()) > 1024 * 1024, f"{name} did not serve the bundle"
+                assert resource.meta is not None
                 assert resource.meta["ui"]["csp"] == _EMPTY_CSP
 
     try:
