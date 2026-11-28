@@ -104,12 +104,52 @@ def _download_error_detail(status: Any, scheme: Any, host: Any) -> str:
     )
 
 
+LOG_TEMP_DIR_PREFIX = "nextdns_logs_"
+
+
+async def _create_download_path() -> str:
+    """Create this download's temp directory on the worker pool and return the CSV path.
+
+    ``mkdtemp`` is a syscall that can block - on a full or cold filesystem it
+    holds whatever thread calls it - so it runs on the pool, like the open,
+    write and unlink that follow it. The await is shielded because the
+    directory has no owner until the caller binds the path: a plain await that
+    is cancelled after the worker started would discard the created directory,
+    and the caller's cleanup guard has nothing to reclaim yet - exactly the
+    leak the cancellation contract forbids. The shield lets the creation land,
+    reclaims what it made, and re-raises the cancellation.
+    """
+    creating = asyncio.ensure_future(asyncio.to_thread(tempfile.mkdtemp, prefix=LOG_TEMP_DIR_PREFIX))
+    try:
+        temp_dir = await asyncio.shield(creating)
+    except asyncio.CancelledError:
+        await _reclaim_abandoned_temp_dir(creating)
+        raise
+    return os.path.join(temp_dir, "download.csv")
+
+
+async def _reclaim_abandoned_temp_dir(creating: asyncio.Future[str]) -> None:
+    """Take back a temp directory whose creating await was cancelled.
+
+    The worker thread cannot be cancelled, so the directory either exists by
+    the time the creation task finishes or never will: waiting for the task is
+    what makes the reclaim exact rather than best effort.
+    """
+    try:
+        made = await asyncio.shield(creating)
+    except (asyncio.CancelledError, OSError):
+        return  # the directory was never created: there is nothing to hand back
+    await asyncio.to_thread(retention._unlink_temp_file, os.path.join(made, "download.csv"))
+
+
 async def _register_successful_download(path: str, downloaded: bool) -> dict[str, Any] | None:
     """Register a completed download with the owning lifespan's registry.
 
-    Returns the rejection payload when the download succeeded outside any
-    server lifespan - nothing could ever reclaim the CSV, so the caller must
-    not hand out the path - and None otherwise.
+    Returns the rejection payload when the download cannot be handed out at
+    all - it succeeded outside any server lifespan, or the registry call
+    itself failed - because in either case nothing could ever reclaim the CSV,
+    so the caller must not hand out the path and must remove the file. None
+    when the registry took ownership.
     """
     if not downloaded:
         return None
@@ -119,6 +159,13 @@ async def _register_successful_download(path: str, downloaded: bool) -> dict[str
         # thread so the next request is not queued behind it.
         await asyncio.to_thread(retention._note_successful_download, path, True)
     except retention.MissingDownloadRegistryError as e:
+        logger.error(f"Downloaded logs could not be registered for reclaim: {client._log_safe_error(e)}")
+        return error_payload(ErrorCode.INTERNAL_ERROR, f"Downloaded logs could not be handed out: {e}")
+    except Exception as e:  # noqa: BLE001
+        # A registry that answered with anything else still did not take the
+        # path, so handing the CSV out would leave it unregistered - invisible
+        # to shutdown reclaim and to eviction. Reject it and let the caller's
+        # cleanup guard remove it.
         logger.error(f"Downloaded logs could not be registered for reclaim: {client._log_safe_error(e)}")
         return error_payload(ErrorCode.INTERNAL_ERROR, f"Downloaded logs could not be handed out: {e}")
     return None
@@ -156,11 +203,8 @@ async def _download_logs_to_tempfile(profile_id: str) -> dict[str, Any]:
     globally routable hosts, so a hostile ``Location`` cannot turn the download
     into a probe of an internal service.
     """
-    # The temp directory is created by a syscall that can block - on a full or
-    # cold filesystem ``mkdtemp`` holds whatever thread calls it - so it goes to
-    # the worker pool, like the write, close and unlink that follow it.
-    temp_dir = await asyncio.to_thread(tempfile.mkdtemp, prefix="nextdns_logs_")
-    path = os.path.join(temp_dir, "download.csv")
+    # Created off the loop, and shielded: see ``_create_download_path``.
+    path = await _create_download_path()
     downloaded = False
     try:
         payload, downloaded = await _download_logs_controlled(profile_id, path)

@@ -27,6 +27,7 @@ import contextlib
 import contextvars
 import logging
 import os
+import threading
 from collections.abc import Iterator
 
 from ...state import request_resources
@@ -107,6 +108,16 @@ class DownloadRegistry:
 
     def __init__(self) -> None:
         self._paths: dict[str, None] = {}
+        # Registration and reclaim no longer run on the caller's event loop:
+        # they run on worker threads (see the download tool and the lifespan
+        # shutdown paths), so two servers' downloads - or one server's downloads
+        # racing its own eviction sweep - can mutate ``_paths`` concurrently.
+        # Insertion order is the eviction order, so the whole register-then-
+        # evict step is held under one lock: it is a check-then-act, and a
+        # mutation inside the eviction loop raises ``RuntimeError: dictionary
+        # changed size during iteration`` out of a download that already
+        # succeeded.
+        self._lock = threading.Lock()
 
     def note(self, path: str, downloaded: bool) -> None:
         """Register a fully-written CSV for reclaim; failures stay unregistered.
@@ -118,12 +129,13 @@ class DownloadRegistry:
         """
         if not downloaded:
             return
-        self._paths[path] = None
-        while len(self._paths) > MAX_RETAINED_DOWNLOADS:
-            oldest = next(iter(self._paths))
-            if not _remove_downloaded_file(oldest):
-                break  # cannot evict: leave the overflow for shutdown reclaim rather than spin
-            self._paths.pop(oldest, None)
+        with self._lock:
+            self._paths[path] = None
+            while len(self._paths) > MAX_RETAINED_DOWNLOADS:
+                oldest = next(iter(self._paths))
+                if not _remove_downloaded_file(oldest):
+                    break  # cannot evict: leave the overflow for shutdown reclaim rather than spin
+                self._paths.pop(oldest, None)
 
     def cleanup(self) -> None:
         """Remove every registered temp file and its directory.
@@ -134,15 +146,18 @@ class DownloadRegistry:
         effort and idempotent: a second call has nothing registered and does
         nothing.
         """
-        for path in list(self._paths):
-            if _remove_downloaded_file(path):
-                self._paths.pop(path, None)
+        with self._lock:
+            for path in list(self._paths):
+                if _remove_downloaded_file(path):
+                    self._paths.pop(path, None)
 
     def __contains__(self, path: object) -> bool:
-        return path in self._paths
+        with self._lock:
+            return path in self._paths
 
     def __len__(self) -> int:
-        return len(self._paths)
+        with self._lock:
+            return len(self._paths)
 
 
 download_registry: contextvars.ContextVar[DownloadRegistry | None] = contextvars.ContextVar(

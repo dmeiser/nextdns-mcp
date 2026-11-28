@@ -99,6 +99,39 @@ def _open_private(path: str) -> Any:
     return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
 
 
+async def _close_abandoned_handle(opening: "asyncio.Future[Any]") -> None:
+    """Close a file handle whose opening await was cancelled.
+
+    The worker thread cannot be cancelled, so the handle exists as soon as the
+    opening task finishes. Dropping it to the garbage collector is not cleanup:
+    the caller's close-on-all-exits guard never sees an unbound handle, and on a
+    platform where an open handle holds its path, the CSV then cannot be
+    removed at all.
+    """
+    try:
+        handle = await asyncio.shield(opening)
+    except (asyncio.CancelledError, OSError):
+        return  # the file was never opened: there is nothing to close
+    await asyncio.to_thread(handle.close)
+
+
+async def _open_private_on_pool(path: str) -> Any:
+    """Open the CSV on the worker pool, never discarding the handle it returns.
+
+    On a busy or cold temp directory the open syscall holds whatever thread
+    calls it for as long as it takes, so it runs on the pool with the writes
+    that follow it. The await is shielded because a handle the caller never
+    bound is a handle no exit path can close: the shield lets the open land,
+    closes what it made, and re-raises the cancellation.
+    """
+    opening = asyncio.ensure_future(asyncio.to_thread(_open_private, path))
+    try:
+        return await asyncio.shield(opening)
+    except asyncio.CancelledError:
+        await _close_abandoned_handle(opening)
+        raise
+
+
 async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict[str, Any]:
     """Write a streaming response body to ``path`` without double-buffering.
 
@@ -132,10 +165,8 @@ async def _write_stream_to_tempfile(response: httpx.Response, path: str) -> dict
     # record's tail - arriving in a later chunk, after the carry was dropped -
     # would be appended to the preview as if it were a new record.
     dropping_record = False
-    # The open belongs on the worker pool with the writes that follow it: on a
-    # busy or cold temp directory the syscall holds the loop for as long as it
-    # takes, and every other request this server serves waits behind it.
-    out = await asyncio.to_thread(_open_private, path)
+    # Private mode, off the loop, shielded: see ``_open_private_on_pool``.
+    out = await _open_private_on_pool(path)
     try:
         async for raw, text in _stream_pieces(response, decoder):
             if written_bytes + len(raw) > max_total:
