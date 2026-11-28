@@ -187,6 +187,20 @@ class TestStripExtraFieldsMiddleware:
         assert "schema fetch failed" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_a_result_with_no_note_carrier_still_succeeds(self, middleware, mock_context):
+        """A dropped argument is reported best-effort: an unannotatable result cannot fail the call.
+
+        A tool answer with no structured dict and no ``content`` list has nowhere to put the
+        note. Losing the note is recoverable; replacing the tool's answer with an error is not.
+        """
+        call_next = AsyncMock(return_value={"ok": True})
+
+        result = await middleware.on_call_tool(mock_context, call_next)
+
+        assert result == {"ok": True}
+        call_next.assert_called_once_with(mock_context)
+
+    @pytest.mark.asyncio
     async def test_not_found_error_passes_through_unwrapped(self, middleware, mock_context):
         """Test that NotFoundError (unknown tool) is re-raised, not wrapped as ToolError."""
         mock_context.fastmcp_context.fastmcp.get_tool = AsyncMock(side_effect=NotFoundError("Unknown tool: nope"))
@@ -287,6 +301,42 @@ class TestStripExtraFieldsMiddleware:
         """Test array items are coerced when items schema is provided."""
         result = middleware._coerce_value(["true", "false"], {"type": "array", "items": {"type": "boolean"}})
         assert result == [True, False]
+
+    def test_coerce_value_recurses_opaque_containers_without_a_schema(self, middleware):
+        """Nested dict/list values get no schema context, so their strings stay strings.
+
+        Only the declared top-level property has a schema to coerce against; anything
+        inside an opaque object is identifier-like until a schema says otherwise.
+        """
+        assert middleware._coerce_value({"a": "true", "b": "2"}) == {"a": "true", "b": "2"}
+        assert middleware._coerce_value(["1", "2.2"]) == ["1", "2.2"]
+        assert middleware._coerce_value(["1", "2.2"], {"type": "array", "items": {"type": "number"}}) == [1, 2.2]
+
+    def test_coerce_value_passes_a_non_string_scalar_through_untouched(self, middleware):
+        """A value already at its wire type is not re-parsed on the way to the tool."""
+        assert middleware._coerce_value(10) == 10
+
+    def test_coerce_value_boolean_false_follows_its_schema(self, middleware):
+        """``"false"`` must land as ``False``, not the truthy non-empty string."""
+        assert middleware._coerce_value("false", {"type": "boolean"}) is False
+
+    @pytest.mark.asyncio
+    async def test_string_typed_leading_zero_identifier_reaches_the_tool_as_a_string(
+        self, middleware, mock_tool, mock_context
+    ):
+        """``{"password": "0012"}`` was the live corruption (string -> int 12) (issue #273).
+
+        ``0012`` is integer-shaped, so only the declared ``string`` schema keeps it a
+        string; the assertion is on the arguments the tool actually receives.
+        """
+        mock_tool.parameters = {"properties": {"password": {"type": "string"}}}
+        mock_context.message.arguments = {"password": "0012"}
+        call_next = AsyncMock(side_effect=lambda context: context.message.arguments)
+
+        result = await middleware.on_call_tool(mock_context, call_next)
+
+        assert result == {"password": "0012"}
+        assert isinstance(result["password"], str)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
