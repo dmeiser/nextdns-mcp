@@ -10,6 +10,7 @@ SPDX-License-Identifier: MIT
 
 import ast
 from bisect import bisect_left
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 _CHART_NAMES = {
@@ -74,18 +75,21 @@ def _is_chart_call(node: ast.AST) -> bool:
     return _call_name(_unwrap_named(node)) in _CHART_NAMES
 
 
-def _call_children(node: ast.Call) -> list[ast.AST]:
-    """Return a call's argument expressions, including keyword values."""
-    children: list[ast.AST] = list(node.args)
-    children.extend(keyword.value for keyword in node.keywords)
-    return children
+def _call_children(node: ast.Call) -> Iterator[ast.AST]:
+    """Yield a call's argument expressions, including keyword values."""
+    yield from node.args
+    for keyword in node.keywords:
+        yield keyword.value
 
 
-def _call_visits(node: ast.Call, in_tab: bool, ctx: _PlacementContext) -> list[tuple[ast.AST, bool]]:
-    """Child visits for a call: a Tab, or a call attached to one, opens tab scope."""
+def _call_visits(node: ast.Call, in_tab: bool, ctx: _PlacementContext) -> Iterator[tuple[ast.AST, bool]]:
+    """Yield child visits for a call: a Tab, or a call attached to one, opens tab scope."""
     if _opens_tab_scope(node, ctx):
-        return [(child, True) for child in _call_children(node)]
-    return [(child, in_tab) for child in ast.iter_child_nodes(node)]
+        for child in _call_children(node):
+            yield child, True
+    else:
+        for child in ast.iter_child_nodes(node):
+            yield child, in_tab
 
 
 def _position(node: ast.AST) -> _Position:
@@ -212,21 +216,30 @@ def _opens_tab_scope(node: ast.AST, ctx: _PlacementContext) -> bool:
     return _is_tab_call(node) or _attaches_to_tab(node, ctx)
 
 
-def _with_visits(node: ast.With | ast.AsyncWith, in_tab: bool, ctx: _PlacementContext) -> list[tuple[ast.AST, bool]]:
-    """Child visits for a `with`: items keep the current scope; the body opens tab scope."""
-    visits: list[tuple[ast.AST, bool]] = [(item.context_expr, in_tab) for item in node.items]
+def _with_visits(
+    node: ast.With | ast.AsyncWith, in_tab: bool, ctx: _PlacementContext
+) -> Iterator[tuple[ast.AST, bool]]:
+    """Yield `with` visits: items keep the current scope; the body opens tab scope."""
+    for item in node.items:
+        yield item.context_expr, in_tab
     body_scope = in_tab or any(_opens_tab_scope(item.context_expr, ctx) for item in node.items)
-    visits.extend((stmt, body_scope) for stmt in node.body)
-    return visits
+    for stmt in node.body:
+        yield stmt, body_scope
 
 
-def _node_visits(node: ast.AST, in_tab: bool, ctx: _PlacementContext) -> list[tuple[ast.AST, bool]]:
-    """Return the (node, scope) pairs to visit for one node's children."""
+def _node_visits(node: ast.AST, in_tab: bool, ctx: _PlacementContext) -> Iterator[tuple[ast.AST, bool]]:
+    """Yield the (node, scope) pairs to visit for one node's children.
+
+    The walk extends its stack with these visits, so no per-node list is built
+    just to be extended and discarded.
+    """
     if isinstance(node, ast.With | ast.AsyncWith):
-        return _with_visits(node, in_tab, ctx)
-    if isinstance(node, ast.Call):
-        return _call_visits(node, in_tab, ctx)
-    return [(child, in_tab) for child in ast.iter_child_nodes(node)]
+        yield from _with_visits(node, in_tab, ctx)
+    elif isinstance(node, ast.Call):
+        yield from _call_visits(node, in_tab, ctx)
+    else:
+        for child in ast.iter_child_nodes(node):
+            yield child, in_tab
 
 
 def _chart_in_tab(root: ast.AST) -> bool:

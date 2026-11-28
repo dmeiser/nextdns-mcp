@@ -15,6 +15,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from functools import cache
 from typing import Any
 
 import prefab_ui.generative as prefab_generative
@@ -336,13 +337,23 @@ def _renderer_csp() -> ResourceCSP:
     )
 
 
+@cache
+def _renderer_html() -> str:
+    """Read the bundled renderer HTML once per process.
+
+    The bundled mode re-reads the packaged HTML file on every call, but every
+    renderer resource serves the same document.
+    """
+    return get_generative_renderer_html(mode="bundled")
+
+
 def _build_renderer_resource(csp: Any) -> TextResource:
     """Build the Generative UI iframe renderer HTML resource."""
     resource_config = AppConfig(csp=csp)
     return TextResource(
         uri=prefab_generative.RESOURCE_URI,  # type: ignore[arg-type]
         name="Prefab Generative Renderer",
-        text=get_generative_renderer_html(mode="bundled"),
+        text=_renderer_html(),
         mime_type=UI_MIME_TYPE,
         meta={"ui": app_config_to_meta_dict(resource_config)},
     )

@@ -140,19 +140,21 @@ class TestDashboardHelpers:
 
     def test_build_domains_card(self):
         data = [{"domain": "example.com", "queries": 50}, {}]
-        card = ui.build_domains_card("Title", "Desc", data)
+        items = [(data_mod.domain_label(item), data_mod.item_queries(item)) for item in data]
+        card = ui.build_domains_card("Title", "Desc", items)
         assert card is not None
-        assert ui.build_domains_card("Title", "Desc", data, view_type="bar") is not None
-        assert ui.build_domains_card("Title", "Desc", data, view_type="pie") is not None
+        assert ui.build_domains_card("Title", "Desc", items, view_type="bar") is not None
+        assert ui.build_domains_card("Title", "Desc", items, view_type="pie") is not None
 
     def test_reasons_card(self):
         data = [{"name": "List A", "queries": 50}, {"id": "list-b", "queries": 50}]
-        card = ui.build_reasons_card(data)
+        items = [(data_mod.reason_label(item), data_mod.item_queries(item)) for item in data]
+        card = ui.build_reasons_card(items)
         assert card is not None
-        assert ui.build_reasons_card(data, view_type="table") is not None
-        assert ui.build_reasons_card(data, view_type="pie") is not None
+        assert ui.build_reasons_card(items, view_type="table") is not None
+        assert ui.build_reasons_card(items, view_type="pie") is not None
 
-        empty_row = data_mod.reason_row({}, 0)
+        empty_row = data_mod.reason_row("Unknown", 0, 0)
         assert empty_row["name"] == "Unknown"
         assert empty_row["share"] == "0.0%"
 
@@ -163,10 +165,11 @@ class TestDashboardHelpers:
             {"id": "dev2"},
             {},
         ]
-        card = ui.build_devices_card(data)
+        items = [(data_mod.device_label(item), data_mod.item_queries(item)) for item in data]
+        card = ui.build_devices_card(data, items)
         assert card is not None
-        assert ui.build_devices_card(data, view_type="bar") is not None
-        assert ui.build_devices_card(data, view_type="pie") is not None
+        assert ui.build_devices_card(data, items, view_type="bar") is not None
+        assert ui.build_devices_card(data, items, view_type="pie") is not None
 
     def test_location_string_and_ips_card(self):
         assert data_mod._location_string({"city": "City", "country": "Country"}) == "City, Country"
@@ -183,7 +186,7 @@ class TestDashboardHelpers:
             },
             {},
         ]
-        card = ui.build_ips_card(data)
+        card = ui.build_ips_card(data, fmt.ip_summary_items(data))
         assert card is not None
 
     def test_gafam_card(self):
@@ -226,10 +229,11 @@ class TestDashboardHelpers:
             {"name": "United States", "code": "US", "queries": 100, "domains": ["google.com"]},
             {},
         ]
-        card = ui.build_destinations_card(data)
+        items = [(data_mod.destination_label(item), data_mod.item_queries(item)) for item in data]
+        card = ui.build_destinations_card(data, items)
         assert card is not None
-        assert ui.build_destinations_card(data, view_type="bar") is not None
-        assert ui.build_destinations_card(data, view_type="pie") is not None
+        assert ui.build_destinations_card(data, items, view_type="bar") is not None
+        assert ui.build_destinations_card(data, items, view_type="pie") is not None
 
     def test_accumulate_domains_budgeted(self):
         # In-budget: labels fit exactly
@@ -239,19 +243,20 @@ class TestDashboardHelpers:
         # Old implementation would return first 60 chars with partial second label
         # New implementation stops after first label because second would exceed budget
         assert (
-            data_mod.destination_row({"domains": long_list})["sample_domains"]
+            data_mod.destination_row({"domains": long_list}, "US")["sample_domains"]
             == "verylongdomainnamethatisoverlimit.example.com"
         )
         # Exact boundary cases
-        assert data_mod.destination_row({"domains": ["a" * 30, "b" * 40]})["sample_domains"] == "a" * 30
+        assert data_mod.destination_row({"domains": ["a" * 30, "b" * 40]}, "US")["sample_domains"] == "a" * 30
         assert (
-            data_mod.destination_row({"domains": ["a" * 28, "b" * 30]})["sample_domains"] == "a" * 28 + ", " + "b" * 30
+            data_mod.destination_row({"domains": ["a" * 28, "b" * 30]}, "US")["sample_domains"]
+            == "a" * 28 + ", " + "b" * 30
         )
         # Empty list returns "-"
-        assert data_mod.destination_row({"domains": []})["sample_domains"] == "-"
+        assert data_mod.destination_row({"domains": []}, "US")["sample_domains"] == "-"
         # Single overlong label gets truncated to budget
         over = "x" * 100
-        assert data_mod.destination_row({"domains": [over]})["sample_domains"] == over[:60]
+        assert data_mod.destination_row({"domains": [over]}, "US")["sample_domains"] == over[:60]
 
 
 class TestDashboardRenderCaps:
@@ -301,8 +306,8 @@ class TestDashboardRenderCaps:
         monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
 
     def test_a_large_table_is_capped_and_paginated(self):
-        data = [{"domain": f"d{i:03d}.example.com", "queries": 500 - i} for i in range(500)]
-        table = _find_component(ui.build_domains_card("Resolved Domains", "desc", data), "DataTable")
+        items = [(f"d{i:03d}.example.com", 500 - i) for i in range(500)]
+        table = _find_component(ui.build_domains_card("Resolved Domains", "desc", items), "DataTable")
         assert table is not None
         assert len(table.rows) == ui.MAX_TABLE_ROWS
         assert table.paginated is True
@@ -312,18 +317,18 @@ class TestDashboardRenderCaps:
         assert table.rows[-1]["queries"] == 500 - (ui.MAX_TABLE_ROWS - 1)
 
     def test_a_table_inside_the_page_size_is_not_paginated(self):
-        data = [{"domain": f"d{i}.example.com", "queries": 5} for i in range(3)]
-        table = _find_component(ui.build_domains_card("Resolved Domains", "desc", data), "DataTable")
+        items = [(f"d{i}.example.com", 5) for i in range(3)]
+        table = _find_component(ui.build_domains_card("Resolved Domains", "desc", items), "DataTable")
         assert table is not None
         assert table.paginated is False
         assert len(table.rows) == 3
 
     def test_bar_and_pie_charts_roll_up_their_categories(self):
-        data = [{"domain": f"d{i:03d}.example.com", "queries": 500 - i} for i in range(500)]
-        total = sum(item["queries"] for item in data)
+        items = [(f"d{i:03d}.example.com", 500 - i) for i in range(500)]
+        total = sum(queries for _, queries in items)
         for view_type, comp_type in (("bar", "BarChart"), ("pie", "PieChart")):
             chart = _find_component(
-                ui.build_domains_card("Resolved Domains", "desc", data, view_type=view_type), comp_type
+                ui.build_domains_card("Resolved Domains", "desc", items, view_type=view_type), comp_type
             )
             assert chart is not None
             assert len(chart.data) == charts_module.CHART_MAX_CATEGORIES
@@ -932,17 +937,21 @@ class TestDashboardToolsExecution:
         assert ui.build_domains_card("Domains", "desc", [], view_type="bar") is not None
         assert ui.build_reasons_card([], view_type="table") is not None
         assert ui.build_reasons_card([], view_type="bar") is not None
-        assert ui.build_devices_card([], view_type="table") is not None
-        assert ui.build_devices_card([], view_type="bar") is not None
-        assert ui.build_devices_card([], view_type="pie") is not None
-        assert ui.build_devices_card([{"name": "iPhone", "queries": 10}], view_type="table") is not None
-        assert ui.build_ips_card([]) is not None
+        assert ui.build_devices_card([], [], view_type="table") is not None
+        assert ui.build_devices_card([], [], view_type="bar") is not None
+        assert ui.build_devices_card([], [], view_type="pie") is not None
+        devices = [{"name": "iPhone", "queries": 10}]
+        device_items = [(data_mod.device_label(item), data_mod.item_queries(item)) for item in devices]
+        assert ui.build_devices_card(devices, device_items, view_type="table") is not None
+        assert ui.build_ips_card([], []) is not None
         assert ui.build_gafam_card([], [], view_type="table") is not None
         assert ui.build_gafam_card([], [], view_type="bar") is not None
-        assert ui.build_destinations_card([], view_type="table") is not None
-        assert ui.build_destinations_card([], view_type="bar") is not None
-        assert ui.build_destinations_card([], view_type="pie") is not None
-        assert ui.build_destinations_card([{"name": "US", "queries": 10}], view_type="table") is not None
+        assert ui.build_destinations_card([], [], view_type="table") is not None
+        assert ui.build_destinations_card([], [], view_type="bar") is not None
+        assert ui.build_destinations_card([], [], view_type="pie") is not None
+        countries = [{"name": "US", "queries": 10}]
+        country_items = [(data_mod.destination_label(item), data_mod.item_queries(item)) for item in countries]
+        assert ui.build_destinations_card(countries, country_items, view_type="table") is not None
         # Interval unparseable fallback
         assert data_mod._overview_interval("invalid", "now") == 86400
 
@@ -1737,19 +1746,19 @@ class TestSanitizeLabel:
         assert "\n" not in data_mod.destination_label({"name": "US\x1bINJECTED"})
 
     def test_device_row_sanitizes_model(self):
-        row = data_mod.device_row({"name": "Phone", "model": "A\r\nB\x00", "queries": 1}, 1)
+        item = {"name": "Phone", "model": "A\r\nB\x00", "queries": 1}
+        row = data_mod.device_row(item, 1, data_mod.device_label(item))
         assert row["model"] == "AB"
         assert row["device"] == "Phone (AB)"
 
     def test_ip_row_sanitizes_ip_isp_location(self):
-        row = data_mod.ip_row(
-            {
-                "ip": "1.2.3.4\nINJECTED",
-                "queries": 5,
-                "network": {"isp": "ISP\x1b[31m"},
-                "geo": {"city": "City\rX", "country": "Country\nY"},
-            }
-        )
+        item = {
+            "ip": "1.2.3.4\nINJECTED",
+            "queries": 5,
+            "network": {"isp": "ISP\x1b[31m"},
+            "geo": {"city": "City\rX", "country": "Country\nY"},
+        }
+        row = data_mod.ip_row(item, fmt.ip_summary_items([item])[0][0])
         assert row["ip"] == "1.2.3.4INJECTED"
         assert row["isp"] == "ISP[31m"
         assert row["location"] == "CityX, CountryY"
@@ -1760,9 +1769,8 @@ class TestSanitizeLabel:
         assert chart_row["label"] == table_row["company"]
 
     def test_destination_row_sanitizes_code_and_sample_domains(self):
-        row = data_mod.destination_row(
-            {"name": "United States", "code": "US\x00", "queries": 1, "domains": ["a.example\r\nb"]}
-        )
+        item = {"name": "United States", "code": "US\x00", "queries": 1, "domains": ["a.example\r\nb"]}
+        row = data_mod.destination_row(item, data_mod.destination_label(item))
         assert row["code"] == "US"
         assert "\n" not in row["sample_domains"]
         assert row["sample_domains"] == "a.exampleb"
@@ -1771,10 +1779,12 @@ class TestSanitizeLabel:
         assert "\n" not in data_mod._accumulate_domains(["evil.example\nINJECTED"], budget=60)
 
     def test_oversized_labels_capped_in_rows(self):
-        row = data_mod.device_row({"name": "n", "model": "m" * 300, "queries": 1}, 1)
+        device = {"name": "n", "model": "m" * 300, "queries": 1}
+        row = data_mod.device_row(device, 1, data_mod.device_label(device))
         assert len(row["model"]) == 201
         assert row["model"].endswith("…")
-        ip_row = data_mod.ip_row({"ip": "1.1.1.1", "queries": 1, "network": {"isp": "i" * 300}, "geo": {}})
+        ip_item = {"ip": "1.1.1.1", "queries": 1, "network": {"isp": "i" * 300}, "geo": {}}
+        ip_row = data_mod.ip_row(ip_item, fmt.ip_summary_items([ip_item])[0][0])
         assert len(ip_row["isp"]) == 201
 
     def test_ip_summary_items_sanitize(self):
@@ -1785,3 +1795,80 @@ class TestSanitizeLabel:
         capped = utils_mod.sanitize_label("x" * 300)  # 200 x's plus the ellipsis
         out = fmt._format_top_items([(capped, 5)])
         assert f"{capped} (5)" in out
+
+
+class TestLabelShapingReuse:
+    """The card and its summary share one shaped row per label (PERF-8)."""
+
+    @staticmethod
+    def _domain_rows(prefix: str, counts: range) -> list[dict[str, object]]:
+        return [{"domain": f"{prefix}{i}.example", "queries": count} for i, count in enumerate(counts)]
+
+    @staticmethod
+    def _count_domain_labels(monkeypatch, tool_module) -> list[str]:
+        seen: list[str] = []
+        original = tool_module.domain_label
+
+        def counting(item, key_name: str = "domain") -> str:
+            seen.append(str(item.get(key_name) or "-"))
+            return original(item, key_name)
+
+        monkeypatch.setattr(tool_module, "domain_label", counting)
+        return seen
+
+    @pytest.mark.asyncio
+    async def test_overview_sanitizes_each_domain_label_once(self, clean_env, monkeypatch):
+        resolved = self._domain_rows("r", range(10, 3, -1))
+        blocked = self._domain_rows("b", range(20, 13, -1))
+
+        async def fake_fetch(pid, endpoint, params=None):
+            if endpoint == "status":
+                return ({"data": [{"status": "default", "queries": 100}]}, None)
+            if endpoint == "status;series":
+                return ({"meta": {"series": {"times": []}}, "data": []}, None)
+            if endpoint == "domains":
+                rows = resolved if (params or {}).get("status") == "default" else blocked
+                return ({"data": rows}, None)
+            return ({"data": []}, None)
+
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
+        seen = self._count_domain_labels(monkeypatch, tool_mod)
+
+        res = await tool_mod.overviewDashboard(profile_id="abc123", section="overview")
+
+        assert isinstance(res, ToolResult)
+        # 14 rows, one shaped label each: the summary reuses what the cards shaped.
+        assert seen == [row["domain"] for row in resolved] + [row["domain"] for row in blocked]
+        summary = res.content[0].text
+        assert (
+            "Top resolved: r0.example (10), r1.example (9), r2.example (8), r3.example (7), r4.example (6)" in summary
+        )
+        assert (
+            "Top blocked: b0.example (20), b1.example (19), b2.example (18), b3.example (17), b4.example (16)"
+            in summary
+        )
+        rendered = json.dumps(res.structured_content, default=str)
+        for row in resolved + blocked:
+            assert str(row["domain"]) in rendered
+
+    @pytest.mark.asyncio
+    async def test_domain_card_sanitizes_each_label_once(self, clean_env, monkeypatch):
+        data = self._domain_rows("d", range(10, 3, -1))
+
+        async def fake_fetch(pid, endpoint, params=None):
+            return ({"data": data if endpoint == "domains" else []}, None)
+
+        monkeypatch.setattr(data_mod, "_fetch_analytics_payload", fake_fetch)
+        seen = self._count_domain_labels(monkeypatch, tool_mod)
+
+        res = await tool_mod.overviewDashboard(profile_id="abc123", section="domains")
+
+        assert isinstance(res, ToolResult)
+        assert seen == [row["domain"] for row in data]
+        assert res.content[0].text == (
+            "[Rendered Resolved Domains (7 domains, 49 queries): d0.example (10), d1.example (9), "
+            "d2.example (8), d3.example (7), d4.example (6)]"
+        )
+        rendered = json.dumps(res.structured_content, default=str)
+        for row in data:
+            assert str(row["domain"]) in rendered

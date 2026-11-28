@@ -52,7 +52,7 @@ def test_build_domains_card_validates_caller_color():
     card = components_module.build_domains_card(
         "Domains",
         "description",
-        [{"domain": "example.com", "queries": 5}],
+        [("example.com", 5)],
         view_type="bar",
         color="blue;background:red",
     )

@@ -109,13 +109,12 @@ def reason_label(item: dict[str, Any]) -> str:
     return sanitize_label(item.get("name") or item.get("id") or "Unknown")
 
 
-def reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
-    """Format one reasons-table row."""
-    q = item_queries(item)
+def reason_row(name: str, queries: int, total: int) -> dict[str, Any]:
+    """Format one reasons-table row from the already-shaped label and count."""
     return {
-        "name": reason_label(item),
-        "queries": q,
-        "share": _format_share(q, total),
+        "name": name,
+        "queries": queries,
+        "share": _format_share(queries, total),
     }
 
 
@@ -134,11 +133,11 @@ def device_label(item: dict[str, Any]) -> str:
     return dev_name
 
 
-def device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
-    """Format one device row."""
+def device_row(item: dict[str, Any], total: int, device: str) -> dict[str, Any]:
+    """Format one device row with the label already shaped for the summary."""
     q = item_queries(item)
     return {
-        "device": device_label(item),
+        "device": device,
         "model": sanitize_label(item.get("model") or "-"),
         "queries": q,
         "share": _format_share(q, total),
@@ -155,12 +154,17 @@ def _location_string(geo: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def ip_row(item: dict[str, Any]) -> dict[str, Any]:
-    """Format one IP address row."""
+def ip_label(item: dict[str, Any]) -> str:
+    """Extract a sanitized IP label."""
+    return sanitize_label(item.get("ip") or "-")
+
+
+def ip_row(item: dict[str, Any], ip: str) -> dict[str, Any]:
+    """Format one IP address row with the IP already shaped for the summary."""
     geo = item.get("geo") or {}
     network = item.get("network") or {}
     return {
-        "ip": sanitize_label(item.get("ip") or "-"),
+        "ip": ip,
         "isp": sanitize_label(network.get("isp") or "-"),
         "location": _location_string(geo),
         "queries": item_queries(item),
@@ -230,11 +234,11 @@ def _accumulate_domains(domains: list[str] | None, budget: int = 60) -> str:
     return ", ".join(labels)
 
 
-def destination_row(item: dict[str, Any]) -> dict[str, Any]:
-    """Format one country destination row."""
+def destination_row(item: dict[str, Any], country: str) -> dict[str, Any]:
+    """Format one country destination row with the name already shaped for the summary."""
     sample = _accumulate_domains(item.get("domains"), budget=60)
     return {
-        "country": destination_label(item),
+        "country": country,
         "code": sanitize_label(item.get("code") or "-"),
         "queries": item_queries(item),
         "sample_domains": sample or "-",
