@@ -43,11 +43,11 @@ def _parse_log_line(line: str) -> Any:
 def _checked_fd(path: str, flags: int) -> int:
     """An fd on ``path`` (created ``0600``), refusing symlinks and non-regular files.
 
-    ``O_NOFOLLOW`` fails the open on a pre-planted symlink (ELOOP) and the
-    ``fstat`` check refuses anything not regular, so no read, append or
-    ``fchmod`` lands on a file the log path merely points at.
+    ``O_NOFOLLOW`` fails on a symlink (ELOOP), ``O_NONBLOCK`` refuses a FIFO
+    with no reader before the open can hang, and ``fstat`` refuses anything
+    not regular: no read, append or ``fchmod`` lands on a file the path names.
     """
-    fd = os.open(path, flags | os.O_NOFOLLOW, 0o600)
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(errno.EINVAL, "call log is not a regular file", path)

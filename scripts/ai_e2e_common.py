@@ -249,11 +249,11 @@ def private_open(path: Any, mode: str = "w"):
     if 0600 cannot be established the artifact is not written at all.
 
     The descriptor is validated before the ``fchmod``: ``O_NOFOLLOW`` refuses
-    a pre-planted symlink (ELOOP) so the mode change cannot land on a file
-    the artifact path merely points at, and the ``fstat`` check refuses
-    anything that is not a regular file.
+    a symlink (ELOOP), ``O_NONBLOCK`` refuses a FIFO with no reader before
+    the open can hang, and ``fstat`` refuses anything that is not a regular
+    file.
     """
-    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC) | os.O_NOFOLLOW
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode == "a" else os.O_TRUNC) | os.O_NOFOLLOW | os.O_NONBLOCK
     fd = os.open(str(Path(path)), flags, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):

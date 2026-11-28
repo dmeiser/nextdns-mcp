@@ -631,6 +631,42 @@ class TestLogPathIsNotFollowed:
         with pytest.raises(OSError):
             read_call_log_rows(str(tmp_path))  # a directory
 
+    def test_a_fifo_is_refused_promptly_by_writer_and_reader(self, tmp_path, caplog):
+        """A FIFO without a reader used to block in os.open before S_ISREG ran.
+
+        Each call runs on a daemon thread joined with a 3s timeout, so a
+        regression fails in seconds instead of hanging the suite while holding
+        the module-wide append lock. Prompt rejection keeps tool responses
+        awaited on recording (``middleware.py``) from stalling.
+        """
+        import threading
+
+        from nextdns_mcp.call_log import read_call_log_rows
+
+        fifo = tmp_path / "calls.jsonl"
+        os.mkfifo(fifo)
+        finished: list[str] = []
+
+        def write() -> None:
+            _append_row(str(fifo), {"tool": "x", "ok": True})  # refuses with a warning
+            finished.append("write")
+
+        def read() -> None:
+            try:
+                read_call_log_rows(str(fifo))
+            except OSError:
+                pass
+            finished.append("read")
+
+        with caplog.at_level("WARNING", logger="nextdns_mcp.call_log"):
+            for fn in (write, read):
+                worker = threading.Thread(target=fn, daemon=True)
+                worker.start()
+                worker.join(timeout=3.0)
+                assert not worker.is_alive(), "the FIFO blocked the open instead of failing promptly"
+        assert finished == ["write", "read"]
+        assert any("call log write failed" in r.getMessage() for r in caplog.records)
+
     def test_get_call_log_degrades_a_symlink_to_empty(self, monkeypatch, tmp_path):
         target = tmp_path / "elsewhere.jsonl"
         target.write_text('{"tool": "x"}\n', encoding="utf-8")
