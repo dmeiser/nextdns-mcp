@@ -32,6 +32,16 @@ def _find_component(node, comp_type):
     return None
 
 
+def _find_all_components(node, comp_type):
+    """Every component of ``comp_type`` in a builder's component tree, in document order."""
+    found = []
+    if getattr(node, "type", None) == comp_type:
+        found.append(node)
+    for child in getattr(node, "children", None) or []:
+        found.extend(_find_all_components(child, comp_type))
+    return found
+
+
 class TestDashboardHelpers:
     """Tests for unit formatting and component builder helpers."""
 
@@ -58,9 +68,9 @@ class TestDashboardHelpers:
         assert p["extra_key"] == "val"
         assert "none_key" not in p
 
-    def test_format_share(self):
-        assert data_mod._format_share(25, 100) == "25.0%"
-        assert data_mod._format_share(0, 0) == "0.0%"
+    def test_share_ratio(self):
+        assert data_mod._share_ratio(25, 100) == 0.25
+        assert data_mod._share_ratio(0, 0) == 0.0
 
     def test_item_and_blocked_queries(self):
         assert data_mod.item_queries({"queries": 42}) == 42
@@ -152,7 +162,7 @@ class TestDashboardHelpers:
 
         empty_row = data_mod.reason_row({}, 0)
         assert empty_row["name"] == "Unknown"
-        assert empty_row["share"] == "0.0%"
+        assert empty_row["share"] == 0.0
 
     def test_devices_card(self):
         data = [
@@ -210,6 +220,24 @@ class TestDashboardHelpers:
         chart = ui._pie_chart([{"label": "a", "queries": -1}, {"label": "b", "queries": 20}])
         assert [row["queries"] for row in chart.data] == [0, 20]
 
+    def test_share_cells_sort_numerically_in_every_share_table(self):
+        # Issue #800: the Share cells carried pre-formatted ``"10.0%"`` strings,
+        # so an ascending sort put 10.0% before 2.0%. The cells now carry the
+        # ratio and the column formats it, so the sort is the numeric one.
+        counts = [("alpha", 2), ("bravo", 10), ("charlie", 88)]
+        _, gafam_table_rows = data_mod.gafam_rows([{"company": n, "queries": q} for n, q in counts])
+        tables = {
+            "reasons": ui._reasons_table([{"name": n, "queries": q} for n, q in counts]),
+            "devices": ui._devices_table([{"name": n, "queries": q} for n, q in counts]),
+            "gafam": ui._gafam_table(gafam_table_rows),
+        }
+        for name, table in tables.items():
+            (share_col,) = [c for c in table.columns if c.key == "share"]
+            assert share_col.sortable, name
+            assert share_col.format == "percent:1", name
+            rows = list(table.rows)
+            assert [r["share"] for r in sorted(rows, key=lambda r: r["share"])] == [0.02, 0.1, 0.88], name
+
     def test_security_card(self):
         enc = [{"encrypted": True, "queries": 90}, {"encrypted": False, "queries": 10}]
         dnssec = [{"validated": True, "queries": 20}, {"validated": False, "queries": 80}]
@@ -218,6 +246,20 @@ class TestDashboardHelpers:
 
         empty_card = ui.build_security_card(data_mod.calc_rate([], "encrypted"), data_mod.calc_rate([], "validated"))
         assert empty_card is not None
+
+    @pytest.mark.parametrize(
+        ("matching", "nonmatching", "expected"),
+        [(-20, 120, 0.0), (120, -20, 100.0), (50, 50, 50.0)],
+    )
+    def test_security_progress_stays_inside_the_bar_range(self, matching: int, nonmatching: int, expected: float):
+        # Issue #800: ``calc_rate`` answers whatever the API counted, and a count
+        # outside 0-100 reached ``Progress`` unclamped. The bar clamps; the text
+        # still reports the rate the API gave.
+        items = [{"encrypted": True, "queries": matching}, {"encrypted": False, "queries": nonmatching}]
+        val, total, pct = data_mod.calc_rate(items, "encrypted")
+        section = ui._build_security_section("Encrypted DNS", val, total, pct)
+        (progress,) = _find_all_components(section, "Progress")
+        assert progress.value == expected
 
     def test_destinations_card(self):
         data = [

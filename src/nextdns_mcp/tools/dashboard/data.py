@@ -73,9 +73,16 @@ async def _fetch_analytics_payload(
     return await fetch_analytics_payload(url, params, max_response_bytes=max_bytes)
 
 
-def _format_share(count: int, total: int) -> str:
-    """Format a query count as a percentage share of the total."""
-    return f"{(count / total * 100):.1f}%" if total > 0 else "0.0%"
+def _share_ratio(count: int, total: int) -> float:
+    """A query count as a fraction of the total, in ``0.0``-``1.0``.
+
+    The number stays numeric on purpose: the Share cell is sorted by the client,
+    and a pre-formatted ``"12.3%"`` string sorts lexicographically, which puts
+    ``10.0%`` before ``2.0%``. Prefab's ``percent`` cell format takes fractional
+    input, so ``0.123`` renders as ``12.3%`` and the display does not change
+    (issue #800).
+    """
+    return (count / total) if total > 0 else 0.0
 
 
 def item_queries(item: dict[str, Any]) -> int:
@@ -115,7 +122,7 @@ def reason_row(item: dict[str, Any], total: int) -> dict[str, Any]:
     return {
         "name": reason_label(item),
         "queries": q,
-        "share": _format_share(q, total),
+        "share": _share_ratio(q, total),
     }
 
 
@@ -141,7 +148,7 @@ def device_row(item: dict[str, Any], total: int) -> dict[str, Any]:
         "device": device_label(item),
         "model": sanitize_label(item.get("model") or "-"),
         "queries": q,
-        "share": _format_share(q, total),
+        "share": _share_ratio(q, total),
     }
 
 
@@ -174,7 +181,7 @@ def _single_gafam_row(item: dict[str, Any], total: int) -> tuple[dict[str, Any],
     return {"label": name, "company": name, "queries": q}, {
         "company": name,
         "queries": q,
-        "share": _format_share(q, total),
+        "share": _share_ratio(q, total),
     }
 
 
