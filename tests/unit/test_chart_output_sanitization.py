@@ -12,6 +12,7 @@ import pytest
 
 from nextdns_mcp.tools import plots as plots_module
 from nextdns_mcp.tools.dashboard import components as components_module
+from nextdns_mcp.tools.dashboard import data as data_module
 
 DEFAULT_BAR_COLOR = "#3b82f6"
 MARKER = "chart-test-marker"
@@ -62,9 +63,11 @@ def test_build_domains_card_validates_caller_color():
 
 
 def test_queries_series_failure_log_omits_exception_text(monkeypatch, caplog):
-    monkeypatch.setattr(components_module, "extract_series_fields", _raise_marker)
-    with caplog.at_level(logging.WARNING, logger=components_module.logger.name):
-        assert components_module._build_queries_series_card({}) is None
+    # The series validation moved to the data layer (WORK-339); the warning
+    # about a malformed payload must still carry no exception text.
+    monkeypatch.setattr(data_module, "extract_series_fields", _raise_marker)
+    with caplog.at_level(logging.WARNING, logger=data_module.logger.name):
+        assert data_module.prepare_queries_series({}) is None
     assert MARKER not in caplog.text
 
 
