@@ -110,11 +110,23 @@ class DummyMessage:
         self.name = name
         self.arguments = arguments
 
+    def model_copy(self, *, update=None):
+        """Mirror pydantic's copy-with-update used by the middleware."""
+        changes = update or {}
+        return DummyMessage(changes.get("name", self.name), changes.get("arguments", self.arguments))
+
 
 class DummyContext:
     def __init__(self, name, arguments, raise_exc=False):
         self.message = DummyMessage(name, arguments)
         self.fastmcp_context = DummyFastMCPContext(raise_exc=raise_exc)
+
+    def copy(self, **kwargs):
+        """Mirror MiddlewareContext.copy: a new context with the given fields."""
+        clone = DummyContext.__new__(DummyContext)
+        clone.message = kwargs.get("message", self.message)
+        clone.fastmcp_context = kwargs.get("fastmcp_context", self.fastmcp_context)
+        return clone
 
 
 async def _dummy_call_next(context):

@@ -1974,6 +1974,64 @@ class TestQueryLengthCap:
         assert [t.get("name") for t in big.data] == [t.get("name") for t in capped.data]
 
 
+class TestFallbackAnswerModeTokens:
+    """The fallback flag is set with a token and restored, never stamped False."""
+
+    @staticmethod
+    def _catalog():
+        from fastmcp.tools.base import Tool
+
+        return [
+            Tool.from_function(lambda: None, name="listProfiles", description="List the profiles on the account."),
+            Tool.from_function(lambda: None, name="getProfile", description="Read one profile by id."),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_answer_restores_the_mode_it_found(self):
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        tools = self._catalog()
+
+        ranked = await transform._search(tools, "qxqv zzxj unmatchable words")
+        assert ts.fallback_answer.get() is True, "the fallback budget must be visible to the render"
+        await transform._render_results(ranked)
+        assert ts.fallback_answer.get() is False, "the render must restore the prior mode"
+
+    @pytest.mark.asyncio
+    async def test_an_unrendered_search_yields_to_the_next_one(self):
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        tools = self._catalog()
+
+        await transform._search(tools, "qxqv zzxj unmatchable words")
+        ranked = await transform._search(tools, "profile")
+        assert ts.fallback_answer.get() is False, "a second search must not inherit the first's mode"
+        await transform._render_results(ranked)
+        assert ts.fallback_answer.get() is False
+
+    @pytest.mark.asyncio
+    async def test_a_preexisting_mode_survives_the_search_and_render(self):
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        tools = self._catalog()
+        token = ts.fallback_answer.set(True)
+        try:
+            ranked = await transform._search(tools, "profile")
+            await transform._render_results(ranked)
+            assert ts.fallback_answer.get() is True, "reset must restore the caller's value, not stamp False"
+        finally:
+            ts.fallback_answer.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_render_still_restores_the_mode(self, monkeypatch):
+        from unittest.mock import Mock
+
+        transform = ts.FallbackBM25SearchTransform(endpoints={})
+        ranked = await transform._search(self._catalog(), "qxqv zzxj unmatchable words")
+        monkeypatch.setattr(ts, "budget_results", Mock(side_effect=RuntimeError("render failed")))
+
+        with pytest.raises(RuntimeError, match="render failed"):
+            await transform._render_results(ranked)
+        assert ts.fallback_answer.get() is False
+
+
 class TestAnalyticsBM25RankingContract:
     """Regression test: raw analytics queries must rank getAnalytics* #1 ahead of overviewDashboard."""
 

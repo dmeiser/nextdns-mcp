@@ -47,6 +47,34 @@ SEARCH_FALLBACK_MAX_BYTES = 131_072
 # task.
 fallback_answer: contextvars.ContextVar[bool] = contextvars.ContextVar("nextdns_fallback_answer", default=False)
 
+# The set-token for the flag above, so the serializer can RESET it to whatever
+# the context held before the search instead of stamping a hardcoded False over
+# it. The reset is what keeps a mode from outliving the answer it belongs to: a
+# search that never reached its render, and any mode an enclosing context had
+# already published, would otherwise decide the budget of the next answer in
+# the same task.
+_fallback_answer_token: contextvars.ContextVar[contextvars.Token[bool] | None] = contextvars.ContextVar(
+    "nextdns_fallback_answer_token", default=None
+)
+
+
+def begin_fallback_answer(fell_back: bool) -> None:
+    """Publish the mode of the search now being answered.
+
+    Any mode an earlier search in this task left unpublished is restored
+    first, so the flag always describes the newest search.
+    """
+    end_fallback_answer()
+    _fallback_answer_token.set(fallback_answer.set(fell_back))
+
+
+def end_fallback_answer() -> None:
+    """Restore the mode the context held before the search being answered."""
+    token = _fallback_answer_token.get()
+    if token is not None:
+        fallback_answer.reset(token)
+        _fallback_answer_token.set(None)
+
 
 def _truncate_description(dumped: dict[str, Any]) -> None:
     """Cut one dumped tool definition's description to the per-result budget.

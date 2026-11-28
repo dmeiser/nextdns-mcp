@@ -803,6 +803,19 @@ class TestDashboardToolsExecution:
         # Long span > 2 days uses 86400s
         assert data_mod._overview_interval("-30d", "now") == 86400
 
+    def test_overview_interval_uses_the_shared_clock(self, monkeypatch):
+        """The interval reads charts.current_time, not time.time directly."""
+        assert data_mod.current_time is charts_module.current_time
+        ticks = []
+
+        def clock():
+            ticks.append(True)
+            return 1_700_000_000.0
+
+        monkeypatch.setattr(data_mod, "current_time", clock)
+        assert data_mod._overview_interval("-1d", "now") == 3600
+        assert ticks
+
     @pytest.mark.asyncio
     async def test_overview_dashboard_budget_error(self, clean_env, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")

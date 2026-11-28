@@ -136,6 +136,15 @@ def test_writable_all_implies_readable_all(patch_env):
     assert config.can_read_profile("any-other-profile")
 
 
+def test_all_profiles_sentinel_is_immutable():
+    """The shared 'ALL' sentinel cannot be widened by any caller (PRIN-9)."""
+    from nextdns_mcp import config
+
+    assert isinstance(config.ALLOW_ALL_PROFILES, frozenset)
+    with pytest.raises(AttributeError):
+        config.ALLOW_ALL_PROFILES.add("profile1")  # type: ignore[attr-defined]
+
+
 def test_read_only_mode_blocks_writes(patch_env):
     """Test read-only mode disables all writes."""
     # Enable read-only mode and set writable profiles

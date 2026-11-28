@@ -2,12 +2,14 @@
 
 import gc
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import mcp.types
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import NotFoundError, ToolError
+from fastmcp.server.middleware import MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from nextdns_mcp import relaxation, spec_tools
@@ -25,6 +27,21 @@ class _FakeServer(SimpleNamespace):
     __slots__ = ("__weakref__",)
     __hash__ = object.__hash__  # identity, like the real FastMCP server key
     __eq__ = object.__eq__
+
+
+def _call_context(
+    name: str, arguments: dict[str, Any] | None, *, fastmcp_context: Any = None
+) -> MiddlewareContext[mcp.types.CallToolRequestParams]:
+    """A real middleware context, so the argument copy behaves as it does in a server."""
+    return MiddlewareContext(
+        message=mcp.types.CallToolRequestParams(name=name, arguments=arguments),
+        fastmcp_context=fastmcp_context,
+    )
+
+
+def _downstream_arguments(call_next: AsyncMock) -> dict[str, Any] | None:
+    """The arguments the next link in the chain actually received."""
+    return call_next.call_args.args[0].message.arguments
 
 
 class TestStripExtraFieldsMiddleware:
@@ -50,36 +67,38 @@ class TestStripExtraFieldsMiddleware:
     @pytest.fixture
     def mock_context(self, mock_tool):
         """Create a mock middleware context."""
-        context = MagicMock()
-        context.message.name = "testTool"
-        context.message.arguments = {
-            "domain": "example.com",
-            "record_type": "A",
-            "extra_field": "should_be_stripped",
-            "unknown": "also_stripped",
-        }
-
+        fastmcp_context = MagicMock()
         # Mock fastmcp_context and get_tool method (fastmcp 3.0.1 API, async)
-        context.fastmcp_context = MagicMock()
-        context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=mock_tool)
+        fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=mock_tool)
         # The ignored-argument hint builds its owner index from the registered
         # catalog; this fixture's catalog is empty, so the hint stays generic.
-        context.fastmcp_context.fastmcp.list_tools = AsyncMock(return_value=[])
-
-        return context
+        fastmcp_context.fastmcp.list_tools = AsyncMock(return_value=[])
+        return _call_context(
+            "testTool",
+            {
+                "domain": "example.com",
+                "record_type": "A",
+                "extra_field": "should_be_stripped",
+                "unknown": "also_stripped",
+            },
+            fastmcp_context=fastmcp_context,
+        )
 
     @pytest.mark.asyncio
     async def test_strips_unknown_fields(self, middleware, mock_context):
-        """Test that unknown fields are stripped from arguments."""
+        """The next link sees the filtered arguments; the original call is untouched."""
         call_next = AsyncMock(return_value=MagicMock())
+        original = dict(mock_context.message.arguments or {})
 
         await middleware.on_call_tool(mock_context, call_next)
-        # Verify arguments were filtered
-        assert mock_context.message.arguments == {
+
+        assert _downstream_arguments(call_next) == {
             "domain": "example.com",
             "record_type": "A",
         }
-        call_next.assert_called_once_with(mock_context)
+        assert mock_context.message.arguments == original
+        call_next.assert_called_once()
+        assert call_next.call_args.args[0] is not mock_context
 
     @pytest.mark.asyncio
     async def test_preserves_known_fields(self, middleware, mock_context):
@@ -93,7 +112,7 @@ class TestStripExtraFieldsMiddleware:
 
         await middleware.on_call_tool(mock_context, call_next)
 
-        assert mock_context.message.arguments == {
+        assert _downstream_arguments(call_next) == {
             "domain": "test.com",
             "record_type": "AAAA",
         }
@@ -120,17 +139,16 @@ class TestStripExtraFieldsMiddleware:
         assert mock_context.message.arguments == {}
 
     @pytest.mark.asyncio
-    async def test_handles_no_fastmcp_context(self, middleware, mock_context):
+    async def test_handles_no_fastmcp_context(self, middleware):
         """Test handling when fastmcp_context is None."""
-        mock_context.fastmcp_context = None
-        mock_context.message.arguments = {"domain": "test.com", "extra": "field"}
+        context = _call_context("testTool", {"domain": "test.com", "extra": "field"})
         call_next = AsyncMock(return_value=MagicMock())
 
-        await middleware.on_call_tool(mock_context, call_next)
+        await middleware.on_call_tool(context, call_next)
 
-        # Arguments should remain unchanged
-        assert mock_context.message.arguments == {"domain": "test.com", "extra": "field"}
-        call_next.assert_called_once_with(mock_context)
+        # Arguments should remain unchanged and the same context passed on
+        assert context.message.arguments == {"domain": "test.com", "extra": "field"}
+        call_next.assert_called_once_with(context)
 
     @pytest.mark.asyncio
     async def test_handles_tool_not_found(self, middleware, mock_context):
@@ -141,9 +159,10 @@ class TestStripExtraFieldsMiddleware:
 
         await middleware.on_call_tool(mock_context, call_next)
 
-        # Arguments should remain unchanged; call_next invoked as pass-through
+        # Arguments remain unchanged on the pass-through; call_next still runs
+        assert _downstream_arguments(call_next) == {"domain": "test.com", "extra": "field"}
         assert mock_context.message.arguments == {"domain": "test.com", "extra": "field"}
-        call_next.assert_called_once_with(mock_context)
+        call_next.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_reports_ignored_arguments_on_the_result(self, middleware, mock_context):
@@ -168,10 +187,11 @@ class TestStripExtraFieldsMiddleware:
     async def test_no_annotation_when_nothing_was_stripped(self, middleware, mock_tool):
         from fastmcp.tools import ToolResult
 
-        context = MagicMock()
-        context.message.name = "testTool"
-        context.message.arguments = {"domain": "example.com", "record_type": "A"}
-        context.fastmcp_context = MagicMock()
+        context = _call_context(
+            "testTool",
+            {"domain": "example.com", "record_type": "A"},
+            fastmcp_context=MagicMock(),
+        )
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=mock_tool)
         call_next = AsyncMock(return_value=ToolResult(structured_content={"success": True}))
 
@@ -236,13 +256,14 @@ class TestStripExtraFieldsMiddleware:
             await middleware.on_call_tool(mock_context, call_next)
 
             # Verify call_next was called (middleware completed successfully)
-            call_next.assert_called_once_with(mock_context)
             # Fields were stripped, so debug should have been called
-            # But we need to verify the arguments were actually filtered
-            assert mock_context.message.arguments == {
+            # but only the downstream copy carries the filtered arguments.
+            call_next.assert_called_once()
+            assert _downstream_arguments(call_next) == {
                 "domain": "example.com",
                 "record_type": "A",
             }
+            assert len(mock_context.message.arguments or {}) == 4
 
     def test_get_schema_property_types_handles_various_schemas(self, middleware):
         """Test extraction of schema types from property schemas."""
@@ -327,17 +348,16 @@ class TestStripExtraFieldsMiddleware:
                 "val": {"type": schema_type},
             }
         }
-        context = MagicMock()
-        context.message.name = "testTool"
-        context.message.arguments = {"val": raw_value}
-        context.fastmcp_context = MagicMock()
-        context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
+        fastmcp_context = MagicMock()
+        fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
+        context = _call_context("testTool", {"val": raw_value}, fastmcp_context=fastmcp_context)
         call_next = AsyncMock(return_value=MagicMock())
 
         await middleware.on_call_tool(context, call_next)
 
-        call_next.assert_called_once_with(context)
-        assert context.message.arguments["val"] == expected
+        call_next.assert_called_once()
+        assert _downstream_arguments(call_next)["val"] == expected
+        assert context.message.arguments["val"] == raw_value
 
     @pytest.mark.asyncio
     async def test_unicode_digits_multi_field_through_middleware_path(self, middleware):
@@ -354,9 +374,9 @@ class TestStripExtraFieldsMiddleware:
                 "nested_obj": {"type": "object"},
             }
         }
-        context = MagicMock()
-        context.message.name = "testNumericTool"
-        context.message.arguments = {
+        fastmcp_context = MagicMock()
+        fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
+        original = {
             "integer_field": "²",
             "number_field": "1.²",
             "valid_int": "42",
@@ -365,14 +385,13 @@ class TestStripExtraFieldsMiddleware:
             "list_field": ["²", "42", "³"],
             "nested_obj": {"power": "²"},
         }
-        context.fastmcp_context = MagicMock()
-        context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
+        context = _call_context("testNumericTool", original, fastmcp_context=fastmcp_context)
         call_next = AsyncMock(return_value=MagicMock())
 
         await middleware.on_call_tool(context, call_next)
 
-        call_next.assert_called_once_with(context)
-        assert context.message.arguments == {
+        call_next.assert_called_once()
+        assert _downstream_arguments(call_next) == {
             "integer_field": "²",
             "number_field": "1.²",
             "valid_int": 42,
@@ -381,6 +400,7 @@ class TestStripExtraFieldsMiddleware:
             "list_field": ["²", 42, "³"],
             "nested_obj": {"power": "²"},
         }
+        assert context.message.arguments == original
 
     def test_coerce_string_value_float_value_error_fallback(self, middleware, monkeypatch):
         """The guarded cast is where a parse failure can still land.

@@ -29,7 +29,10 @@ from .errors import ConfigurationError
 logger = logging.getLogger(__name__)
 
 # Constants for profile access control
-ALLOW_ALL_PROFILES: set[str] = set()  # Represents "ALL" profiles
+# The "ALL profiles" sentinel. An immutable empty set: it is compared and
+# copied by every access decision in this module, and nothing may ever add a
+# profile id to the value every reader shares.
+ALLOW_ALL_PROFILES: frozenset[str] = frozenset()  # Represents "ALL" profiles
 
 BOOL_TRUE_TOKENS = frozenset(("true", "1", "yes", "on"))
 BOOL_FALSE_TOKENS = frozenset(("false", "0", "no", "off", ""))
@@ -271,7 +274,7 @@ def _combine_set_readable(readable: set[str], writable: set[str]) -> frozenset[s
     (write implies read).
     """
     if not readable or not writable:
-        return frozenset(ALLOW_ALL_PROFILES)
+        return ALLOW_ALL_PROFILES
     return frozenset(readable | writable)
 
 

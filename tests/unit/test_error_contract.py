@@ -828,3 +828,35 @@ class TestRateLimitHeaders:
             json=MagicMock(side_effect=ValueError),
         )
         assert "retry_after" not in http_error_payload("err", exc_no_headers)
+
+
+class TestStructuredErrorBoundingIsPure:
+    """``bound_structured_fields`` returns a bounded copy; the input keeps its contents."""
+
+    def test_the_input_document_is_not_rewritten(self):
+        from nextdns_mcp.errors.body import bound_structured_fields
+
+        original = {
+            "error": "upstream said no",
+            "code": "http_error",
+            "details": {"blob": "y" * (MAX_RESPONSE_BODY_CHARS + 500), "keep": "small"},
+        }
+        bounded, truncated = bound_structured_fields(original)
+
+        assert truncated is True
+        assert bounded is not original
+        assert str(bounded["details"]["blob"]).endswith(TRUNCATION_MARKER)
+        assert len(str(bounded["details"]["blob"])) <= MAX_RESPONSE_BODY_CHARS + len(TRUNCATION_MARKER)
+        # The caller's document is untouched: same keys, same value lengths.
+        assert original["details"]["blob"] == "y" * (MAX_RESPONSE_BODY_CHARS + 500)
+        assert original["details"]["keep"] == "small"
+
+    def test_an_already_bounded_document_reports_no_cut(self):
+        from nextdns_mcp.errors.body import bound_structured_fields
+
+        original = {"error": "fine", "code": "http_error", "status_code": 400}
+        bounded, truncated = bound_structured_fields(original)
+
+        assert truncated is False
+        assert bounded == original
+        assert bounded is not original

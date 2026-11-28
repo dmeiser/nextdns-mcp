@@ -126,6 +126,32 @@ class TestRequestResourcesResolution:
             server_resources(_Bare())  # type: ignore[arg-type]
 
 
+class TestServerResourcesRegistry:
+    """Server state is registered weakly, never hung off the FastMCP object."""
+
+    def test_creation_leaves_the_server_object_alone(self, mock_api_key, monkeypatch):
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        server = create_mcp_server()
+        assert "_nextdns_resources" not in vars(server)
+        assert isinstance(server_resources(server), ServerResources)
+
+    def test_a_collected_server_takes_its_resources_with_it(self, mock_api_key, monkeypatch):
+        """The registry holds no strong reference, so a dead server's state is reclaimable."""
+        import gc
+
+        from nextdns_mcp import lifespan as lifespan_module
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        server = create_mcp_server()
+        resources = server_resources(server)
+        assert lifespan_module._server_resources[server] is resources
+
+        del server
+        gc.collect()
+
+        assert resources not in list(lifespan_module._server_resources.values())
+
+
 class TestMountedServerResourceResolution:
     """A mounted NextDNS child resolves its own state, not the parent's (issue #752)."""
 

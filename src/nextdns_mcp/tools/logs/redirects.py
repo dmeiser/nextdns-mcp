@@ -148,7 +148,7 @@ async def _follow_redirects_to_tempfile(next_url: httpx.URL, path: str) -> dict[
 
 async def _stream_download_to_path(profile_id: str, path: str) -> dict[str, Any]:
     """Stream the log download for ``profile_id`` into ``path`` and return the payload."""
-    async with client.api_client.stream(
+    async with client.get_api_client().stream(
         "GET", f"/profiles/{profile_id}/logs/download", headers={"Accept-Encoding": "identity"}
     ) as initial:
         # A non-redirect response is written straight to disk;

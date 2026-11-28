@@ -92,9 +92,10 @@ def _structured_error_payload(parsed: Any, fallback_code: str, status_code: Any)
     payload = dict(parsed)
     payload.setdefault("code", fallback_code)
     payload.setdefault("status_code", status_code)
-    if bound_structured_fields(payload):
-        payload["response_body_truncated"] = True
-    return payload
+    bounded, truncated = bound_structured_fields(payload)
+    if truncated:
+        bounded["response_body_truncated"] = True
+    return bounded
 
 
 def _attach_error_body(payload: dict[str, Any], response: Any) -> None:

@@ -48,8 +48,10 @@ from .config import ConfigurationError
 from .tool_search_answer import (
     SEARCH_ANSWER_MAX_BYTES,
     SEARCH_FALLBACK_MAX_BYTES,
+    begin_fallback_answer,
     budget_results,
     compact_entry,
+    end_fallback_answer,
     fallback_answer,
 )
 from .tool_search_rank import (
@@ -230,7 +232,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
             leading=catalog.leading,
             generic=catalog.generic_verbs,
         )
-        fallback_answer.set(fell_back)
+        begin_fallback_answer(fell_back)
         return ranked if fell_back else ranked[: self._max_results]
 
     def _make_search_tool(self) -> Tool:
@@ -287,7 +289,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         try:
             return budget_results([self._cached_compaction(tool) for tool in tools], budget)
         finally:
-            fallback_answer.set(False)
+            end_fallback_answer()
 
     def _cached_compaction(self, tool: Tool) -> tuple[dict[str, Any], int]:
         """One tool's compacted payload and byte cost, cached per tool name.
