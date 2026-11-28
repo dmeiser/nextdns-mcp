@@ -58,7 +58,7 @@ DEFAULT_BAR_COLOR = "#3b82f6"
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 QUERIES_COLUMN = DataTableColumn(key="queries", header="Queries", sortable=True, format="number")
-SHARE_COLUMN = DataTableColumn(key="share", header="Share", sortable=True)
+SHARE_COLUMN = DataTableColumn(key="share", header="Share", sortable=True, format="percent:1")
 
 # ``DataTable.rows`` is invariant in its element type: a plain ``list[dict[str, Any]]``
 # is not accepted where ``list[dict[str, Any] | ExpandableRow]`` is expected. Build
@@ -358,10 +358,17 @@ def build_gafam_card(
 
 
 def _build_security_section(title: str, val: int, total: int, pct: float) -> Column:
-    """Build a progress-bar section for one security indicator."""
+    """Build a progress-bar section for one security indicator.
+
+    ``pct`` is the raw rate, and an upstream count can push it outside the
+    bar's 0-100 range (a negative ``queries`` value, or matching queries
+    counted above the total). The bar is clamped so it never renders past
+    full or below empty; the text keeps the number the API reported
+    (issue #800).
+    """
     with Column(gap=2) as col:
         Text(f"{title}: {pct:.2f}%", css_class="font-semibold")
-        Progress(value=pct)
+        Progress(value=max(0.0, min(100.0, pct)))
         Text(f"{val:,} / {total:,} queries", css_class="text-sm text-muted-foreground")
     return col
 
