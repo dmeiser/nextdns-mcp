@@ -537,6 +537,62 @@ class TestStreamingToDisk:
         assert payload["preview"]["bytes"] <= logs_module.DOWNLOAD_PREVIEW_MAX_BYTES
         assert payload["preview"]["truncated"] is True
 
+    async def test_after_the_preview_fills_later_chunks_are_not_decoded_and_writes_are_coalesced(
+        self, tmp_path, monkeypatch
+    ):
+        """The preview window is the last use of the body text (PERF-9)."""
+        decode_calls = 0
+        real_incremental_decoder = stream.codecs.getincrementaldecoder
+
+        def counting_incremental_decoder(encoding):
+            decoder_type = real_incremental_decoder(encoding)
+
+            class CountingDecoder:
+                def __init__(self, errors):
+                    self._decoder = decoder_type(errors)
+
+                def decode(self, data: bytes, final: bool = False) -> str:
+                    nonlocal decode_calls
+                    decode_calls += 1
+                    return self._decoder.decode(data, final=final)
+
+            return CountingDecoder
+
+        monkeypatch.setattr(stream.codecs, "getincrementaldecoder", counting_incremental_decoder)
+
+        real_fdopen = stream.os.fdopen
+        writes: list[bytes] = []
+
+        class CountingFile:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+
+            def write(self, data: bytes) -> int:
+                writes.append(bytes(data))
+                return self._wrapped.write(data)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._wrapped, name)
+
+        monkeypatch.setattr(stream.os, "fdopen", lambda fd, mode: CountingFile(real_fdopen(fd, mode)))
+
+        path = str(tmp_path / "download.csv")
+        chunks = [f"row{i},host\n" for i in range(28)] + ["名前,値", "last"]
+        payload = await logs_module._write_stream_to_tempfile(_FakeResponse("https://x/file.csv", chunks=chunks), path)
+
+        expected_bytes = "".join(chunks).encode("utf-8")
+        assert Path(path).read_bytes() == expected_bytes
+        assert payload["row_count"] == 29
+        assert payload["preview"]["line_count"] == logs_module.DOWNLOAD_PREVIEW_MAX_LINES
+        assert payload["preview"]["text"] == "".join(chunks[: logs_module.DOWNLOAD_PREVIEW_MAX_LINES])
+        # The decoder is needed only while text can enter the preview; the
+        # skipped body still contributes raw bytes and raw newline counts.
+        assert decode_calls == logs_module.DOWNLOAD_PREVIEW_MAX_LINES
+        # One offload per preview-filling chunk, then the small body tail is
+        # coalesced into one write instead of one offload per stream chunk.
+        assert len(writes) == logs_module.DOWNLOAD_PREVIEW_MAX_LINES + 1
+        assert b"".join(writes) == expected_bytes
+
     async def test_a_final_line_without_a_newline_is_counted(self, tmp_path):
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["a\n", "b"]), str(tmp_path / "d.csv")

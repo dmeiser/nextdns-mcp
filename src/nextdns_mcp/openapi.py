@@ -140,7 +140,13 @@ def _build_fastmcp_instance(
     # runs before that filter (which would drop the misplaced parameters) and
     # before the call log (which then records the call that actually happened).
     if search_transform is not None:
-        mcp.add_middleware(CallToolShapeMiddleware(transform=search_transform, endpoints=endpoints))
+        mcp.add_middleware(
+            CallToolShapeMiddleware(
+                transform=search_transform,
+                endpoints=endpoints,
+                tool_names=tool_names,
+            )
+        )
 
     return mcp, endpoints
 
