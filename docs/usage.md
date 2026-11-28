@@ -108,6 +108,12 @@ limit is rejected with an `invalid_argument` error rather than silently
 adjusted. `limit` must not exceed 500 and is rejected above that; the series
 endpoints consume no `limit`, so it is validated but never sent.
 
+The rendered chart is bounded independently of the fetch: it draws at most 250
+downsampled intervals and at most 25 series - the busiest ones, with every omitted
+series summed interval by interval into one `Other` series, so plotted totals still
+match the summary. A rendered chart over the 256 KiB result ceiling is refused with
+a `response_too_large` payload naming its size rather than delivered trimmed.
+
 ### overviewDashboard
 Renders an interactive Prefab UI overview dashboard or individual widget card.
 Use `section` to select what to display:
@@ -134,6 +140,13 @@ as do the fixed metric cards in `section="kpi"` and `section="security"`. `domai
 formats only the domain cards in `section="overview"` and `section="all"`, and an
 explicit `view_type` overrides it there; the other cards appended by `section="all"`
 follow `view_type` and keep their defaults when it is `"auto"`.
+
+Rendering is bounded separately from `limit`: each table shows at most 100 rows and
+paginates beyond 25 per page, a bar or pie chart draws its 24 busiest entries plus
+one `Other` rollup (25 entries in all, with totals preserved), and the time-series
+card draws at most 25 series including that rollup. A rendered page over the 256 KiB
+result ceiling is refused with a `response_too_large` payload naming its size; ask
+for fewer rows or one section at a time.
 
 ### Generative UI (Beta)
 Generative UI is an opt-in beta feature (disabled by default). When enabled by setting

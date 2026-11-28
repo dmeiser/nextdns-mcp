@@ -137,11 +137,13 @@ def build_timeseries_area_chart(
 def rendered_app_bytes(app: PrefabApp) -> int:
     """UTF-8 size of a rendered app as the MCP wire carries it.
 
-    Measured on ``PrefabApp.to_json`` - the same document ``structured_content``
-    holds once the tool result is built - so the number the ceiling is compared
-    against is the number that is actually sent, not a proxy for it.
+    Measured on ``PrefabApp.to_json`` - the document ``structured_content``
+    holds once the tool result is built - serialized exactly as the stdio server
+    writes it: compact JSON with raw UTF-8, no ``\\uXXXX`` escapes. Escaping
+    non-ASCII labels charges up to six bytes per character and overstates the
+    ceiling decision; the MCP wire does not pay those bytes.
     """
-    return len(json.dumps(app.to_json(), separators=(",", ":")).encode("utf-8"))
+    return len(json.dumps(app.to_json(), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 def bounded_app_result(app: PrefabApp, summary: str, surface: str) -> ToolResult | dict[str, Any]:

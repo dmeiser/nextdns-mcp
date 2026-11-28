@@ -1,18 +1,20 @@
 """Unit tests for NextDNS interactive analytics dashboard and specialized UI tools."""
 
 import asyncio
+import inspect
 import json
 from collections.abc import Mapping
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastmcp.tools.base import ToolResult
-from prefab_ui.components import Card
+from prefab_ui.components import Card, Column, DataTableColumn
 
 from nextdns_mcp import chart_ui as chart_ui_module
 from nextdns_mcp import charts as charts_module
 from nextdns_mcp import utils as utils_mod
 from nextdns_mcp.tools import dashboard as dash_module
+from nextdns_mcp.tools import plots as plots_module
 from nextdns_mcp.tools.dashboard import components as ui
 from nextdns_mcp.tools.dashboard import data as data_mod
 from nextdns_mcp.tools.dashboard import formatters as fmt
@@ -984,6 +986,28 @@ class TestDashboardToolsExecution:
         assert res["code"] == "response_too_large"
         assert res["max_result_bytes"] == 1
         assert res["result_bytes"] > 1
+
+    def test_rendered_app_bytes_counts_raw_utf8_not_ascii_escapes(self):
+        """The ceiling must charge what the stdio wire carries, not ``\\uXXXX`` escapes."""
+        label = "münchen-例え.jp" * 5
+        rows = [{"domain": label, "queries": 100} for _ in range(100)]
+        table = ui._data_table([DataTableColumn(key="domain", header="Domain")], rows)
+        with Column(gap=4, css_class="p-6", children=[Card(title="Non-ASCII", children=[table])]) as view:
+            pass
+        app = ui.build_page_app(view)
+        measured = chart_ui_module.rendered_app_bytes(app)
+        wire = len(json.dumps(app.to_json(), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        escaped = len(json.dumps(app.to_json(), separators=(",", ":")).encode("utf-8"))
+        assert measured == wire
+        assert escaped > wire
+
+    def test_model_facing_cap_claims_match_the_renderer(self):
+        """Published descriptions state the totals the caps actually render."""
+        dash_doc = inspect.getdoc(dash_module.overviewDashboard) or ""
+        plot_doc = inspect.getdoc(plots_module.plotAnalytics) or ""
+        assert "24 busiest entries" in dash_doc
+        assert "25 series including" in dash_doc
+        assert "at most 25 series" in plot_doc
 
 
 class TestFanoutShortCircuit:

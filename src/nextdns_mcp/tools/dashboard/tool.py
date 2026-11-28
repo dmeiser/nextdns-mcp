@@ -519,11 +519,12 @@ async def overviewDashboard(
 
     What is fetched is bounded by ``limit``; what is rendered is bounded too. A
     table shows at most its 100 busiest rows, paginated 25 to a page, and a bar or
-    pie chart draws its 25 busiest entries with the rest rolled up into one
-    "Other" entry, so the chart's totals still account for every row it was sent.
-    A time-series chart draws at most 25 series plus that rollup. A rendered page
-    still over the 262144-byte result ceiling is refused with a
-    ``response_too_large`` payload naming its size rather than delivered trimmed.
+    pie chart draws its 24 busiest entries with the rest rolled up into one
+    "Other" entry (25 entries in all), so the chart's totals still account for
+    every row it was sent. A time-series chart draws at most 25 series including
+    that rollup. A rendered page still over the 262144-byte result ceiling is
+    refused with a ``response_too_large`` payload naming its size rather than
+    delivered trimmed.
     """
     return await _overview_dashboard_impl(
         profile_id=profile_id,
