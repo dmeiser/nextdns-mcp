@@ -33,7 +33,7 @@ import shutil
 import subprocess
 import tomllib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -70,6 +70,7 @@ class Step:
     name: str
     uses: str | None
     run: str | None
+    env: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ def load_release_job(path: Path, job_id: str) -> ReleaseJob:
             name=str(step.get("name") or step.get("uses") or "<unnamed>"),
             uses=step.get("uses"),
             run=step.get("run"),
+            env=dict(step.get("env") or {}),
         )
         for index, step in enumerate((raw.get("jobs") or {})[job_id].get("steps") or [])
     ]
@@ -163,13 +165,22 @@ def write_scratch_project(root: Path, cache: Path, version: str) -> None:
 
 def run_step(step: Step, root: Path, outputs: Path, env: Mapping[str, str] | None = None) -> None:
     """Execute one ``run`` step's shell body the way the runner would."""
-    # The runner interpolates ``${{ ... }}`` expressions before bash sees them.
-    body = re.sub(r"\$\{\{[^}]*\}\}", "scratch", step.run or "")
+
+    # The runner interpolates ``${{ ... }}`` expressions before bash sees them,
+    # both in the shell body and in the step's own ``env`` block.
+    def interpolate(value: object) -> str:
+        return re.sub(r"\$\{\{[^}]*\}\}", "scratch", str(value))
+
+    body = interpolate(step.run or "")
+    step_env = {name: interpolate(value) for name, value in step.env.items()}
     proc = subprocess.run(
         ["bash", "-euo", "pipefail", "-c", body],
         cwd=root,
         env={
             **os.environ,
+            **step_env,
+            # Harness-provided values stand in for the expressions that would
+            # resolve on the runner, so they take precedence over the raw YAML.
             "BUMP_LABEL": "bump-patch",
             "GITHUB_OUTPUT": str(outputs),
             "UV_CACHE_DIR": str(root / ".uv-cache"),

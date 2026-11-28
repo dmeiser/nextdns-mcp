@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 from .config import _BOOL_FALSE_TOKENS, _BOOL_TRUE_TOKENS, get_default_profile
-from .constants import PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
+from .constants import CONTROL_CHARS_PATTERN, PROFILE_ID_HINT, SAFE_PROFILE_ID_PATTERN
 from .errors import ErrorCode, cap_with_marker, error_payload
 
 
@@ -387,7 +387,6 @@ def schema_required(schema: dict[str, Any] | None) -> list[str]:
     return [str(name) for name in ((schema or {}).get("required") or [])]
 
 
-_CONTROL_CHARS_RE = re.compile(r"[\r\n\x00-\x1f\x7f-\x9f]")
 _MAX_LABEL_LENGTH = 200
 _LABEL_TRUNCATION_MARKER = "…"
 
@@ -402,7 +401,7 @@ def sanitize_label(value: Any) -> str:
     exactly once, at extraction/shaping time: the cap appends a character, so
     a second pass would see a 201-character label and cut it again.
     """
-    text = _CONTROL_CHARS_RE.sub("", str(value))
+    text = CONTROL_CHARS_PATTERN.sub("", str(value))
     # errors.body.cap_with_marker holds the one cap-and-marker implementation,
     # borrowed from the package root by public name; re-inlining the comparison
     # here is the second copy of the cut both callers must make identically.

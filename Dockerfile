@@ -98,7 +98,8 @@ USER appuser
 ENV PYTHONPATH=/install:/app/src \
     PATH=/usr/local/bin:$PATH \
     FASTMCP_CHECK_FOR_UPDATES=off \
-    FASTMCP_HTTP_HOST_ORIGIN_PROTECTION=auto
+    FASTMCP_HTTP_HOST_ORIGIN_PROTECTION=auto \
+    PREFAB_BUNDLED_RENDERER=1
 
 # Command to run the application
 CMD ["python", "-m", "nextdns_mcp.server"]

@@ -48,7 +48,7 @@ from ..config import (
     get_http_timeout,
     load_profile_access_control,
 )
-from ..constants import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES
+from ..constants import DNS_STATUS_CODES, VALID_DNS_RECORD_TYPES, escape_control_chars
 from ..errors import ErrorCode, StateOwnershipError, error_payload, http_error_payload
 from ..state import request_resources
 from ..transport import access_denied_payload
@@ -181,7 +181,7 @@ def _read_denied(target_profile: str) -> dict[str, Any]:
     has the same shape (typed code, reason, profile id, nominal 403) as a
     denial from the ACL layer - the caller branches on one contract, not two.
     """
-    logger.warning(f"Read access denied for profile: {target_profile}")
+    logger.warning("Read access denied for profile: %s", escape_control_chars(target_profile))
     return access_denied_payload(
         ErrorCode.READ_ACCESS_DENIED,
         f"Read access denied for profile: {target_profile}",
@@ -253,7 +253,7 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
 
     is_valid, record_type_upper = _normalize_and_validate_record_type(record_type)
     if not is_valid:
-        logger.warning(f"Invalid DNS record type requested: {record_type}")
+        logger.warning("Invalid DNS record type requested: %s", escape_control_chars(record_type))
         return error_payload(
             ErrorCode.INVALID_RECORD_TYPE,
             f"Invalid record type: {record_type}",
@@ -264,7 +264,11 @@ async def _dohLookup_impl(domain: str, profile_id: OptionalProfileId = None, rec
     # The queried domain is what the caller is asking *about* - query names are
     # browsing-shaped sensitive data - so it belongs at DEBUG, while the
     # routine "a lookup ran" fact stays at INFO without it.
-    logger.info("DoH lookup (%s) via profile %s", record_type_upper, target_profile)
+    logger.info(
+        "DoH lookup (%s) via profile %s",
+        escape_control_chars(record_type_upper),
+        escape_control_chars(target_profile),
+    )
     logger.debug("DoH lookup: %s (%s) via profile %s", domain, record_type_upper, target_profile)
     return await doh_lookup(doh_url, domain, record_type_upper, target_profile, access)
 

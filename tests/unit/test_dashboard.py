@@ -844,7 +844,7 @@ class TestDashboardToolsExecution:
     def test_build_queries_series_card_unexpected_error_propagates(self, monkeypatch):
         # Only payload-shape errors degrade to a missing card; anything else
         # is a programming error and must surface (FUNC-5 / WORK-324).
-        monkeypatch.setattr(ui, "validate_series_payload", MagicMock(side_effect=RuntimeError("unexpected failure")))
+        monkeypatch.setattr(ui, "extract_series_fields", MagicMock(side_effect=RuntimeError("unexpected failure")))
         with pytest.raises(RuntimeError, match="unexpected failure"):
             ui._build_queries_series_card({"meta": {}})
 
@@ -905,12 +905,13 @@ class TestDashboardToolsExecution:
 
 
 class TestFanoutShortCircuit:
-    """A queued fan-out wave is skipped once upstream has rejected the request itself.
+    """A queued fan-out wave is skipped once any fetch of the fan-out has failed.
 
     ``overviewDashboard(section='all')`` dispatches 12 endpoints under a semaphore of
-    4, so two thirds of the fan-out is still queued when the first wave answers. A 429,
-    401, 403 or 404 rejects the credential, the profile or the quota — not one endpoint —
-    so the queued waves can only repeat it while spending quota and latency (issue #549).
+    4, so two thirds of the fan-out is still queued when the first wave answers. The
+    unpacking layer answers the overview with the first error and discards every
+    payload beside it, so once any fetch has failed the queued waves can only spend
+    quota and latency on results that are never read (issues #549, #792).
     """
 
     EXTRA_ENDPOINTS = ("reasons", "devices", "ips", "encryption", "dnssec")
@@ -946,33 +947,38 @@ class TestFanoutShortCircuit:
         assert started == ["status", "status;series", "domains", "domains"]
 
     @pytest.mark.asyncio
-    async def test_per_endpoint_failure_still_dispatches_every_wave(self, monkeypatch):
-        """A 5xx says nothing about the other endpoints, so the fan-out must not stop."""
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            {"code": "http_error", "error": "upstream said 502", "status_code": 502},
+            {"code": "http_error", "error": "request timed out"},
+            {"code": "response_too_large", "error": "response crossed the byte budget", "max_response_bytes": 65536},
+        ],
+        ids=["http_502", "timeout", "response_too_large"],
+    )
+    async def test_a_first_wave_failure_stops_the_queued_waves(self, monkeypatch, failure):
+        """Any first-wave error condemns the fan-out: its result would be discarded anyway."""
         started: list[str] = []
-        gateway = {"code": "http_error", "error": "upstream said 502", "status_code": 502}
         monkeypatch.setattr(
-            data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("status", gateway), "status")
+            data_mod, "_fetch_analytics_payload", self._fake_fetch(started, ("status", failure), "status")
         )
 
         _, _, _, _, extra, err = await data_mod.fetch_overview_payloads("p1", "-30d", "now", 10, include_extra=True)
 
-        assert err == gateway
-        assert len(started) == 12
+        assert err == failure
         assert extra is None
+        assert started == ["status", "status;series", "domains", "domains"]
 
-    def test_stop_signal_latches_only_a_request_fatal_error(self):
-        """The first fatal error is the one reported, and a success or a 5xx never latches."""
+    def test_stop_signal_latches_the_first_error_and_only_errors(self):
+        """A success never latches; the first error is the one reported."""
         stop = data_mod._FanoutStop()
         stop.observe(None)
         assert stop.error is None
         gateway = {"code": "http_error", "error": "upstream said 502", "status_code": 502}
         stop.observe(gateway)
-        assert stop.error is None
-        rate_limited = {"code": "http_error", "error": "upstream said 429", "status_code": 429}
-        stop.observe(rate_limited)
         stop.observe({"code": "http_error", "error": "upstream said 401", "status_code": 401})
         stop.observe(None)
-        assert stop.error is rate_limited
+        assert stop.error is gateway
 
 
 class TestExtraSectionBinding:
@@ -1520,6 +1526,17 @@ class TestViewTypeScope:
         counts = self._counts(res)
         # Resolved, Blocked, Root, Reasons, Devices, GAFAM, Countries; IPs has no chart form.
         assert counts["BarChart"] == 7
+        assert "PieChart" not in counts
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("view_type", ["auto", "table", "bar", "pie"])
+    async def test_ips_is_fixed_format_and_ignores_view_type(self, rows, view_type):
+        """The documented table-only card stays table-only for every format value."""
+        res = await dash_module.overviewDashboard(profile_id="abc123", section="ips", view_type=view_type)
+        assert isinstance(res, ToolResult)
+        counts = self._counts(res)
+        assert counts["DataTable"] == 1
+        assert "BarChart" not in counts
         assert "PieChart" not in counts
 
 

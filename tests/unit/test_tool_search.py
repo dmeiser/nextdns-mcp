@@ -149,6 +149,43 @@ class TestNameAwareRanking:
         assert "dohLookup" in [tool.get("name") for tool in found.data]
 
 
+class TestWarmRankReusesTheCatalogsLeadingWords:
+    """A warm search must not recompute the catalog's per-name leading words.
+
+    ``_rank_by_name_overlap`` derived every name's leading word and the
+    catalog's generic verbs on each call; measured at intake, a second
+    'add to denylist' search against the 81-tool catalog ran 162 regex
+    splits the word memo already held. The transform now hands its memoized
+    ``catalog.leading`` and ``catalog.generic_verbs`` down, so the warm rank
+    derives nothing and the answer comes out unchanged.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_second_search_derives_no_leading_words(self, monkeypatch):
+        from fastmcp import Client
+
+        import nextdns_mcp.tool_search_rank as rank
+
+        monkeypatch.setenv("NEXTDNS_TOOL_SEARCH", "bm25")
+        async with Client(build_mcp_server()) as client:
+            first = await client.call_tool("search_tools", {"query": "add to denylist"}, raise_on_error=False)
+
+            calls = 0
+            original = rank._leading_word
+
+            def counting(name):
+                nonlocal calls
+                calls += 1
+                return original(name)
+
+            monkeypatch.setattr(rank, "_leading_word", counting)
+            second = await client.call_tool("search_tools", {"query": "add to denylist"}, raise_on_error=False)
+
+        assert calls == 0
+        assert [t.get("name") for t in second.data] == [t.get("name") for t in first.data]
+        assert second.data[0].get("name") == "addToDenylist"
+
+
 class TestMorphologicalQueryExpansion:
     """Lexical search has to bridge plurals: live gemma 12b queries failed on them.
 
@@ -1751,6 +1788,27 @@ class TestShapeRepairAnnouncesItself:
         assert _annotate_resolved_from(result, "other", None) is result
         shaped = _annotate_resolved_from(SimpleNamespace(structured_content={"ok": True}), ["x"], "realTool")
         assert shaped.structured_content["resolved_from"] == '["x"]'
+
+    def test_a_prefab_payload_keeps_its_wire_shape_and_gets_a_content_note(self):
+        """The re-target is still announced, but not inside the renderer's document.
+
+        A Prefab UI payload (``$prefab``) is the renderer's wire contract, not
+        this server's response shape: ``resolved_from``/``resolved_name``
+        injected there would be read as document content. The annotation moves
+        to the result content, beside the tool's own answer.
+        """
+        import mcp.types
+        from fastmcp.tools import ToolResult
+
+        from nextdns_mcp.tool_search import _annotate_resolved_from
+
+        payload = {"$prefab": {"version": "0.3"}, "view": {}}
+        result = ToolResult(content=[mcp.types.TextContent(type="text", text="Rendered")], structured_content=payload)
+        shaped = _annotate_resolved_from(result, "overview_dashboard", "overviewDashboard")
+        assert shaped.structured_content == payload
+        note = shaped.content[-1]
+        assert note.type == "text"
+        assert "overviewDashboard" in note.text and "overview_dashboard" in note.text
 
     async def test_the_description_says_a_write_headed_answer_is_refused_not_run(self, monkeypatch):
         from fastmcp import Client

@@ -113,10 +113,12 @@ jobs:
       - name: Generate Release Notes and Create Release
         if: steps.pr.outputs.proceed == 'true'
         uses: actions/github-script@v8
+        env:
+          TAG_NAME: ${{ steps.version.outputs.tag }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const tagName = '${{ steps.version.outputs.tag }}';
+            const tagName = process.env.TAG_NAME;
             const headSha = context.payload.workflow_run.head_sha;
             console.log(`Creating release for ${tagName} at commit ${headSha}...`);
 

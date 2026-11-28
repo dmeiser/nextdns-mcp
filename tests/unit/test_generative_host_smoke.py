@@ -65,16 +65,16 @@ async def test_host_smoke_executes_generated_tree() -> None:
 
 @pytest.mark.asyncio
 async def test_host_smoke_renderer_resource_advertises_csp() -> None:
-    """The renderer resource carries the CSP domains the host must enforce."""
+    """The renderer resource needs no external origin: Python executes server-side."""
     resource = _build_renderer_resource(_renderer_csp())
     assert resource.mime_type == "text/html;profile=mcp-app"
     csp = resource.meta["ui"]["csp"]
-    assert csp["resourceDomains"] == ["https://cdn.jsdelivr.net"]
-    assert csp["connectDomains"] == [
-        "https://cdn.jsdelivr.net",
-        "https://pypi.org",
-        "https://files.pythonhosted.org",
-    ]
+    assert csp == {
+        "resourceDomains": [],
+        "connectDomains": [],
+        "frameDomains": [],
+        "baseUriDomains": [],
+    }
 
 
 def test_host_smoke_chart_sizing_guard_rejects_charts_in_tabs() -> None:

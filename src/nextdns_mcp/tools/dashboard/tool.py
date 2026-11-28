@@ -157,6 +157,8 @@ _DEVICES_SPEC = _CardSpec(
     build_card=lambda data, view_type: build_devices_card(data, view_type=view_type),
 )
 
+# IPs have no chart form: `build_ips_card` is fixed-format and ignores view_type,
+# as documented for section="ips". The shared builder signature drops that argument here.
 _IPS_SPEC = _CardSpec(
     endpoint="ips",
     summary_title="IP Analytics",

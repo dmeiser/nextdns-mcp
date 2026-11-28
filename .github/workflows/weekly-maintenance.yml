@@ -218,8 +218,9 @@ jobs:
         env:
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
           CHANGES: ${{ needs.check.outputs.changes_summary }}
+          BRANCH_NAME: ${{ steps.bump.outputs.branch_name }}
         run: |
-          BRANCH="${{ steps.bump.outputs.branch_name }}"
+          BRANCH="$BRANCH_NAME"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -244,8 +245,9 @@ jobs:
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
           CURRENT_VERSION: ${{ needs.check.outputs.current_version }}
           CHANGES: ${{ needs.check.outputs.changes_summary }}
+          BRANCH_NAME: ${{ steps.bump.outputs.branch_name }}
         run: |
-          BRANCH="${{ steps.bump.outputs.branch_name }}"
+          BRANCH="$BRANCH_NAME"
 
           # Close any stale open PR for this branch before creating a new one
           EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
@@ -290,8 +292,9 @@ jobs:
         id: poll
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          REPO: ${{ github.repository }}
         run: |
-          PR_NUMBER="${{ needs.prepare.outputs.pr_number }}"
           MAX_ATTEMPTS=90   # 90 × 60s = 90 minutes
           ATTEMPT=0
 
@@ -312,7 +315,7 @@ jobs:
 
             # Fetch all check runs for the head commit (up to 100)
             CHECKS_JSON=$(gh api \
-              "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+              "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
               --jq '[.check_runs[] | {name, status, conclusion}]' 2>/dev/null || echo "[]")
 
             TOTAL=$(   echo "$CHECKS_JSON" | jq 'length')
@@ -367,10 +370,9 @@ jobs:
         id: inspect
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          REPO: ${{ github.repository }}
         run: |
-          PR_NUMBER="${{ needs.prepare.outputs.pr_number }}"
-          REPO="${{ github.repository }}"
-
           # Collect all Copilot review bodies + inline comment bodies
           REVIEW_BODIES=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
             --jq '[.[] | select(.user.login | ascii_downcase | startswith("copilot")) | .body] | join("\n")' \
@@ -410,15 +412,18 @@ jobs:
         if: steps.inspect.outputs.safe_to_merge == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          BLOCK_REASON: ${{ steps.inspect.outputs.block_reason }}
+          REPO: ${{ github.repository }}
         run: |
           # Try with labels first; fall back without if labels don't exist
           gh issue create \
-            --title "⚠️ Weekly maintenance PR #${{ needs.prepare.outputs.pr_number }} blocked — critical Copilot review" \
-            --body "The weekly maintenance workflow detected a potentially critical issue in Copilot's review of PR #${{ needs.prepare.outputs.pr_number }}.
+            --title "⚠️ Weekly maintenance PR #${PR_NUMBER} blocked — critical Copilot review" \
+            --body "The weekly maintenance workflow detected a potentially critical issue in Copilot's review of PR #${PR_NUMBER}.
 
-          **Reason:** ${{ steps.inspect.outputs.block_reason }}
+          **Reason:** ${BLOCK_REASON}
 
-          **PR:** https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.pr_number }}
+          **PR:** https://github.com/${REPO}/pull/${PR_NUMBER}
 
           **Action required:** Please review the PR manually and either merge it yourself or close it.
 
@@ -426,12 +431,12 @@ jobs:
           *Opened automatically by the [weekly maintenance workflow](../actions/workflows/weekly-maintenance.yml).*" \
             --label "security,needs-human-review" 2>/dev/null || \
           gh issue create \
-            --title "⚠️ Weekly maintenance PR #${{ needs.prepare.outputs.pr_number }} blocked — critical Copilot review" \
-            --body "The weekly maintenance workflow detected a potentially critical issue in Copilot's review of PR #${{ needs.prepare.outputs.pr_number }}.
+            --title "⚠️ Weekly maintenance PR #${PR_NUMBER} blocked — critical Copilot review" \
+            --body "The weekly maintenance workflow detected a potentially critical issue in Copilot's review of PR #${PR_NUMBER}.
 
-          **Reason:** ${{ steps.inspect.outputs.block_reason }}
+          **Reason:** ${BLOCK_REASON}
 
-          **PR:** https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.pr_number }}
+          **PR:** https://github.com/${REPO}/pull/${PR_NUMBER}
 
           **Action required:** Please review the PR manually and either merge it yourself or close it.
 
@@ -455,8 +460,8 @@ jobs:
       - name: Enable auto-merge and wait for completion
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
         run: |
-          PR_NUMBER="${{ needs.prepare.outputs.pr_number }}"
           echo "Enabling auto-merge on PR #$PR_NUMBER..."
 
           # Direct merge — no --auto needed because wait-checks already confirmed CI is green,
@@ -500,8 +505,9 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ needs.prepare.outputs.new_version }}
         run: |
-          TAG="v${{ needs.prepare.outputs.new_version }}"
+          TAG="v${NEW_VERSION}"
 
           # Idempotent: skip if the release already exists
           if gh release view "$TAG" >/dev/null 2>&1; then

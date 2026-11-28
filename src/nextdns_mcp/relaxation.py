@@ -40,7 +40,7 @@ from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
-from .constants import SYNTHETIC_TOOL_NAMES
+from .constants import SYNTHETIC_TOOL_NAMES, escape_control_chars
 from .utils import BARE_NEGATIVE_RE, NOW_OFFSET_RE, is_float_shaped, is_integer_shaped
 
 logger = logging.getLogger(__name__)
@@ -169,6 +169,10 @@ def _report_ignored_arguments(
     merged set instead of concatenating the two passes' sentences: a name
     the inner pass and the outer pass both dropped would otherwise be
     attributed twice.
+
+    A Prefab result (``$prefab`` in the payload) is the renderer's wire
+    document, not this server's response shape: the note is said in the
+    content and the document is left exactly as the tool emitted it.
     """
     structured = getattr(result, "structured_content", None)
     if not isinstance(structured, dict):
@@ -176,6 +180,7 @@ def _report_ignored_arguments(
         return
     if "$prefab" in structured:
         _annotate_content_only(result, ignored, hint)
+        return
     _annotate_structured_ignored(structured, ignored, hint, hint_for)
 
 
@@ -208,27 +213,36 @@ def _merge_ignored_hints(structured: dict[str, Any], hint: str) -> None:
     _merge_result_hint(structured, hint)
 
 
+def _append_content_note(result: Any, text: str) -> None:
+    """Append a text note to the result's content, best-effort.
+
+    A middleware report whose payload cannot carry it - a Prefab wire
+    document, an image-only answer - says itself in the content instead,
+    beside what the tool produced. The append never raises: losing the note is
+    recoverable, replacing the tool's own answer with a failure because its
+    content is not a list is not. It lives here because this module owns the
+    ignored-arguments note; the call-shape middleware reuses it rather than
+    growing a second copy of the try.
+    """
+    try:
+        result.content.append(mcp.types.TextContent(type="text", text=text))
+    except Exception:
+        logger.debug("middleware note could not be appended to the result content", exc_info=True)
+
+
 def _annotate_content_only(result: ToolResult, ignored: list[str], hint: str) -> None:
     """Say the annotation in the content when no plain-dict payload can carry it.
 
-    Prefab answers (plotAnalytics, overviewDashboard) arrive as a model rather
-    than a dict, so the dict-merge path cannot touch them, and a result with
-    no structured payload at all has nothing else to carry the note; without
-    this the argument drop would be silent for exactly the tools whose names
-    (from/to on the series endpoints) differ from this one's
-    (from_time/to_time).
+    A Prefab answer (plotAnalytics, overviewDashboard) is the renderer's wire
+    document: its keys belong to that document, so a note added to it is not
+    this server's response shape. A result with no structured payload at all
+    has nothing else to carry the note either; without this the argument drop
+    would be silent for exactly the tools whose names (from/to on the series
+    endpoints) differ from this one's (from_time/to_time).
     """
     if not ignored:
         return
-    try:
-        result.content.append(
-            mcp.types.TextContent(
-                type="text",
-                text=f"Note: the server ignored argument(s) {', '.join(ignored)}; {hint}",
-            )
-        )
-    except Exception:
-        logger.debug("ignored-arguments annotation could not be appended", exc_info=True)
+    _append_content_note(result, f"Note: the server ignored argument(s) {', '.join(ignored)}; {hint}")
 
 
 def _merge_result_hint(structured: dict[str, Any], hint: str) -> None:
@@ -401,16 +415,19 @@ class StripExtraFieldsMiddleware(Middleware):
     def _coerce_value(self, value: Any, prop_schema: dict[str, Any] | None = None) -> Any:
         """Coerce a value using its property schema.
 
-        Top-level values are coerced according to the declared schema. Nested
-        dict/list values are recursed without schema context to avoid coercing
-        identifier-like strings inside opaque objects.
+        A value with no schema comes back as it went in: there is nothing to
+        coerce against, and rebuilding its nested dicts/lists allocated deep
+        copies of containers the caller already held. Top-level values are
+        coerced according to the declared schema. A dict is returned
+        untouched - nested values carry no schema context, so identifier-like
+        strings inside opaque objects were never coerced anyway.
         """
+        if prop_schema is None:
+            return value
         if isinstance(value, str):
             return self._coerce_string_value(value, self._get_schema_property_types(prop_schema))
         if isinstance(value, list):
             return self._coerce_list_value(value, prop_schema)
-        if isinstance(value, dict):
-            return {k: self._coerce_value(v, None) for k, v in value.items()}
         return value
 
     def _coerce_list_value(self, value: list[Any], prop_schema: dict[str, Any] | None) -> list[Any]:
@@ -451,7 +468,10 @@ class StripExtraFieldsMiddleware(Middleware):
         except Exception as e:
             # Schema fetch/parse failure: fail closed so callers get a clear error
             # instead of downstream validation failures from unstripped args.
-            logger.exception(f"Failed to prepare arguments for tool '{tool_name}'; aborting call")
+            logger.exception(
+                "Failed to prepare arguments for tool '%s'; aborting call",
+                escape_control_chars(tool_name),
+            )
             raise ToolError(
                 f"Tool call for '{tool_name}' failed closed: could not fetch its parameter "
                 f"schema to validate arguments (root cause: {e})"

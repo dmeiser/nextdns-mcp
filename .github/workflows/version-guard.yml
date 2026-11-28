@@ -20,9 +20,11 @@ jobs:
 
       - name: Validate Labels
         if: github.event_name != 'merge_group'
+        env:
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
         run: |
           # Use exact matching against the labels array
-          LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
+          LABELS="$PR_LABELS"
           echo "Current labels: $LABELS"
           
           # Check for mutual exclusivity and existence
@@ -65,8 +67,10 @@ jobs:
     steps:
       - name: Check for no-release label
         id: bypass
+        env:
+          HAS_NO_RELEASE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'no-release') }}
         run: |
-          HAS_LABEL="${{ contains(github.event.pull_request.labels.*.name, 'no-release') }}"
+          HAS_LABEL="$HAS_NO_RELEASE_LABEL"
           echo "has_label=$HAS_LABEL" >> $GITHUB_OUTPUT
           if [ "$HAS_LABEL" = "true" ]; then
             echo "✅ 'no-release' label found. Skipping version sync check."

@@ -1,7 +1,8 @@
 # ADR 0003 — Progressive tool disclosure by BM25 search ("search, then call by exact name")
 
 Status: accepted (4.0.0, and the default since). Applies to `src/nextdns_mcp/tool_search.py`,
-`src/nextdns_mcp/tool_search_rank.py`, the transform mount in `src/nextdns_mcp/openapi.py`,
+`src/nextdns_mcp/tool_search_rank.py`, `src/nextdns_mcp/tool_search_answer.py`,
+`src/nextdns_mcp/tool_search_shape.py`, the transform mount in `src/nextdns_mcp/openapi.py`,
 the `NEXTDNS_TOOL_SEARCH` flag in `src/nextdns_mcp/config.py`, and the `initialize`
 instructions in `src/nextdns_mcp/usage.py`. It sits **on top of** ADR 0001: the catalog is
 generated there, disclosed here.
@@ -15,7 +16,7 @@ them, each with its own spec description, in every session, for every client.
 
 What that costs was measured, not guessed. Four fully-described search results still
 measured about 10 KB, and the live run that carried 10-18 KB per discovery stalled 27
-times in 29 steps (`src/nextdns_mcp/tool_search.py:72-74`).
+times in 29 steps (`src/nextdns_mcp/tool_search_answer.py:28-30`).
 
 The failure mode of naive disclosure was measured too. FastMCP's `BM25SearchTransform`
 ranks prose similarity, and small models query with tool-shaped guesses —
@@ -29,7 +30,7 @@ The options:
 2. **FastMCP's pattern-match transform.** Rejected before this server shipped: it ranks
    nothing (matches come back in registration order) and none of the live model
    validations that shaped this feature ran under it
-   (`src/nextdns_mcp/config.py:216-221`).
+   (`src/nextdns_mcp/config.py:240-245`).
 3. **FastMCP's BM25 transform, with its two failure modes closed here** — the choice made.
 
 ## Decision
@@ -40,53 +41,57 @@ nets make discovery survive a bad query, and disclosure never touches authorizat
 
 - The mode is an environment decision resolved once: `NEXTDNS_TOOL_SEARCH` accepts `off`
   and `bm25`, unset means `bm25`, and any other value fails startup with
-  `ConfigurationError` (`src/nextdns_mcp/config.py:216-252`). `bm25` is the default
+  `ConfigurationError` (`src/nextdns_mcp/config.py:246-277`). `bm25` is the default
   because every live-model validation of this contract ran under it; the full listing is
   the explicit opt-out.
 - The transform is mounted when the `FastMCP` instance is constructed, because the
   middleware that repairs `call_tool` shape has to exist on the instance before any call
-  is served (`src/nextdns_mcp/openapi.py:649-691`). A mode that config accepts and this
+  is served (`src/nextdns_mcp/openapi.py:103-145`). A mode that config accepts and this
   module has not implemented raises at startup rather than silently meaning "no
-  disclosure" (`src/nextdns_mcp/tool_search.py:856-875`).
+  disclosure" (`src/nextdns_mcp/tool_search.py:328-347`).
 - The synthetic names stay FastMCP's: `search_tools` plural, `call_tool` singular. That
   asymmetry is upstream's contract, not a local inconsistency to rename
-  (`src/nextdns_mcp/tool_search.py:26-28`). Their descriptions are replaced with this
+  (`src/nextdns_mcp/tool_search.py:31-35`). Their descriptions are replaced with this
   server's discovery contract, because under disclosure they are the only always-visible
   place to say that the catalog is hidden and that guessing a name fails
-  (`src/nextdns_mcp/tool_search.py:256-283`).
+  (`src/nextdns_mcp/tool_search.py:225-249`).
 - Two safety nets, both task-independent and client-agnostic — no prompt hints, no
   per-task routing (`src/nextdns_mcp/tool_search.py:14-20`):
   1. **Full-catalog fallback.** A query that matches nothing answers with every tool,
      reads first, rather than an empty list
-     (`src/nextdns_mcp/tool_search.py:228-247`).
+     (`src/nextdns_mcp/tool_search.py:198-223`).
   2. **Name-aware re-rank.** A tool whose own name carries the caller's words is never
      left out of the answer, and ranks first, with BM25's order preserved on ties. The
      re-rank runs over the full merged list and the slice comes last — slicing first cut
      tools out before the name scorer ever saw them
-     (`src/nextdns_mcp/tool_search.py:192-252`, ranking machinery in
+     (`src/nextdns_mcp/tool_search.py:198-223`, ranking machinery in
      `src/nextdns_mcp/tool_search_rank.py`).
 - Read/write ordering in the fallback is a fact, not a name shape. Classification comes
   from the endpoint map built from the shipped document's routes; a name the map does not
   carry — the three composites and the generative-UI pair — is classified from its own
   `readOnlyHint`. The name heuristic this replaced read every `list*` tool as a write, and
   defaulting off-map names to `GET` let a loose match reach `generate_prefab_ui`, a tool
-  that executes code (`src/nextdns_mcp/tool_search.py:93-118`).
+  that executes code (`src/nextdns_mcp/tool_search_shape.py:61-73`).
 - Byte budgets are part of the contract: 1,400 characters of description per result, 8 KB
   for a ranked answer, 128 KB for the fallback, top 6 ranked entries
-  (`src/nextdns_mcp/tool_search.py:64-84`). The fallback gets its own larger ceiling
-  because it *is* the catalog: an answer that silently drops entries teaches the caller
-  the catalog is smaller than it is (`src/nextdns_mcp/tool_search.py:238-247`).
+  (`src/nextdns_mcp/tool_search_answer.py:26-40`, `src/nextdns_mcp/tool_search.py:66`).
+  The fallback gets its own larger ceiling because it *is* the catalog: an answer that
+  silently drops entries teaches the caller the catalog is smaller than it is
+  (`src/nextdns_mcp/tool_search_answer.py:32-40`, `src/nextdns_mcp/tool_search.py:210-223`).
 - `CallToolShapeMiddleware` repairs the three ways live callers wrap `call_tool` wrong —
   the whole search answer where a name belongs, a name typed from memory, and parameters
   sent beside `name` instead of inside `arguments`. It runs first, before the extra-field
   strip (which would delete the misplaced parameters) and before the call log (which then
   records the call that actually happened). A re-target is reported on the payload and in
   the log, and an answer whose head is a write is refused rather than run
-  (`src/nextdns_mcp/tool_search.py:673-697`, `src/nextdns_mcp/openapi.py:680-689`).
+  (`src/nextdns_mcp/tool_search_shape.py:336-356`, `src/nextdns_mcp/openapi.py:82-89`
+  and `:134-143`).
 - The `initialize` instructions describe the catalog by name only when it is small enough
   for that to be cheaper than the search every caller would otherwise run — 12 tools or
-  fewer. Above that they point at `search_tools` and leave the names to `tools/list`
-  (`src/nextdns_mcp/usage.py:22-50`).
+  fewer. Above that they point at `search_tools`: exact names and schemas come back in a
+  search answer, while `tools/list` publishes the catalog only when
+  `NEXTDNS_TOOL_SEARCH=off` (`src/nextdns_mcp/usage.py:22-50`,
+  `src/nextdns_mcp/openapi.py:118-132`).
 - Disclosure hides names; it does not grant or withhold permission. The ACL, the
   destination allow-list, redaction, and the typed error contract live on the client every
   call path goes through, so a hidden tool is still callable and a visible tool is still
@@ -119,7 +124,7 @@ nets make discovery survive a bad query, and disclosure never touches authorizat
   `_make_call_tool`, `_render_results`, and the privately-set `_max_results` — which is
   why the `fastmcp>=4.1.8` floor in `pyproject.toml` is kept with it, and why the borrowed
   attributes are named in the subclass docstring so a dependency bump finds them instead
-  of failing at request time (`src/nextdns_mcp/tool_search.py:125-141`).
+  of failing at request time (`src/nextdns_mcp/tool_search.py:99-116`).
 - The word memos and per-tool payload caches assume a static catalog registered once at
   startup. A tool re-registered at runtime is a fresh instance with a fresh entry, and the
   stale entry lives for the life of the process.
@@ -131,7 +136,7 @@ nets make discovery survive a bad query, and disclosure never touches authorizat
 - `e808646` (#378, 4.0.0): progressive disclosure lands with the one-tool-per-operation
   surface — "discovery is gated, access is not" — initially offered as three modes.
 - The pattern-match mode is dropped before that release ships; the accepted set is `off`
-  and `bm25`, with the reason recorded at `src/nextdns_mcp/config.py:216-221`.
+  and `bm25`, with the reason recorded at `src/nextdns_mcp/config.py:240-245`.
 - `81142b4` (#471): documentation re-pointed at the hand-written tools the surface rewrite
   left behind.
 - `614f829` (#570): off-map tools are classified from their own `readOnlyHint` instead of

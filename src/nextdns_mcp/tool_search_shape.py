@@ -27,6 +27,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import Tool
 
 from .constants import is_write_operation
+from .relaxation import _append_content_note
 from .tool_search_rank import (
     _catalog_words_for,
     _catalog_words_memo,
@@ -286,22 +287,33 @@ def _supplied_name_label(supplied: Any) -> str:
     return json.dumps(supplied, default=str)[:120]
 
 
+def _resolved_from_note(supplied: Any, resolved: str) -> str:
+    """The content note for a re-target the payload cannot carry."""
+    return f"Note: the server ran {resolved}; the name sent was {_supplied_name_label(supplied)}"
+
+
 def _annotate_resolved_from(result: Any, supplied: Any, resolved: str | None) -> Any:
-    """Say on the payload when the executed call is not the call the caller named.
+    """Say on the result when the executed call is not the call the caller named.
 
     A re-target the caller cannot see is a wrong discovery it cannot notice:
     the shape repair is a fallback, so it announces itself in the structured
     content, beside `ignored_arguments`, with what the caller actually sent.
-    Only a dict payload can carry the note; anything else passes through.
+    A Prefab UI payload is the renderer's wire document rather than this
+    server's response shape, so the note goes in the content instead; a result
+    with no dict payload at all passes through unchanged.
     """
     if not resolved or resolved == supplied:
         return result
     structured = getattr(result, "structured_content", None)
-    if isinstance(structured, dict):
-        structured["resolved_from"] = _supplied_name_label(supplied)
-        # Name it in the other direction too: a caller that reads only the
-        # result (not the transport logs) learns which tool actually ran.
-        structured["resolved_name"] = resolved
+    if not isinstance(structured, dict):
+        return result
+    if "$prefab" in structured:
+        _append_content_note(result, _resolved_from_note(supplied, resolved))
+        return result
+    structured["resolved_from"] = _supplied_name_label(supplied)
+    # Name it in the other direction too: a caller that reads only the
+    # result (not the transport logs) learns which tool actually ran.
+    structured["resolved_name"] = resolved
     return result
 
 

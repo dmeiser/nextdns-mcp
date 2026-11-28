@@ -57,9 +57,10 @@ def server_instructions(tool_search_mode: str, tool_names: Sequence[str] = ()) -
     Progressive disclosure exists so a large catalog does not eat context; with a
     catalog of ``ADVERTISE_CATALOG_MAX_TOOLS`` or fewer, the names are cheaper to
     state than the search every caller would otherwise have to make to find them,
-    so they are stated. Above that, the instructions point at ``search_tools`` and
-    ``tools/list`` stays the only place the names appear. Either way this is the
-    server choosing what it advertises about itself.
+    so they are stated. Above that, the instructions point at ``search_tools``,
+    whose answers carry the exact names and schemas; ``tools/list`` publishes the
+    catalog only when discovery is off (``NEXTDNS_TOOL_SEARCH=off``). Either way
+    this is the server choosing what it advertises about itself.
 
     ``tool_search_mode`` is the resolved NEXTDNS_TOOL_SEARCH value, so the
     discovery mechanism is only described when discovery is actually required.
