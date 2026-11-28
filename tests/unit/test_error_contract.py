@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -508,20 +508,21 @@ class TestAccessControlErrorContract:
         assert "Write access denied for profile: abc123" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_create_profile_denial_names_the_protected_writable_set(self, monkeypatch, spec_call):
-        """A collection write with nowhere to land is refused by the ACL layer.
+    async def test_create_profile_refusal_keeps_its_existing_typed_payload(self, monkeypatch, spec_call):
+        """The all-writable-protected refusal still answers with the original payload.
 
-        ``createProfile`` carries no profile_id, so the writable set and the
-        protected denylist are compared on the request path: the caller gets
-        the typed denial and no request leaves the process.
+        The decision moved into ``AccessControlledClient``; the contract did not.
+        The caller still gets ``invalid_argument`` / "no writable profile available"
+        and not one request leaves the process. An upstream double counts any
+        attempt to send it, because the ACL refusal fires before the network.
         """
         monkeypatch.setenv("NEXTDNS_WRITABLE_PROFILES", "abc123")
         monkeypatch.setenv("NEXTDNS_PROTECTED_PROFILES", "abc123")
-        result = await spec_call("createProfile", name="new profile")
+        with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as upstream:
+            result = await spec_call("createProfile", name="new profile")
         _assert_error_contract(result)
-        assert result["code"] == ErrorCode.WRITE_ACCESS_DENIED
-        assert result["status_code"] == 403
-        assert "every writable profile is protected" in result["error"]
+        assert result == {"error": "no writable profile available", "code": "invalid_argument"}
+        upstream.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_upstream_403_is_http_error_not_acl_denial(self, mock_api_client, spec_call):

@@ -95,7 +95,14 @@ def access_denied_payload(code: str, message: str, profile_id: str) -> dict[str,
 
 
 def access_denied_payload_for(exc: AccessDeniedError) -> dict[str, Any]:
-    """The standardized denial payload for a raised :class:`AccessDeniedError`."""
+    """The standardized denial payload for a raised :class:`AccessDeniedError`.
+
+    A refusal that carries its own payload (the collection-create refusal,
+    whose contract predates the typed 403 denial) is passed through instead of
+    being restyled as a profile denial.
+    """
+    if exc.payload is not None:
+        return dict(exc.payload)
     return access_denied_payload(exc.code, exc.message, exc.profile_id)
 
 

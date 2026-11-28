@@ -278,8 +278,8 @@ class TestAccessControlledClientWriteAccess:
                 await client.request("POST", "/profiles", json={"name": "New Profile"})
 
         mock_super_request.assert_not_called()
-        assert exc_info.value.code == "write_access_denied"
-        assert "every writable profile is protected" in str(exc_info.value)
+        assert exc_info.value.code == "invalid_argument"
+        assert "no writable profile available" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_allows_create_profile_when_one_writable_profile_is_unprotected(
