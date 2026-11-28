@@ -10,7 +10,7 @@ SPDX-License-Identifier: MIT
 """
 
 import os
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -304,7 +304,7 @@ class TestGeneratedToolProfileGuard:
 
     @pytest.fixture
     def routes(self) -> dict[str, Any]:
-        return {route.operation_id: route for route in spec_tools.spec_routes()}
+        return {cast(str, route.operation_id): route for route in spec_tools.spec_routes()}
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("operation_id", ["getDenylist", "clearLogs", "getAnalyticsDomains"])

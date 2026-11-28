@@ -16,7 +16,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 
@@ -2786,7 +2786,7 @@ class TestChecklistExpectationShape:
 
 
 class TestVerifyStepVerdicts:
-    def _step(self, h, verify: str, vdata=None) -> "h.Step":
+    def _step(self, h, verify: str, vdata=None) -> Any:
         return h.Step(
             id=f"v.{verify}",
             section="lists",

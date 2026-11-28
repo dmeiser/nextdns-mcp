@@ -38,6 +38,7 @@ enable= assertion.
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -180,7 +181,7 @@ def test_dispatch_version_tags_require_the_main_ref():
 # Recorded listPullRequestsAssociatedWithCommit payloads (gh api
 # repos/dmeiser/nextdns-mcp/commits/<sha>/pulls), the inputs of the two buggy
 # runs 43801875717 and 43790690497 and of a good release run 42647653783.
-def _recorded_pr(number: int, merged_at: str, merge_sha: str, labels: list[str]) -> dict:
+def _recorded_pr(number: int, merged_at: str, merge_sha: str, labels: list[str]) -> dict[str, Any]:
     return {
         "number": number,
         "state": "closed",
@@ -190,7 +191,7 @@ def _recorded_pr(number: int, merged_at: str, merge_sha: str, labels: list[str])
     }
 
 
-_SCENARIOS = (
+_SCENARIOS: tuple[tuple[str, str, list[dict[str, Any]], str], ...] = (
     (
         "no-release-516",
         "06fe963f51b1708582ad081bf009830a53d7d4fe",

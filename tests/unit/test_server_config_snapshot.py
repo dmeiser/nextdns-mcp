@@ -11,7 +11,7 @@ import socket
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Self, cast
 
 import httpx
 import pytest
@@ -371,13 +371,13 @@ async def test_log_download_path_uses_snapshot_timeout_and_cap(monkeypatch, tmp_
         assert redirect.request_timeouts == [7.5]
 
         large = await stream_module._write_stream_to_tempfile(
-            _FakeResponse("https://api.nextdns.io/file.csv", chunks=[b"abcdefghij"]),
+            cast(httpx.Response, _FakeResponse("https://api.nextdns.io/file.csv", chunks=[b"abcdefghij"])),
             str(tmp_path / "large.csv"),
         )
         assert large["size"] == 10
 
     with pytest.raises(stream_module.DownloadTooLargeError):
         await stream_module._write_stream_to_tempfile(
-            _FakeResponse("https://api.nextdns.io/file.csv", chunks=[b"abcdefghij"]),
+            cast(httpx.Response, _FakeResponse("https://api.nextdns.io/file.csv", chunks=[b"abcdefghij"])),
             str(tmp_path / "outside.csv"),
         )

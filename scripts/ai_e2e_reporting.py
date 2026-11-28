@@ -15,10 +15,14 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import ai_e2e_common as common
-from ai_e2e_common import Report
+if TYPE_CHECKING:
+    from scripts import ai_e2e_common as common
+    from scripts.ai_e2e_common import Report
+else:
+    import ai_e2e_common as common
+    from ai_e2e_common import Report
 
 
 def write_report(report: Report, path: str, actor_log: str | None = None) -> None:

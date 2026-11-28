@@ -154,7 +154,7 @@ import tempfile
 import time
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # --------------------------------------------------------------------------- #
 # Make the in-tree ``nextdns_mcp`` package importable when running as a script
@@ -167,7 +167,13 @@ if str(_REPO_ROOT / "src") not in sys.path:
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import ai_e2e_common as common
+if TYPE_CHECKING:
+    from scripts import ai_e2e_common as common
+    from scripts.ai_e2e_common import Report
+else:
+    import ai_e2e_common as common
+
+    Report = common.Report
 
 # Re-export the pure model, constants, and helpers so existing imports and the
 # README keep working against this module (they now live in ``ai_e2e_common``).
@@ -182,7 +188,6 @@ PLOT_METRICS = common.PLOT_METRICS
 LIST_ENTRIES = common.LIST_ENTRIES
 _LIST_SPECS = common._LIST_SPECS
 CheckResult = common.CheckResult
-Report = common.Report
 check_from_call = common.check_from_call
 # Private helpers (re-exported for the unit tests, which import by file path).
 _extract_tool_error = common._extract_tool_error
@@ -228,120 +233,236 @@ make_profile_name = common.make_profile_name
 # ai_e2e_steps / ai_e2e_verify / ai_e2e_run / ai_e2e_cli siblings keep resolving
 # their primitives through ``harness.X``.
 # =========================================================================== #
-from ai_e2e_actor import (
-    ActorRun,
-    ToolCall,
-    _collect_streams,
-    _flatten_text,
-    _kill_process_group,
-    _suppress,
-    _tool_event_name,
-    parse_actor_events,
-    run_actor,
-)
-from ai_e2e_checklist import (
-    _ANALYTICS_TOOLS,
-    _LIST_TOOLS,
-    _SETTINGS_OPS,
-    ANY_PROFILE,
-    CALL_LOG_NAME,
-    PLOT_PROFILE,
-    PROFILE_CREATE_STEP,
-    PROFILE_DELETE_STEP,
-    Step,
-    StepRangeError,
-    _answered,
-    _call_label,
-    _endpoint,
-    _entry_bounds,
-    _expect,
-    _expect_label,
-    _expect_local,
-    _expected_call_ok,
-    _identifiers_from_answers,
-    _read_new_calls,
-    _server_calls_text,
-    _spec_endpoints,
-    _step_position,
-    _step_prompt,
-    _walk_identifiers,
-    needs_harness_setup,
-    needs_harness_teardown,
-    render_step_catalog,
-    select_steps,
-)
-from ai_e2e_config import (
-    _BUILTIN_TOOLS,
-    _ENV_REF,
-    _MAX_PROFILE_PAGES,
-    DEFAULT_HARNESS_COMMAND,
-    DEFAULT_SERVER,
-    ENV_REF_API_KEY,
-    PLACEHOLDER_CONFIG_FILE,
-    PLACEHOLDER_MODEL,
-    PLACEHOLDER_PROMPT,
-    PLACEHOLDER_SERVER_COMMAND,
-    PLACEHOLDER_SERVER_ENV,
-    PLACEHOLDER_WORKDIR,
-    HarnessAbortError,
-    HarnessConfig,
-    _as_argv,
-    _expand_env_refs,
-    _known_tools,
-    _profile_list_cursor,
-    _profile_protection_probe,
-    _protect_server_profile,
-    _redacted_server_env,
-    _validated_profile_page,
-    allowed_tools,
-    render_argv,
-    write_mcp_config,
-)
-from ai_e2e_feedback import (
-    _CODE_MODE_TOOL_PATH_MARKERS,
-    _LAZY_REGISTRATION_MARKERS,
-    _PROVIDER_OUTAGE_MARKERS,
-    _PROVIDER_STREAM_MARKERS,
-    PROVIDER_OUTAGE_STEPS,
-    TRANSIENT_ATTEMPTS,
-    _actor_read_the_instrument,
-    _client_reported_errors,
-    _extract_error_events,
-    _feedback_block,
-    _provider_outage,
-    _summarize_calls,
-    _transient_actor_failure,
-)
-from ai_e2e_measure import (
-    MeasureClient,
-    _all_profile_ids,
-    _created_ids_from_records,
-    _deletable_by_this_run,
-    _ensure_plot_profile,
-    _harness_delete_profile,
-    _harness_provision_profile,
-    _mcp_call,
-    _never_delete_ids,
-    _profile_gone,
-    _profile_lifecycle_call,
-    _progress,
-    _proven_created_id,
-    _self_heal_profile,
-    _sweep_stray_profiles,
-)
-from ai_e2e_reporting import (
-    _EXPECTED_CALL_MODES,
-    _SCHEMA_REJECTION,
-    _UPSTREAM_STATUS,
-    _failure_modes,
-    render_text_report,
-    summarize_reports,
-    write_report,
-    write_skip_report,
-)
-from ai_e2e_task import (
-    TaskTargets,
-)
+if TYPE_CHECKING:
+    from scripts.ai_e2e_actor import (
+        ActorRun,
+        ToolCall,
+        _collect_streams,
+        _flatten_text,
+        _kill_process_group,
+        _suppress,
+        _tool_event_name,
+        parse_actor_events,
+        run_actor,
+    )
+    from scripts.ai_e2e_checklist import (
+        _ANALYTICS_TOOLS,
+        _LIST_TOOLS,
+        _SETTINGS_OPS,
+        ANY_PROFILE,
+        CALL_LOG_NAME,
+        PLOT_PROFILE,
+        PROFILE_CREATE_STEP,
+        PROFILE_DELETE_STEP,
+        Step,
+        StepRangeError,
+        _answered,
+        _call_label,
+        _endpoint,
+        _entry_bounds,
+        _expect,
+        _expect_label,
+        _expect_local,
+        _expected_call_ok,
+        _identifiers_from_answers,
+        _read_new_calls,
+        _server_calls_text,
+        _spec_endpoints,
+        _step_position,
+        _step_prompt,
+        _walk_identifiers,
+        needs_harness_setup,
+        needs_harness_teardown,
+        render_step_catalog,
+        select_steps,
+    )
+    from scripts.ai_e2e_config import (
+        _BUILTIN_TOOLS,
+        _ENV_REF,
+        _MAX_PROFILE_PAGES,
+        DEFAULT_HARNESS_COMMAND,
+        DEFAULT_SERVER,
+        ENV_REF_API_KEY,
+        PLACEHOLDER_CONFIG_FILE,
+        PLACEHOLDER_MODEL,
+        PLACEHOLDER_PROMPT,
+        PLACEHOLDER_SERVER_COMMAND,
+        PLACEHOLDER_SERVER_ENV,
+        PLACEHOLDER_WORKDIR,
+        HarnessAbortError,
+        HarnessConfig,
+        _as_argv,
+        _expand_env_refs,
+        _known_tools,
+        _profile_list_cursor,
+        _profile_protection_probe,
+        _protect_server_profile,
+        _redacted_server_env,
+        _validated_profile_page,
+        allowed_tools,
+        render_argv,
+        write_mcp_config,
+    )
+    from scripts.ai_e2e_feedback import (
+        _CODE_MODE_TOOL_PATH_MARKERS,
+        _LAZY_REGISTRATION_MARKERS,
+        _PROVIDER_OUTAGE_MARKERS,
+        _PROVIDER_STREAM_MARKERS,
+        PROVIDER_OUTAGE_STEPS,
+        TRANSIENT_ATTEMPTS,
+        _actor_read_the_instrument,
+        _client_reported_errors,
+        _extract_error_events,
+        _feedback_block,
+        _provider_outage,
+        _summarize_calls,
+        _transient_actor_failure,
+    )
+    from scripts.ai_e2e_measure import (
+        MeasureClient,
+        _all_profile_ids,
+        _created_ids_from_records,
+        _deletable_by_this_run,
+        _ensure_plot_profile,
+        _harness_delete_profile,
+        _harness_provision_profile,
+        _mcp_call,
+        _never_delete_ids,
+        _profile_gone,
+        _profile_lifecycle_call,
+        _progress,
+        _proven_created_id,
+        _self_heal_profile,
+        _sweep_stray_profiles,
+    )
+    from scripts.ai_e2e_reporting import (
+        _EXPECTED_CALL_MODES,
+        _SCHEMA_REJECTION,
+        _UPSTREAM_STATUS,
+        _failure_modes,
+        render_text_report,
+        summarize_reports,
+        write_report,
+        write_skip_report,
+    )
+    from scripts.ai_e2e_task import (
+        TaskTargets,
+    )
+else:
+    from ai_e2e_actor import (
+        ActorRun,
+        ToolCall,
+        _collect_streams,
+        _flatten_text,
+        _kill_process_group,
+        _suppress,
+        _tool_event_name,
+        parse_actor_events,
+        run_actor,
+    )
+    from ai_e2e_checklist import (
+        _ANALYTICS_TOOLS,
+        _LIST_TOOLS,
+        _SETTINGS_OPS,
+        ANY_PROFILE,
+        CALL_LOG_NAME,
+        PLOT_PROFILE,
+        PROFILE_CREATE_STEP,
+        PROFILE_DELETE_STEP,
+        Step,
+        StepRangeError,
+        _answered,
+        _call_label,
+        _endpoint,
+        _entry_bounds,
+        _expect,
+        _expect_label,
+        _expect_local,
+        _expected_call_ok,
+        _identifiers_from_answers,
+        _read_new_calls,
+        _server_calls_text,
+        _spec_endpoints,
+        _step_position,
+        _step_prompt,
+        _walk_identifiers,
+        needs_harness_setup,
+        needs_harness_teardown,
+        render_step_catalog,
+        select_steps,
+    )
+    from ai_e2e_config import (
+        _BUILTIN_TOOLS,
+        _ENV_REF,
+        _MAX_PROFILE_PAGES,
+        DEFAULT_HARNESS_COMMAND,
+        DEFAULT_SERVER,
+        ENV_REF_API_KEY,
+        PLACEHOLDER_CONFIG_FILE,
+        PLACEHOLDER_MODEL,
+        PLACEHOLDER_PROMPT,
+        PLACEHOLDER_SERVER_COMMAND,
+        PLACEHOLDER_SERVER_ENV,
+        PLACEHOLDER_WORKDIR,
+        HarnessAbortError,
+        HarnessConfig,
+        _as_argv,
+        _expand_env_refs,
+        _known_tools,
+        _profile_list_cursor,
+        _profile_protection_probe,
+        _protect_server_profile,
+        _redacted_server_env,
+        _validated_profile_page,
+        allowed_tools,
+        render_argv,
+        write_mcp_config,
+    )
+    from ai_e2e_feedback import (
+        _CODE_MODE_TOOL_PATH_MARKERS,
+        _LAZY_REGISTRATION_MARKERS,
+        _PROVIDER_OUTAGE_MARKERS,
+        _PROVIDER_STREAM_MARKERS,
+        PROVIDER_OUTAGE_STEPS,
+        TRANSIENT_ATTEMPTS,
+        _actor_read_the_instrument,
+        _client_reported_errors,
+        _extract_error_events,
+        _feedback_block,
+        _provider_outage,
+        _summarize_calls,
+        _transient_actor_failure,
+    )
+    from ai_e2e_measure import (
+        MeasureClient,
+        _all_profile_ids,
+        _created_ids_from_records,
+        _deletable_by_this_run,
+        _ensure_plot_profile,
+        _harness_delete_profile,
+        _harness_provision_profile,
+        _mcp_call,
+        _never_delete_ids,
+        _profile_gone,
+        _profile_lifecycle_call,
+        _progress,
+        _proven_created_id,
+        _self_heal_profile,
+        _sweep_stray_profiles,
+    )
+    from ai_e2e_reporting import (
+        _EXPECTED_CALL_MODES,
+        _SCHEMA_REJECTION,
+        _UPSTREAM_STATUS,
+        _failure_modes,
+        render_text_report,
+        summarize_reports,
+        write_report,
+        write_skip_report,
+    )
+    from ai_e2e_task import (
+        TaskTargets,
+    )
 
 __all__ = [
     "ANY_PROFILE",
@@ -525,10 +646,16 @@ def main(argv: list[str] | None = None) -> int:
 # the siblings would never see. Register this copy under its real name first.
 if __name__ == "__main__":
     sys.modules.setdefault("ai_e2e_harness", sys.modules[__name__])
-import ai_e2e_cli as _cli
-import ai_e2e_run as _run
-import ai_e2e_steps as _steps
-import ai_e2e_verify as _verify
+if TYPE_CHECKING:
+    from scripts import ai_e2e_cli as _cli
+    from scripts import ai_e2e_run as _run
+    from scripts import ai_e2e_steps as _steps
+    from scripts import ai_e2e_verify as _verify
+else:
+    import ai_e2e_cli as _cli
+    import ai_e2e_run as _run
+    import ai_e2e_steps as _steps
+    import ai_e2e_verify as _verify
 
 if __name__ == "__main__":
     raise SystemExit(main())

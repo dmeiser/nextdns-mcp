@@ -365,7 +365,7 @@ def _registry_for_spec(spec: dict[str, Any]) -> Registry[Any]:
     global _spec_registry_memo
     if _spec_registry_memo is not None and _spec_registry_memo[0] is spec:
         return _spec_registry_memo[1]
-    resource: Resource[Any] = Resource(contents=spec, specification=DRAFT202012)
+    resource: Resource[Any] = DRAFT202012.create_resource(contents=spec)
     registry: Registry[Any] = Registry().with_resource(_DOC_URI, resource)
     _spec_registry_memo = (spec, registry)
     return registry

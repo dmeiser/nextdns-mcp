@@ -20,19 +20,32 @@ import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ai_e2e_common import _content_texts
-from ai_e2e_config import (
-    PLACEHOLDER_CONFIG_FILE,
-    PLACEHOLDER_MODEL,
-    PLACEHOLDER_PROMPT,
-    PLACEHOLDER_SERVER_COMMAND,
-    PLACEHOLDER_SERVER_ENV,
-    PLACEHOLDER_WORKDIR,
-    HarnessConfig,
-    _redacted_server_env,
-)
+if TYPE_CHECKING:
+    from scripts.ai_e2e_common import _content_texts
+    from scripts.ai_e2e_config import (
+        PLACEHOLDER_CONFIG_FILE,
+        PLACEHOLDER_MODEL,
+        PLACEHOLDER_PROMPT,
+        PLACEHOLDER_SERVER_COMMAND,
+        PLACEHOLDER_SERVER_ENV,
+        PLACEHOLDER_WORKDIR,
+        HarnessConfig,
+        _redacted_server_env,
+    )
+else:
+    from ai_e2e_common import _content_texts
+    from ai_e2e_config import (
+        PLACEHOLDER_CONFIG_FILE,
+        PLACEHOLDER_MODEL,
+        PLACEHOLDER_PROMPT,
+        PLACEHOLDER_SERVER_COMMAND,
+        PLACEHOLDER_SERVER_ENV,
+        PLACEHOLDER_WORKDIR,
+        HarnessConfig,
+        _redacted_server_env,
+    )
 
 
 @dataclass

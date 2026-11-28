@@ -11,7 +11,7 @@ SPDX-License-Identifier: MIT
 import inspect
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -42,7 +42,7 @@ def _fake_api(payload: dict[str, Any], calls: list[Any]):
 @pytest.fixture
 def routes() -> dict[str, Any]:
     """Every offerable route, by operationId."""
-    return {route.operation_id: route for route in spec_tools.spec_routes()}
+    return {cast(str, route.operation_id): route for route in spec_tools.spec_routes()}
 
 
 class TestGeneratedCatalog:

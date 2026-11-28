@@ -25,7 +25,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Self, cast
 
 import httpx
 import pytest
@@ -94,7 +94,9 @@ class _FakeResponse:
             # Faithful to streaming httpx: the error carries the *streaming*
             # response (body still unread), which is the shape that used to
             # crash the payload builder with ResponseNotRead.
-            raise httpx.HTTPStatusError(f"upstream said {self.status_code}", request=self.request, response=self)
+            raise httpx.HTTPStatusError(
+                f"upstream said {self.status_code}", request=self.request, response=cast(httpx.Response, self)
+            )
 
     async def aiter_bytes(self) -> AsyncIterator[bytes]:
         for chunk in self._chunks:
@@ -1045,7 +1047,7 @@ class _BlockingRawSink(io.RawIOBase):
 
     def open_over(self, fd: int, *args: Any, **kwargs: Any) -> io.BufferedWriter:
         self._fd = fd
-        return io.BufferedWriter(self, buffer_size=_SINK_BUFFER_BYTES)
+        return io.BufferedWriter(cast(Any, self), buffer_size=_SINK_BUFFER_BYTES)
 
     def writable(self) -> bool:
         return True
@@ -1053,7 +1055,7 @@ class _BlockingRawSink(io.RawIOBase):
     def readable(self) -> bool:
         return False
 
-    def write(self, view: memoryview) -> int:
+    def write(self, view: Any) -> int:
         if not self.raw_write_started.is_set():
             self.raw_write_started.set()
             self._released.wait(_RELEASE_SECONDS)

@@ -11,8 +11,12 @@ Split out of ``ai_e2e_harness.py``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import ai_e2e_common as common
+if TYPE_CHECKING:
+    from scripts import ai_e2e_common as common
+else:
+    import ai_e2e_common as common
 
 
 @dataclass

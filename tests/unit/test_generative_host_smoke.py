@@ -16,6 +16,7 @@ Requires the Deno binary (the Prefab sandbox backend); skipped without it.
 """
 
 import shutil
+from typing import Any
 
 import pytest
 
@@ -68,6 +69,7 @@ async def test_host_smoke_renderer_resource_advertises_csp() -> None:
     """The renderer resource needs no external origin: Python executes server-side."""
     resource = _build_renderer_resource(_renderer_csp())
     assert resource.mime_type == "text/html;profile=mcp-app"
+    assert resource.meta is not None
     csp = resource.meta["ui"]["csp"]
     assert csp == {
         "resourceDomains": [],
@@ -141,17 +143,17 @@ async def test_host_smoke_rejects_oversized_result_during_read(monkeypatch) -> N
         JSONDecodeError = real_json.JSONDecodeError
 
         @staticmethod
-        def dumps(*args: object, **kwargs: object) -> str:
+        def dumps(*args: Any, **kwargs: Any) -> str:
             return real_json.dumps(*args, **kwargs)
 
         @staticmethod
-        def loads(data: bytes, *args: object, **kwargs: object) -> object:
+        def loads(data: bytes, *args: Any, **kwargs: Any) -> Any:
             decoded_line_sizes.append(len(data))
             return real_json.loads(data, *args, **kwargs)
 
     real_from_json = prefab_app.PrefabApp.from_json
 
-    def _recording_from_json(wire: object) -> object:
+    def _recording_from_json(wire: Any) -> Any:
         validated_wire_sizes.append(len(real_json.dumps(wire)))
         return real_from_json(wire)
 

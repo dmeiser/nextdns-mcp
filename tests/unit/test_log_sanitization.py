@@ -16,6 +16,7 @@ import io
 import logging
 import sys
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import httpx
@@ -27,6 +28,9 @@ from nextdns_mcp.constants import CONTROL_CHARS_PATTERN, escape_control_chars
 from nextdns_mcp.logging_config import SanitizingFormatter, configure_logging
 from nextdns_mcp.relaxation import StripExtraFieldsMiddleware
 from nextdns_mcp.tools import doh, plots
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
 
 # What a caller can put into a profile id, a URL path, or a tool name: a record
 # break that forges a complete CRITICAL line, and an ANSI escape that repaints
@@ -289,16 +293,20 @@ class TestCitedCallSites:
             assert not CONTROL_CHARS_PATTERN.search(msg)
 
     @pytest.mark.asyncio
-    async def test_relaxation_failure_logs_an_escaped_tool_name(self, caplog: pytest.LogCaptureFixture) -> None:
+    async def test_relaxation_failure_logs_an_escaped_tool_name(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         middleware = StripExtraFieldsMiddleware()
 
         async def failing_schema_fetch(*args: object) -> dict[str, object]:
             raise RuntimeError("could not read the parameter schema")
 
-        middleware._tool_parameters = failing_schema_fetch
+        monkeypatch.setattr(middleware, "_tool_parameters", failing_schema_fetch)
 
         with caplog.at_level(logging.ERROR, logger="nextdns_mcp.relaxation"), pytest.raises(ToolError):
-            await middleware._prepare_arguments(SimpleNamespace(), f"getProfile{_FORGED_LINE}", {})
+            await middleware._prepare_arguments(
+                cast("FastMCP[Any]", SimpleNamespace()), f"getProfile{_FORGED_LINE}", {}
+            )
 
         messages = [record.getMessage() for record in caplog.records]
         assert any("Failed to prepare arguments for tool 'getProfile\\r\\n" in msg for msg in messages)

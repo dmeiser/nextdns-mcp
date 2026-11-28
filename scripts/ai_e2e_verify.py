@@ -18,10 +18,14 @@ turn a typo such as ``logs_bogus`` into the ``logs_clear`` branch — a live
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import ai_e2e_common as common
-import ai_e2e_harness as harness
+if TYPE_CHECKING:
+    from scripts import ai_e2e_common as common
+    from scripts import ai_e2e_harness as harness
+else:
+    import ai_e2e_common as common
+    import ai_e2e_harness as harness
 
 # The verifier names each family below implements. The dispatcher matches these
 # exactly: an unknown name must reach the unknown-verifier answer, never a

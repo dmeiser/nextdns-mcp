@@ -16,19 +16,44 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 
-import ai_e2e_common as common
-from ai_e2e_checklist import _endpoint
-from ai_e2e_common import (
-    ABSENT,
-    INDETERMINATE,
-    PRESENT,
-    _content_texts,
-    _unwrap_id,
-)
-from ai_e2e_config import _MAX_PROFILE_PAGES, HarnessAbortError, HarnessConfig, _expand_env_refs, _profile_list_cursor
-from ai_e2e_task import TaskTargets
+if TYPE_CHECKING:
+    from scripts import ai_e2e_common as common
+    from scripts.ai_e2e_checklist import _endpoint
+    from scripts.ai_e2e_common import (
+        ABSENT,
+        INDETERMINATE,
+        PRESENT,
+        _content_texts,
+        _unwrap_id,
+    )
+    from scripts.ai_e2e_config import (
+        _MAX_PROFILE_PAGES,
+        HarnessAbortError,
+        HarnessConfig,
+        _expand_env_refs,
+        _profile_list_cursor,
+    )
+    from scripts.ai_e2e_task import TaskTargets
+else:
+    import ai_e2e_common as common
+    from ai_e2e_checklist import _endpoint
+    from ai_e2e_common import (
+        ABSENT,
+        INDETERMINATE,
+        PRESENT,
+        _content_texts,
+        _unwrap_id,
+    )
+    from ai_e2e_config import (
+        _MAX_PROFILE_PAGES,
+        HarnessAbortError,
+        HarnessConfig,
+        _expand_env_refs,
+        _profile_list_cursor,
+    )
+    from ai_e2e_task import TaskTargets
 
 
 class MeasureClient:
@@ -153,7 +178,7 @@ async def _all_profile_rows(m: MeasureClient) -> list[Any] | None:
         rows.extend(page_rows)
         body = page.get("body") if isinstance(page, dict) else None
         try:
-            cursor = _profile_list_cursor(body)
+            cursor = _profile_list_cursor(cast("dict[str, Any]", body))
         except HarnessAbortError:
             # A malformed cursor (present, not a non-empty string) is fatal to
             # the startup probe but only a failed page here: mid-run it must

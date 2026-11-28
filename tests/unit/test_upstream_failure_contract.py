@@ -479,6 +479,7 @@ class TestSharedAnalyticsPayloadContract:
         )
 
         await dashboard_module._fetch_analytics_payload("abc123", "destinations")
+        assert dashboard_shared.await_args is not None
         assert dashboard_shared.await_args.kwargs["max_response_bytes"] == dashboard_module.MAX_DASHBOARD_RESPONSE_BYTES
 
         assert await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", {}) == (

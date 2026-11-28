@@ -13,10 +13,14 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import ai_e2e_harness as harness
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from scripts import ai_e2e_harness as harness
+else:
+    import ai_e2e_harness as harness
 
 
 def build_parser() -> argparse.ArgumentParser:

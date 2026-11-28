@@ -86,7 +86,7 @@ class ReleaseJob:
 
     def version_edit(self) -> Step | None:
         """The step that rewrites the version in the non-lockfile files."""
-        return self.first(lambda s: bool(s.run) and "re.sub(" in s.run and "pyproject.toml" in s.run)
+        return self.first(lambda s: s.run is not None and "re.sub(" in s.run and "pyproject.toml" in s.run)
 
     def lock_refresh(self) -> Step | None:
         """The first step that runs ``uv lock`` in a mode that *writes* it.
@@ -95,11 +95,14 @@ class ReleaseJob:
         and does not count as a refresh.
         """
         return self.first(
-            lambda s: bool(s.run) and any("--check" not in m.group("flags").split() for m in _UV_LOCK.finditer(s.run))
+            lambda s: (
+                s.run is not None
+                and any("--check" not in (m.group("flags") or "").split() for m in _UV_LOCK.finditer(s.run))
+            )
         )
 
     def commit(self) -> Step | None:
-        return self.first(lambda s: bool(s.run) and "git commit" in s.run)
+        return self.first(lambda s: s.run is not None and "git commit" in s.run)
 
 
 def load_release_job(path: Path, job_id: str) -> ReleaseJob:
