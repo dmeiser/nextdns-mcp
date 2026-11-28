@@ -7,7 +7,7 @@ the call the caller made: name resolution (from a search answer, a mistyped
 name, or an already-exact one), argument lifting, and the write refusals.
 The transform owns the synthetic pair's own descriptions.
 
-The read/write classification of a name (:func:`_is_write_tool`) lives here
+The read/write classification of a name (:func:`is_write_tool`) lives here
 too, because the refusals are what make it a fact rather than a heuristic: a
 re-target is kept inside the reads only if "write" is decided from the route
 map, not from the shape of a name. The transform's full-catalog fallback sorts
@@ -59,7 +59,7 @@ def _annotation_says_write(tool: Any) -> bool:
     return getattr(getattr(tool, "annotations", None), "read_only_hint", None) is False
 
 
-def _is_write_tool(name: str, endpoints: Mapping[str, tuple[str, str]] | None, tool: Any = None) -> bool:
+def is_write_tool(name: str, endpoints: Mapping[str, tuple[str, str]] | None, tool: Any = None) -> bool:
     """Whether calling ``name`` changes something: the endpoint map first, then the tool.
 
     The map is the fact of what a spec route executes. For a name the map does
@@ -494,7 +494,7 @@ class CallToolShapeMiddleware(Middleware):
 
     def _loose_write_refused(self, resolved: str, by_name: dict[str, Tool], entry: tuple[str, Tool]) -> bool:
         """Whether a loosely matched name landed on a write operation."""
-        return resolved not in by_name and _is_write_tool(entry[0], self._endpoints, entry[1])
+        return resolved not in by_name and is_write_tool(entry[0], self._endpoints, entry[1])
 
     def _refuse_ambiguous_write(self, supplied: Any, by_name: Mapping[str, Tool]) -> None:
         """Refuse a multi-entry answer whose head is a write; resolve everything else.
@@ -509,7 +509,7 @@ class CallToolShapeMiddleware(Middleware):
             return
         candidates = _named_entries(supplied)
         head = candidates[0] if candidates else ""
-        if len(candidates) > 1 and _is_write_tool(head, self._endpoints, by_name.get(head)):
+        if len(candidates) > 1 and is_write_tool(head, self._endpoints, by_name.get(head)):
             raise ToolError(_ambiguous_write_message(candidates))
 
     @staticmethod

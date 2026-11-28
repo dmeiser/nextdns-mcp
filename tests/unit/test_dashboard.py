@@ -287,14 +287,14 @@ class TestDashboardFetchAndValidation:
     @pytest.mark.asyncio
     async def test_fetch_analytics_payload_error_classification(self, monkeypatch):
         monkeypatch.setattr(
-            "nextdns_mcp.transport._api_request_payload",
+            "nextdns_mcp.transport.api_request_payload",
             AsyncMock(return_value={"code": "http_error", "error": "upstream"}),
         )
         payload, err = await data_mod._fetch_analytics_payload("p1", "status")
         assert payload is None and err["code"] == "http_error"
 
         monkeypatch.setattr(
-            "nextdns_mcp.transport._api_request_payload", AsyncMock(return_value={"data": [{"ok": True}]})
+            "nextdns_mcp.transport.api_request_payload", AsyncMock(return_value={"data": [{"ok": True}]})
         )
         payload, err = await data_mod._fetch_analytics_payload("p1", "status")
         assert payload == {"data": [{"ok": True}]} and err is None
@@ -303,7 +303,7 @@ class TestDashboardFetchAndValidation:
     async def test_fetch_analytics_payload_caps_series_and_bounded_endpoints(self, monkeypatch):
         """`;series` runs under the series ceiling, every other endpoint under the dashboard cap."""
         stub = AsyncMock(return_value={"data": []})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", stub)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", stub)
 
         payload, err = await data_mod._fetch_analytics_payload("p1", "status")
         assert payload == {"data": []} and err is None

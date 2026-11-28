@@ -28,7 +28,7 @@ from fastmcp.utilities.mime import UI_MIME_TYPE
 from prefab_ui.app import PrefabApp
 from prefab_ui.renderer import get_generative_renderer_html
 
-from .chart_placement import _validate_chart_placement
+from .chart_placement import validate_chart_placement
 from .errors import ErrorCode, error_payload
 from .generative_sandbox import (
     EXECUTION_TIMEOUT,
@@ -170,7 +170,7 @@ def _validated_payload(code: str, data: str | dict[str, Any] | None) -> dict[str
     """Apply the code and data guards and return the parsed data payload."""
     if len(code.encode("utf-8")) > MAX_CODE_BYTES:
         raise ValueError(f"code exceeds maximum size of {MAX_CODE_BYTES} bytes")
-    _validate_chart_placement(code)
+    validate_chart_placement(code)
     if isinstance(data, str):
         return _guard_string_data(data)
     return _guard_object_data(data)

@@ -788,7 +788,7 @@ class TestPlotAnalyticsSeriesImpl:
     async def test_http_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         wrapped = AsyncMock(return_value={"error": "boom", "code": "http_error"})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "http_error"
 
@@ -796,7 +796,7 @@ class TestPlotAnalyticsSeriesImpl:
     async def test_unexpected_error_returns_payload(self, clean_env, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         wrapped = AsyncMock(return_value={"error": "boom", "code": "internal_error"})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
         result = await plots_module._plot_analytics_series_impl("status")
         assert result["code"] == "internal_error"
 
@@ -901,7 +901,7 @@ class TestPlotAnalyticsToolWrapper:
     async def test_plot_analytics_wrapper_with_default_profile(self, clean_env, monkeypatch, mock_api_client):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         wrapped = AsyncMock(return_value={"error": "boom", "code": "http_error"})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
         result = await server.plotAnalytics("status")
         assert result["code"] == "http_error"
 
@@ -971,7 +971,7 @@ class TestPlotFetchUsesSharedWrapper:
 
     Before the fix ``_fetch_series_payload`` called the raw
     ``client.api_client.get(...)`` directly, bypassing the transport's payload
-    wrapper (``_api_request_payload``) and its error handling/logging - a
+    wrapper (``api_request_payload``) and its error handling/logging - a
     parallel wrapper of its own stayed a second copy of that contract. (and any future retry/rate-limit/telemetry). These
     mock-level assertions pin the wrapped path so a raw-client regression is
     caught: the shared wrapper is awaited and the raw transport is not.
@@ -982,7 +982,7 @@ class TestPlotFetchUsesSharedWrapper:
         self, clean_env, monkeypatch, mock_api_client, sample_series_payload
     ):
         wrapped = AsyncMock(return_value=sample_series_payload)
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
 
         params = {"from": "-1d", "to": "now", "interval": 3600}
         payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", params)
@@ -998,7 +998,7 @@ class TestPlotFetchUsesSharedWrapper:
     @pytest.mark.asyncio
     async def test_fetch_series_payload_surfaces_wrapper_error(self, clean_env, monkeypatch, mock_api_client):
         wrapped = AsyncMock(return_value={"error": "upstream failure", "code": "http_error", "status_code": 500})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
 
         payload, error = await plots_module._fetch_series_payload("/profiles/abc123/analytics/status;series", {})
 
@@ -1013,7 +1013,7 @@ class TestPlotFetchUsesSharedWrapper:
         # Empty series so the impl returns before rendering; the fetch has already
         # run, which is what we are asserting on.
         wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
 
         # Drive the impl end-to-end; the fetch must go through the shared
         # wrapper rather than the raw client.
@@ -1045,7 +1045,7 @@ class TestRangeReportingAndProfileGuard:
         monkeypatch.setattr(utils_module, "resolve_profile_id", lambda profile_id, **kwargs: (None, None))
 
         wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
 
         result = await plots_module._plot_analytics_series_impl("status", profile_id="abc123")
         assert result["code"] == "internal_error"

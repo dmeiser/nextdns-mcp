@@ -42,6 +42,6 @@ def describe(route: HTTPRoute) -> str:
     return _truncate_description(text, DESCRIPTION_MAX_CHARS)
 
 
-def _required(route: HTTPRoute) -> list[str]:
+def required(route: HTTPRoute) -> list[str]:
     """The arguments the published schema marks required, in the caller's terms."""
     return schema_required(route.flat_param_schema)

@@ -17,7 +17,7 @@ payload shape the server documents (the ``errors`` package):
 - a 2xx that carries an error document instead of a payload is normalized into
   the same typed failure, because returning it as data would make an error
   look like a success;
-- ``_api_request_payload`` is the one place that turns those raised failures -
+- ``api_request_payload`` is the one place that turns those raised failures -
   including the ACL denial - into the standardized payloads;
 - a 404 under ``/profiles/<id>`` gets the hint naming both ids it could be
   blaming, because upstream does not say which one is wrong.
@@ -44,7 +44,7 @@ from typing import Any
 import httpx
 
 from . import client
-from .client import AccessDeniedError, _log_safe_error, _redacted
+from .client import AccessDeniedError, log_safe_error, redacted
 from .errors import (
     ErrorCode,
     NextDNSAuthError,
@@ -116,11 +116,11 @@ async def _api_request(
     all other failures raise a ``NextDNSError`` subclass with status_code and
     response_body attributes, so callers can implement retry-with-backoff for
     429 or circuit-breaking for 5xx. Callers that want payloads await
-    ``_api_request_payload``, where the denial becomes
+    ``api_request_payload``, where the denial becomes
     ``{"error": ..., "code": "read_access_denied" | "write_access_denied" | "access_denied", "status_code": 403, ...}``.
     ``NextDNSError`` is the base exception, with subclasses ``NextDNSAuthError`` (401/403), ``NextDNSRateLimitError`` (429), and ``NextDNSServerError`` (5xx).
     For non-HTTP failures, a ``NextDNSError`` is raised with status_code=None.
-    Tools that report failures as payloads should await ``_api_request_payload``,
+    Tools that report failures as payloads should await ``api_request_payload``,
     which applies this conversion.
 
     ``max_response_bytes`` caps the response body at the caller's ceiling: the
@@ -136,8 +136,8 @@ async def _api_request(
         # Raised by the ACL layer before any network request. Logged redacted
         # here and re-raised like every other failure; a real upstream 403
         # (raise_for_status) still takes the httpx.HTTPError branch, and the
-        # payload translation lives in _api_request_payload.
-        logger.warning(f"Access denied in {method} {_redacted(url)}: {_log_safe_error(e)}")
+        # payload translation lives in api_request_payload.
+        logger.warning(f"Access denied in {method} {redacted(url)}: {log_safe_error(e)}")
         raise
     except NextDNSError:
         # Already typed (including the 2xx-with-error-document case in
@@ -145,10 +145,10 @@ async def _api_request(
         # status/response.
         raise
     except httpx.HTTPError as e:
-        logger.error(f"HTTP error in {method} {_redacted(url)}: {_log_safe_error(e)}")
+        logger.error(f"HTTP error in {method} {redacted(url)}: {log_safe_error(e)}")
         raise _typed_http_error(f"HTTP error in {method} {url}: {e}", *_http_error_parts(e)) from e
     except Exception as e:
-        logger.error(f"Unexpected error in {method} {_redacted(url)}: {_log_safe_error(e)}")
+        logger.error(f"Unexpected error in {method} {redacted(url)}: {log_safe_error(e)}")
         raise NextDNSError(f"Unexpected error in {method} {url}: {e}", status_code=None) from e
 
 
@@ -301,7 +301,7 @@ def _typed_http_error(message: str, status_code: int | None, response_body: str 
     return NextDNSError(message, status_code=status_code, response_body=response_body)
 
 
-async def _api_request_payload(
+async def api_request_payload(
     method: str,
     url: str,
     params: dict[str, Any] | None = None,
@@ -330,7 +330,7 @@ async def _api_request_payload(
 
 
 def is_error_payload(payload: Any) -> bool:
-    """Say whether a payload from ``_api_request_payload`` is a typed failure.
+    """Say whether a payload from ``api_request_payload`` is a typed failure.
 
     The whole classification behind the ``(payload, error)`` convention the
     analytics tools use (AGENT.md, issue #181): a typed failure carries a
@@ -350,7 +350,7 @@ async def fetch_analytics_payload(
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Fetch an analytics payload and split success from typed failure.
 
-    Awaits ``_api_request_payload`` and classifies the result with
+    Awaits ``api_request_payload`` and classifies the result with
     ``is_error_payload``, returning ``(payload, None)`` on success and
     ``(None, error_payload)`` on a typed failure - the one place that shape is
     built. ``max_response_bytes`` is passed through unchanged, because the cap
@@ -360,7 +360,7 @@ async def fetch_analytics_payload(
     (``tools/dashboard/data.py``, issue #550). A caller that names no cap
     gets no cap.
     """
-    payload = await _api_request_payload("GET", url, params=params, max_response_bytes=max_response_bytes)
+    payload = await api_request_payload("GET", url, params=params, max_response_bytes=max_response_bytes)
     if is_error_payload(payload):
         return None, payload
     return payload, None

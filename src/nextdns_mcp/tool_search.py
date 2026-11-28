@@ -48,21 +48,21 @@ from .config import ConfigurationError
 from .tool_search_answer import (
     SEARCH_ANSWER_MAX_BYTES,
     SEARCH_FALLBACK_MAX_BYTES,
-    _budget_results,
-    _compact_entry,
-    _fallback_answer,
+    budget_results,
+    compact_entry,
+    fallback_answer,
 )
 from .tool_search_rank import (
-    _catalog_words_memo,
-    _CatalogWordMemos,
-    _CatalogWords,
-    _named_tools,
-    _rank_by_name_overlap,
-    _strip_scope_mentions,
-    _variant_words,
-    _words,
+    CatalogWordMemos,
+    CatalogWords,
+    catalog_words_memo,
+    comparable_words,
+    named_tools,
+    rank_by_name_overlap,
+    strip_scope_mentions,
+    variant_words,
 )
-from .tool_search_shape import _is_write_tool
+from .tool_search_shape import is_write_tool
 
 CATALOG_MAX_RESULTS = 6
 
@@ -140,21 +140,21 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         # name it does not carry - the three composite operations and the
         # generative-UI pair - is classified from its own readOnlyHint.
         self._endpoints: dict[str, tuple[str, str]] = dict(endpoints)
-        self._word_memos = _CatalogWordMemos()
+        self._word_memos = CatalogWordMemos()
         # tool name -> (fingerprint, pins, compacted payload, byte cost); see
         # _cached_compaction for why the key is the name and not the instance.
         self._compacted_cache: dict[str, tuple[tuple[Any, ...], tuple[Any, ...], dict[str, Any], int]] = {}
         self._synthetic_tools: dict[str, Tool] = {}
 
-    def _catalog_words(self, tools: Sequence[Tool]) -> _CatalogWords:
-        """The catalog's word structures, memoized by its tool names (see _catalog_words_memo)."""
-        return _catalog_words_memo(self._word_memos, tools)
+    def _catalog_words(self, tools: Sequence[Tool]) -> CatalogWords:
+        """The catalog's word structures, memoized by its tool names (see catalog_words_memo)."""
+        return catalog_words_memo(self._word_memos, tools)
 
     def _augment_query(self, query: str, variants: set[str]) -> str:
         """Widen a lexical query with the catalog's own other spellings.
 
         bm25 indexes raw text with no stemming, so the partner spellings ride
-        along as extra terms (see _variant_words). Without variants, the
+        along as extra terms (see variant_words). Without variants, the
         caller's query is exactly what was asked and stays untouched.
         """
         if not variants:
@@ -174,13 +174,13 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         # often points the ranking at the wrong tool.
         query = query[:512] if isinstance(query, str) else query
         catalog = self._catalog_words(tools)
-        stripped = _strip_scope_mentions(query, catalog.scope)
+        stripped = strip_scope_mentions(query, catalog.scope)
         # Only the scoring query widens; the name-inclusion below stays on the
         # caller's own words, which is what "named" has always meant. Shared
         # scope words are never widened - they name every tool at once.
         scored = self._augment_query(
             stripped,
-            _variant_words(stripped, catalog.raw_names, exclude=catalog.name_shared | catalog.vocab_shared),
+            variant_words(stripped, catalog.raw_names, exclude=catalog.name_shared | catalog.vocab_shared),
         )
         results = list(await super()._search(tools, scored) or [])
         # A tool whose own name carries the caller's word is never left out of
@@ -188,8 +188,8 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         # description gets longer: publishing the full docstrings once moved
         # the `doh` match off the tool named for it, and that tool dropped out
         # of the result set entirely.
-        words = _words(stripped)
-        named = _named_tools(
+        words = comparable_words(stripped)
+        named = named_tools(
             words,
             catalog.names,
             catalog.vocabulary,
@@ -208,7 +208,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
             # so a tool that runs code is never sorted in with the reads.
             results = sorted(
                 tools,
-                key=lambda t: (_is_write_tool(getattr(t, "name", ""), self._endpoints, t), getattr(t, "name", "")),
+                key=lambda t: (is_write_tool(getattr(t, "name", ""), self._endpoints, t), getattr(t, "name", "")),
             )
             # The fallback IS the catalog: an unmatchable query gets every tool
             # (reads first), not a six-entry sample - a small model that finds
@@ -221,7 +221,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
             fell_back = False
         merged = _merge_named_results(results, tools, named)
         shared = (catalog.name_shared, catalog.vocab_shared)
-        ranked = _rank_by_name_overlap(
+        ranked = rank_by_name_overlap(
             merged,
             stripped,
             catalog.names,
@@ -230,7 +230,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
             leading=catalog.leading,
             generic=catalog.generic_verbs,
         )
-        _fallback_answer.set(fell_back)
+        fallback_answer.set(fell_back)
         return ranked if fell_back else ranked[: self._max_results]
 
     def _make_search_tool(self) -> Tool:
@@ -283,11 +283,11 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         replaced paid a dict per kept entry per answer to fence only the top
         level of it.
         """
-        budget = SEARCH_FALLBACK_MAX_BYTES if _fallback_answer.get() else SEARCH_ANSWER_MAX_BYTES
+        budget = SEARCH_FALLBACK_MAX_BYTES if fallback_answer.get() else SEARCH_ANSWER_MAX_BYTES
         try:
-            return _budget_results([self._cached_compaction(tool) for tool in tools], budget)
+            return budget_results([self._cached_compaction(tool) for tool in tools], budget)
         finally:
-            _fallback_answer.set(False)
+            fallback_answer.set(False)
 
     def _cached_compaction(self, tool: Tool) -> tuple[dict[str, Any], int]:
         """One tool's compacted payload and byte cost, cached per tool name.
@@ -310,7 +310,7 @@ class FallbackBM25SearchTransform(BM25SearchTransform):
         fingerprint = _tool_fingerprint(tool)
         cached = self._compacted_cache.get(tool.name)
         if cached is None or cached[0] != fingerprint:
-            dumped, cost = _compact_entry(tool)
+            dumped, cost = compact_entry(tool)
             # The identity-compared fingerprint slots ride along as strong
             # references, so an id cannot be recycled under a live entry.
             pins = (
@@ -340,7 +340,7 @@ def _meta_key(meta: Mapping[str, Any] | None) -> str | None:
 
 
 def _tool_fingerprint(tool: Tool) -> tuple[Any, ...]:
-    """A cheap change-detector for the metadata ``_compact_entry`` renders.
+    """A cheap change-detector for the metadata ``compact_entry`` renders.
 
     Compares by IDENTITY the structures a shallow ``model_copy`` shares with
     the registered tool (the schemas, annotations, icons, execution and task

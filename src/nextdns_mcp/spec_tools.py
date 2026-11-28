@@ -13,14 +13,14 @@ id, the ``createProfile`` guard, delegation, the argument split, the schema chec
 series budget, the empty-write refusal, dispatch. The pieces are ``spec_routes``,
 ``spec_descriptions``, ``spec_arguments``, ``spec_validation`` and ``spec_series``.
 
-Only the transport is ours: calls go through ``transport._api_request_payload``, the
+Only the transport is ours: calls go through ``transport.api_request_payload``, the
 access-controlled client enforcing the profile allowlists, read-only mode and the
 protected-profile denylist, and answering failures with the server's typed payload rather
 than an HTTP status that discards the body. FastMCP's own transport bypasses that ACL
 layer and raises on non-2xx - the reason this module exists at all.
 
 The one operation performed here is ``downloadLogs``: following its signed-URL redirect
-safely lives in ``tools.logs``, so the tool hands off. ``_api_request_payload`` and
+safely lives in ``tools.logs``, so the tool hands off. ``api_request_payload`` and
 ``resolve_profile_id`` resolve from these globals, which the suite patches.
 """
 
@@ -38,18 +38,18 @@ from mcp.types import ToolAnnotations
 
 from .constants import PROFILE_ID_HINT
 from .errors import ErrorCode, error_payload
-from .spec_arguments import _PATH_PLACEHOLDER, _malformed_profile_id_payload, _unsafe_path_arguments, split_arguments
-from .spec_descriptions import DESCRIPTION_MAX_CHARS, _required, describe
+from .spec_arguments import PATH_PLACEHOLDER, malformed_profile_id_payload, split_arguments, unsafe_path_arguments
+from .spec_descriptions import DESCRIPTION_MAX_CHARS, describe, required
 from .spec_routes import SPEC_PATH, WITHHELD_OPERATIONS, endpoints_for_routes, load_spec, spec_routes, spec_tool_names
 from .spec_series import (
-    _capped_transport_kwargs,
-    _ceiling_measured_on_the_wire,
-    _series_budget_for_generated_call,
-    _series_refusal,
+    capped_transport_kwargs,
+    ceiling_measured_on_the_wire,
+    series_budget_for_generated_call,
+    series_refusal,
 )
-from .spec_validation import _normalized_for_validation, _schema_validation_payload
+from .spec_validation import normalized_for_validation, schema_validation_payload
 from .tools import logs as _logs
-from .transport import MAX_SERIES_RESPONSE_BYTES, _api_request_payload, is_error_payload
+from .transport import MAX_SERIES_RESPONSE_BYTES, api_request_payload, is_error_payload
 from .utils import resolve_profile_id
 
 # The generated surface's public names, unchanged by the split: the server,
@@ -99,7 +99,7 @@ class SpecApiTool(Tool):
     """One NextDNS API endpoint, published from the spec and executed through the ACL client.
 
     ``transport`` overrides the request function (the default, resolved as a
-    module global at call time, is ``_api_request_payload``); it exists so a
+    module global at call time, is ``api_request_payload``); it exists so a
     caller can inject a transport per tool instead of patching module state,
     while tests that do patch the module keep working.
     """
@@ -169,10 +169,10 @@ class SpecApiTool(Tool):
 
     def _request_refusal(self, args: dict[str, Any]) -> dict[str, Any] | None:
         """The payload when this call's path arguments must not be sent at all."""
-        unsafe = _unsafe_path_arguments(self._route, args)
+        unsafe = unsafe_path_arguments(self._route, args)
         if unsafe:
             return self._unsafe_path_payload(unsafe)
-        return _malformed_profile_id_payload(self._route, args)
+        return malformed_profile_id_payload(self._route, args)
 
     def _create_profile_guard(self) -> ToolResult | None:
         """Refuse createProfile when every writable profile is also protected."""
@@ -193,13 +193,13 @@ class SpecApiTool(Tool):
         return None
 
     async def _dispatch_rendered(self, path: str, query: dict[str, Any], body: Any, args: dict[str, Any]) -> ToolResult:
-        unfilled = _PATH_PLACEHOLDER.findall(path)
+        unfilled = PATH_PLACEHOLDER.findall(path)
         if unfilled:
             return ToolResult(structured_content=self._missing_payload(unfilled), is_error=True)
-        invalid = _schema_validation_payload(self._validator, self.name, _normalized_for_validation(self._route, args))
+        invalid = schema_validation_payload(self._validator, self.name, normalized_for_validation(self._route, args))
         if invalid is not None:
             return ToolResult(structured_content=invalid, is_error=True)
-        budget = _series_budget_for_generated_call(self._route, query)
+        budget = series_budget_for_generated_call(self._route, query)
         if budget is not None:
             return ToolResult(structured_content=budget, is_error=True)
         empty = self._empty_write_refusal(self._route.method, body)
@@ -227,10 +227,10 @@ class SpecApiTool(Tool):
         memory and is never JSON-decoded. An injected transport predating the
         cap keeps its legacy four-argument signature (see
         :func:`_transport_accepts_cap`) and is called the old way; either way
-        ``_series_refusal`` renders the ceiling as the typed series refusal.
+        ``series_refusal`` renders the ceiling as the typed series refusal.
         """
-        request = self._transport or _api_request_payload
-        transport_kwargs = _capped_transport_kwargs(self._route, request)
+        request = self._transport or api_request_payload
+        transport_kwargs = capped_transport_kwargs(self._route, request)
         payload = await request(
             self._route.method,
             path,
@@ -238,7 +238,7 @@ class SpecApiTool(Tool):
             json_body=body,
             **transport_kwargs,
         )
-        return self._wrap_call_result(payload, _ceiling_measured_on_the_wire(request, transport_kwargs))
+        return self._wrap_call_result(payload, ceiling_measured_on_the_wire(request, transport_kwargs))
 
     def _wrap_call_result(self, payload: Any, ceiling_measured_on_the_wire: bool = False) -> ToolResult:
         """Turn a transport payload into a typed ToolResult.
@@ -247,7 +247,7 @@ class SpecApiTool(Tool):
         ``;series`` body byte-for-byte as it arrived, which is what lets the
         serialized backstop stay out of a successful call's way.
         """
-        refused = _series_refusal(self._route, payload, ceiling_measured_on_the_wire)
+        refused = series_refusal(self._route, payload, ceiling_measured_on_the_wire)
         if refused is not None:
             return ToolResult(structured_content=refused, is_error=True)
         return ToolResult(structured_content=payload, is_error=is_error_payload(payload))
@@ -298,7 +298,7 @@ class SpecApiTool(Tool):
         return error_payload(
             ErrorCode.MISSING_REQUIRED_ARGUMENT,
             f"{self.name} needs {', '.join(missing)} for {self._route.method} {self._route.path}",
-            hint=hints.get(missing[0], "required by this endpoint: " + ", ".join(_required(self._route))),
+            hint=hints.get(missing[0], "required by this endpoint: " + ", ".join(required(self._route))),
         )
 
 

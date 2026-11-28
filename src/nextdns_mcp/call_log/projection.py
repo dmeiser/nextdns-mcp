@@ -53,7 +53,7 @@ def _project_value(value: Any, depth: int = 0) -> Any:
     return bound_json(value, _PROJECTION_BOUNDS, depth)[0]
 
 
-def _project_result(structured: Any) -> Any:
+def project_result(structured: Any) -> Any:
     """The bounded, still-structured form of a result for the log row.
 
     Keys a caller (or a harness) matches on survive - names, ids, statuses -
@@ -64,7 +64,7 @@ def _project_result(structured: Any) -> Any:
     return _project_value(structured)
 
 
-def _result_text(result: Any) -> str:
+def result_text(result: Any) -> str:
     """Bounded text form of a tool result, for matching read outcomes.
 
     Always valid JSON, even when bounded: a slice cut mid-document is what a
@@ -77,7 +77,7 @@ def _result_text(result: Any) -> str:
         # No sort_keys here: the row serializer in ``_append_row`` sorts the
         # whole row once, so sorting this intermediate dump would serialize
         # twice for nothing (same reasoning as the ``args`` column).
-        raw = json.dumps(_project_result(structured), default=str)
+        raw = json.dumps(project_result(structured), default=str)
         if len(raw) <= RESULT_CHARS:
             return raw
         # json.dumps of a string can double it (quote/backslash escaping), so

@@ -10,7 +10,7 @@ and the component types of a Prefab UI document. Reads the full payload
 
 from typing import Any
 
-# Dedicated bounded evidence (see ``_result_evidence``): how many id/name pairs
+# Dedicated bounded evidence (see ``result_evidence``): how many id/name pairs
 # one row may carry, and how long each field may be. An id or name over the cap
 # is an anomaly; 50 pairs covers every list this server publishes a budget for.
 EVIDENCE_MAX_ITEMS = 50
@@ -128,7 +128,7 @@ def _prefab_evidence(structured: dict[str, Any]) -> dict[str, Any]:
     return {"components": sorted(types)} if types else {}
 
 
-def _result_evidence(result: Any, write: bool) -> dict[str, Any]:
+def result_evidence(result: Any, write: bool) -> dict[str, Any]:
     """Identity facts lifted out of the FULL result, before any bounding.
 
     Bounded by construction, so a harness matching created-ids or id/name

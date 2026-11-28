@@ -24,7 +24,7 @@ from nextdns_mcp import chart_placement as chart_placement_module
 from nextdns_mcp import generative as generative_module
 from nextdns_mcp import generative_sandbox as sandbox_module
 from nextdns_mcp import lifespan as lifespan_module
-from nextdns_mcp.chart_placement import _validate_chart_placement
+from nextdns_mcp.chart_placement import validate_chart_placement
 from nextdns_mcp.generative import (
     MAX_CODE_BYTES,
     MAX_CONCURRENT_SANDBOXES,
@@ -71,7 +71,7 @@ def test_validate_chart_placement_rejects_charts_in_tabs():
     ]
     for code in bad_codes:
         with pytest.raises(ValueError, match="Recharts chart components"):
-            _validate_chart_placement(code)
+            validate_chart_placement(code)
 
 
 def test_validate_chart_placement_accepts_valid_code():
@@ -80,52 +80,52 @@ def test_validate_chart_placement_accepts_valid_code():
         "with Column():\n    PieChart(data=[])",
     ]
     for code in good_codes:
-        _validate_chart_placement(code)  # should not raise
+        validate_chart_placement(code)  # should not raise
 
 
 def test_chart_after_tab_block_is_accepted():
     """A dedented chart after a Tab block is not nested (false-rejection regression)."""
     code = "with Tab('Data'):\n    DataTable(columns=[], rows=[])\nAreaChart(data=[], series=[])\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_chart_in_card_after_tab_block_is_accepted():
     """A chart in a Card following a Tab block is not nested (false-rejection regression)."""
     code = "with Tab('Data'):\n    DataTable(columns=[], rows=[])\nwith Card():\n    AreaChart(data=[], series=[])\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_chart_before_tab_block_is_accepted():
     """A chart placed before any Tab block is not nested."""
     code = "AreaChart(data=[], series=[])\nwith Tab('Data'):\n    DataTable(columns=[], rows=[])\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_multiple_tab_blocks_without_charts_are_accepted():
     """Several chart-free Tab blocks must not trip the validator."""
     code = "".join(f"with Tab('T{i}'):\n    DataTable(columns=[], rows=[])\n" for i in range(5))
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_with_tabstrigger_chart_is_rejected():
     """A hallucinated TabsTrigger keeps its charts nested even though the prelude no longer aliases it."""
     code = "with TabsTrigger('Charts'):\n    AreaChart(data=[], series=[])\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_tab_functional_children_chart_is_rejected():
     """Functional Tab(children=[...]) nesting bypasses `with` matching."""
     code = "Tab(children=[AreaChart(data=[], series=[])])\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_tabstrigger_functional_children_chart_is_rejected():
     """Functional TabsTrigger(children=[...]) nesting is nested too."""
     code = "TabsTrigger(value='a', children=[LineChart(data=[], series=[])])\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_repeated_tab_blocks_scale_subquadratically(monkeypatch):
@@ -145,7 +145,7 @@ def test_repeated_tab_blocks_scale_subquadratically(monkeypatch):
 
         monkeypatch.setattr(chart_placement_module, "_node_visits", counting)
         code = "".join(f"with Tab('T{i}'):\n    pass\n" for i in range(blocks))
-        _validate_chart_placement(code)  # should not raise
+        validate_chart_placement(code)  # should not raise
         return examinations["n"]
 
     # The walk visits the Module root plus four nodes per Tab block (the
@@ -159,26 +159,26 @@ def test_repeated_tab_blocks_scale_subquadratically(monkeypatch):
 def test_with_alias_context_is_not_a_tab():
     """`with foo:` has a Name (not Call) context expr — charts inside are accepted."""
     code = "with foo:\n    AreaChart(data=[], series=[])\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_attribute_tab_call_is_not_a_tab():
     """`mod.Tab(...)` is an attribute call, not the bare Tab alias — accepted."""
     code = "with mod.Tab('Charts'):\n    AreaChart(data=[], series=[])\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_tab_positional_chart_arg_is_rejected():
     """A chart passed positionally to Tab(...) is still nested."""
     code = "Tab(AreaChart(data=[], series=[]))\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_bare_tab_call_without_chart_is_accepted():
     """A chart-free Tab(...) call leaves a later top-level chart alone."""
     code = "Tab('Data')\nAreaChart(data=[], series=[])\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_all_chart_types_in_tab_are_rejected():
@@ -196,212 +196,212 @@ def test_all_chart_types_in_tab_are_rejected():
     ):
         code = f"with Tab('Charts'):\n    {chart}(data=[], series=[])\n"
         with pytest.raises(ValueError, match="Recharts chart components"):
-            _validate_chart_placement(code)
+            validate_chart_placement(code)
 
 
 def test_chart_parent_tab_call_is_rejected():
     """A chart attaching to a Tab via parent= is nested even outside a with block."""
     code = "AreaChart(data=[], series=[], parent=Tab('Charts'))\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_chart_parent_tab_binding_is_rejected():
     """parent= referencing a name bound to a Tab call earlier is nested."""
     code = "t = Tab('Charts')\nAreaChart(data=[], series=[], parent=t)\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_walrus_tab_with_scope_is_rejected():
     """`with (t := Tab(...)):` still opens tab scope for its body."""
     code = "with (t := Tab('Charts')):\n    AreaChart(data=[], series=[])\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_walrus_tab_binding_parent_is_rejected():
     """A walrus-bound Tab referenced by a later parent= is nested."""
     code = "with (t := Tab('Charts')):\n    DataTable(columns=[], rows=[])\nAreaChart(data=[], series=[], parent=t)\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_with_as_tab_binding_parent_is_rejected():
     """`with Tab(...) as t` binds t, so a later parent=t is nested."""
     code = "with Tab('Charts') as t:\n    DataTable(columns=[], rows=[])\nAreaChart(data=[], series=[], parent=t)\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_annotated_tab_binding_parent_is_rejected():
     """An annotated assignment to a Tab call binds the name for parent=."""
     code = "t: Component = Tab('Charts')\nAreaChart(data=[], series=[], parent=t)\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_walrus_chart_call_without_tab_is_accepted():
     """A walrus-bound chart outside any tab stays accepted."""
     code = "(c := AreaChart(data=[], series=[]))\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_chart_parent_non_tab_binding_is_accepted():
     """parent= referencing a non-Tab container stays accepted."""
     code = "c = Card()\nAreaChart(data=[], series=[], parent=c)\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_chart_parent_before_tab_binding_is_accepted():
     """parent= naming a Tab bound only later stays accepted (source-order binding)."""
     code = "AreaChart(data=[], series=[], parent=t)\nt = Tab('Charts')\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_chart_in_card_attached_to_tab_is_rejected():
     """A container with parent=tab carries its children into the 0px tab panel."""
     code = "t = Tab('Charts')\nCard(parent=t, children=[LineChart(data=[], series=[])])\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_chart_in_with_card_attached_to_tab_is_rejected():
     """A `with Card(parent=tab)` body is inside the tab panel."""
     code = "t = Tab('Charts')\nwith Card(parent=t):\n    LineChart(data=[], series=[])\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_chart_in_card_attached_to_inline_tab_is_rejected():
     """A container's parent= need not go through a name."""
     code = "Card(parent=Tab('Charts'), children=[AreaChart(data=[], series=[])])\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_chart_in_tab_attached_container_after_children_keyword_is_rejected():
     """parent= is inspected regardless of its position among the keywords."""
     code = "t = Tab('Charts')\nCard(children=[AreaChart(data=[], series=[])], parent=t)\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_chart_parent_rebound_to_container_is_accepted():
     """An earlier Tab binding does not survive a rebinding to a non-Tab."""
     code = "t = Tab('Charts')\nt = Column()\nAreaChart(data=[], series=[], parent=t)\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_chart_parent_parameter_shadows_tab_binding_is_accepted():
     """A same-named parameter in another function is not the earlier Tab binding."""
     code = "def build():\n    t = Tab('Charts')\n    return t\ndef panel(t):\n    return AreaChart(data=[], series=[], parent=t)\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_chart_parent_outer_tab_binding_in_function_is_rejected():
     """A function body that closes over a Tab name still nests the chart."""
     code = "t = Tab('Charts')\ndef panel():\n    return AreaChart(data=[], series=[], parent=t)\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_chart_parent_never_bound_name_is_accepted():
     """A parent= name with no binding anywhere resolves to no Tab."""
     code = "AreaChart(data=[], series=[], parent=unknown)\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_method_parent_skips_class_scope_and_sees_enclosing_tab():
     """Methods do not close over class-body names; the enclosing module Tab applies."""
     code = "t = Tab('Charts')\nclass Panel:\n    t = Column()\n    def build(self):\n        return AreaChart(data=[], series=[], parent=t)\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_chart_parent_attribute_is_accepted():
     """Only bare names get binding lookups; an attribute is not a known Tab binding."""
     code = "AreaChart(data=[], series=[], parent=container.tab)\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_chart_parent_loop_target_is_accepted():
     """A loop target rebinds the name to an unknown value, not the earlier Tab."""
     code = "t = Tab('Charts')\nfor t in rows:\n    AreaChart(data=[], series=[], parent=t)\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_module_chart_parent_is_not_overridden_by_local_in_uncalled_function():
     """A local Tab in an uncalled function does not change a module-level Column."""
     code = "t = Column()\ndef unused():\n    t = Tab('Charts')\n    return t\nAreaChart(data=[], series=[], parent=t)\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_module_tab_parent_is_not_shadowed_by_parameter_in_uncalled_function():
     """A parameter in an uncalled function does not hide a module-level Tab."""
     code = "t = Tab('Charts')\ndef unused(t):\n    return t\nAreaChart(data=[], series=[], parent=t)\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_nested_function_closes_over_tab_binding():
     """A real closure still resolves the enclosing scope's Tab binding."""
     code = "def outer():\n    t = Tab('Charts')\n    def inner():\n        return AreaChart(data=[], series=[], parent=t)\n    return inner\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_chart_parent_comprehension_target_is_accepted():
     """A comprehension target rebinds the name to an unknown value."""
     code = "t = Tab('Charts')\n[(AreaChart(data=[], series=[], parent=t)) for t in rows]\n"
-    _validate_chart_placement(code)  # should not raise
+    validate_chart_placement(code)  # should not raise
 
 
 def test_nested_tabs_with_chart_is_rejected():
     """A chart in a Tab inside a Tab is still nested."""
     code = "with Tab('a'):\n    with Tab('b'):\n        AreaChart(data=[], series=[])\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_syntax_error_is_ignored():
     """Unparseable input cannot nest anything, so it is accepted."""
-    _validate_chart_placement("with Tab('x':\n")  # should not raise
+    validate_chart_placement("with Tab('x':\n")  # should not raise
 
 
 def test_star_kwargs_are_walked_without_a_chart():
     """`Tab(**config)` is a keyword with arg=None — the **-unpacked Name must be visited."""
-    _validate_chart_placement("Tab(**config)\n")  # should not raise
+    validate_chart_placement("Tab(**config)\n")  # should not raise
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement("Tab(children=[AreaChart(data=[], series=[])], **config)\n")
+        validate_chart_placement("Tab(children=[AreaChart(data=[], series=[])], **config)\n")
 
 
 def test_with_context_expr_chart_is_rejected():
     """`with Tab(children=[...])` nests the chart in the context expression, which was never walked."""
     code = "with Tab(children=[AreaChart(data=[], series=[])]):\n    pass\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_nested_with_context_expr_chart_is_rejected():
     """A Card(...) context expression inside a Tab block carries the chart through."""
     code = "with Tab('Charts'):\n    with Card(children=[AreaChart(data=[], series=[])]):\n        pass\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_async_with_context_expr_chart_is_rejected():
     """`async with` shares the same traversal as `with`."""
     code = "async def render():\n    async with Tab(children=[LineChart(data=[], series=[])]):\n        pass\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_multi_item_with_body_opens_tab_scope():
     """Tab need not be the first item of a multi-item `with` for the body to be in scope."""
     code = "with Card(), Tab('Charts'):\n    AreaChart(data=[], series=[])\n"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(code)
+        validate_chart_placement(code)
 
 
 def test_multi_item_with_scales_linearly_in_items():
@@ -413,10 +413,10 @@ def test_multi_item_with_scales_linearly_in_items():
         return f"with {head}:\n{body}"
 
     start = time.perf_counter()
-    _validate_chart_placement(with_code(50))  # should not raise
+    validate_chart_placement(with_code(50))  # should not raise
     small_elapsed = time.perf_counter() - start
     start = time.perf_counter()
-    _validate_chart_placement(with_code(800))  # should not raise
+    validate_chart_placement(with_code(800))  # should not raise
     large_elapsed = time.perf_counter() - start
     assert large_elapsed < 10
     assert large_elapsed / max(small_elapsed, 1e-6) < 10
@@ -425,7 +425,7 @@ def test_multi_item_with_scales_linearly_in_items():
 def test_deeply_nested_expression_does_not_recurse():
     """500 chained '+' ops nest hundreds of nodes deep — the walker must not use Python recursion."""
     expr = " + ".join(str(i) for i in range(500))
-    _validate_chart_placement(f"with Tab('Charts'):\n    value = {expr}\n")  # should not raise
+    validate_chart_placement(f"with Tab('Charts'):\n    value = {expr}\n")  # should not raise
 
 
 def test_deeply_nested_chart_under_tab_is_still_rejected():
@@ -434,7 +434,7 @@ def test_deeply_nested_chart_under_tab_is_still_rejected():
     for _ in range(150):
         deep = f"[{deep}]"
     with pytest.raises(ValueError, match="Recharts chart components"):
-        _validate_chart_placement(f"Tab(children={deep})\n")
+        validate_chart_placement(f"Tab(children={deep})\n")
 
 
 def _prelude_namespace() -> dict[str, Any]:
@@ -851,7 +851,7 @@ async def test_generate_ui_oversized_code_skips_ast_parsing():
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
     oversize = "a" * (MAX_CODE_BYTES + 1)
-    with patch("nextdns_mcp.generative._validate_chart_placement") as mock_validate:
+    with patch("nextdns_mcp.generative.validate_chart_placement") as mock_validate:
         result = await gen_tool.fn(code=oversize)
     _assert_typed_generation_error(result, "invalid_argument", "code exceeds maximum size")
     mock_validate.assert_not_called()

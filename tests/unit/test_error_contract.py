@@ -601,7 +601,7 @@ class TestPlotAndDohErrorContract:
     async def test_plot_no_data(self, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         wrapped = AsyncMock(return_value={"meta": {"series": {"times": []}}, "data": []})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
         result = await _plot_analytics_series_impl("status")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.NO_DATA
@@ -610,7 +610,7 @@ class TestPlotAndDohErrorContract:
     async def test_plot_http_error(self, mock_api_client, monkeypatch):
         monkeypatch.setenv("NEXTDNS_DEFAULT_PROFILE", "abc123")
         wrapped = AsyncMock(return_value={"error": "boom", "code": ErrorCode.HTTP_ERROR, "status_code": 500})
-        monkeypatch.setattr("nextdns_mcp.transport._api_request_payload", wrapped)
+        monkeypatch.setattr("nextdns_mcp.transport.api_request_payload", wrapped)
         result = await server.plotAnalytics("status")
         _assert_error_contract(result)
         assert result["code"] == ErrorCode.HTTP_ERROR

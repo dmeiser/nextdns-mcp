@@ -299,7 +299,7 @@ class TestGeneratedToolProfileGuard:
             seen.append({"method": method, "url": url})
             return {"data": []}
 
-        monkeypatch.setattr(spec_tools, "_api_request_payload", fake_payload)
+        monkeypatch.setattr(spec_tools, "api_request_payload", fake_payload)
         return seen
 
     @pytest.fixture

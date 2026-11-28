@@ -109,7 +109,7 @@ def _allowed_destination_hosts(configured_base: str = "") -> frozenset[str]:
     return result
 
 
-def _redacted(url: str) -> str:
+def redacted(url: str) -> str:
     """Return the URL with any query string removed (issue #139).
 
     Query strings can carry sensitive data (DNS search terms, device IDs, cursor
@@ -123,12 +123,12 @@ def _redacted(url: str) -> str:
     return escape_control_chars(str(url).split("?", 1)[0])
 
 
-def _log_safe_error(error: Exception) -> str:
+def log_safe_error(error: Exception) -> str:
     """Return exception text that is safe to log at INFO or above (issue #139).
 
     httpx builds ``HTTPStatusError`` messages from the fully merged request
     URL, so only the status is logged for those. Every other message keeps its
-    wording but goes through :func:`_redacted`, because an exception raised by
+    wording but goes through :func:`redacted`, because an exception raised by
     the ACL layer names the URL the caller asked for verbatim. The exception
     itself is never rewritten: the caller still receives the full text.
     The status branch escapes the reason phrase as well: it comes from the
@@ -136,7 +136,14 @@ def _log_safe_error(error: Exception) -> str:
     """
     if isinstance(error, httpx.HTTPStatusError):
         return escape_control_chars(f"{error.response.status_code} {error.response.reason_phrase}")
-    return _redacted(str(error))
+    return redacted(str(error))
+
+
+# Pre-rename private names, kept bound for the callers this rename does not
+# move (tools/doh.py, tools/logs/tool.py); transport takes the public names
+# (issue #783).
+_redacted = redacted
+_log_safe_error = log_safe_error
 
 
 # Match the first path segment case-insensitively; anything under a
@@ -518,7 +525,7 @@ class AccessControlledClient:
         """
         # Query strings can carry sensitive data (search terms, device IDs, cursor
         # tokens). Log only the path at INFO; log the full URL at DEBUG. (issue #139)
-        logged_path = _redacted(url)
+        logged_path = redacted(url)
         logger.info(f"HTTP Request: {method} {logged_path}")
         logger.debug(f"HTTP Request: {method} {url}")
 
@@ -570,7 +577,7 @@ class AccessControlledClient:
         """
         # Query strings can carry sensitive data (search terms, device IDs, cursor
         # tokens). Log only the path. (issue #249)
-        logged_path = _redacted(url)
+        logged_path = redacted(url)
         logger.info(f"HTTP Stream: {method} {logged_path}")
 
         # _authorize() applies the destination allow-list and the profile ACL

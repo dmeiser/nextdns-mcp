@@ -26,7 +26,7 @@ from fastmcp import FastMCP
 from .client import ApiClientOwner, api_client_owner, close_raw_probe_client
 from .state import RESOURCES_LIFESPAN_KEY
 from .tools.doh import DohClientOwner, doh_client_owner
-from .tools.logs import DownloadRegistry, _download_registry, close_redirect_client
+from .tools.logs import DownloadRegistry, close_redirect_client, download_registry
 
 
 class ServerResources:
@@ -93,7 +93,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     resources = server_resources(server)
     api_token = api_client_owner.set(resources.api_client)
     doh_token = doh_client_owner.set(resources.doh_client)
-    registry_token = _download_registry.set(resources.downloads)
+    registry_token = download_registry.set(resources.downloads)
     try:
         yield {RESOURCES_LIFESPAN_KEY: resources}
     finally:
@@ -112,6 +112,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             # before this lifespan: this module has no dependency on the optional
             # generative module, and one server's shutdown no longer reaches into
             # its siblings' sandboxes (issue #542).
-            _download_registry.reset(registry_token)
+            download_registry.reset(registry_token)
             doh_client_owner.reset(doh_token)
             api_client_owner.reset(api_token)

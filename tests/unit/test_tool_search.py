@@ -92,7 +92,7 @@ class TestNameAwareRanking:
         """
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getDenylist"),
@@ -100,20 +100,20 @@ class TestNameAwareRanking:
             Tool.from_function(lambda: None, name="replaceDenylist"),
             Tool.from_function(lambda: None, name="addToDenylist"),
         ]
-        assert _rank_by_name_overlap(tools, "add entry to denylist")[0].name == "addToDenylist"
-        assert _rank_by_name_overlap(tools, "change an entry in the denylist")[0].name == "updateDenylistEntry"
+        assert rank_by_name_overlap(tools, "add entry to denylist")[0].name == "addToDenylist"
+        assert rank_by_name_overlap(tools, "change an entry in the denylist")[0].name == "updateDenylistEntry"
 
     def test_rank_prefers_name_overlap_and_keeps_underlying_order_on_ties(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getAnalyticsDomains"),
             Tool.from_function(lambda: None, name="listProfiles"),
             Tool.from_function(lambda: None, name="plotAnalytics"),
         ]
-        ranked = [t.name for t in _rank_by_name_overlap(tools, "generate analytics plot")]
+        ranked = [t.name for t in rank_by_name_overlap(tools, "generate analytics plot")]
         assert ranked == ["plotAnalytics", "getAnalyticsDomains", "listProfiles"]
 
     @pytest.mark.asyncio
@@ -195,26 +195,26 @@ class TestMorphologicalQueryExpansion:
     """
 
     def test_variant_words_adds_catalog_partners(self):
-        from nextdns_mcp.tool_search_rank import _variant_words
+        from nextdns_mcp.tool_search_rank import variant_words
 
         vocabulary = {"category", "categories", "native", "natives"}
-        assert _variant_words("categories natives", vocabulary) == {"category", "native"}
+        assert variant_words("categories natives", vocabulary) == {"category", "native"}
 
     def test_variant_words_ignores_partners_the_catalog_never_wrote(self):
-        from nextdns_mcp.tool_search_rank import _variant_words
+        from nextdns_mcp.tool_search_rank import variant_words
 
-        assert _variant_words("categories aa", {"categories"}) == set()
+        assert variant_words("categories aa", {"categories"}) == set()
 
     def test_variant_words_adds_plural_of_a_singular_word(self):
-        from nextdns_mcp.tool_search_rank import _variant_words
+        from nextdns_mcp.tool_search_rank import variant_words
 
-        assert _variant_words("category entry", {"categories", "entries"}) == {"categories", "entries"}
+        assert variant_words("category entry", {"categories", "entries"}) == {"categories", "entries"}
 
     def test_variant_words_skips_words_that_name_every_tool(self):
-        from nextdns_mcp.tool_search_rank import _variant_words
+        from nextdns_mcp.tool_search_rank import variant_words
 
         vocabulary = {"profile", "profiles", "category", "categories"}
-        assert _variant_words("delete profile categories", vocabulary, exclude={"profile"}) == {"category"}
+        assert variant_words("delete profile categories", vocabulary, exclude={"profile"}) == {"category"}
 
     def test_bm25_concatenates_variants_into_the_query(self):
         from nextdns_mcp.tool_search import FallbackBM25SearchTransform
@@ -355,14 +355,14 @@ class TestSearchPathGuards:
     def test_a_query_with_no_words_leaves_the_order_as_it_was(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="getDenylist"),
             Tool.from_function(lambda: None, name="addToDenylist"),
         ]
-        assert [tool.name for tool in _rank_by_name_overlap(tools, "")] == ["getDenylist", "addToDenylist"]
-        assert [tool.name for tool in _rank_by_name_overlap(tools, "   ")] == ["getDenylist", "addToDenylist"]
+        assert [tool.name for tool in rank_by_name_overlap(tools, "")] == ["getDenylist", "addToDenylist"]
+        assert [tool.name for tool in rank_by_name_overlap(tools, "   ")] == ["getDenylist", "addToDenylist"]
 
     def test_a_name_with_no_words_has_no_leading_word(self):
         """The verb is the first word; a name that has none has nothing to score."""
@@ -780,7 +780,7 @@ class TestRankingOnTheWordsTheCatalogOwns:
     )
     def test_a_scope_reference_comes_out_and_a_subject_stays(self, query, kept):
         """`profile 87c444` names which account, not which tool."""
-        stripped = ts._strip_scope_mentions(query, {"profile"})
+        stripped = ts.strip_scope_mentions(query, {"profile"})
         assert " ".join(stripped.split()) == " ".join(kept.split())
 
     def test_the_scope_words_are_read_from_the_catalog(self):
@@ -812,7 +812,7 @@ class TestRankingOnTheWordsTheCatalogOwns:
             return Tool.from_function(run, name=name)
 
         tools = [make("updateSettings"), make("getDenylist"), make("getLogs"), make("updateProfile")]
-        ranked = [tool.name for tool in ts._rank_by_name_overlap(tools, "read the current settings")]
+        ranked = [tool.name for tool in ts.rank_by_name_overlap(tools, "read the current settings")]
         assert ranked[0] == "updateSettings"
 
     # Three live shapes - "replace privacy_natives with alexa profile <id>",
@@ -1001,15 +1001,19 @@ class TestUnknownNameReusesTheCatalogsWordData:
             monkeypatch.setattr(module, name, count_rebuild)
 
         normalized: list[str] = []
-        for module in (rank, shape):
-            for name in ("_flat_key", "_words"):
-                original = getattr(module, name)
+        for module, name in (
+            (rank, "_flat_key"),
+            (rank, "comparable_words"),
+            (shape, "_flat_key"),
+            (shape, "_words"),
+        ):
+            original = getattr(module, name)
 
-                def count_normalization(text, _original=original, _normalized=normalized):
-                    _normalized.append(text)
-                    return _original(text)
+            def count_normalization(text, _original=original, _normalized=normalized):
+                _normalized.append(text)
+                return _original(text)
 
-                monkeypatch.setattr(module, name, count_normalization)
+            monkeypatch.setattr(module, name, count_normalization)
         return counts, normalized
 
     @staticmethod
@@ -1196,7 +1200,7 @@ class TestTieBreakOnUndiscountedNameOverlap:
     def test_a_tie_breaks_for_the_tool_whose_name_holds_more_query_words(self):
         from fastmcp.tools.base import Tool
 
-        from nextdns_mcp.tool_search_rank import _rank_by_name_overlap
+        from nextdns_mcp.tool_search_rank import rank_by_name_overlap
 
         tools = [
             Tool.from_function(lambda: None, name="deleteRewrite"),
@@ -1204,7 +1208,7 @@ class TestTieBreakOnUndiscountedNameOverlap:
         ]
         # deleteRewrite is listed first and ties on the weighted score; the
         # tie-break must not let registration order answer for the name itself.
-        assert _rank_by_name_overlap(tools, "delete profile")[0].name == "deleteProfile"
+        assert rank_by_name_overlap(tools, "delete profile")[0].name == "deleteProfile"
 
 
 class TestMemoizedCatalogStructures:
@@ -1382,7 +1386,7 @@ class TestAnswerByteBudget:
         from fastmcp.tools.base import Tool
 
         tool = Tool.from_function(lambda: None, name="accentedTool", description="café " * 400)
-        dumped, cost = ts._compact_entry(tool)
+        dumped, cost = ts.compact_entry(tool)
         # The cost is the UTF-8 byte length of the wire JSON (unescaped, as the
         # MCP payload carries it), not the character count its dumps reported:
         # each é is one character and two bytes.
@@ -1399,9 +1403,9 @@ class TestAnswerByteBudget:
         small_one = Tool.from_function(lambda: None, name="smallOne", description="a")
         huge = Tool.from_function(lambda: None, name="hugeOne", description="x" * 5000)
         small_two = Tool.from_function(lambda: None, name="smallTwo", description="b")
-        cost_one = ts._compact_entry(small_one)[1]
-        cost_huge = ts._compact_entry(huge)[1]
-        cost_two = ts._compact_entry(small_two)[1]
+        cost_one = ts.compact_entry(small_one)[1]
+        cost_huge = ts.compact_entry(huge)[1]
+        cost_two = ts.compact_entry(small_two)[1]
         assert cost_huge > cost_one and cost_huge > cost_two
         # The budget fits exactly the two small results, framing comma counted.
         monkeypatch.setattr(nextdns_mcp.tool_search_answer, "SEARCH_ANSWER_MAX_BYTES", cost_one + len(",") + cost_two)
