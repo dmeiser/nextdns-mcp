@@ -593,6 +593,40 @@ class TestStreamingToDisk:
         assert len(writes) == logs_module.DOWNLOAD_PREVIEW_MAX_LINES + 1
         assert b"".join(writes) == expected_bytes
 
+    async def test_post_preview_chunks_flush_when_the_coalesce_buffer_fills(self, tmp_path, monkeypatch):
+        """A full buffer lands immediately; only the remainder waits for EOF."""
+        monkeypatch.setattr(stream, "_STREAM_WRITE_COALESCE_BYTES", 8)
+        real_fdopen = stream.os.fdopen
+        writes: list[bytes] = []
+
+        class CountingFile:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+
+            def write(self, data: bytes) -> int:
+                writes.append(bytes(data))
+                return self._wrapped.write(data)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._wrapped, name)
+
+        monkeypatch.setattr(stream.os, "fdopen", lambda fd, mode: CountingFile(real_fdopen(fd, mode)))
+
+        path = str(tmp_path / "download.csv")
+        chunks = [f"row{i}\n" for i in range(logs_module.DOWNLOAD_PREVIEW_MAX_LINES)] + [
+            "a" * 5,
+            "b" * 5,
+            "c" * 3,
+        ]
+        payload = await logs_module._write_stream_to_tempfile(_FakeResponse("https://x/file.csv", chunks=chunks), path)
+
+        expected_bytes = "".join(chunks).encode("utf-8")
+        assert Path(path).read_bytes() == expected_bytes
+        assert payload["row_count"] == logs_module.DOWNLOAD_PREVIEW_MAX_LINES + 1
+        assert len(writes) == logs_module.DOWNLOAD_PREVIEW_MAX_LINES + 2
+        assert writes[-2:] == [b"a" * 5 + b"b" * 5, b"c" * 3]
+        assert b"".join(writes) == expected_bytes
+
     async def test_a_final_line_without_a_newline_is_counted(self, tmp_path):
         payload = await logs_module._write_stream_to_tempfile(
             _FakeResponse("https://x/file.csv", chunks=["a\n", "b"]), str(tmp_path / "d.csv")
@@ -1419,6 +1453,13 @@ class TestDiallingTheVettedAddress:
 
 class TestPreviewRespectsRecordBoundaries:
     """Chunk boundaries are not CSV record boundaries: a split line is previewed whole."""
+
+    def test_append_preview_short_circuits_once_the_window_is_full(self, monkeypatch):
+        """No later text is split or appended once either preview cap is reached."""
+        monkeypatch.setattr(preview, "DOWNLOAD_PREVIEW_MAX_LINES", 1)
+        lines = ["first\n"]
+        assert preview._append_preview(lines, 6, "second\nthird\n") == 6
+        assert lines == ["first\n"]
 
     async def test_a_record_split_across_chunks_is_previewed_whole(self, tmp_path, unauthenticated, monkeypatch):
         signed = "https://storage.example/file.csv"
