@@ -824,24 +824,64 @@ def test_wire_built_payload_ignores_the_tool_resolver():
         "view": {"type": "Button", "props": {"label": "go", "action": {"action": "toolCall", "tool": "peer"}}},
         "tools": [{"name": "peer", "description": "d", "result": {"type": "string"}}],
     }
-    app = generative_module._rendered_app(PrefabApp.from_json(wire))
+    untagged = PrefabApp.from_json(wire)
+    tagged = generative_module._rendered_app(PrefabApp.from_json(wire))
     resolve = _resolver_double()
 
-    resolved = app.to_json(tool_resolver=resolve)
-
-    assert resolved == app.to_json()
+    # Ask Prefab's own serializer first: the premise is only pinned if the base
+    # app is the one that actually sees the resolver.
+    resolver_aware = untagged.to_json(tool_resolver=resolve)
     assert resolve.seen == [], "a wire-built app handed the resolver something to rewrite"
-    assert resolved["tools"][0]["name"] == "peer"
+    assert resolver_aware["tools"][0]["name"] == "peer"
+
+    guarded = tagged.to_json()
+    assert guarded == resolver_aware
+    assert tagged.to_json(tool_resolver=resolve) == resolver_aware
+
+
+def test_tagged_app_forwards_the_resolver_before_the_cache_exists():
+    """A resolver on a cache miss reaches Prefab's serializer and is not cached."""
+    app = generative_module._rendered_app(PrefabApp.from_json({"view": _WIRE_VIEW}))
+    resolve = _resolver_double()
+    real_to_json = PrefabApp.to_json
+    seen: list[Any] = []
+
+    def spy(self: PrefabApp, *, tool_resolver: Any = None) -> dict[str, Any]:
+        seen.append(tool_resolver)
+        return real_to_json(self, tool_resolver=tool_resolver)
+
+    with patch.object(PrefabApp, "to_json", spy):
+        app.to_json(tool_resolver=resolve)
+        app.to_json(tool_resolver=resolve)
+        assert seen == [resolve, resolve]
+        app.to_json()  # no resolver: the payload the guard measures is cached
+        app.to_json(tool_resolver=resolve)  # cache hit: no fresh serialization
+    assert seen == [resolve, resolve, None]
+
+
+def test_cached_payload_is_copied_for_each_reader():
+    """Metadata a consumer attaches to its payload cannot pollute a later reader."""
+    app = generative_module._rendered_app(PrefabApp.from_json({"view": _WIRE_VIEW}))
+
+    first = app.to_json()
+    first["_meta"] = {"fastmcp": {"toolNames": {"x": "y"}}}
+
+    assert "_meta" not in app.to_json()
 
 
 def test_rendered_app_tags_the_rendered_app_and_hands_on_anything_else():
-    """The tag carries the app's fields by reference, and is taken only by a rendered app."""
-    app = PrefabApp.from_json({"view": _WIRE_VIEW, "title": "dash", "state": {"n": 1}, "mode": "dark"})
+    """The tag re-tags the same instance, and is taken only by a rendered app."""
+    app = PrefabApp.from_json({"view": _WIRE_VIEW, "state": {"n": 1}, "mode": "dark"})
+    before = app.model_dump(by_alias=True)
+    fields_set = app.model_fields_set
+    private = app.__pydantic_private__
 
     tagged = generative_module._rendered_app(app)
 
-    assert tagged.model_dump(by_alias=True) == app.model_dump(by_alias=True)
-    assert tagged.model_fields_set == app.model_fields_set
+    assert tagged is app  # in place: no field, extra or private state can be dropped
+    assert tagged.model_dump(by_alias=True) == before
+    assert tagged.model_fields_set == fields_set
+    assert tagged.__pydantic_private__ is private
     assert generative_module._rendered_app(tagged) is tagged
     stub = object()
     assert generative_module._rendered_app(stub) is stub  # type: ignore[arg-type]

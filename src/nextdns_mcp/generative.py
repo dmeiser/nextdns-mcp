@@ -196,32 +196,42 @@ class RenderedApp(PrefabApp):
     payload is what ``to_json`` would have returned with one. That premise is
     pinned by ``test_wire_built_payload_ignores_the_tool_resolver``.
 
-    The cache is a slot rather than a model field so it reaches neither
-    ``model_dump`` nor the wire payload, and it stays unset — not empty — for an
-    instance copied out of this class, which then serializes normally.
+    The cache lives in the model's instance dictionary, not in a field, so it
+    reaches neither ``model_dump`` nor the wire payload. Only a serialization
+    without a resolver is cached: that is the one the size guard measures. A
+    caller that brings a resolver before the guard does (nothing in this server
+    does) still reaches Prefab's serializer with it forwarded.
     """
 
-    __slots__ = ("_wire_payload",)
-
     def to_json(self, *, tool_resolver: Callable[..., Any] | None = None) -> dict[str, Any]:
-        payload: dict[str, Any] | None = getattr(self, "_wire_payload", None)
+        """Serialize on the first call; give every reader its own top-level dict.
+
+        FastMCP annotates the payload it receives with tool-reference identities
+        and middleware may attach more metadata, so every call hands out a fresh
+        shallow copy of the cached payload: a consumer's edits cannot change the
+        bytes the guard measured or what a later reader sees. Nested values
+        remain shared, so those must not be mutated by consumers.
+        """
+        payload: dict[str, Any] | None = self.__dict__.get("_wire_payload")
         if payload is None:
-            payload = super().to_json()
-            self._wire_payload = payload
-        return payload
+            payload = super().to_json(tool_resolver=tool_resolver)
+            if tool_resolver is None:
+                self.__dict__["_wire_payload"] = payload
+        return dict(payload)
 
 
 def _rendered_app(app: PrefabApp) -> PrefabApp:
     """Tag the app one render produced, so its payload is serialized once.
 
-    Field values move by reference — no second walk of the view — and the tag
-    only records that this app came off the worker's wire frame. Anything that is
-    not a plain :class:`PrefabApp` (a stub injected by a test, or an app already
-    tagged) is handed on untouched.
+    The app is re-tagged in place, not rebuilt: no field, extra or private state
+    is copied or dropped, and the view is not walked a second time. Anything that
+    is not a plain :class:`PrefabApp` (a stub injected by a test, or an app
+    already tagged) is handed on untouched.
     """
     if type(app) is not PrefabApp:
         return app
-    return RenderedApp.model_construct(_fields_set=app.model_fields_set, **app.__dict__)
+    app.__class__ = RenderedApp
+    return app
 
 
 def _renderer_csp() -> ResourceCSP:

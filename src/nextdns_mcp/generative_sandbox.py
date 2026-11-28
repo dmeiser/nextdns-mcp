@@ -353,6 +353,12 @@ class WirePayload(dict[str, Any]):
     nothing between the tool and the wire can tell the difference. Only
     :func:`_request_frame` reads :attr:`json_text`; re-serializing an instance
     yields the same JSON, so a payload that never reaches the wire costs nothing.
+
+    No-mutation contract: ``json_text`` is a snapshot of the dict at guard time,
+    and the shallow ``super().__init__(data)`` copy shares nested values with the
+    caller. The tool hands this payload straight to the sandbox without changing
+    it; a caller that mutates it between the guard and the frame must not expect
+    the spliced bytes to follow.
     """
 
     __slots__ = ("json_text",)
