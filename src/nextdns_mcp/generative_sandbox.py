@@ -450,7 +450,9 @@ class DenoPyodideSandbox:
         stdin, stdout = process.stdin, process.stdout
         if stdin is None or stdout is None:
             raise _WorkerGone("Sandbox failed to start")
-        frame = (json.dumps({"id": request_id, "code": code, "data": data or {}}) + "\n").encode()
+        # allow_nan=False: a Python float('nan') would serialize as the literal NaN and
+        # the worker's JSON.parse would fail on a frame the server already accepted.
+        frame = (json.dumps({"id": request_id, "code": code, "data": data or {}}, allow_nan=False) + "\n").encode()
         try:
             return await asyncio.get_running_loop().run_in_executor(None, _round_trip, stdin, stdout, frame)
         except OSError:

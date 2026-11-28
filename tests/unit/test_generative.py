@@ -29,6 +29,7 @@ from nextdns_mcp.generative import (
     MAX_CODE_BYTES,
     MAX_CONCURRENT_SANDBOXES,
     MAX_DATA_BYTES,
+    MAX_JSON_DEPTH,
     SANDBOX_PRELUDE,
     PrefabGenerativeUI,
     _build_renderer_resource,
@@ -59,6 +60,105 @@ def test_parse_ui_data_rejects_malformed_and_non_dict():
     for bad in (123, ["a"], True):
         with pytest.raises(ValueError):
             _parse_ui_data(bad)
+
+
+def _nested_containers(levels: int) -> dict[str, Any]:
+    """A document with exactly ``levels`` container levels: the root dict plus nested lists."""
+    value: Any = 1
+    for _ in range(levels - 1):
+        value = [value]
+    return {"a": value}
+
+
+def test_parse_ui_data_rejects_non_finite_numbers_in_json_text():
+    """NaN and Infinity decode in Python but fail JSON.parse in the worker (issue #764)."""
+    for payload in ('{"a": NaN}', '{"a": Infinity}', '{"a": -Infinity}'):
+        with pytest.raises(ValueError, match="not a valid JSON number"):
+            _parse_ui_data(payload)
+
+
+def test_parse_ui_data_rejects_non_finite_numbers_in_a_dict():
+    """A dict the host passed never went through a parser, so its floats are walked too."""
+    for payload in (
+        {"a": float("nan")},
+        {"a": float("inf")},
+        {"a": float("-inf")},
+        {"a": [{"b": [float("nan")]}]},
+    ):
+        with pytest.raises(ValueError, match="NaN or Infinity"):
+            _parse_ui_data(payload)
+
+
+def test_parse_ui_data_accepts_finite_numbers():
+    assert _parse_ui_data('{"a": -1.5e308, "b": 0}') == {"a": -1.5e308, "b": 0}
+    assert _parse_ui_data({"a": 1.5e-308}) == {"a": 1.5e-308}
+
+
+def test_parse_ui_data_rejects_nesting_past_the_cap():
+    with pytest.raises(ValueError, match="maximum nesting depth"):
+        _parse_ui_data(_nested_containers(MAX_JSON_DEPTH))
+    with pytest.raises(ValueError, match="maximum nesting depth"):
+        _parse_ui_data('{"a": ' + "[" * (MAX_JSON_DEPTH + 5) + "]" * (MAX_JSON_DEPTH + 5) + "}")
+
+
+def test_parse_ui_data_accepts_nesting_at_the_cap():
+    assert _parse_ui_data(_nested_containers(MAX_JSON_DEPTH - 1)) == _nested_containers(MAX_JSON_DEPTH - 1)
+
+
+def test_parse_ui_data_rejects_cycles_in_a_dict():
+    """A branching cycle is refused on the first descent, not queued generation by generation."""
+    root: dict[str, Any] = {}
+    for key in "abcdefghij":
+        branch: dict[str, Any] = {}
+        for sub in "abcdefghij":
+            branch[sub] = root
+        root[key] = branch
+
+    start = time.perf_counter()
+    with pytest.raises(ValueError, match="circular reference"):
+        _parse_ui_data(root)
+    assert time.perf_counter() - start < 1
+
+    self_cycle: dict[str, Any] = {}
+    self_cycle["self"] = self_cycle
+    with pytest.raises(ValueError, match="circular reference"):
+        _parse_ui_data(self_cycle)
+
+    holder: list[Any] = []
+    holder.append((holder,))
+    with pytest.raises(ValueError, match="circular reference"):
+        _parse_ui_data({"a": holder})
+
+
+def test_parse_ui_data_accepts_shared_subobjects():
+    """An object reachable through two sibling branches is not a cycle."""
+    shared = {"x": [1, 2]}
+    assert _parse_ui_data({"a": shared, "b": [shared]}) == {"a": {"x": [1, 2]}, "b": [{"x": [1, 2]}]}
+
+
+def test_parse_ui_data_handles_tuples():
+    """json.dumps encodes a tuple as an array, so tuple chains get the same depth bound."""
+    assert _parse_ui_data({"a": (1, "two")}) == {"a": (1, "two")}
+    value: Any = 1
+    for _ in range(MAX_JSON_DEPTH + 1):
+        value = (value,)
+    with pytest.raises(ValueError, match="maximum nesting depth"):
+        _parse_ui_data({"a": value})
+
+
+def test_decode_ui_json_reports_a_decoder_stack_blowout_as_a_validation_error():
+    """A decoder stack blowout is reported as a validation error, not leaked as RecursionError.
+
+    The exact depth at which a C scanner runs out of stack depends on the
+    interpreter's stack size, so force the exception rather than tying the test
+    to a document length that only fails on some runners.
+    """
+    with (
+        patch("nextdns_mcp.generative.json.loads", side_effect=RecursionError("maximum recursion depth")),
+        pytest.raises(ValueError, match="maximum nesting depth") as raised,
+    ):
+        generative_module._decode_ui_json('{"a": 1}')
+    assert isinstance(raised.value.__cause__, RecursionError)
 
 
 def test_validate_chart_placement_rejects_charts_in_tabs():
@@ -941,6 +1041,46 @@ async def test_generate_ui_data_size_limit():
 
 
 @pytest.mark.asyncio
+async def test_generate_ui_rejects_non_finite_data_before_the_sandbox():
+    """A NaN in either data form is a typed validation error, and no worker starts (issue #764)."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    for payload, message_part in (
+        ('{"v": NaN}', "not a valid JSON number"),
+        ({"v": float("nan")}, "NaN or Infinity"),
+    ):
+        with patch.object(gen_ui, "_new_worker") as mock_worker:
+            result = await gen_tool.fn(code="print('hi')", data=payload)
+        _assert_typed_generation_error(result, "invalid_argument", message_part)
+        mock_worker.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_rejects_deeply_nested_data_before_the_sandbox():
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    deep = "[" * (MAX_JSON_DEPTH + 1) + "]" * (MAX_JSON_DEPTH + 1)
+    with patch.object(gen_ui, "_new_worker") as mock_worker:
+        result = await gen_tool.fn(code="print('hi')", data=f'{{"v": {deep}}}')
+    _assert_typed_generation_error(result, "invalid_argument", "maximum nesting depth")
+    mock_worker.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_rejects_deep_tuples_in_dict_data_before_the_sandbox():
+    """The tuple path QA probed is refused by the tool, not by the worker's RecursionError."""
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    value: Any = 1
+    for _ in range(MAX_JSON_DEPTH + 1):
+        value = (value,)
+    with patch.object(gen_ui, "_new_worker") as mock_worker:
+        result = await gen_tool.fn(code="print('hi')", data={"v": value})
+    _assert_typed_generation_error(result, "invalid_argument", "maximum nesting depth")
+    mock_worker.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_generate_ui_result_size_limit():
     gen_ui = PrefabGenerativeUI()
     gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
@@ -1554,6 +1694,19 @@ async def test_run_defaults_data_to_an_empty_object():
     await sandbox.run("print(1)")
 
     assert proc.requests[0]["data"] == {}
+
+
+@pytest.mark.asyncio
+async def test_run_never_frames_a_non_finite_number():
+    """The request serializer refuses NaN/Infinity: the worker's JSON.parse would reject the frame (issue #764)."""
+    sandbox = sandbox_module.DenoPyodideSandbox()
+    proc = _StubProcess()
+    sandbox._process = proc
+
+    with pytest.raises(ValueError, match="Out of range float"):
+        await sandbox.run("print(1)", data={"k": float("nan")})
+
+    assert proc.requests == []
 
 
 @pytest.mark.asyncio
