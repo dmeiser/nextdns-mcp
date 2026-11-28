@@ -30,7 +30,6 @@ from prefab_ui.renderer import get_generative_renderer_html
 
 from .chart_placement import _validate_chart_placement
 from .errors import ErrorCode, error_payload
-from .typed_error_tool import TypedArgumentTool
 from .generative_sandbox import (
     EXECUTION_TIMEOUT,
     MAX_RESULT_BYTES,
