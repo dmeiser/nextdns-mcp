@@ -164,6 +164,39 @@ class TestProductionServerTools:
         assert "search_prefab_components" not in names
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "arguments, bad_field",
+        [
+            ({"code": "print(1)", "data": ["value"]}, "data"),
+            ({"code": 123}, "code"),
+        ],
+    )
+    async def test_generate_ui_wrong_type_is_a_typed_error_over_mcp(
+        self, mock_api_key, monkeypatch, arguments, bad_field
+    ):
+        """Signature-level refusals must reach callers as the typed contract.
+
+        FastMCP validates a function tool's arguments before its body runs, so
+        calling ``gen_tool.fn`` directly with a list bypasses the very check a
+        real MCP client hits. Go through ``Client.call_tool``: the refusal must
+        be a flagged ``invalid_argument`` with structured content, not a bare
+        ValidationError with ``structured_content=None``.
+        """
+        from nextdns_mcp.server import build_mcp_server
+
+        monkeypatch.setenv("NEXTDNS_API_KEY", mock_api_key)
+        monkeypatch.setenv("NEXTDNS_GENERATIVE_UI", "on")
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            result = await client.call_tool("generate_prefab_ui", arguments, raise_on_error=False)
+
+        assert result.is_error is True
+        structured = result.structured_content or {}
+        assert structured["code"] == "invalid_argument"
+        assert bad_field in structured["error"]
+
+    @pytest.mark.asyncio
     async def test_the_grouped_area_tools_are_not_published(self):
         """The eight area tools are gone, and so is the second choice they imposed.
 

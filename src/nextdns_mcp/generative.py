@@ -38,6 +38,7 @@ from .generative_sandbox import (
     DenoPyodideSandbox,
     _ResultTooLarge,
 )
+from .typed_error_tool import TypedArgumentTool
 
 logger = logging.getLogger(__name__)
 
@@ -520,6 +521,11 @@ def _build_generate_tool(
         _validate_generated_tree(result)
         return result
 
+    # A plain Tool.from_function would let FastMCP reject a wrong-typed
+    # argument (e.g. data=["value"]) before generate_ui could answer it, so the
+    # caller would get a bare ValidationError with structured_content=None.
+    # The subclass converts the signature's refusals into the typed payload;
+    # the published input schema is still built from the same signature.
     return TypedArgumentTool.from_function(
         generate_ui,
         name=name,
