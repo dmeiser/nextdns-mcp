@@ -44,6 +44,24 @@ class TestGetApiKey:
         result = get_api_key()
         assert result == env_key
 
+    def test_get_api_key_whitespace_env_falls_back_to_file(self, monkeypatch, temp_api_key_file, mock_api_key):
+        """A whitespace-only environment key is not a configured key."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "   ")
+        monkeypatch.setenv("NEXTDNS_API_KEY_FILE", str(temp_api_key_file))
+
+        from nextdns_mcp.config import get_api_key
+
+        assert get_api_key() == mock_api_key
+
+    def test_get_api_key_padded_env_key_takes_precedence(self, monkeypatch, temp_api_key_file):
+        """A padded nonblank environment key is stripped and still wins over the file."""
+        monkeypatch.setenv("NEXTDNS_API_KEY", "  env_api_key  ")
+        monkeypatch.setenv("NEXTDNS_API_KEY_FILE", str(temp_api_key_file))
+
+        from nextdns_mcp.config import get_api_key
+
+        assert get_api_key() == "env_api_key"
+
     def test_get_api_key_file_not_found(self, monkeypatch, caplog):
         """Test handling of missing API key file."""
         monkeypatch.delenv("NEXTDNS_API_KEY", raising=False)
