@@ -241,15 +241,25 @@ def _parse_ui_data(data: str | dict[str, Any] | None) -> dict[str, Any] | None:
     return parsed
 
 
-def _require_byte_limit(text: str, limit: int, source: str) -> None:
-    """Refuse a payload bigger than its byte limit, measured as UTF-8.
+def _byte_limit_message(measured_bytes: int, limit: int, source: str) -> str | None:
+    """The refusal sentence for a byte count over its limit, ``None`` when it fits.
 
-    Every size guard on the generate path charges the same thing — the UTF-8
-    encoding of the text that actually goes to the worker — and reports it with
-    the same sentence, so the limit and the source name are the only variables.
+    Every size guard on the generate path charges a byte count against a limit
+    and names the refusal the same way, so the comparison and the sentence live
+    once. The caller keeps its own failure class: the input guards raise the
+    sentence as ``ValueError`` (the tool answers it as ``invalid_argument``) and
+    the result guard answers it as ``response_too_large``.
     """
-    if len(text.encode("utf-8")) > limit:
-        raise ValueError(f"{source} exceeds maximum size of {limit} bytes")
+    if measured_bytes > limit:
+        return f"{source} exceeds maximum size of {limit} bytes"
+    return None
+
+
+def _require_byte_limit(text: str, limit: int, source: str) -> None:
+    """Refuse an input payload bigger than its byte limit, measured as UTF-8."""
+    message = _byte_limit_message(len(text.encode("utf-8")), limit, source)
+    if message is not None:
+        raise ValueError(message)
 
 
 def _guard_string_data(data: str) -> dict[str, Any] | None:
@@ -596,10 +606,9 @@ async def _run_guarded(
     except (RuntimeError, ValueError, OSError) as exc:
         logger.warning("generate_prefab_ui execution failed: %s", exc, exc_info=True)
         return _generation_error(ErrorCode.INTERNAL_ERROR, str(exc))
-    if result_size > MAX_RESULT_BYTES:
-        return _generation_error(
-            ErrorCode.RESPONSE_TOO_LARGE, f"result exceeds maximum size of {MAX_RESULT_BYTES} bytes"
-        )
+    too_large = _byte_limit_message(result_size, MAX_RESULT_BYTES, "result")
+    if too_large is not None:
+        return _generation_error(ErrorCode.RESPONSE_TOO_LARGE, too_large)
     return result
 
 
