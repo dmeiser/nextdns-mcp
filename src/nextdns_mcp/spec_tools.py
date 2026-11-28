@@ -255,11 +255,11 @@ class SpecApiTool(Tool):
     async def _run_delegated(self, arguments: dict[str, Any]) -> ToolResult:
         """Serve a delegated operation with its own guarded handler.
 
-        The profile id gets the same shape check the generated path gets (and
-        the check the pre-migration ``manageLogs`` tool enforced): a malformed
-        id must fail as ``invalid_profile_id`` here rather than being smuggled
-        into a path the downloader builds from it. Unsafe path characters are
-        already refused by the guard ``run`` applies before dispatch.
+        The profile id gets the same shape check the generated path gets: a
+        malformed id must fail as ``invalid_profile_id`` here rather than being
+        smuggled into a path the downloader builds from it. Unsafe path
+        characters are already refused by the guard ``run`` applies before
+        dispatch.
         """
         profile_id = arguments.get("profile_id")
         resolved, error = resolve_profile_id("" if profile_id is None else str(profile_id).strip(), allow_default=False)

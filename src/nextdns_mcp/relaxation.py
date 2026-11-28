@@ -483,8 +483,8 @@ class StripExtraFieldsMiddleware(Middleware):
         """Strip keys the tool's schema does not declare, then coerce what remains.
 
         The stripped names are returned so the caller can report them instead of
-        losing them silently: silently dropping e.g. a `privacy` payload from a
-        manageProfiles call leaves the model believing it acted.
+        losing them silently: silently dropping e.g. a `disguisedTrackers` field
+        from an updatePrivacySettings call leaves the model believing it acted.
         """
         properties = parameters.get("properties", {})
         known_params = set(properties.keys())

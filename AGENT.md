@@ -84,8 +84,8 @@ These are the FastMCP internals this server leans on. `fastmcp` carries a `>=4.1
 | `prefab_ui.renderer.get_generative_renderer_html`, `get_renderer_html` | both renderer resources load Prefab's bundled HTML; the CSP is declared locally because Python executes in the server sandbox | `mode="bundled"` stays explicit and the HTML stays a single self-contained document |
 
 When a bump touches any of these: run the unit suite and the container E2E, and re-read the
-`# type: ignore` suppressions in `src/nextdns_mcp/tool_search.py` — they are suppressed
-because the hooks are private, so a rename there is silent.
+private FastMCP hook overrides in `src/nextdns_mcp/tool_search.py` (`_search`,
+`_make_search_tool`, `_make_call_tool`) — the hooks are private, so a rename upstream is silent.
 
 ## Testing Strategy
 
