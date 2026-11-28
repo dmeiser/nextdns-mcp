@@ -776,6 +776,13 @@ class TestRankingOnTheWordsTheCatalogOwns:
             # compound token while the scope set holds the split words.
             ("delete profile_id=87c444", "delete"),
             ("update profile_id 87c444 now", "update now"),
+            # `added` and `facade` are entirely hex letters, but they are
+            # words: a bare run of hex letters is not an identifier. A digit
+            # or an explicit 0x prefix still marks one.
+            ("profile added", "profile added"),
+            ("profile facade", "profile facade"),
+            ("profile abcdef", "profile abcdef"),
+            ("profile 0xabcdef", ""),
         ],
     )
     def test_a_scope_reference_comes_out_and_a_subject_stays(self, query, kept):

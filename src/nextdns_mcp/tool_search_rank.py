@@ -112,8 +112,13 @@ def variant_words(query: str, vocabulary: set[str], exclude: set[str] | frozense
 # identifier with a real separator between them: `profile 87c444`,
 # `profile_id=87c444`. The separator is what makes the pair a reference; an
 # identifier with the word fused into one token (`TEST_PROFILE_20261029`) is a
-# name, not a scope mention, and the empty separator keeps it.
-_SCOPE_MENTION = re.compile(r"""(?i)\b([a-z][a-z0-9_-]*)([\s :=/#'.\-]{0,3})(?:0x)?([0-9a-f]{5,}|\d{4,})['\"]?""")
+# name, not a scope mention, and the empty separator keeps it. A bare run of
+# hex letters is not an identifier here: English words like `profile added`
+# and `profile facade` are made entirely of hex digits, so the hex branch
+# requires a decimal digit or an explicit `0x` prefix.
+_SCOPE_MENTION = re.compile(
+    r"""(?i)\b([a-z][a-z0-9_-]*)([\s :=/#'.\-]{0,3})(?:0x(?:[0-9a-f]{5,}|\d{4,})|(?=[0-9a-f]*\d)[0-9a-f]{5,}|\d{4,})['\"]?"""
+)
 
 
 def _parameter_words(tool: Tool) -> set[str]:

@@ -164,13 +164,14 @@ def get_api_base(environ: Mapping[str, str] | None = None) -> str:
 def get_api_key(environ: Mapping[str, str] | None = None) -> str | None:
     """Get API key from ``environ`` (the process environment by default).
 
-    The ``NEXTDNS_API_KEY_FILE`` fallback is unchanged: a Docker secret is
+    A whitespace-only ``NEXTDNS_API_KEY`` is treated as unset. The
+    ``NEXTDNS_API_KEY_FILE`` fallback is unchanged: a Docker secret is
     still read from the path the environment names.
     """
     env = _effective_environ(environ)
-    key = env.get("NEXTDNS_API_KEY")
+    key = env.get("NEXTDNS_API_KEY", "").strip()
     if key:
-        return key.strip()
+        return key
 
     # Fall back to a file (Docker secret)
     key_file = env.get("NEXTDNS_API_KEY_FILE")
