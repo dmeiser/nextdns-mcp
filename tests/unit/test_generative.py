@@ -1242,6 +1242,7 @@ async def test_generate_ui_returns_validated_passive_tree():
         mock_exec.return_value = passive
         assert await gen_tool.fn(code="print(1)") is passive
 
+
 # --- Concurrent renders (issue #793 / PERF-7) ---
 
 
@@ -1274,11 +1275,17 @@ async def test_a_render_executes_while_a_peer_render_is_paused_in_its_reap():
     worker_a = _blocking_worker("worker-a", reap_a_entered, release_reap_a)
     worker_b = _stub_worker()
 
+    app_a = _passive_app()
+    app_b = _passive_app()
+
+    def _exec_result(code, *, data=None, sandbox=None):
+        return app_a if "print('a')" in code else app_b
+
     with (
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
         patch.object(gen_ui, "_new_worker", side_effect=[worker_a, worker_b]),
     ):
-        mock_exec.side_effect = lambda code, *, data=None, sandbox: code
+        mock_exec.side_effect = _exec_result
 
         render_a = asyncio.create_task(gen_tool.fn(code="print('a')"))
         # A has executed and is now blocked reaping its worker:
@@ -1287,12 +1294,12 @@ async def test_a_render_executes_while_a_peer_render_is_paused_in_its_reap():
         render_b = asyncio.create_task(gen_tool.fn(code="print('b')"))
         # B enters execution on its own worker while A's reap is still blocked:
         result_b = await asyncio.wait_for(render_b, timeout=10)
-        assert result_b.endswith("print('b')")
+        assert result_b is app_b
         assert not release_reap_a.is_set()
 
         release_reap_a.set()
         result_a = await asyncio.wait_for(render_a, timeout=10)
-        assert result_a.endswith("print('a')")
+        assert result_a is app_a
 
     assert worker_a is not worker_b
     assert mock_exec.call_args_list[0].kwargs["sandbox"] is worker_a
@@ -1318,7 +1325,7 @@ async def test_render_concurrency_is_bounded_by_the_worker_capacity():
         patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
         patch.object(gen_ui, "_new_worker", side_effect=[*blocked_workers, free_worker]),
     ):
-        mock_exec.side_effect = lambda code, *, data=None, sandbox: code
+        mock_exec.side_effect = lambda code, *, data=None, sandbox: _passive_app()
 
         renders = [
             asyncio.create_task(gen_tool.fn(code=f"print({index})")) for index in range(MAX_CONCURRENT_SANDBOXES)
@@ -1332,14 +1339,13 @@ async def test_render_concurrency_is_bounded_by_the_worker_capacity():
 
         release_reaps.set()
         waiting_result = await asyncio.wait_for(waiting_render, timeout=10)
-        assert waiting_result.endswith("print('waiting')")
+        assert isinstance(waiting_result, PrefabApp)
         for index, render in enumerate(renders):
             result = await asyncio.wait_for(render, timeout=10)
-            assert result.endswith(f"print({index})")
+            assert isinstance(result, PrefabApp)
 
     free_worker.stop.assert_called_once()
     assert gen_ui._active_workers == set()
-
 
 
 class _ChunkedRaw:
