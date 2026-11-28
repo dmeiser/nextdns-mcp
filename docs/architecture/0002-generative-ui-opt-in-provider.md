@@ -122,7 +122,7 @@ obligations down instead of assuming them.**
   provider raises when the sandbox first starts
   (`src/nextdns_mcp/generative_sandbox.py:163`).
 - Sandbox teardown is deliberately *not* in the server lifespan: that module has no
-  dependency on the optional generative module (the `PrefabGenerativeUI.lifespan()` comment, `src/nextdns_mcp/openapi.py:780-783`). A
+  dependency on the optional generative module (the `PrefabGenerativeUI.lifespan()` comment, `src/nextdns_mcp/lifespan.py:14-18`). A
   future optional subsystem owned by the server needs its own shutdown owner — the
   process-global registry that used to own it killed sibling servers' sandboxes (issue
   #542).
