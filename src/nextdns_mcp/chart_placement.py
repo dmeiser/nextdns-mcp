@@ -12,17 +12,21 @@ import ast
 from bisect import bisect_left
 from dataclasses import dataclass
 
-_CHART_NAMES = {
+#: The chart components the sandbox offers. The one source for both this module's
+#: tab-placement validation and the chart lists ``generative`` writes into its tool
+#: guidance, so the two cannot drift apart (WORK-369 / DRY-4).
+CHART_COMPONENT_NAMES = (
     "AreaChart",
-    "LineChart",
     "BarChart",
-    "PieChart",
     "DonutChart",
+    "LineChart",
+    "PieChart",
     "RadarChart",
     "RadialChart",
     "ScatterChart",
     "WaterfallChart",
-}
+)
+_CHART_NAMES = frozenset(CHART_COMPONENT_NAMES)
 _TAB_NAMES = {"Tab", "TabsTrigger"}
 
 _Position = tuple[int, int]
@@ -262,7 +266,11 @@ def validate_chart_placement(code: str) -> None:
         return
     if _chart_in_tab(tree):
         raise ValueError(
-            f"Recharts chart components ({', '.join(sorted(_CHART_NAMES))}) cannot be placed "
+            f"Recharts chart components ({', '.join(CHART_COMPONENT_NAMES)}) cannot be placed "
             "inside Tab components because tab panels initialize with 0px width, causing charts to "
             "render completely invisible. Place the chart outside of Tabs in a Column, Row, Card, or Grid."
         )
+
+
+# Back-compat alias for the pre-promotion private name (WORK-349).
+_validate_chart_placement = validate_chart_placement

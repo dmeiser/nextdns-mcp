@@ -239,10 +239,7 @@ def build_reasons_card(data: list[dict[str, Any]], view_type: str = "auto") -> C
             _reasons_table(data)
         else:
             chart_data = [{"label": reason_label(item), "queries": item_queries(item)} for item in data]
-            if view_type == "pie":
-                _pie_chart(chart_data)
-            else:
-                _bar_chart(chart_data, "Blocked Queries", "#ef4444")
+            _render_chart_view(chart_data, "Blocked Queries", "#ef4444", view_type)
 
     return _build_analytics_card(
         "Reasons for Blocking",
@@ -286,27 +283,35 @@ def build_devices_card(data: list[dict[str, Any]], view_type: str = "auto") -> C
     )
 
 
+def _ips_table(data: list[dict[str, Any]]) -> DataTable:
+    """Build IP addresses data table."""
+    rows: _TableRows = [ip_row(item) for item in data]
+    return _data_table(
+        [
+            DataTableColumn(key="ip", header="IP Address", sortable=True),
+            DataTableColumn(key="isp", header="ISP", sortable=True),
+            DataTableColumn(key="location", header="Location", sortable=True),
+            QUERIES_COLUMN,
+        ],
+        rows,
+    )
+
+
+def _render_ip_content(data: list[dict[str, Any]]) -> None:
+    """Render the IP addresses card content."""
+    if not data:
+        Text("No IP queries recorded for this period.", css_class="text-sm text-muted-foreground py-4")
+    else:
+        _ips_table(data)
+
+
 def build_ips_card(data: list[dict[str, Any]]) -> Card:
     """Build the IP addresses card; this fixed-format card is always a table."""
-    rows: _TableRows = [ip_row(item) for item in data]
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle("IPs")
-            CardDescription("IP addresses making the queries.")
-        with CardContent():
-            if not data:
-                Text("No IP queries recorded for this period.", css_class="text-sm text-muted-foreground py-4")
-            else:
-                _data_table(
-                    [
-                        DataTableColumn(key="ip", header="IP Address", sortable=True),
-                        DataTableColumn(key="isp", header="ISP", sortable=True),
-                        DataTableColumn(key="location", header="Location", sortable=True),
-                        QUERIES_COLUMN,
-                    ],
-                    rows,
-                )
-    return card
+    return _build_analytics_card(
+        "IPs",
+        "IP addresses making the queries.",
+        lambda: _render_ip_content(data),
+    )
 
 
 def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
@@ -322,33 +327,34 @@ def _gafam_table(table_rows: list[dict[str, Any]]) -> DataTable:
     )
 
 
+def _render_gafam_content(chart_data: list[dict[str, Any]], table_rows: list[dict[str, Any]], view_type: str) -> None:
+    """Render the GAFAM card content: one view, or the combined pie-plus-table default."""
+    # ``chart_data`` holds one row per upstream item, so an empty chart means empty data.
+    if not chart_data:
+        Text("No GAFAM traffic recorded for this period.", css_class="text-sm text-muted-foreground py-4")
+    elif view_type == "bar":
+        _bar_chart(chart_data, "Queries", "#3b82f6")
+    elif view_type == "table":
+        _gafam_table(table_rows)
+    elif view_type == "pie":
+        _pie_chart(chart_data)
+    else:
+        with Column(gap=4):
+            _pie_chart(chart_data)
+            _gafam_table(table_rows)
+
+
 def build_gafam_card(
     chart_data: list[dict[str, Any]],
     table_rows: list[dict[str, Any]],
     view_type: str = "auto",
 ) -> Card:
     """Build the GAFAM dominance donut chart and table card from prefetched rows."""
-    # ``chart_data`` holds one row per upstream item, so an empty chart means empty data.
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle("GAFAM Dominance")
-            CardDescription(
-                "Traffic share of dominant internet companies (Google, Apple, Facebook, Amazon, Microsoft)."
-            )
-        with CardContent():
-            if not chart_data:
-                Text("No GAFAM traffic recorded for this period.", css_class="text-sm text-muted-foreground py-4")
-            elif view_type == "bar":
-                _bar_chart(chart_data, "Queries", "#3b82f6")
-            elif view_type == "table":
-                _gafam_table(table_rows)
-            elif view_type == "pie":
-                _pie_chart(chart_data)
-            else:
-                with Column(gap=4):
-                    _pie_chart(chart_data)
-                    _gafam_table(table_rows)
-    return card
+    return _build_analytics_card(
+        "GAFAM Dominance",
+        "Traffic share of dominant internet companies (Google, Apple, Facebook, Amazon, Microsoft).",
+        lambda: _render_gafam_content(chart_data, table_rows, view_type),
+    )
 
 
 def _build_security_section(title: str, val: int, total: int, pct: float) -> Column:
@@ -360,19 +366,23 @@ def _build_security_section(title: str, val: int, total: int, pct: float) -> Col
     return col
 
 
-def build_security_card(encryption_rate: tuple[int, int, float], dnssec_rate: tuple[int, int, float]) -> Card:
-    """Build the security card from the encrypted DNS and DNSSEC rate tuples."""
+def _render_security_content(encryption_rate: tuple[int, int, float], dnssec_rate: tuple[int, int, float]) -> None:
+    """Render the security card's encrypted DNS and DNSSEC progress sections."""
     enc_val, enc_total, enc_pct = encryption_rate
     dnssec_val, dnssec_total, dnssec_pct = dnssec_rate
 
-    with Card(css_class="flex-1 min-w-[300px]") as card:
-        with CardHeader():
-            CardTitle("Security & Privacy")
-            CardDescription("Encryption and DNSSEC validation rates.")
-        with CardContent(), Column(gap=4):
-            _build_security_section("Encrypted DNS", enc_val, enc_total, enc_pct)
-            _build_security_section("DNSSEC Validation", dnssec_val, dnssec_total, dnssec_pct)
-    return card
+    with Column(gap=4):
+        _build_security_section("Encrypted DNS", enc_val, enc_total, enc_pct)
+        _build_security_section("DNSSEC Validation", dnssec_val, dnssec_total, dnssec_pct)
+
+
+def build_security_card(encryption_rate: tuple[int, int, float], dnssec_rate: tuple[int, int, float]) -> Card:
+    """Build the security card from the encrypted DNS and DNSSEC rate tuples."""
+    return _build_analytics_card(
+        "Security & Privacy",
+        "Encryption and DNSSEC validation rates.",
+        lambda: _render_security_content(encryption_rate, dnssec_rate),
+    )
 
 
 def _destinations_table(data: list[dict[str, Any]]) -> DataTable:
