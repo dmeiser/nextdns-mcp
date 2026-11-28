@@ -45,57 +45,11 @@ jobs:
           BUMP_LABEL: ${{ github.event.label.name }}
         run: |
           set -euo pipefail
-          
-          python3 << 'PY'
-          import os
-          import re
-          import sys
-          import tomllib
-          from pathlib import Path
-
-          LABEL = os.environ["BUMP_LABEL"]
-          MAIN_ROOT = Path("main-ref")
-          PR_ROOT = Path(".")
-
-          # 1. Get current version from main (baseline)
-          with (MAIN_ROOT / "pyproject.toml").open("rb") as f:
-              data = tomllib.load(f)
-              current_v = data["project"]["version"]
-          
-          # 2. Calculate next version
-          major, minor, patch = map(int, current_v.split('.'))
-          if LABEL == 'bump-major':
-              major += 1; minor = 0; patch = 0
-          elif LABEL == 'bump-minor':
-              minor += 1; patch = 0
-          elif LABEL == 'bump-patch':
-              patch += 1
-          next_v = f"{major}.{minor}.{patch}"
-          
-          print(f"Bumping {current_v} -> {next_v} (due to {LABEL})")
-
-          # 3. Update files
-          def update_file(path, pattern, replacement, flags=0):
-              p = PR_ROOT / path
-              content = p.read_text()
-              new_content = re.sub(pattern, replacement, content, flags=flags)
-              if content != new_content:
-                  p.write_text(new_content)
-                  print(f"✅ Updated {path}")
-              else:
-                  print(f"⚠️ No change needed for {path}")
-
-          # Use MULTILINE so ^ works at the start of any line
-          update_file("pyproject.toml", r'^version\s*=\s*".*"', f'version = "{next_v}"', flags=re.MULTILINE)
-          update_file("src/nextdns_mcp/__init__.py", r'__version__\s*=\s*["\'].*["\']', f'__version__ = "{next_v}"', flags=re.MULTILINE)
-          update_file("Dockerfile", r'LABEL org\.opencontainers\.image\.version=["\'].*["\']', f'LABEL org.opencontainers.image.version="{next_v}"', flags=re.MULTILINE)
-          update_file("Dockerfile.alpine", r'LABEL org\.opencontainers\.image\.version=["\'].*["\']', f'LABEL org.opencontainers.image.version="{next_v}"', flags=re.MULTILINE)
-          
-          with open("new_version.txt", "w") as f:
-              f.write(next_v)
-          PY
-          
-          NEXT_V=$(cat new_version.txt)
+          # Run the baseline's copy: post-merge main always has the CLI while
+          # stale PR branches may not, and the PR must not supply code that
+          # runs with a contents: write token. Still bump from main's version,
+          # not the PR head's, so a stale branch cannot re-apply a release.
+          NEXT_V=$(python3 main-ref/scripts/version_sync.py bump --root . --label "$BUMP_LABEL" --baseline main-ref)
           echo "next_version=$NEXT_V" >> "$GITHUB_OUTPUT"
 
       # uv.lock pins this package's own version, so it must be re-locked after

@@ -62,11 +62,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          CURRENT_VERSION=$(python3 -c "
-          import tomllib
-          with open('pyproject.toml', 'rb') as f:
-              print(tomllib.load(f)['project']['version'])
-          ")
+          CURRENT_VERSION=$(python3 scripts/version_sync.py get)
           echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
           # ── Dependency updates ──────────────────────────────────────────────
@@ -153,50 +149,8 @@ jobs:
       - name: Bump patch version
         id: bump
         run: |
-          python3 << 'PY'
-          import re
-          import tomllib
-          from pathlib import Path
-
-          with open("pyproject.toml", "rb") as f:
-              v = tomllib.load(f)["project"]["version"]
-
-          major, minor, patch = map(int, v.split("."))
-          patch += 1
-          new_v = f"{major}.{minor}.{patch}"
-
-          UPDATES = [
-              ("pyproject.toml",
-               r'^version\s*=\s*"[^"]*"',
-               f'version = "{new_v}"',
-               re.MULTILINE),
-              ("src/nextdns_mcp/__init__.py",
-               r'__version__\s*=\s*["\'][^"\']*["\']',
-               f'__version__ = "{new_v}"',
-               0),
-              ("Dockerfile",
-               r'LABEL org\.opencontainers\.image\.version=["\'][^"\']*["\']',
-               f'LABEL org.opencontainers.image.version="{new_v}"',
-               0),
-              ("Dockerfile.alpine",
-               r'LABEL org\.opencontainers\.image\.version=["\'][^"\']*["\']',
-               f'LABEL org.opencontainers.image.version="{new_v}"',
-               0),
-          ]
-
-          for path, pattern, replacement, flags in UPDATES:
-              p = Path(path)
-              old = p.read_text()
-              new = re.sub(pattern, replacement, old, flags=flags)
-              p.write_text(new)
-              status = "✅" if old != new else "⚠️  (no change)"
-              print(f"{status} {path}")
-
-          Path("new_version.txt").write_text(new_v)
-          print(f"\nBumped {v} → {new_v}")
-          PY
-
-          NEW_VERSION=$(cat new_version.txt)
+          set -euo pipefail
+          NEW_VERSION=$(python3 scripts/version_sync.py bump --label bump-patch)
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "branch_name=release/v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 

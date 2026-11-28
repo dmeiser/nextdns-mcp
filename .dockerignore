@@ -2,6 +2,10 @@
 .git/
 .github/
 
+# The workflow-revision checkout docker-publish.yml stages for the version CLI;
+# it is a second copy of the repository and never part of the image.
+workflow-ref/
+
 # Python cache / virtual environments
 __pycache__/
 *.pyc

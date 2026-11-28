@@ -90,25 +90,24 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
+      # workflow_run executes the default branch's workflow against the
+      # triggering commit, which can predate scripts/version_sync.py. The CLI
+      # comes from the revision supplying this workflow; the version still
+      # comes from the release tree at the workspace root.
+      - name: Checkout workflow revision (version helper)
+        if: steps.pr.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: workflow-ref
+
       - name: Extract Project Version
         if: steps.pr.outputs.proceed == 'true'
         id: version
         run: |
-          # Use Python to reliably extract version from pyproject.toml
-          python3 << 'PY'
-          import os
-          import sys
-          import tomllib
-          from pathlib import Path
-
-          p = Path("pyproject.toml")
-          with p.open("rb") as f:
-              data = tomllib.load(f)
-              v = data["project"]["version"]
-
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"tag=v{v}\n")
-          PY
+          set -euo pipefail
+          TAG="v$(python3 workflow-ref/scripts/version_sync.py get --root .)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Generate Release Notes and Create Release
         if: steps.pr.outputs.proceed == 'true'
