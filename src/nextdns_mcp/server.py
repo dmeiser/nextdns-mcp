@@ -104,8 +104,9 @@ def _register_composite_renderer(server: FastMCP) -> None:
         ),
     )
     def _bundled_renderer() -> str:
-        # Imported here rather than at module scope: a catalog-only process must
-        # not load the Prefab renderer (issue #780).
+        # Imported where the document is rendered, not at module import: reading
+        # the catalog must not pull the Prefab UI component tree into a process
+        # that renders nothing (issue #780).
         from prefab_ui.renderer import get_renderer_html
 
         return get_renderer_html(mode="bundled")

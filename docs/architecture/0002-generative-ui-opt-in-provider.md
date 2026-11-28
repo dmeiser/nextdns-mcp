@@ -14,7 +14,7 @@ holding two different kinds of UI:
 
 - `overviewDashboard` and `plotAnalytics` render component trees this project wrote. The
   server knows every component in the tree before a call happens
-  (the registry built by `_composite_tools()` at `src/nextdns_mcp/server.py:79-95`).
+  (the registry built by `_composite_tools()` at `src/nextdns_mcp/server.py:112-128`).
 - FastMCP's `GenerativeUI` provider is the other shape: the **model** writes Python and
   the server executes it (`generate_prefab_ui(code, data)` answers with a `PrefabApp`).
   Nothing else in the catalog runs caller-authored code.
@@ -50,11 +50,11 @@ obligations down instead of assuming them.**
   only for `true`/`1`/`on`/`yes` (`src/nextdns_mcp/config.py:231-237`), and an
   unrecognized value fails startup with `ConfigurationError` rather than quietly
   disabling the feature (`validate_configuration()`'s env parse, `src/nextdns_mcp/config.py:349-355`). `build_mcp_server()` mounts
-  the provider only when the flag is true (`register_generative_ui_provider()` at `src/nextdns_mcp/server.py:226`, with the gate in
+  the provider only when the flag is true (`register_generative_ui_provider()` at `src/nextdns_mcp/server.py:244`, with the gate in
   `src/nextdns_mcp/catalog.py:91-103`).
 - The catalog stays self-describing under the flag. `published_tool_names()` adds the
   provider's two names in the same conditional that registers them
-  (`published_tool_names()`, `src/nextdns_mcp/server.py:174-186`), so the `initialize` instructions, schema
+  (`published_tool_names()`, `src/nextdns_mcp/server.py:207-219`), so the `initialize` instructions, schema
   validation's completeness checks, and the container pre-flight see the pair exactly
   when the provider publishes it. No consumer hardcodes the conditional surface.
 - The two tools are partitioned by what they answer with, declared once on the module
