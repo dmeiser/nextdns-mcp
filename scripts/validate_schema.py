@@ -162,6 +162,16 @@ def _success_response_schema(operation: dict[str, Any]) -> dict[str, Any] | None
 _SPEC_OPERATION_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
 
 
+def _iter_path_items(spec: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """The mapping path items of a document; anything else is not a path."""
+    paths = spec.get("paths", {})
+    if not isinstance(paths, dict):
+        return
+    for path_item in paths.values():
+        if isinstance(path_item, dict):
+            yield path_item
+
+
 def _iter_spec_operations(spec: dict[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
     """Yield ``(method, operation)`` for every HTTP operation in a document.
 
@@ -171,12 +181,7 @@ def _iter_spec_operations(spec: dict[str, Any]) -> Iterator[tuple[str, dict[str,
     non-mapping path item, which the container runner already tolerated — are
     not operations and contribute nothing.
     """
-    paths = spec.get("paths", {})
-    if not isinstance(paths, dict):
-        return
-    for path_item in paths.values():
-        if not isinstance(path_item, dict):
-            continue
+    for path_item in _iter_path_items(spec):
         for method, operation in path_item.items():
             if method in _SPEC_OPERATION_METHODS and isinstance(operation, dict):
                 yield method, operation
@@ -191,6 +196,15 @@ def _iter_spec_operations(spec: dict[str, Any]) -> Iterator[tuple[str, dict[str,
 _response_index_memo: tuple[dict[str, Any], dict[str, dict[str, Any]]] | None = None
 
 
+def _index_operation(index: dict[str, dict[str, Any]], operation: dict[str, Any]) -> None:
+    operation_id = operation.get("operationId")
+    if not operation_id or operation_id in index:
+        return
+    schema = _success_response_schema(operation)
+    if schema:
+        index[operation_id] = schema
+
+
 def _response_index(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Every operationId's 2xx response schema in one pass (memoized per spec)."""
     global _response_index_memo
@@ -198,12 +212,7 @@ def _response_index(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
         return _response_index_memo[1]
     index: dict[str, dict[str, Any]] = {}
     for _method, operation in _iter_spec_operations(spec):
-        operation_id = operation.get("operationId")
-        if not operation_id or operation_id in index:
-            continue
-        schema = _success_response_schema(operation)
-        if schema:
-            index[operation_id] = schema
+        _index_operation(index, operation)
     _response_index_memo = (spec, index)
     return index
 
@@ -241,6 +250,21 @@ def _request_body_json_schema(operation: dict[str, Any]) -> dict[str, Any] | Non
     return schema if isinstance(schema, dict) else None
 
 
+def _titled_non_object_body(spec: dict[str, Any], operation: dict[str, Any]) -> str:
+    body_schema = _request_body_json_schema(operation)
+    if body_schema is None:
+        return ""
+    # $ref'd bodies resolve to their target; only a non-object effective
+    # type mis-names the argument (an undecidable type is not "object"
+    # either, and FastMCP's namer reads the title from the raw schema).
+    resolved = _resolve_body_schema(spec, body_schema)
+    if _declared_schema_type(resolved) == "object":
+        return ""
+    if resolved.get("title") and operation.get("operationId"):
+        return str(operation["operationId"])
+    return ""
+
+
 def titled_non_object_bodies(spec: dict[str, Any]) -> list[str]:
     """operationIds whose request body is a non-object schema carrying a ``title``.
 
@@ -254,18 +278,53 @@ def titled_non_object_bodies(spec: dict[str, Any]) -> list[str]:
     """
     offenders: list[str] = []
     for _method, operation in _iter_spec_operations(spec):
-        body_schema = _request_body_json_schema(operation)
-        if body_schema is None:
-            continue
-        # $ref'd bodies resolve to their target; only a non-object effective
-        # type mis-names the argument (an undecidable type is not "object"
-        # either, and FastMCP's namer reads the title from the raw schema).
-        resolved = _resolve_body_schema(spec, body_schema)
-        if _declared_schema_type(resolved) == "object":
-            continue
-        if resolved.get("title") and operation.get("operationId"):
-            offenders.append(str(operation["operationId"]))
+        offender = _titled_non_object_body(spec, operation)
+        if offender:
+            offenders.append(offender)
     return sorted(set(offenders))
+
+
+def _check_published_names(operations: dict[str, str], published: set[str], local_tools: set[str]) -> None:
+    unknown = sorted(published - set(operations) - local_tools)
+    if unknown:
+        raise ValueError(f"published tools that name no operation in the spec: {unknown}")
+
+
+def _check_published_operations(operations: dict[str, str], published: set[str]) -> None:
+    unpublished = sorted(set(operations) - published - WITHHELD_OPERATIONS)
+    if unpublished:
+        raise ValueError(f"spec operations published as no tool: {unpublished}")
+
+
+def _check_pinned_local_tools(published: set[str], local_tools: set[str]) -> None:
+    unpinned = sorted(
+        tool for tool in published & local_tools if tool not in TOOL_RESPONSE_SCHEMAS and tool not in CONTENT_TOOLS
+    )
+    if unpinned:
+        raise ValueError(f"local tools whose answer is neither pinned nor content: {unpinned}")
+
+
+def _unvalidated_read(spec: dict[str, Any], operation_id: str, method: str, published: set[str]) -> bool:
+    return method == "get" and operation_id in published and get_operation_response_schema(spec, operation_id) is None
+
+
+def _check_validated_reads(spec: dict[str, Any], operations: dict[str, str], published: set[str]) -> None:
+    unvalidated = sorted(
+        operation_id
+        for operation_id, method in operations.items()
+        if _unvalidated_read(spec, operation_id, method, published)
+    )
+    if unvalidated:
+        raise ValueError(f"published reads that resolve to no response schema: {unvalidated}")
+
+
+def _check_untitled_bodies(spec: dict[str, Any]) -> None:
+    titled = titled_non_object_bodies(spec)
+    if titled:
+        raise ValueError(
+            "request bodies that are titled non-object schemas — FastMCP would name the tool "
+            f"argument after the title while the executor wraps whole bodies as 'body': {titled}"
+        )
 
 
 def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str]) -> None:
@@ -291,34 +350,11 @@ def assert_operation_coverage(spec: dict[str, Any], expected_tools: Iterable[str
     published = set(expected_tools)
     local_tools = local_tool_names()
 
-    unknown = sorted(published - set(operations) - local_tools)
-    if unknown:
-        raise ValueError(f"published tools that name no operation in the spec: {unknown}")
-
-    unpublished = sorted(set(operations) - published - WITHHELD_OPERATIONS)
-    if unpublished:
-        raise ValueError(f"spec operations published as no tool: {unpublished}")
-
-    unpinned = sorted(
-        tool for tool in published & local_tools if tool not in TOOL_RESPONSE_SCHEMAS and tool not in CONTENT_TOOLS
-    )
-    if unpinned:
-        raise ValueError(f"local tools whose answer is neither pinned nor content: {unpinned}")
-
-    unvalidated = sorted(
-        operation_id
-        for operation_id, method in operations.items()
-        if method == "get" and operation_id in published and get_operation_response_schema(spec, operation_id) is None
-    )
-    if unvalidated:
-        raise ValueError(f"published reads that resolve to no response schema: {unvalidated}")
-
-    titled = titled_non_object_bodies(spec)
-    if titled:
-        raise ValueError(
-            "request bodies that are titled non-object schemas — FastMCP would name the tool "
-            f"argument after the title while the executor wraps whole bodies as 'body': {titled}"
-        )
+    _check_published_names(operations, published, local_tools)
+    _check_published_operations(operations, published)
+    _check_pinned_local_tools(published, local_tools)
+    _check_validated_reads(spec, operations, published)
+    _check_untitled_bodies(spec)
 
 
 # Canonical address of the OpenAPI document inside the validator registry. A
@@ -371,6 +407,20 @@ def _registry_for_spec(spec: dict[str, Any]) -> Registry[Any]:
     return registry
 
 
+def _run_validator(spec: dict[str, Any], schema: dict[str, Any], data: Any) -> list[str]:
+    validator = jsonschema.Draft202012Validator(_with_absolute_refs(schema), registry=_registry_for_spec(spec))
+    try:
+        return sorted(f"{error.json_path}: {error.message}" for error in validator.iter_errors(data))
+    except Unresolvable as error:
+        return [f"$: unresolvable schema reference: {error}"]
+    except RecursionError:
+        # Backstop for a non-consuming reference cycle the walk above did not
+        # name: reported as a violation, never as a permissive pass. A cycle
+        # that descends through ``properties``/``items`` cannot reach this,
+        # because every step consumes instance depth and payloads are finite.
+        return ["$: schema reference recurses back to itself without descending into the instance"]
+
+
 def _validation_errors(spec: dict[str, Any], schema: dict[str, Any], data: Any) -> list[str]:
     """Validate ``data`` against ``schema``, resolving ``$ref`` pointers in ``spec``.
 
@@ -388,17 +438,7 @@ def _validation_errors(spec: dict[str, Any], schema: dict[str, Any], data: Any) 
     cycle = _non_consuming_ref_cycle(spec, schema)
     if cycle is not None:
         return [f"$: schema reference {cycle!r} recurses back to itself without descending into the instance"]
-    validator = jsonschema.Draft202012Validator(_with_absolute_refs(schema), registry=_registry_for_spec(spec))
-    try:
-        return sorted(f"{error.json_path}: {error.message}" for error in validator.iter_errors(data))
-    except Unresolvable as error:
-        return [f"$: unresolvable schema reference: {error}"]
-    except RecursionError:
-        # Backstop for a non-consuming reference cycle the walk above did not
-        # name: reported as a violation, never as a permissive pass. A cycle
-        # that descends through ``properties``/``items`` cannot reach this,
-        # because every step consumes instance depth and payloads are finite.
-        return ["$: schema reference recurses back to itself without descending into the instance"]
+    return _run_validator(spec, schema, data)
 
 
 def _resolve_schema_ref(spec: dict[str, Any], ref: str) -> Any:
@@ -417,6 +457,43 @@ def _resolve_schema_ref(spec: dict[str, Any], ref: str) -> Any:
 _SAME_INSTANCE_KEYWORDS = ("allOf", "anyOf", "oneOf", "not", "if", "then", "else", "dependentSchemas")
 
 
+def _visited(chain: tuple[Any, ...], node: Any) -> bool:
+    return any(entry is node for entry in chain)
+
+
+def _ref_cycle(spec: dict[str, Any], schema: dict[str, Any], chain: tuple[Any, ...]) -> str | None:
+    """The ``$ref`` this schema points at when it closes a same-instance loop."""
+    ref = schema.get("$ref")
+    if not isinstance(ref, str):
+        return None
+    target = _resolve_schema_ref(spec, ref)
+    if isinstance(target, dict) and _visited(chain, target):
+        return ref
+    return _non_consuming_ref_cycle(spec, target, chain)
+
+
+def _same_instance_group(keyword: str, subschemas: dict[str, Any]) -> list[Any]:
+    return list(subschemas.values()) if keyword == "dependentSchemas" else [subschemas]
+
+
+def _same_instance_members(schema: dict[str, Any]) -> Iterator[Any]:
+    """The subschemas that apply to the same instance location as this one."""
+    for keyword in _SAME_INSTANCE_KEYWORDS:
+        subschemas = schema.get(keyword)
+        if isinstance(subschemas, dict):
+            yield from _same_instance_group(keyword, subschemas)
+        elif isinstance(subschemas, list):
+            yield from subschemas
+
+
+def _member_cycle(spec: dict[str, Any], schema: dict[str, Any], chain: tuple[Any, ...]) -> str | None:
+    for member in _same_instance_members(schema):
+        found = _non_consuming_ref_cycle(spec, member, chain)
+        if found is not None:
+            return found
+    return None
+
+
 def _non_consuming_ref_cycle(spec: dict[str, Any], schema: Any, chain: tuple[Any, ...] = ()) -> str | None:
     """Return the ``$ref`` that re-enters an already-visited schema without descending.
 
@@ -429,28 +506,22 @@ def _non_consuming_ref_cycle(spec: dict[str, Any], schema: Any, chain: tuple[Any
     schema identity, so the walk itself terminates: a repeated identity is the
     stop condition, not a recursion risk.
     """
-    if not isinstance(schema, dict) or any(node is schema for node in chain):
+    if not isinstance(schema, dict) or _visited(chain, schema):
         return None
     chain = chain + (schema,)
-    ref = schema.get("$ref")
-    if isinstance(ref, str):
-        target = _resolve_schema_ref(spec, ref)
-        if isinstance(target, dict) and any(node is target for node in chain):
-            return ref
-        return _non_consuming_ref_cycle(spec, target, chain)
-    for keyword in _SAME_INSTANCE_KEYWORDS:
-        subschemas = schema.get(keyword)
-        if isinstance(subschemas, dict):
-            members = list(subschemas.values()) if keyword == "dependentSchemas" else [subschemas]
-        elif isinstance(subschemas, list):
-            members = subschemas
-        else:
-            continue
-        for member in members:
-            found = _non_consuming_ref_cycle(spec, member, chain)
-            if found is not None:
-                return found
-    return None
+    ref_cycle = _ref_cycle(spec, schema, chain)
+    if ref_cycle is not None:
+        return ref_cycle
+    return _member_cycle(spec, schema, chain)
+
+
+def _body_ref_target(spec: dict[str, Any], schema: dict[str, Any], seen: set[str]) -> Any:
+    ref = schema["$ref"]
+    if not isinstance(ref, str) or ref in seen:
+        return None
+    seen.add(ref)
+    target = _resolve_schema_ref(spec, ref)
+    return target if isinstance(target, dict) else None
 
 
 def _resolve_body_schema(spec: dict[str, Any], schema: Any) -> Any:
@@ -462,12 +533,8 @@ def _resolve_body_schema(spec: dict[str, Any], schema: Any) -> Any:
     """
     seen: set[str] = set()
     while isinstance(schema, dict) and "$ref" in schema:
-        ref = schema["$ref"]
-        if not isinstance(ref, str) or ref in seen:
-            return {}
-        seen.add(ref)
-        target = _resolve_schema_ref(spec, ref)
-        if not isinstance(target, dict):
+        target = _body_ref_target(spec, schema, seen)
+        if target is None:
             return {}
         schema = target
     return schema
@@ -489,6 +556,40 @@ def _declared_schema_type(schema: Any) -> str | None:
     if "items" in schema:
         return "array"
     return None
+
+
+def _candidate_schemas(tool_name: str, spec: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """The schema(s) an answer for this tool can be checked against."""
+    # A proxied tool answers with its endpoint's body, so the operation is the tool
+    # name. A tool with a pinned shape answers with something the endpoint does not
+    # return — a DoH response, or the receipt for a file the endpoint streams elsewhere
+    # — so only the pinned schema applies; checking it against the endpoint's document
+    # would compare a receipt to a CSV.
+    literal_schema = TOOL_RESPONSE_SCHEMAS.get(tool_name)
+    if literal_schema is not None:
+        return [(tool_name, literal_schema)]
+    if tool_name in local_tool_names():
+        return []
+    operation_schema = get_operation_response_schema(spec, tool_name)
+    if operation_schema is not None:
+        return [(tool_name, operation_schema)]
+    return []
+
+
+def _validation_report(
+    spec: dict[str, Any], schemas: list[tuple[str, dict[str, Any]]], response_data: Any
+) -> tuple[str, list[str]]:
+    # One tool, one operation, one schema; the loop is here so an answer with more than
+    # one candidate is reported by which one it failed.
+    all_errors: list[str] = []
+    for op_id, schema in schemas:
+        errors = _validation_errors(spec, schema, response_data)
+        if not errors:
+            return "VALID", []
+        all_errors.append(f"{op_id}:")
+        for error in errors:
+            all_errors.append(f"  - {error}")
+    return "INVALID", all_errors
 
 
 def validate_tool_response(
@@ -514,38 +615,50 @@ def validate_tool_response(
     # return — a DoH response, or the receipt for a file the endpoint streams elsewhere
     # — so only the pinned schema applies; checking it against the endpoint's document
     # would compare a receipt to a CSV.
-    schemas: list[tuple[str, dict[str, Any]]] = []
-    literal_schema = TOOL_RESPONSE_SCHEMAS.get(tool_name)
-    if literal_schema is not None:
-        schemas.append((tool_name, literal_schema))
-    elif tool_name not in local_tool_names():
-        operation_schema = get_operation_response_schema(spec, tool_name)
-        if operation_schema is not None:
-            schemas.append((tool_name, operation_schema))
-
+    schemas = _candidate_schemas(tool_name, spec)
     if not schemas:
         return "SKIPPED", [f"No schemas found for tool '{tool_name}'"]
+    return _validation_report(spec, schemas, response_data)
 
-    # One tool, one operation, one schema; the loop is here so an answer with more than
-    # one candidate is reported by which one it failed.
-    all_errors: list[str] = []
-    for op_id, schema in schemas:
-        errors = _validation_errors(spec, schema, response_data)
-        if not errors:
-            return "VALID", []
-        all_errors.append(f"{op_id}:")
-        for error in errors:
-            all_errors.append(f"  - {error}")
 
-    return "INVALID", all_errors
+def _print_usage_and_exit() -> None:
+    print("Usage: validate_schema.py <tool_name> <json_response>", file=sys.stderr)
+    print('Example: validate_schema.py listProfiles \'{"data":[{"id":"abc123"}]}\'', file=sys.stderr)
+    sys.exit(1)
+
+
+def _load_spec_and_response(spec_path: Path, json_response: str) -> tuple[dict[str, Any], Any]:
+    try:
+        spec = load_openapi_spec(str(spec_path))
+        response_data = json.loads(json_response)
+    except yaml.YAMLError as e:
+        print(f"ERROR: Failed to parse OpenAPI spec: {e}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Failed to parse JSON response: {e}", file=sys.stderr)
+        sys.exit(1)
+    return spec, response_data
+
+
+def _report_verdict(tool_name: str, status: str, errors: list[str]) -> None:
+    if status == "SKIPPED":
+        if errors:
+            print(f"WARNING: {errors[0]}", file=sys.stderr)
+        print("SKIPPED", file=sys.stdout)
+        sys.exit(0)
+    if status == "VALID":
+        print("VALID", file=sys.stdout)
+        sys.exit(0)
+    print(f"SCHEMA_ERRORS: no matching schema for {tool_name}", file=sys.stderr)
+    for line in errors:
+        print(line, file=sys.stderr)
+    sys.exit(1)
 
 
 def main():
     """Main entry point for schema validation."""
     if len(sys.argv) < 3:
-        print("Usage: validate_schema.py <tool_name> <json_response>", file=sys.stderr)
-        print('Example: validate_schema.py listProfiles \'{"data":[{"id":"abc123"}]}\'', file=sys.stderr)
-        sys.exit(1)
+        _print_usage_and_exit()
 
     tool_name = sys.argv[1]
     json_response = sys.argv[2]
@@ -558,30 +671,10 @@ def main():
         sys.exit(1)
 
     # Load spec and response
-    try:
-        spec = load_openapi_spec(str(spec_path))
-        response_data = json.loads(json_response)
-    except yaml.YAMLError as e:
-        print(f"ERROR: Failed to parse OpenAPI spec: {e}", file=sys.stderr)
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        print(f"ERROR: Failed to parse JSON response: {e}", file=sys.stderr)
-        sys.exit(1)
+    spec, response_data = _load_spec_and_response(spec_path, json_response)
 
     status, errors = validate_tool_response(tool_name, response_data, spec)
-    if status == "SKIPPED":
-        if errors:
-            print(f"WARNING: {errors[0]}", file=sys.stderr)
-        print("SKIPPED", file=sys.stdout)
-        sys.exit(0)
-    elif status == "VALID":
-        print("VALID", file=sys.stdout)
-        sys.exit(0)
-    else:
-        print(f"SCHEMA_ERRORS: no matching schema for {tool_name}", file=sys.stderr)
-        for line in errors:
-            print(line, file=sys.stderr)
-        sys.exit(1)
+    _report_verdict(tool_name, status, errors)
 
 
 if __name__ == "__main__":
