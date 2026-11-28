@@ -137,6 +137,8 @@ def log_safe_error(error: Exception) -> str:
     if isinstance(error, httpx.HTTPStatusError):
         return escape_control_chars(f"{error.response.status_code} {error.response.reason_phrase}")
     return redacted(str(error))
+
+
 # Pre-rename private names, kept bound for the callers this rename does not
 # move (tools/doh.py, tools/logs/tool.py); transport takes the public names
 # (issue #783).
