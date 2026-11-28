@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp import FastMCP
+from prefab_ui.app import PrefabApp
 
 from nextdns_mcp import chart_placement as chart_placement_module
 from nextdns_mcp import generative as generative_module
@@ -763,6 +764,87 @@ async def test_generate_ui_accepts_utf8_result_under_cap():
     ):
         mock_exec.return_value = app
         assert await gen_tool.fn(code="print(1)") is app
+
+
+_WIRE_VIEW = {"type": "Text", "props": {"text": "hello"}}
+
+
+def _resolver_double() -> Callable[..., Any]:
+    """A tool_resolver double that records every reference it was asked about."""
+
+    def resolve(ref: Any) -> Any:
+        resolve.seen.append(ref)  # type: ignore[attr-defined]
+        return SimpleNamespace(name="__h_peer", local_name="peer", unwrap_result=False)
+
+    resolve.seen = []  # type: ignore[attr-defined]
+    return resolve
+
+
+@pytest.mark.asyncio
+async def test_generate_ui_serializes_the_response_payload_once():
+    """The size guard and FastMCP's conversion share one serialized response (WORK-354).
+
+    ``to_json`` is counted on ``PrefabApp``, which is where both readers land: the
+    guard's measurement and the Prefab conversion FastMCP runs on the value the
+    tool returned. A second serialization of the same payload is what this pins.
+    """
+    gen_ui = PrefabGenerativeUI()
+    gen_tool = (await _tool_map(gen_ui))["generate_prefab_ui"]
+    real_to_json = PrefabApp.to_json
+    calls: list[bool] = []
+
+    def counting_to_json(self: PrefabApp, *, tool_resolver: Any = None) -> dict[str, Any]:
+        calls.append(tool_resolver is not None)
+        return real_to_json(self, tool_resolver=tool_resolver)
+
+    with (
+        patch.object(generative_module.prefab_generative, "execute", new_callable=AsyncMock) as mock_exec,
+        patch.object(gen_ui, "_new_worker", return_value=_stub_worker()),
+        patch.object(PrefabApp, "to_json", counting_to_json),
+    ):
+        mock_exec.return_value = PrefabApp.from_json({"view": _WIRE_VIEW})
+        rendered = await gen_tool.fn(code="print(1)")
+        result = gen_tool.convert_result(rendered)
+
+    assert len(calls) == 1, f"the response payload serialized {len(calls)} times"
+    assert isinstance(rendered, generative_module.RenderedApp)
+    assert result.structured_content == rendered.to_json()
+    assert result.structured_content["view"]["children"][0]["type"] == "Text"
+
+
+def test_wire_built_payload_ignores_the_tool_resolver():
+    """The shortcut RenderedApp takes rests here: nothing in a wire-built app resolves.
+
+    The app a render returns carries tool-call references and app tools, all of
+    them parsed out of the worker's frame, so Prefab's ``tool_resolver`` — which
+    rewrites *callable* references during serialization — has nothing to rewrite.
+    A resolver therefore cannot change the payload the guard measured.
+    """
+    wire = {
+        "view": {"type": "Button", "props": {"label": "go", "action": {"action": "toolCall", "tool": "peer"}}},
+        "tools": [{"name": "peer", "description": "d", "result": {"type": "string"}}],
+    }
+    app = generative_module._rendered_app(PrefabApp.from_json(wire))
+    resolve = _resolver_double()
+
+    resolved = app.to_json(tool_resolver=resolve)
+
+    assert resolved == app.to_json()
+    assert resolve.seen == [], "a wire-built app handed the resolver something to rewrite"
+    assert resolved["tools"][0]["name"] == "peer"
+
+
+def test_rendered_app_tags_the_rendered_app_and_hands_on_anything_else():
+    """The tag carries the app's fields by reference, and is taken only by a rendered app."""
+    app = PrefabApp.from_json({"view": _WIRE_VIEW, "title": "dash", "state": {"n": 1}, "mode": "dark"})
+
+    tagged = generative_module._rendered_app(app)
+
+    assert tagged.model_dump(by_alias=True) == app.model_dump(by_alias=True)
+    assert tagged.model_fields_set == app.model_fields_set
+    assert generative_module._rendered_app(tagged) is tagged
+    stub = object()
+    assert generative_module._rendered_app(stub) is stub  # type: ignore[arg-type]
 
 
 class _ChunkedRaw:
