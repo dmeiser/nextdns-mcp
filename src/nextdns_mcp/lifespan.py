@@ -30,7 +30,7 @@ from .client import ApiClientOwner, ProbeClientOwner, api_client_owner
 from .config import ServerConfig
 from .state import RESOURCES_LIFESPAN_KEY, server_config
 from .tools.doh import DohClientOwner, doh_client_owner
-from .tools.logs import DownloadRegistry, RedirectClientOwner, _download_registry, _redirect_client_owner
+from .tools.logs import DownloadRegistry, RedirectClientOwner, _redirect_client_owner, download_registry
 
 
 class ServerResources:
@@ -110,7 +110,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     resources = server_resources(server)
     api_token = api_client_owner.set(resources.api_client)
     doh_token = doh_client_owner.set(resources.doh_client)
-    registry_token = _download_registry.set(resources.downloads)
+    registry_token = download_registry.set(resources.downloads)
     redirect_token = _redirect_client_owner.set(resources.redirect_client)
     config_token = server_config.set(resources.config)
     try:
@@ -120,7 +120,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
             await resources.aclose()
         finally:
             _redirect_client_owner.reset(redirect_token)
-            _download_registry.reset(registry_token)
+            download_registry.reset(registry_token)
             doh_client_owner.reset(doh_token)
             api_client_owner.reset(api_token)
             server_config.reset(config_token)

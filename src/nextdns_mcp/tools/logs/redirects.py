@@ -162,7 +162,6 @@ def _get_redirect_client() -> httpx.AsyncClient:
     return current_redirect_client_owner().get()
 
 
-
 async def close_redirect_client() -> None:
     """Close the current owner's redirect-chain client if one exists and reset it.
 
